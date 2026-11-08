@@ -111,9 +111,6 @@ jobs:
     defaults:
       run:
         shell: pwsh
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cqlmatic-cargo
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cqlmatic-target
     steps:
       - name: Retain LF checkout
         run: |
@@ -124,6 +121,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Validate and build native Windows release
+        env:
+          CARGO_HOME: ${{ runner.temp }}/cqlmatic-cargo
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cqlmatic-target
         run: ./tools/windows-release.ps1 -OutDir "${{ runner.temp }}/windows-artifact"
       - name: Upload checked Windows executable
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
