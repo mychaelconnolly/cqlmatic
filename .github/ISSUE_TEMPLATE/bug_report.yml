@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible CLI, contract, or query-behavior defect.
+body:
+  - type: markdown
+    attributes:
+      value: Use synthetic data only. Follow SECURITY.md for sensitive findings; do not include credentials, tenant identifiers, raw receipts, or private operational data.
+  - type: input
+    id: version
+    attributes:
+      label: Version and platform
+      description: Output of cqlmatic --version, commit if known, OS and architecture.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include a sanitized command/request and synthetic input. For CQL semantics, include the relevant primary reference.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the intended outcome and, when relevant, explicit expected rows.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include sanitized output, diagnostics, and exit status. Distinguish static checking from actual authorized execution.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and workaround
+      description: Explain what is blocked and any safe workaround.

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": { "repo": "example_repo" },
+      "filters": [{ "op": "like", "field": "CommandLine", "pattern": "powershell" }],
+      "steps": [{
+        "op": "case",
+        "branches": [
+          {
+            "source": {},
+            "filters": [{ "op": "regex", "field": "CommandLine", "pattern": "(?i)-enc(?:odedcommand)?\\s+", "flags": "" }],
+            "steps": [{ "op": "assign", "field": "classification", "expression": { "kind": "literal", "value": "encoded PowerShell candidate" } }]
+          },
+          {
+            "source": {},
+            "steps": [{ "op": "assign", "field": "classification", "expression": { "kind": "literal", "value": "PowerShell candidate" } }]
+          }
+        ]
+      }]
+    }
+  }
+}

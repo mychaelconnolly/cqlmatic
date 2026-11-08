@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "literal-pivot-1",
+  "input": {
+    "mode": "recipe",
+    "request": {
+      "recipe": "pivot",
+      "params": {
+        "source": {"repo": "example_repo"},
+        "field": "user",
+        "value": "literal*name",
+        "fields": ["user", "ComputerName"],
+        "limit": 50
+      }
+    }
+  },
+  "context": {"confirmed_fields": ["user", "ComputerName"]}
+}

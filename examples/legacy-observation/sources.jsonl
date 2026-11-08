@@ -1,0 +1,1 @@
+{"id":"env:repo:example_repo","kind":"repo","name":"example_repo","inventory_status":"observed-only","selectors":{"repo":"example_repo"},"evidence":{"declared":false,"observed":true,"observation_window":"2026-01-01T00:00:00Z/2026-01-01T00:15:00Z"},"provenance_ids":["prov:example-observation"]}

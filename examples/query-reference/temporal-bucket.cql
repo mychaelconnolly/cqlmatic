@@ -1,0 +1,1 @@
+#repo = "example_auth" | bucket(span="1h", field=["host"], function=[count(as="events")], buckets=24, limit=100, timezone="UTC") | sort(["_bucket"], order="asc", type="number", limit=200) | neighbor(include=["events"], direction="preceding", distance=1, prefix="previous")

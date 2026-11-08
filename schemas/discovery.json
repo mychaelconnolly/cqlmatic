@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiscoverRequest",
+  "type": "object",
+  "properties": {
+    "census": {
+      "type": "boolean",
+      "default": false
+    },
+    "contracts": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ContractBinding"
+      }
+    },
+    "end": {
+      "type": "string"
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "kind_fields": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_population_fields_per_source": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "maximum": 4000,
+      "minimum": 1
+    },
+    "max_queries": {
+      "type": "integer",
+      "format": "uint32",
+      "default": 200,
+      "minimum": 0
+    },
+    "max_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "default": 900,
+      "minimum": 0
+    },
+    "population_fields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FieldSelection"
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "sources": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Scope"
+      }
+    },
+    "start": {
+      "type": "string"
+    },
+    "value_fields": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "environment",
+    "start",
+    "end"
+  ],
+  "$defs": {
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "ContractBinding": {
+      "type": "object",
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/ParserContract"
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "contract"
+      ]
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    },
+    "FieldSelection": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "fields"
+      ]
+    },
+    "ParserContract": {
+      "type": "object",
+      "properties": {
+        "array_fields": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "details": {
+          "default": null
+        },
+        "fields_to_tag": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parser": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "parser",
+        "retrieved_at",
+        "declared_fields",
+        "fields_to_tag"
+      ]
+    },
+    "Scope": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

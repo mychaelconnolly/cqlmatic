@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": {
+        "repo": "example_arrays"
+      },
+      "filters": [],
+      "steps": [
+        {
+          "op": "call",
+          "function": "array:eval",
+          "args": [
+            {
+              "value": {
+                "kind": "literal",
+                "value": "values[]"
+              }
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "squared[]"
+              },
+              "name": "asArray"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "x"
+              },
+              "name": "var"
+            },
+            {
+              "value": {
+                "kind": "query",
+                "plan": {
+                  "source": {},
+                  "filters": [],
+                  "steps": [
+                    {
+                      "op": "assign",
+                      "field": "squared",
+                      "expression": {
+                        "kind": "binary",
+                        "operator": "multiply",
+                        "left": {
+                          "kind": "field",
+                          "name": "x"
+                        },
+                        "right": {
+                          "kind": "field",
+                          "name": "x"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "name": "function"
+            }
+          ]
+        },
+        {
+          "op": "select",
+          "fields": [
+            "squared[0]",
+            "squared[1]"
+          ]
+        }
+      ]
+    }
+  }
+}

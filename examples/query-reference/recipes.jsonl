@@ -1,0 +1,9 @@
+{"schema_version":1,"id":"recipe-events","input":{"mode":"recipe","request":{"recipe":"events","params":{"source":{},"fields":["user"],"limit":5}}}}
+{"schema_version":1,"id":"recipe-count-events","input":{"mode":"recipe","request":{"recipe":"count-events","params":{"source":{}}}}}
+{"schema_version":1,"id":"recipe-count-by","input":{"mode":"recipe","request":{"recipe":"count-by","params":{"source":{},"keys":["user"]}}}}
+{"schema_version":1,"id":"recipe-distinct","input":{"mode":"recipe","request":{"recipe":"distinct","params":{"source":{},"field":"user","accuracy":"exact"}}}}
+{"schema_version":1,"id":"recipe-top-values","input":{"mode":"recipe","request":{"recipe":"top-values","params":{"source":{},"field":"user","limit":5}}}}
+{"schema_version":1,"id":"recipe-threshold","input":{"mode":"recipe","request":{"recipe":"threshold","params":{"source":{},"keys":["user"],"minimum":3}}}}
+{"schema_version":1,"id":"recipe-pivot","input":{"mode":"recipe","request":{"recipe":"pivot","params":{"source":{},"field":"user","value":"synthetic-user","fields":["user"],"limit":5}}}}
+{"schema_version":1,"id":"recipe-join-pivot","input":{"mode":"recipe","request":{"recipe":"join-pivot","params":{"source":{"repo":"example_left"},"query":{"source":{"repo":"example_right"},"steps":[{"op":"select","fields":["user","peer"]},{"op":"head","limit":10}]},"field":"user","key":"user","include":["peer"],"max_matches":1,"limit":10}}}}
+{"schema_version":1,"id":"recipe-sequence","input":{"mode":"recipe","request":{"recipe":"sequence","params":{"queries":[{"name":"A","plan":{"source":{"repo":"example_a"}}},{"name":"B","plan":{"source":{"repo":"example_b"}}}],"links":[{"from":"A","field":"user","to":"B","key":"user"}],"within":"5m"}}}}

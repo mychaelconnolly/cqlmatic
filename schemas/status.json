@@ -1,0 +1,921 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatusContract",
+  "type": "object",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/StatusRequest"
+    },
+    "result": {
+      "$ref": "#/$defs/InventoryStatus"
+    }
+  },
+  "required": [
+    "request",
+    "result"
+  ],
+  "$defs": {
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "span": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Span"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
+    },
+    "DiscoveryRun": {
+      "type": "object",
+      "properties": {
+        "answered": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "end": {
+          "type": "string"
+        },
+        "max_queries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pack_path": {
+          "type": "string"
+        },
+        "receipt_path": {
+          "type": "string"
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "start": {
+          "type": "string"
+        },
+        "state_path": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "value_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state_path",
+        "pack_path",
+        "receipt_path",
+        "start",
+        "end",
+        "source_ids",
+        "value_fields",
+        "max_queries",
+        "max_seconds",
+        "answered",
+        "elapsed_seconds",
+        "status"
+      ]
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    },
+    "FieldStatus": {
+      "type": "object",
+      "properties": {
+        "declared": {
+          "type": "boolean"
+        },
+        "evidence_dates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "field": {
+          "type": "string"
+        },
+        "measured": {
+          "type": "boolean"
+        },
+        "not_reobserved": {
+          "type": "boolean"
+        },
+        "observed": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/Progress"
+        },
+        "values": {
+          "$ref": "#/$defs/Progress"
+        },
+        "values_requested": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "declared",
+        "observed",
+        "measured",
+        "status",
+        "values",
+        "values_requested",
+        "evidence_dates",
+        "not_reobserved"
+      ]
+    },
+    "InventoryFailure": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "message",
+        "recorded_at"
+      ]
+    },
+    "InventoryStatus": {
+      "type": "object",
+      "properties": {
+        "active_pack": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PackReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blank_canvas": {
+          "type": "boolean"
+        },
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "covered_queries_usable": {
+          "type": "boolean"
+        },
+        "discovery_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveryRun"
+          }
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InventoryFailure"
+          }
+        },
+        "full_map_complete": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parser_catalog": {
+          "$ref": "#/$defs/Progress"
+        },
+        "parser_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "parser_page_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "parser_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParserRun"
+          }
+        },
+        "parsers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParserSummary"
+          }
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/Progress"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "scouting": {
+          "$ref": "#/$defs/Progress"
+        },
+        "scouting_evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScoutSummary"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceStatus"
+          }
+        },
+        "target": {
+          "$ref": "#/$defs/Progress"
+        },
+        "target_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TargetScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unclassified_parser_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "blank_canvas",
+        "full_map_complete",
+        "message",
+        "target",
+        "scouting",
+        "parser_catalog",
+        "reconciliation",
+        "parser_count",
+        "parser_page_count",
+        "parsers",
+        "scouting_evidence",
+        "unclassified_parser_ids",
+        "sources",
+        "discovery_runs",
+        "parser_runs",
+        "failures",
+        "next_actions",
+        "covered_queries_usable"
+      ]
+    },
+    "NativeSourceReason": {
+      "type": "string",
+      "enum": [
+        "falcon-sensor-native",
+        "platform-internal"
+      ]
+    },
+    "PackReference": {
+      "type": "object",
+      "properties": {
+        "content_digest": {
+          "type": "string"
+        },
+        "discovery_run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imported_at": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "content_digest",
+        "imported_at"
+      ]
+    },
+    "ParserBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "parser"
+            },
+            "parser_id": {
+              "type": "string"
+            },
+            "parser_sha256": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "semantics": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SemanticReview"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "parser_id",
+            "parser_sha256",
+            "reviewed_at",
+            "evidence",
+            "semantics"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "not-applicable"
+            },
+            "reason": {
+              "$ref": "#/$defs/NativeSourceReason"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason",
+            "reviewed_at",
+            "evidence"
+          ]
+        }
+      ]
+    },
+    "ParserRun": {
+      "type": "object",
+      "properties": {
+        "elapsed_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_pages": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_parsers": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pages_completed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "parsers_completed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "max_pages",
+        "max_parsers",
+        "max_seconds",
+        "pages_completed",
+        "parsers_completed",
+        "elapsed_seconds"
+      ]
+    },
+    "ParserSummary": {
+      "type": "object",
+      "properties": {
+        "array_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fields_to_tag": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "review_lines": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "sha256",
+        "retrieved_at",
+        "declared_fields",
+        "fields_to_tag",
+        "array_fields",
+        "review_lines"
+      ]
+    },
+    "Progress": {
+      "type": "string",
+      "enum": [
+        "done",
+        "pending",
+        "review",
+        "unknown",
+        "n-a"
+      ]
+    },
+    "RecordKind": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "values",
+        "truncated"
+      ]
+    },
+    "Scope": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ScoutPlan": {
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/SearchArguments"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "query_sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "environment",
+        "arguments",
+        "query_sha256"
+      ]
+    },
+    "ScoutSummary": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/ScoutPlan"
+        },
+        "raw_sha256": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "row_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plan",
+        "raw_sha256",
+        "retrieved_at",
+        "row_count"
+      ]
+    },
+    "SearchArguments": {
+      "type": "object",
+      "properties": {
+        "end": {
+          "type": "string"
+        },
+        "query_string": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "query_string",
+        "start",
+        "end"
+      ]
+    },
+    "SemanticReview": {
+      "description": "A review records its exact parser snapshot and line. It cannot assert observed presence.",
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "string"
+        },
+        "interpretation": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "line",
+        "interpretation",
+        "evidence"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "SourceReview": {
+      "type": "object",
+      "properties": {
+        "data_model": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "data_model",
+        "reviewed_at",
+        "evidence"
+      ]
+    },
+    "SourceStatus": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParserBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FieldStatus"
+          }
+        },
+        "interpretation": {
+          "$ref": "#/$defs/Progress"
+        },
+        "measurements": {
+          "$ref": "#/$defs/Progress"
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "observation": {
+          "$ref": "#/$defs/Progress"
+        },
+        "parser": {
+          "$ref": "#/$defs/Progress"
+        },
+        "record_kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecordKind"
+          }
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceReview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scouted_events": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "selectors": {
+          "$ref": "#/$defs/Scope"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/Progress"
+        },
+        "unobserved_declared_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "selectors",
+        "status",
+        "interpretation",
+        "parser",
+        "measurements",
+        "observation",
+        "fields",
+        "record_kinds",
+        "unobserved_declared_fields",
+        "next_actions"
+      ]
+    },
+    "Span": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "line",
+        "column"
+      ]
+    },
+    "StatusRequest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version"
+      ]
+    },
+    "TargetScope": {
+      "type": "string",
+      "enum": [
+        "full-environment",
+        "selected-sources"
+      ]
+    }
+  }
+}

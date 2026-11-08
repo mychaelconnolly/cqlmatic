@@ -1,0 +1,6 @@
+{
+  "source": {"repo": "example_authentication", "type": "example_parser"},
+  "filters": [{"op": "eq", "field": "event.outcome", "value": "failure"}],
+  "keys": ["user.name", "source.ip"],
+  "minimum": 5
+}

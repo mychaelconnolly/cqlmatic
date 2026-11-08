@@ -1,0 +1,1893 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GenerateRequest",
+  "type": "object",
+  "properties": {
+    "context": {
+      "$ref": "#/$defs/Context",
+      "default": {
+        "accept_mixed_record_kinds": false,
+        "confirmed_fields": [],
+        "environment": null,
+        "require_observed": false
+      }
+    },
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "input": {
+      "$ref": "#/$defs/GenerateInput"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "input"
+  ],
+  "$defs": {
+    "Accuracy": {
+      "type": "string",
+      "enum": [
+        "exact",
+        "estimate"
+      ]
+    },
+    "Aggregate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "accuracy": {
+              "$ref": "#/$defs/Accuracy",
+              "default": "exact"
+            },
+            "as": {
+              "type": "string",
+              "default": "_count"
+            },
+            "distinct": {
+              "type": "boolean",
+              "default": false
+            },
+            "field": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "function": {
+              "type": "string",
+              "const": "count"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "function"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "as": {
+              "type": "string"
+            },
+            "field": {
+              "type": "string"
+            },
+            "function": {
+              "type": "string",
+              "const": "sum"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "function",
+            "field",
+            "as"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "as": {
+              "type": "string"
+            },
+            "field": {
+              "type": "string"
+            },
+            "function": {
+              "type": "string",
+              "const": "avg"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "function",
+            "field",
+            "as"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "as": {
+              "type": "string"
+            },
+            "field": {
+              "type": "string"
+            },
+            "function": {
+              "type": "string",
+              "const": "min"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "function",
+            "field",
+            "as"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "as": {
+              "type": "string"
+            },
+            "field": {
+              "type": "string"
+            },
+            "function": {
+              "type": "string",
+              "const": "max"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "function",
+            "field",
+            "as"
+          ]
+        }
+      ]
+    },
+    "Argument": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "$ref": "#/$defs/Expression"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "value"
+      ]
+    },
+    "Arithmetic": {
+      "type": "string",
+      "enum": [
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "remainder"
+      ]
+    },
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "Comparison": {
+      "type": "string",
+      "enum": [
+        "eq",
+        "ne",
+        "lt",
+        "le",
+        "gt",
+        "ge"
+      ]
+    },
+    "Context": {
+      "type": "object",
+      "properties": {
+        "accept_mixed_record_kinds": {
+          "type": "boolean",
+          "default": false
+        },
+        "confirmed_fields": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "require_observed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    },
+    "Expression": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "compare"
+            },
+            "left": {
+              "$ref": "#/$defs/Expression"
+            },
+            "operator": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "right": {
+              "$ref": "#/$defs/Expression"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "left",
+            "operator",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unary"
+            },
+            "operator": {
+              "$ref": "#/$defs/Unary"
+            },
+            "value": {
+              "$ref": "#/$defs/Expression"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "operator",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "field"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "literal"
+            },
+            "value": {
+              "$ref": "#/$defs/Scalar"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "binary"
+            },
+            "left": {
+              "$ref": "#/$defs/Expression"
+            },
+            "operator": {
+              "$ref": "#/$defs/Arithmetic"
+            },
+            "right": {
+              "$ref": "#/$defs/Expression"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "left",
+            "operator",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Argument"
+              }
+            },
+            "function": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "call"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "function"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Expression"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "array"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "query"
+            },
+            "plan": {
+              "$ref": "#/$defs/Plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "plan"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimeAnchor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TimeAnchor"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "include": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/QueryFields"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "kind": {
+              "type": "string",
+              "const": "named-query"
+            },
+            "name": {
+              "type": "string"
+            },
+            "plan": {
+              "$ref": "#/$defs/Plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "name",
+            "plan"
+          ]
+        }
+      ]
+    },
+    "GenerateInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "plan"
+            },
+            "plan": {
+              "$ref": "#/$defs/Plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "plan"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "recipe"
+            },
+            "request": {
+              "$ref": "#/$defs/Recipe"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "request"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "english"
+            },
+            "source": {
+              "$ref": "#/$defs/Scope"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "text",
+            "source"
+          ]
+        }
+      ]
+    },
+    "Link": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "field",
+        "to",
+        "key"
+      ]
+    },
+    "MatchArm": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "$ref": "#/$defs/MatchPattern"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pattern",
+        "plan"
+      ]
+    },
+    "MatchPattern": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "literal"
+            },
+            "value": {
+              "$ref": "#/$defs/Scalar"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "glob"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "flags": {
+              "type": "string",
+              "default": ""
+            },
+            "kind": {
+              "type": "string",
+              "const": "regex"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "any"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Missing": {
+      "type": "string",
+      "enum": [
+        "include",
+        "exclude"
+      ]
+    },
+    "NamedPlan": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "plan": {
+          "$ref": "#/$defs/Plan"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "plan"
+      ]
+    },
+    "Order": {
+      "type": "string",
+      "enum": [
+        "asc",
+        "desc"
+      ]
+    },
+    "Plan": {
+      "type": "object",
+      "properties": {
+        "filters": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Predicate"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        },
+        "steps": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Stage"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ]
+    },
+    "Predicate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "like"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Argument"
+              }
+            },
+            "function": {
+              "type": "string"
+            },
+            "negate": {
+              "type": "boolean",
+              "default": false
+            },
+            "op": {
+              "type": "string",
+              "const": "call"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "function"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "eq"
+            },
+            "value": {
+              "$ref": "#/$defs/Scalar"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "missing": {
+              "$ref": "#/$defs/Missing"
+            },
+            "op": {
+              "type": "string",
+              "const": "not-eq"
+            },
+            "value": {
+              "$ref": "#/$defs/Scalar"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "value",
+            "missing"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "missing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Missing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "negate": {
+              "type": "boolean",
+              "default": false
+            },
+            "op": {
+              "type": "string",
+              "const": "glob"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "flags": {
+              "type": "string",
+              "default": ""
+            },
+            "missing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Missing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "negate": {
+              "type": "boolean",
+              "default": false
+            },
+            "op": {
+              "type": "string",
+              "const": "regex"
+            },
+            "pattern": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "pattern"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "exists"
+            },
+            "present": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "compare"
+            },
+            "operator": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "operator",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "left": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "fields"
+            },
+            "operator": {
+              "$ref": "#/$defs/Comparison"
+            },
+            "right": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "left",
+            "operator",
+            "right"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Predicate"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "items"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Predicate"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "any"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "items"
+          ]
+        }
+      ]
+    },
+    "QueryFields": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "all"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "mode": {
+              "type": "string",
+              "const": "fields"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "fields"
+          ]
+        }
+      ]
+    },
+    "Recipe": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "fields": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "default": 200,
+                  "minimum": 0
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "events"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "count-events"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source",
+                "keys"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "count-by"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "accuracy": {
+                  "$ref": "#/$defs/Accuracy"
+                },
+                "field": {
+                  "type": "string"
+                },
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source",
+                "field",
+                "accuracy"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "distinct"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source",
+                "field",
+                "limit"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "top-values"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "minimum": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source",
+                "keys",
+                "minimum"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "threshold"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "fields": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "default": 200,
+                  "minimum": 0
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                },
+                "value": {
+                  "$ref": "#/$defs/Scalar"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source",
+                "field",
+                "value"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "pivot"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "filters": {
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "$ref": "#/$defs/Predicate"
+                  }
+                },
+                "include": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "key": {
+                  "type": "string"
+                },
+                "left": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "limit": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "default": 200,
+                  "minimum": 0
+                },
+                "max_matches": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                },
+                "query": {
+                  "$ref": "#/$defs/Plan"
+                },
+                "source": {
+                  "$ref": "#/$defs/Scope"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "source",
+                "query",
+                "field",
+                "key",
+                "include",
+                "max_matches"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "join-pivot"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "params": {
+              "type": "object",
+              "properties": {
+                "links": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Link"
+                  }
+                },
+                "queries": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/NamedPlan"
+                  }
+                },
+                "within": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "queries",
+                "links",
+                "within"
+              ]
+            },
+            "recipe": {
+              "type": "string",
+              "const": "sequence"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "recipe",
+            "params"
+          ]
+        }
+      ]
+    },
+    "Scalar": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        }
+      ]
+    },
+    "Scope": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "SortType": {
+      "type": "string",
+      "enum": [
+        "number",
+        "string"
+      ]
+    },
+    "Stage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "link"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "to",
+            "key"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "branches": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Plan"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "case"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "branches"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "arms": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MatchArm"
+              }
+            },
+            "field": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "match"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "arms"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "type": "string",
+              "const": "filter"
+            },
+            "predicate": {
+              "$ref": "#/$defs/Predicate"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "predicate"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "accuracy": {
+              "$ref": "#/$defs/Accuracy",
+              "default": "exact"
+            },
+            "as": {
+              "type": "string",
+              "default": "_count"
+            },
+            "distinct": {
+              "type": "boolean",
+              "default": false
+            },
+            "field": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "op": {
+              "type": "string",
+              "const": "count"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "aggregates": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Aggregate"
+              }
+            },
+            "keys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "group"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "keys",
+            "aggregates"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "select"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "fields"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 200,
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "sort"
+            },
+            "order": {
+              "$ref": "#/$defs/Order",
+              "default": "desc"
+            },
+            "type": {
+              "$ref": "#/$defs/SortType",
+              "default": "number"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "fields"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "head"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "limit"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "tail"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "limit"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "expression": {
+              "$ref": "#/$defs/Expression"
+            },
+            "field": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "assign"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "field",
+            "expression"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "args": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/Argument"
+              }
+            },
+            "function": {
+              "type": "string"
+            },
+            "op": {
+              "type": "string",
+              "const": "call"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "function"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "key": {
+              "type": "string"
+            },
+            "left": {
+              "type": "boolean",
+              "default": false
+            },
+            "limit": {
+              "type": "integer",
+              "format": "uint32",
+              "default": 200,
+              "minimum": 0
+            },
+            "max_matches": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "op": {
+              "type": "string",
+              "const": "join"
+            },
+            "query": {
+              "$ref": "#/$defs/Plan"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "query",
+            "field",
+            "key",
+            "include",
+            "max_matches"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "links": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Link"
+              }
+            },
+            "op": {
+              "type": "string",
+              "const": "correlate"
+            },
+            "queries": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/NamedPlan"
+              }
+            },
+            "sequence": {
+              "type": "boolean",
+              "default": false
+            },
+            "within": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "op",
+            "queries",
+            "links",
+            "within"
+          ]
+        }
+      ]
+    },
+    "TimeAnchor": {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "query"
+      ]
+    },
+    "Unary": {
+      "type": "string",
+      "enum": [
+        "negative",
+        "positive",
+        "not"
+      ]
+    }
+  }
+}

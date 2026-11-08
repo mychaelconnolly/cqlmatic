@@ -1,0 +1,2 @@
+{"schema_version":1,"id":"group-1","query":"groupBy([user], function=count(), limit=max)"}
+{"schema_version":1,"id":"bad-arg-1","query":"count(no_such_argument=1)"}

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CheckRequest",
+  "type": "object",
+  "properties": {
+    "context": {
+      "$ref": "#/$defs/Context",
+      "default": {
+        "accept_mixed_record_kinds": false,
+        "confirmed_fields": [],
+        "environment": null,
+        "require_observed": false
+      }
+    },
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "query": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "query"
+  ],
+  "$defs": {
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "Context": {
+      "type": "object",
+      "properties": {
+        "accept_mixed_record_kinds": {
+          "type": "boolean",
+          "default": false
+        },
+        "confirmed_fields": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "require_observed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    }
+  }
+}

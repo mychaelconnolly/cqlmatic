@@ -1,0 +1,24 @@
+name: Task or capability proposal
+description: Define a focused, reviewable change for a contributor or agent.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and existing coverage
+      description: Describe the caller/analyst need and the gap after checking current capabilities and existing issues. Use synthetic examples.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and boundaries
+      description: Name affected modules/contracts, out-of-scope work, required permissions, and any external source material.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and evidence
+      description: State observable success checks, semantic references, regressions, and any native execution evidence needed. An issue does not authorize cloud access or release publication.
+    validations:
+      required: true

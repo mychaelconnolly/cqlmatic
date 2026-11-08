@@ -1,0 +1,1 @@
+correlate(Login: { #repo = "example_auth" | kind = "login" } include: ["user", "host"], Purchase: { #repo = "example_orders" | kind = "purchase" | user <=> Login.user } include: *, aggregation=[Views: { #repo = "example_pages" | user <=> Login.user | count(as="_count") } after: "Login +5s" before: "Purchase -1s"], sequence=true, within="5m")

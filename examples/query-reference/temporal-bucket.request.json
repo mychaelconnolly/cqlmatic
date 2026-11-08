@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": {
+        "repo": "example_auth"
+      },
+      "filters": [],
+      "steps": [
+        {
+          "op": "call",
+          "function": "bucket",
+          "args": [
+            {
+              "value": {
+                "kind": "literal",
+                "value": "1h"
+              },
+              "name": "span"
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "host"
+                  }
+                ]
+              },
+              "name": "field"
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "call",
+                    "function": "count",
+                    "args": [
+                      {
+                        "value": {
+                          "kind": "literal",
+                          "value": "events"
+                        },
+                        "name": "as"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "name": "function"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": 24
+              },
+              "name": "buckets"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": 100
+              },
+              "name": "limit"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "UTC"
+              },
+              "name": "timezone"
+            }
+          ]
+        },
+        {
+          "op": "sort",
+          "fields": [
+            "_bucket"
+          ],
+          "order": "asc",
+          "limit": 200
+        },
+        {
+          "op": "call",
+          "function": "neighbor",
+          "args": [
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "events"
+                  }
+                ]
+              },
+              "name": "include"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "preceding"
+              },
+              "name": "direction"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": 1
+              },
+              "name": "distance"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "previous"
+              },
+              "name": "prefix"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

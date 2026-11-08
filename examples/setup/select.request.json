@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-select",
+  "action": {
+    "type": "select",
+    "selection": {
+      "client": "vs-code",
+      "cloud": "us1",
+      "server_name": "synthetic-cs-mcp",
+      "registration": {
+        "mode": "cimd",
+        "metadata_url": "https://vscode.dev/oauth/client-metadata.json",
+        "allowlist_confirmed": true
+      }
+    }
+  }
+}

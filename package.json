@@ -1,0 +1,53 @@
+{
+  "name": "cqlmatic",
+  "version": "0.1.0",
+  "description": "Deterministic local CQL construction and environment discovery CLI",
+  "license": "Apache-2.0",
+  "homepage": "https://cqlmatic.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mychaelconnolly/cqlmatic.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "bin": {
+    "cqlmatic": "npm/cqlmatic.cjs"
+  },
+  "scripts": {
+    "test": "node --test npm/launcher.test.cjs",
+    "prepack": "node npm/cqlmatic.cjs --version"
+  },
+  "files": [
+    "npm/cqlmatic.cjs",
+    "npm/native-manifest.json",
+    "native/",
+    "README.md",
+    "USAGE.md",
+    "LICENSE",
+    "NOTICE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
+    "AGENTS.md",
+    "licenses/",
+    "docs/",
+    "integrations/agent/",
+    "examples/",
+    "schemas/",
+    "data/",
+    "src/contracts.rs",
+    "src/language/plan.rs",
+    "src/language/english.rs",
+    "src/language/parser.rs",
+    "src/language/validate.rs",
+    "src/catalog.rs",
+    ".github/workflows/ci.yml",
+    "site/public/assets/agentworks-expert-builder-2026.png",
+    "site/public/assets/setup-discovery-query.png",
+    "site/public/assets/github-mark.svg",
+    "site/public/assets/github-mark.LICENSE.txt"
+  ]
+}

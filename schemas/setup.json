@@ -1,0 +1,718 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SetupContract",
+  "type": "object",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/SetupRequest"
+    },
+    "result": {
+      "$ref": "#/$defs/SetupResult"
+    },
+    "state": {
+      "$ref": "#/$defs/SetupState"
+    }
+  },
+  "required": [
+    "request",
+    "result",
+    "state"
+  ],
+  "$defs": {
+    "AuthenticationEvidence": {
+      "type": "string",
+      "enum": [
+        "none",
+        "user-confirmed",
+        "saved-host-tool-discovery"
+      ]
+    },
+    "ClientKind": {
+      "type": "string",
+      "enum": [
+        "codex",
+        "vs-code"
+      ]
+    },
+    "ClientObservation": {
+      "type": "object",
+      "properties": {
+        "capability_sha256": {
+          "type": "string"
+        },
+        "client": {
+          "$ref": "#/$defs/ClientKind"
+        },
+        "executable": {
+          "description": "Absolute, canonical executable discovered locally; never accepted from a request.",
+          "type": "string"
+        },
+        "executable_sha256": {
+          "type": "string"
+        },
+        "supports_cimd": {
+          "type": "boolean"
+        },
+        "supports_http": {
+          "type": "boolean"
+        },
+        "supports_login": {
+          "type": "boolean"
+        },
+        "supports_manual": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "client",
+        "executable",
+        "executable_sha256",
+        "version",
+        "supports_http",
+        "supports_cimd",
+        "supports_manual",
+        "supports_login",
+        "capability_sha256"
+      ]
+    },
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "ConfigBaseline": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "server": {
+          "$ref": "#/$defs/ExistingServer"
+        },
+        "sha256": {
+          "description": "None means absent. A zero-byte existing file still has a digest.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "server"
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "span": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Span"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
+    },
+    "ExistingServer": {
+      "type": "string",
+      "enum": [
+        "absent",
+        "same",
+        "collision"
+      ]
+    },
+    "NativeCommand": {
+      "type": "object",
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "interactive": {
+          "type": "boolean"
+        },
+        "program": {
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "program",
+        "args",
+        "interactive",
+        "timeout_seconds"
+      ]
+    },
+    "PlanOperation": {
+      "type": "string",
+      "enum": [
+        "configure",
+        "authenticate"
+      ]
+    },
+    "RegistrationMode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "allowlist_confirmed": {
+              "type": "boolean"
+            },
+            "metadata_url": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "const": "cimd"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "metadata_url",
+            "allowlist_confirmed"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "callback_url": {
+              "type": "string"
+            },
+            "client_id": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "const": "manual"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "client_id",
+            "callback_url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "credentials_file": {
+              "type": "string"
+            },
+            "mode": {
+              "type": "string",
+              "const": "api-client"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "credentials_file"
+          ]
+        }
+      ]
+    },
+    "Selection": {
+      "type": "object",
+      "properties": {
+        "client": {
+          "$ref": "#/$defs/ClientKind"
+        },
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "registration": {
+          "$ref": "#/$defs/RegistrationMode"
+        },
+        "server_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "client",
+        "cloud",
+        "server_name",
+        "registration"
+      ]
+    },
+    "SetupAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "status"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "detect"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "selection": {
+              "$ref": "#/$defs/Selection"
+            },
+            "type": {
+              "type": "string",
+              "const": "select"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "selection"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "$ref": "#/$defs/PlanOperation"
+            },
+            "type": {
+              "type": "string",
+              "const": "preview"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "operation"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "confirmation_sha256": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "apply"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "confirmation_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "confirm-authentication"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "import-discovery"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "file"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "confirmation_sha256": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "acknowledge-pending"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "confirmation_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "cancel"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "SetupPhase": {
+      "type": "string",
+      "enum": [
+        "new",
+        "selected",
+        "installation-required",
+        "review-required",
+        "command-pending",
+        "authentication-required",
+        "authenticated",
+        "tool-discovery-verified",
+        "advanced-pending",
+        "cancelled"
+      ]
+    },
+    "SetupPlan": {
+      "type": "object",
+      "properties": {
+        "backup_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "baseline": {
+          "$ref": "#/$defs/ConfigBaseline"
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "client": {
+          "$ref": "#/$defs/ClientObservation"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NativeCommand"
+          }
+        },
+        "confirmation_sha256": {
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/PlanOperation"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "selection": {
+          "$ref": "#/$defs/Selection"
+        },
+        "state_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "state_revision",
+        "operation",
+        "selection",
+        "client",
+        "baseline",
+        "commands",
+        "changes",
+        "confirmation_sha256"
+      ]
+    },
+    "SetupRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/SetupAction"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "action"
+      ]
+    },
+    "SetupResult": {
+      "type": "object",
+      "properties": {
+        "diagnostics": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "handoff": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceMetadata"
+          }
+        },
+        "state": {
+          "$ref": "#/$defs/SetupState"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "state",
+        "next_actions",
+        "sources",
+        "diagnostics"
+      ]
+    },
+    "SetupState": {
+      "type": "object",
+      "properties": {
+        "authentication_evidence": {
+          "$ref": "#/$defs/AuthenticationEvidence"
+        },
+        "clients": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientObservation"
+          }
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "configured_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "discovery_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_notice": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/SetupPhase"
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SetupPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Selection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "revision",
+        "phase",
+        "clients",
+        "configured",
+        "authentication_evidence"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "SourceMetadata": {
+      "type": "object",
+      "properties": {
+        "reviewed_on": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "uncertainty": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reviewed_on",
+        "title",
+        "url",
+        "uncertainty"
+      ]
+    },
+    "Span": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "line",
+        "column"
+      ]
+    }
+  }
+}

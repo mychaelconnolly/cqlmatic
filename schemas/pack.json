@@ -1,0 +1,704 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pack",
+  "type": "object",
+  "properties": {
+    "content_digest": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/PackData"
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentId"
+    },
+    "format_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "knowledge_revision": {
+      "type": "string"
+    },
+    "producer_version": {
+      "type": "string"
+    },
+    "profile_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "environment",
+    "producer_version",
+    "profile_id",
+    "knowledge_revision",
+    "created_at",
+    "content_digest",
+    "data"
+  ],
+  "$defs": {
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "Coverage": {
+      "type": "object",
+      "properties": {
+        "declared": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "observed": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "population": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "rate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    },
+    "LegacyAnnotation": {
+      "type": "object",
+      "properties": {
+        "notes": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "reviewed_at",
+        "notes"
+      ]
+    },
+    "LegacyField": {
+      "type": "object",
+      "properties": {
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Coverage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "data_type": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "evidence_kind": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_array": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "is_tag": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "observation_window": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "path": {
+          "type": "string"
+        },
+        "provenance_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "refresh_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "retained_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetainedContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schema_variant": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_id",
+        "path",
+        "data_type",
+        "evidence_kind",
+        "provenance_ids"
+      ]
+    },
+    "LegacyProvenance": {
+      "type": "object",
+      "properties": {
+        "canonical_source": {
+          "type": "string"
+        },
+        "coverage_status": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "notes": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "observation_window": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "redaction_status": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "sampling": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Sampling"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source_type": {
+          "type": "string"
+        },
+        "source_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_type",
+        "canonical_source",
+        "retrieved_at",
+        "redaction_status",
+        "coverage_status"
+      ]
+    },
+    "LegacySource": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "inventory_status": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parser_contract": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParserContract"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "provenance_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "relationship": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Relationship"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "retained_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetainedContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "selectors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Selectors"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "inventory_status",
+        "provenance_ids"
+      ]
+    },
+    "LegacyValue": {
+      "type": "object",
+      "properties": {
+        "evidence_kind": {
+          "type": "string"
+        },
+        "field_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "meaning": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "provenance_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sanitized": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "value": {
+          "default": null
+        },
+        "value_kind": {
+          "type": "string"
+        },
+        "vocabulary": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "field_id",
+        "value_kind",
+        "vocabulary",
+        "evidence_kind",
+        "provenance_ids"
+      ]
+    },
+    "PackData": {
+      "type": "object",
+      "properties": {
+        "annotations": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LegacyAnnotation"
+          }
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacyField"
+          }
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacyProvenance"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacySource"
+          }
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LegacyValue"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sources",
+        "fields",
+        "values",
+        "provenance"
+      ]
+    },
+    "ParserContract": {
+      "type": "object",
+      "properties": {
+        "array_fields": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "declared_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "details": {
+          "default": null
+        },
+        "fields_to_tag": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parser": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_hash": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "parser",
+        "retrieved_at",
+        "declared_fields",
+        "fields_to_tag"
+      ]
+    },
+    "RecordKind": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "values",
+        "truncated"
+      ]
+    },
+    "Relationship": {
+      "type": "object",
+      "properties": {
+        "datasets": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "parent_repo_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "parsers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "record_kinds": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RecordKind"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RetainedContext": {
+      "type": "object",
+      "properties": {
+        "evidence_retrieved_at": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "evidence_retrieved_at"
+      ]
+    },
+    "Sampling": {
+      "type": "object",
+      "properties": {
+        "budget": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "Selectors": {
+      "type": "object",
+      "properties": {
+        "event_family": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "sourcetype": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "SourceEvidence": {
+      "type": "object",
+      "properties": {
+        "declared": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "measured_fields": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "observation_window": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "observed": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

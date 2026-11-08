@@ -1,0 +1,310 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AssessContract",
+  "type": "object",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/AssessRequest"
+    },
+    "result": {
+      "$ref": "#/$defs/AssessResult"
+    }
+  },
+  "required": [
+    "request",
+    "result"
+  ],
+  "$defs": {
+    "AssessOutcome": {
+      "type": "string",
+      "enum": [
+        "no-findings",
+        "advisory",
+        "inconclusive",
+        "error"
+      ]
+    },
+    "AssessRequest": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "$ref": "#/$defs/Context",
+          "default": {
+            "accept_mixed_record_kinds": false,
+            "confirmed_fields": [],
+            "environment": null,
+            "require_observed": false
+          }
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "query": {
+          "type": "string"
+        },
+        "result": {
+          "description": "Saved MCP payload (not just its rows). Normalization hashes its JSON reserialization."
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "query",
+        "result"
+      ]
+    },
+    "AssessResult": {
+      "type": "object",
+      "properties": {
+        "caps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapInfo"
+          }
+        },
+        "columns": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ColumnStats"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/AssessOutcome"
+        },
+        "query_sha256": {
+          "type": "string"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "outcome",
+        "query_sha256",
+        "rows",
+        "caps",
+        "columns",
+        "findings"
+      ]
+    },
+    "CapInfo": {
+      "type": "object",
+      "properties": {
+        "cap": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "defaulted": {
+          "type": "boolean"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "cap",
+        "defaulted"
+      ]
+    },
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "ColumnStats": {
+      "type": "object",
+      "properties": {
+        "empty": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "null": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "present": {
+          "description": "Rows containing this key, including null and empty-string values.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "present",
+        "null",
+        "empty"
+      ]
+    },
+    "Context": {
+      "type": "object",
+      "properties": {
+        "accept_mixed_record_kinds": {
+          "type": "boolean",
+          "default": false
+        },
+        "confirmed_fields": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "require_observed": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "Diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "span": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Span"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "Span": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "line",
+        "column"
+      ]
+    }
+  }
+}

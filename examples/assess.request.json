@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "synthetic-count-1",
+  "query": "count()",
+  "result": {
+    "result": [
+      {"_count": "24"}
+    ]
+  },
+  "context": {}
+}

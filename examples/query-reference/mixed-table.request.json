@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": {},
+      "filters": [],
+      "steps": [
+        {
+          "op": "call",
+          "function": "defineTable",
+          "args": [
+            {
+              "value": {
+                "kind": "query",
+                "plan": {
+                  "source": {
+                    "repo": "example_directory"
+                  },
+                  "filters": [],
+                  "steps": [
+                    {
+                      "op": "select",
+                      "fields": [
+                        "account",
+                        "role"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "roles"
+              },
+              "name": "name"
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "account"
+                  },
+                  {
+                    "kind": "literal",
+                    "value": "role"
+                  }
+                ]
+              },
+              "name": "include"
+            }
+          ]
+        },
+        {
+          "op": "filter",
+          "predicate": {
+            "op": "eq",
+            "field": "#repo",
+            "value": "example_auth"
+          }
+        },
+        {
+          "op": "call",
+          "function": "match",
+          "args": [
+            {
+              "value": {
+                "kind": "literal",
+                "value": "roles"
+              },
+              "name": "table"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "user"
+              },
+              "name": "field"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "account"
+              },
+              "name": "column"
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "role"
+                  }
+                ]
+              },
+              "name": "include"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": false
+              },
+              "name": "strict"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": 1
+              },
+              "name": "nrows"
+            }
+          ]
+        },
+        {
+          "op": "select",
+          "fields": [
+            "user",
+            "host",
+            "role"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,3 @@
+/docs https://docs.cqlmatic.dev/ 301
+/docs/ https://docs.cqlmatic.dev/ 301
+/docs/* https://docs.cqlmatic.dev/:splat 301

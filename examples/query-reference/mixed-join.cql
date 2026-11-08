@@ -1,0 +1,1 @@
+#repo = "example_auth" | join({ #repo = "example_devices" | select(["account", "device", "owner"]) }, field=["user", "host"], key=["account", "device"], include=["owner"], mode="left", limit=1000, max=1) | select(["user", "host", "owner"])

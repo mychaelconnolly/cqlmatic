@@ -1,0 +1,10 @@
+{
+  "source": {"repo": "example_endpoint", "event": "ProcessRollup2"},
+  "filters": [
+    {"op": "eq", "field": "FileName", "value": "powershell.exe"}
+  ],
+  "steps": [
+    {"op": "group", "keys": ["ComputerName"], "aggregates": [{"function": "count", "as": "processes"}]},
+    {"op": "sort", "fields": ["processes"], "order": "desc", "type": "number", "limit": 20}
+  ]
+}

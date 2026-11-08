@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": {},
+      "filters": [],
+      "steps": [
+        {
+          "op": "filter",
+          "predicate": {
+            "op": "eq",
+            "field": "#repo",
+            "value": "example_auth"
+          }
+        },
+        {
+          "op": "call",
+          "function": "join",
+          "args": [
+            {
+              "value": {
+                "kind": "query",
+                "plan": {
+                  "source": {
+                    "repo": "example_devices"
+                  },
+                  "filters": [],
+                  "steps": [
+                    {
+                      "op": "select",
+                      "fields": [
+                        "account",
+                        "device",
+                        "owner"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "user"
+                  },
+                  {
+                    "kind": "literal",
+                    "value": "host"
+                  }
+                ]
+              },
+              "name": "field"
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "account"
+                  },
+                  {
+                    "kind": "literal",
+                    "value": "device"
+                  }
+                ]
+              },
+              "name": "key"
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "literal",
+                    "value": "owner"
+                  }
+                ]
+              },
+              "name": "include"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "left"
+              },
+              "name": "mode"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": 1000
+              },
+              "name": "limit"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": 1
+              },
+              "name": "max"
+            }
+          ]
+        },
+        {
+          "op": "select",
+          "fields": [
+            "user",
+            "host",
+            "owner"
+          ]
+        }
+      ]
+    }
+  }
+}

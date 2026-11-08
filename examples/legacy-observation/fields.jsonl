@@ -1,0 +1,1 @@
+{"id":"env:field:example_repo:user","source_id":"env:repo:example_repo","path":"user","data_type":"string","is_tag":false,"is_array":false,"evidence_kind":"observed","observation_window":"2026-01-01T00:00:00Z/2026-01-01T00:15:00Z","coverage":{"declared":false,"observed":true},"provenance_ids":["prov:example-observation"]}

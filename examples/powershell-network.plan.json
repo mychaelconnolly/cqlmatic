@@ -1,0 +1,336 @@
+{
+  "source": {
+    "event": "ProcessRollup2",
+    "repo": "endpoints-prod"
+  },
+  "filters": [
+    {
+      "op": "any",
+      "items": [
+        {
+          "op": "glob",
+          "field": "ComputerName",
+          "pattern": "LON-WKS-*"
+        },
+        {
+          "op": "glob",
+          "field": "ComputerName",
+          "pattern": "NYC-WKS-*"
+        }
+      ]
+    },
+    {
+      "op": "any",
+      "items": [
+        {
+          "op": "eq",
+          "field": "FileName",
+          "value": "powershell.exe"
+        },
+        {
+          "op": "eq",
+          "field": "FileName",
+          "value": "pwsh.exe"
+        }
+      ]
+    },
+    {
+      "op": "regex",
+      "field": "CommandLine",
+      "pattern": "-enc",
+      "flags": "",
+      "negate": false,
+      "missing": null
+    },
+    {
+      "op": "exists",
+      "field": "aid",
+      "present": true
+    },
+    {
+      "op": "exists",
+      "field": "TargetProcessId",
+      "present": true
+    }
+  ],
+  "steps": [
+    {
+      "op": "call",
+      "function": "join",
+      "args": [
+        {
+          "name": "query",
+          "value": {
+            "kind": "query",
+            "plan": {
+              "source": {
+                "event": "NetworkConnectIP4",
+                "repo": "endpoints-prod"
+              },
+              "filters": [
+                {
+                  "op": "exists",
+                  "field": "aid",
+                  "present": true
+                },
+                {
+                  "op": "exists",
+                  "field": "ContextProcessId",
+                  "present": true
+                },
+                {
+                  "op": "exists",
+                  "field": "RemoteAddressIP4",
+                  "present": true
+                }
+              ],
+              "steps": [
+                {
+                  "op": "group",
+                  "keys": [
+                    "aid",
+                    "ContextProcessId",
+                    "RemoteAddressIP4"
+                  ],
+                  "aggregates": [
+                    {
+                      "function": "count",
+                      "as": "destination_events"
+                    }
+                  ]
+                },
+                {
+                  "op": "call",
+                  "function": "groupBy",
+                  "args": [
+                    {
+                      "name": "field",
+                      "value": {
+                        "kind": "array",
+                        "items": [
+                          {
+                            "kind": "literal",
+                            "value": "aid"
+                          },
+                          {
+                            "kind": "literal",
+                            "value": "ContextProcessId"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "function",
+                      "value": {
+                        "kind": "array",
+                        "items": [
+                          {
+                            "kind": "call",
+                            "function": "count",
+                            "args": [
+                              {
+                                "name": "as",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": "destinations"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "call",
+                            "function": "sum",
+                            "args": [
+                              {
+                                "name": "field",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": "destination_events"
+                                }
+                              },
+                              {
+                                "name": "as",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": "connections"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "call",
+                            "function": "collect",
+                            "args": [
+                              {
+                                "name": "fields",
+                                "value": {
+                                  "kind": "array",
+                                  "items": [
+                                    {
+                                      "kind": "literal",
+                                      "value": "RemoteAddressIP4"
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "name": "limit",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": 20
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "limit",
+                      "value": {
+                        "kind": "field",
+                        "name": "max"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "field",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "aid"
+              },
+              {
+                "kind": "literal",
+                "value": "TargetProcessId"
+              }
+            ]
+          }
+        },
+        {
+          "name": "key",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "aid"
+              },
+              {
+                "kind": "literal",
+                "value": "ContextProcessId"
+              }
+            ]
+          }
+        },
+        {
+          "name": "include",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "destinations"
+              },
+              {
+                "kind": "literal",
+                "value": "connections"
+              },
+              {
+                "kind": "literal",
+                "value": "RemoteAddressIP4"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mode",
+          "value": {
+            "kind": "literal",
+            "value": "inner"
+          }
+        },
+        {
+          "name": "limit",
+          "value": {
+            "kind": "literal",
+            "value": 20000
+          }
+        },
+        {
+          "name": "max",
+          "value": {
+            "kind": "literal",
+            "value": 1
+          }
+        }
+      ]
+    },
+    {
+      "op": "call",
+      "function": "test",
+      "args": [
+        {
+          "value": {
+            "kind": "compare",
+            "left": {
+              "kind": "field",
+              "name": "destinations"
+            },
+            "operator": "ge",
+            "right": {
+              "kind": "literal",
+              "value": 5
+            }
+          }
+        }
+      ]
+    },
+    {
+      "op": "assign",
+      "field": "connections_per_ip",
+      "expression": {
+        "kind": "binary",
+        "left": {
+          "kind": "field",
+          "name": "connections"
+        },
+        "operator": "divide",
+        "right": {
+          "kind": "field",
+          "name": "destinations"
+        }
+      }
+    },
+    {
+      "op": "sort",
+      "fields": [
+        "destinations",
+        "connections"
+      ],
+      "order": "desc",
+      "type": "number",
+      "limit": 20
+    },
+    {
+      "op": "select",
+      "fields": [
+        "ComputerName",
+        "ParentBaseFileName",
+        "TargetProcessId",
+        "CommandLine",
+        "destinations",
+        "connections",
+        "connections_per_ip",
+        "RemoteAddressIP4"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+{"schema_version":1,"id":"count-1","input":{"mode":"english","text":"count events where user equals \"alice\"","source":{"repo":"example_repo"}}}
+{"schema_version":1,"id":"exact-1","input":{"mode":"plan","plan":{"source":{"repo":"example_repo"},"steps":[{"op":"count","field":"user","distinct":true,"accuracy":"exact"}]}}}

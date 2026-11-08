@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+      - name: Fetch locked dependencies
+        run: ./dev fetch --locked
+      - name: Check formatting
+        run: ./dev fmt --all --check
+      - name: Run Clippy
+        run: ./dev clippy --offline --locked --all-targets -- -D warnings
+      - name: Run tests
+        run: ./dev test --offline --locked
+      - name: Install pinned Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Test npm launcher
+        run: node --test npm/launcher.test.cjs
+      - name: Test release and deployment tooling
+        env:
+          PYTHONDONTWRITEBYTECODE: 1
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - name: Build release
+        run: ./dev build --release --locked --offline
+      - name: Smoke-test CLI
+        run: |
+          ./target/release/cqlmatic --version
+          ./target/release/cqlmatic generate --request examples/generate.request.json --json
+      - name: Replay synthetic MCP discovery and assess offline
+        run: |
+          set -euo pipefail
+          work=.local/ci-mcp-replay
+          mkdir -p "$work"
+          trap 'rm -rf "$work"' EXIT
+          set +e
+          ./target/release/cqlmatic env discover --mcp --request examples/mcp/discover.request.json --state "$work/state.json" --pack "$work/pack.json" --receipt "$work/receipt.json" > "$work/step.json"
+          code=$?
+          set -e
+          test "$code" -eq 3
+          for round in 1 2 3 4; do
+            status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/step.json")"
+            if [ "$status" = complete ]; then break; fi
+            test "$status" = needs-probes
+            # Same probe-to-answer mapping as tests/mcp_discovery.rs fixture().
+            answers="$(python3 -c 'import json,sys
+          def name(p):
+              kind, field = p["kind"], p.get("field")
+              if kind == "tag-detect":
+                  return "count" if field == "event_simpleName" else "zero"
+              if kind == "record-kind-facet":
+                  return {"#type": "kind", "#event_simpleName": "simple-name"}[field]
+              return {"census": "census", "volume": "count", "dataset-facet": "dataset", "fieldset": "fieldset", "population": "population", "value-facet": "value"}[kind]
+          print("\n".join(p["probe_id"] + "=examples/mcp/" + name(p) + ".json" for p in json.load(open(sys.argv[1]))["probes"]))' "$work/step.json")"
+            test -n "$answers"
+            args=()
+            while IFS= read -r answer; do args+=(--answer "$answer"); done <<< "$answers"
+            set +e
+            ./target/release/cqlmatic env discover --mcp --state "$work/state.json" "${args[@]}" > "$work/step.json"
+            code=$?
+            set -e
+            if [ "$code" -ne 3 ]; then test "$code" -eq 0; fi
+          done
+          test "$code" -eq 0
+          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/step.json")" = complete
+          test -s "$work/pack.json"
+          test -s "$work/receipt.json"
+          # The synthetic source has two #type record kinds: unconstrained generation must ask for context ...
+          set +e
+          ./target/release/cqlmatic generate --intent 'show events from synthetic_repo where user equals "synthetic-user" select user limit 20' --pack "$work/pack.json" --require-observed --json > "$work/generate-ambiguous.json"
+          code=$?
+          set -e
+          test "$code" -eq 1
+          python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); assert result["outcome"]=="needs-context", result["outcome"]; assert any(d["code"]=="CQL_RECORD_KIND_AMBIGUOUS" for d in result["diagnostics"]), result["diagnostics"]' "$work/generate-ambiguous.json"
+          # ... and explicit acceptance of mixed kinds is ready with the warning kept.
+          ./target/release/cqlmatic generate --intent 'show events from synthetic_repo where user equals "synthetic-user" select user limit 20' --pack "$work/pack.json" --require-observed --accept-mixed-record-kinds --json > "$work/generate.json"
+          python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); assert result["outcome"]=="ready", result["diagnostics"]; assert any(d["code"]=="CQL_RECORD_KIND_AMBIGUOUS" and d["severity"]=="warning" for d in result["diagnostics"]), result["diagnostics"]; open(sys.argv[2],"w",encoding="utf-8").write(result["query"])' "$work/generate.json" "$work/query.cql"
+          set +e
+          ./target/release/cqlmatic assess --query-file "$work/query.cql" --result examples/mcp/value.json --pack "$work/pack.json" --json > "$work/assess.json"
+          code=$?
+          set -e
+          test "$code" -eq 1
+          python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); assert result["outcome"]=="advisory", result["findings"]; assert result["rows"]==1; assert any(f["code"]=="RESULT_COMPLETENESS_UNATTESTED" and f["severity"]=="info" for f in result["findings"]); assert any(f["code"]=="RESULT_KEY_COVERAGE" and f["severity"]=="warning" for f in result["findings"])' "$work/assess.json"
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cqlmatic-cargo
+      CARGO_TARGET_DIR: ${{ runner.temp }}/cqlmatic-target
+    steps:
+      - name: Retain LF checkout
+        run: |
+          git config --global core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate and build native Windows release
+        run: ./tools/windows-release.ps1 -OutDir "${{ runner.temp }}/windows-artifact"
+      - name: Upload checked Windows executable
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: windows-x86_64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/windows-artifact/cqlmatic.exe
+            ${{ runner.temp }}/windows-artifact/BUILD-WINDOWS.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+  site:
+    name: Site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: 24.22.1
+          package-manager-cache: false
+      - name: Install locked site dependencies
+        run: npm --prefix site ci
+      - name: Test site
+        run: npm --prefix site test
+      - name: Build site from this commit
+        run: npm --prefix site run build -- --commit "$GITHUB_SHA"
+      - name: Stage immutable site artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p "$RUNNER_TEMP/site-artifact/site"
+          cp -a site/dist "$RUNNER_TEMP/site-artifact/site/dist"
+      - name: Upload checked site output
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: site-${{ github.sha }}
+          path: ${{ runner.temp }}/site-artifact/
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: false
+          retention-days: 30

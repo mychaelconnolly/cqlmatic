@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": {},
+      "filters": [],
+      "steps": [
+        {
+          "op": "call",
+          "function": "correlate",
+          "args": [
+            {
+              "value": {
+                "kind": "named-query",
+                "name": "Login",
+                "plan": {
+                  "source": {
+                    "repo": "example_auth"
+                  },
+                  "filters": [
+                    {
+                      "op": "eq",
+                      "field": "kind",
+                      "value": "login"
+                    }
+                  ],
+                  "steps": []
+                },
+                "include": {
+                  "mode": "fields",
+                  "fields": [
+                    "user",
+                    "host"
+                  ]
+                }
+              }
+            },
+            {
+              "value": {
+                "kind": "named-query",
+                "name": "Purchase",
+                "plan": {
+                  "source": {
+                    "repo": "example_orders"
+                  },
+                  "filters": [
+                    {
+                      "op": "eq",
+                      "field": "kind",
+                      "value": "purchase"
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "op": "link",
+                      "field": "user",
+                      "to": "Login",
+                      "key": "user"
+                    }
+                  ]
+                },
+                "include": {
+                  "mode": "all"
+                }
+              }
+            },
+            {
+              "value": {
+                "kind": "array",
+                "items": [
+                  {
+                    "kind": "named-query",
+                    "name": "Views",
+                    "plan": {
+                      "source": {
+                        "repo": "example_pages"
+                      },
+                      "filters": [],
+                      "steps": [
+                        {
+                          "op": "link",
+                          "field": "user",
+                          "to": "Login",
+                          "key": "user"
+                        },
+                        {
+                          "op": "count"
+                        }
+                      ]
+                    },
+                    "after": {
+                      "query": "Login",
+                      "offset": "+5s"
+                    },
+                    "before": {
+                      "query": "Purchase",
+                      "offset": "-1s"
+                    }
+                  }
+                ]
+              },
+              "name": "aggregation"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": true
+              },
+              "name": "sequence"
+            },
+            {
+              "value": {
+                "kind": "literal",
+                "value": "5m"
+              },
+              "name": "within"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

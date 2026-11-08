@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if command -v rustup >/dev/null 2>&1; then
+  compiler_path=$(rustup which --toolchain 1.99.1 rustc 2>/dev/null || rustup which --toolchain stable rustc)
+  PATH="$(dirname "$compiler_path"):$PATH"
+  export PATH
+fi
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  echo 'CQLmatic development requires Rust 1.99.1. Install the pinned toolchain and put cargo/rustc on PATH.' >&2
+  exit 2
+fi
+case "$(rustc --version)" in
+  'rustc 1.99.1 '*) ;;
+  *) echo 'The pinned compiler is Rust 1.99.1.' >&2; exit 2 ;;
+esac
+CARGO_HOME=${CQLMATIC_CARGO_HOME:-"$project_dir/.local/cargo"}
+export CARGO_HOME
+cd "$project_dir"
+exec cargo "$@"

@@ -1,0 +1,1390 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "InventoryContract",
+  "type": "object",
+  "properties": {
+    "request": {
+      "$ref": "#/$defs/InventoryRequest"
+    },
+    "state": {
+      "$ref": "#/$defs/InventoryState"
+    }
+  },
+  "required": [
+    "request",
+    "state"
+  ],
+  "$defs": {
+    "Cloud": {
+      "type": "string",
+      "enum": [
+        "us1",
+        "us2",
+        "eu1"
+      ]
+    },
+    "ConfirmedTarget": {
+      "type": "object",
+      "properties": {
+        "confirmed_at": {
+          "type": "string"
+        },
+        "context": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "scope": {
+          "$ref": "#/$defs/TargetScope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "environment",
+        "scope",
+        "context",
+        "confirmed_at"
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "pointer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "span": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Span"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message"
+      ]
+    },
+    "DiscoveryAnswer": {
+      "type": "object",
+      "properties": {
+        "probe_id": {
+          "type": "string"
+        },
+        "result_file": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "probe_id",
+        "result_file"
+      ]
+    },
+    "DiscoveryRun": {
+      "type": "object",
+      "properties": {
+        "answered": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "end": {
+          "type": "string"
+        },
+        "max_queries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pack_path": {
+          "type": "string"
+        },
+        "receipt_path": {
+          "type": "string"
+        },
+        "source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "start": {
+          "type": "string"
+        },
+        "state_path": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "value_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "state_path",
+        "pack_path",
+        "receipt_path",
+        "start",
+        "end",
+        "source_ids",
+        "value_fields",
+        "max_queries",
+        "max_seconds",
+        "answered",
+        "elapsed_seconds",
+        "status"
+      ]
+    },
+    "EnvironmentId": {
+      "type": "object",
+      "properties": {
+        "cloud": {
+          "$ref": "#/$defs/Cloud"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cloud",
+        "tenant",
+        "view"
+      ]
+    },
+    "FieldSelection": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "fields"
+      ]
+    },
+    "InventoryAction": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "init"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "end": {
+              "type": "string"
+            },
+            "environment": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prepare-scout"
+            },
+            "start": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "environment",
+            "start",
+            "end"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "arguments": {
+              "$ref": "#/$defs/SearchArguments"
+            },
+            "kind": {
+              "type": "string",
+              "const": "import-scout"
+            },
+            "result_file": {
+              "type": "string"
+            },
+            "retrieved_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "result_file",
+            "arguments",
+            "retrieved_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "context": {
+              "type": "string"
+            },
+            "environment": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "expected_sources": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Scope"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "confirm-target"
+            },
+            "scope": {
+              "$ref": "#/$defs/TargetScope"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "environment",
+            "scope",
+            "context",
+            "expected_sources"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data_model": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "review-source"
+            },
+            "purpose": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "purpose",
+            "data_model",
+            "reviewed_at",
+            "evidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "details": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ParserDetailInput"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "import-parsers"
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ParserPageInput"
+              }
+            },
+            "retrieved_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pages",
+            "details",
+            "retrieved_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "credentials_file": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fetch-parsers"
+            },
+            "max_pages": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_parsers": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "credentials_file",
+            "max_pages",
+            "max_parsers",
+            "max_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "bind-parser"
+            },
+            "parser_id": {
+              "type": "string"
+            },
+            "parser_sha256": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "semantics": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SemanticReview"
+              }
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "parser_id",
+            "parser_sha256",
+            "reviewed_at",
+            "evidence",
+            "semantics"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "parser-not-applicable"
+            },
+            "reason": {
+              "$ref": "#/$defs/NativeSourceReason"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "reason",
+            "reviewed_at",
+            "evidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "exclude-parser"
+            },
+            "parser_id": {
+              "type": "string"
+            },
+            "parser_sha256": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "parser_id",
+            "parser_sha256",
+            "reviewed_at",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "end": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prepare-discovery"
+            },
+            "kind_fields": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "max_queries": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "population_fields": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/FieldSelection"
+              }
+            },
+            "source_ids": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "start": {
+              "type": "string"
+            },
+            "value_fields": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "start",
+            "end",
+            "max_queries",
+            "max_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "answers": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/DiscoveryAnswer"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "discovery-step"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "import-pack"
+            },
+            "pack_file": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pack_file"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reconcile"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reviewed_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "record-failure"
+            },
+            "message": {
+              "type": "string"
+            },
+            "recorded_at": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stage": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "stage",
+            "message",
+            "recorded_at"
+          ]
+        }
+      ]
+    },
+    "InventoryFailure": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "message",
+        "recorded_at"
+      ]
+    },
+    "InventoryRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/InventoryAction"
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "action"
+      ]
+    },
+    "InventorySource": {
+      "type": "object",
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParserBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceReview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scouted_events": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "selectors": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "selectors",
+        "expected"
+      ]
+    },
+    "InventoryState": {
+      "type": "object",
+      "properties": {
+        "active_pack": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PackReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "discovery_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveryRun"
+          }
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InventoryFailure"
+          }
+        },
+        "format": {
+          "type": "string"
+        },
+        "packs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PackReference"
+          }
+        },
+        "parser_exclusions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParserExclusion"
+          }
+        },
+        "parser_pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParserPage"
+          }
+        },
+        "parser_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParserRun"
+          }
+        },
+        "parsers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParserSnapshot"
+          }
+        },
+        "reconciled_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reconciled_evidence_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "scout_plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScoutPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scouting": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ScoutEvidence"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InventorySource"
+          }
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfirmedTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "schema_version",
+        "created_at",
+        "updated_at",
+        "scouting",
+        "sources",
+        "parser_pages",
+        "parsers",
+        "parser_exclusions",
+        "packs",
+        "discovery_runs",
+        "parser_runs",
+        "failures"
+      ]
+    },
+    "NativeSourceReason": {
+      "type": "string",
+      "enum": [
+        "falcon-sensor-native",
+        "platform-internal"
+      ]
+    },
+    "PackReference": {
+      "type": "object",
+      "properties": {
+        "content_digest": {
+          "type": "string"
+        },
+        "discovery_run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imported_at": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "content_digest",
+        "imported_at"
+      ]
+    },
+    "ParserBinding": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "parser"
+            },
+            "parser_id": {
+              "type": "string"
+            },
+            "parser_sha256": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "semantics": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SemanticReview"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "parser_id",
+            "parser_sha256",
+            "reviewed_at",
+            "evidence",
+            "semantics"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "not-applicable"
+            },
+            "reason": {
+              "$ref": "#/$defs/NativeSourceReason"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason",
+            "reviewed_at",
+            "evidence"
+          ]
+        }
+      ]
+    },
+    "ParserDeclarations": {
+      "type": "object",
+      "properties": {
+        "array_fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fields_to_tag": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "review_lines": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "fields_to_tag",
+        "array_fields",
+        "review_lines"
+      ]
+    },
+    "ParserDetailInput": {
+      "type": "object",
+      "properties": {
+        "parser_id": {
+          "type": "string"
+        },
+        "result_file": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parser_id",
+        "result_file"
+      ]
+    },
+    "ParserExclusion": {
+      "type": "object",
+      "properties": {
+        "parser_id": {
+          "type": "string"
+        },
+        "parser_sha256": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parser_id",
+        "parser_sha256",
+        "reviewed_at",
+        "reason"
+      ]
+    },
+    "ParserPage": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "snapshot": {
+          "$ref": "#/$defs/RawSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "snapshot"
+      ]
+    },
+    "ParserPageInput": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "offset": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "result_file": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "offset",
+        "limit",
+        "result_file"
+      ]
+    },
+    "ParserRun": {
+      "type": "object",
+      "properties": {
+        "elapsed_seconds": {
+          "type": "number",
+          "format": "double"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_pages": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_parsers": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "pages_completed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "parsers_completed": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "max_pages",
+        "max_parsers",
+        "max_seconds",
+        "pages_completed",
+        "parsers_completed",
+        "elapsed_seconds"
+      ]
+    },
+    "ParserSnapshot": {
+      "type": "object",
+      "properties": {
+        "declarations": {
+          "$ref": "#/$defs/ParserDeclarations"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/RawSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "snapshot",
+        "declarations"
+      ]
+    },
+    "RawSnapshot": {
+      "type": "object",
+      "properties": {
+        "raw_hex": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "retrieved_at",
+        "raw_hex"
+      ]
+    },
+    "Scope": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ScoutEvidence": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/ScoutPlan"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "snapshot": {
+          "$ref": "#/$defs/RawSnapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "plan",
+        "snapshot",
+        "rows"
+      ]
+    },
+    "ScoutPlan": {
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/SearchArguments"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "query_sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "environment",
+        "arguments",
+        "query_sha256"
+      ]
+    },
+    "SearchArguments": {
+      "type": "object",
+      "properties": {
+        "end": {
+          "type": "string"
+        },
+        "query_string": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "query_string",
+        "start",
+        "end"
+      ]
+    },
+    "SemanticReview": {
+      "description": "A review records its exact parser snapshot and line. It cannot assert observed presence.",
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "type": "string"
+        },
+        "interpretation": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "line",
+        "interpretation",
+        "evidence"
+      ]
+    },
+    "Severity": {
+      "type": "string",
+      "enum": [
+        "error",
+        "warning",
+        "info"
+      ]
+    },
+    "SourceReview": {
+      "type": "object",
+      "properties": {
+        "data_model": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "purpose": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "purpose",
+        "data_model",
+        "reviewed_at",
+        "evidence"
+      ]
+    },
+    "Span": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "line": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "line",
+        "column"
+      ]
+    },
+    "TargetScope": {
+      "type": "string",
+      "enum": [
+        "full-environment",
+        "selected-sources"
+      ]
+    }
+  }
+}

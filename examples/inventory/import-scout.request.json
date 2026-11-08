@@ -1,0 +1,14 @@
+{
+  "schema_version":1,
+  "action":{
+    "kind":"import-scout",
+    "result_file":"examples/inventory/scout.synthetic.json",
+    "arguments":{
+      "repository":"search-all",
+      "query_string":"groupBy([#repo, #type, @sourcetype], function=count(as=events), limit=max)",
+      "start":"2026-01-01T00:00:00Z",
+      "end":"2026-01-02T00:00:00Z"
+    },
+    "retrieved_at":"2026-01-02T00:00:00Z"
+  }
+}

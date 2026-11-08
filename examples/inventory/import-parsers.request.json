@@ -1,0 +1,9 @@
+{
+  "schema_version":1,
+  "action":{
+    "kind":"import-parsers",
+    "pages":[{"offset":0,"limit":100,"result_file":"examples/inventory/parser-page.synthetic.json"}],
+    "details":[{"parser_id":"synthetic-parser-id","result_file":"examples/inventory/parser.synthetic.json"}],
+    "retrieved_at":"2026-01-02T00:00:00Z"
+  }
+}

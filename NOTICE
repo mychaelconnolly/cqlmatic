@@ -1,0 +1,31 @@
+CQLmatic is licensed under the Apache License 2.0 (see LICENSE).
+
+CQLmatic contains an independent Rust implementation of its parser, semantic
+planner, checker, linter, storage, and Falcon API client.
+
+Bundled reference material and standards records derive from:
+  NG-SIEM Query Engine, Michael Connolly
+  https://github.com/mychaelconnolly/ngsiem-query-engine
+  revision 2158f99fc529e234d5fd6fd4d4af899d7d83a848
+  licensed under Apache License 2.0
+
+The original license text is retained at licenses/NGSIEM-APACHE-2.0.txt.
+Record identities, source links, standards provenance, and hashes of imported
+source files are retained in data/provenance.json and the data/corpus/provenance
+directory.
+Reference text is adapted for CQLmatic. Additional factual documentation
+summaries identify their primary sources.
+
+CrowdStrike and CQL identify the supported query language and platform. This
+independent project does not assert vendor affiliation or endorsement.
+
+The AgentWorks Hackathon Expert Builder award graphic is credited to
+CrowdStrike and identifies the author's hackathon recognition. Rights in
+the award graphic and third-party marks remain with their owners.
+
+The GitHub Mark icon is from GitHub Octicons, licensed under MIT.
+Source: https://github.com/primer/octicons
+Revision: 68ec2de8d0ddfcbb7497da01d0b7d98eb5593020
+The unmodified icon and its license are retained at
+site/public/assets/github-mark.svg and github-mark.LICENSE.txt.
+GitHub and its marks remain the property of GitHub, Inc.

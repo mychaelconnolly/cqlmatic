@@ -1,0 +1,8 @@
+{
+  "resources":[{
+    "id":"synthetic-parser-id",
+    "name":"Synthetic parser",
+    "script":"user := \"synthetic-user\"\nevent.kind := \"synthetic\"\nitems[] := split(raw, by=\",\")",
+    "fields_to_tag":["event.kind"]
+  }]
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "action": {
+    "kind": "bind-parser",
+    "source_id": "REPLACE_WITH_STATUS_SOURCE_ID",
+    "parser_id": "synthetic-parser-id",
+    "parser_sha256": "REPLACE_WITH_STATUS_PARSER_SHA256",
+    "reviewed_at": "2026-01-02T00:00:00Z",
+    "evidence": "Replace with evidence linking this source to this exact parser snapshot",
+    "semantics": [
+      {
+        "line": 3,
+        "interpretation": "Synthetic example: the assignment declares items[]; output presence still requires telemetry measurement",
+        "evidence": "Review of line 3 of the exact saved synthetic parser definition"
+      }
+    ]
+  }
+}

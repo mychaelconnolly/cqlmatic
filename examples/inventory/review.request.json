@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "action": {
+    "kind": "review-source",
+    "source_id": "REPLACE_WITH_STATUS_SOURCE_ID",
+    "purpose": "Synthetic source for the inventory walkthrough",
+    "data_model": "Synthetic parsed user records with an event kind tag and an array field",
+    "reviewed_at": "2026-01-02T00:00:00Z",
+    "evidence": "Synthetic fixture only; replace with reviewed operational evidence"
+  }
+}

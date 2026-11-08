@@ -1,0 +1,1 @@
+#repo = "example_auth" | failed := if(condition=regex("^fail$", field="status"), then=1, else=0) | groupBy(["host"], function=[count(as="events"), sum("failed", as="failures")], limit=max) | failure_rate := (failures / events) | failure_rate >= "0.5" | sort(["failure_rate"], order="desc", type="number", limit=10) | select(["host", "events", "failures", "failure_rate"])

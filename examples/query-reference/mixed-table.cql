@@ -1,0 +1,1 @@
+defineTable({ #repo = "example_directory" | select(["account", "role"]) }, name="roles", include=["account", "role"]) | #repo = "example_auth" | match(table="roles", field="user", column="account", include=["role"], strict=false, nrows=1) | select(["user", "host", "role"])

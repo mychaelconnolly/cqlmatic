@@ -1,0 +1,129 @@
+name: Deploy Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full source commit from a successful main CI push (also selects rollback content)
+        required: true
+        type: string
+      ci_run_id:
+        description: Successful CI run ID for that source commit
+        required: true
+        type: string
+      site_artifact_id:
+        description: Immutable site artifact ID from that CI run
+        required: true
+        type: string
+      site_manifest_sha256:
+        description: Owner-reviewed SHA-256 of SITE-SHA256SUMS
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cqlmatic-production
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Verify approved artifact
+    if: github.repository == 'mychaelconnolly/cqlmatic' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      transfer_artifact_id: ${{ steps.transfer.outputs.artifact-id }}
+    steps:
+      - name: Check out verification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: deployment-tools
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            tools/verify-site.py
+      - name: Bind source, successful CI run, artifact and site manifest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+          SITE_ARTIFACT_ID: ${{ inputs.site_artifact_id }}
+          SITE_MANIFEST_SHA256: ${{ inputs.site_manifest_sha256 }}
+        run: |
+          python3 deployment-tools/tools/verify-site.py prepare \
+            --source-sha "$SOURCE_SHA" --run-id "$CI_RUN_ID" \
+            --artifact-id "$SITE_ARTIFACT_ID" --manifest-sha256 "$SITE_MANIFEST_SHA256" \
+            --out "$RUNNER_TEMP/checked-site-transfer"
+      - name: Preserve the verified bytes for production approval
+        id: transfer
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: checked-site-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/checked-site-transfer/site.zip
+            ${{ runner.temp }}/checked-site-transfer/provenance.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+
+  production:
+    name: Deploy and verify both Pages projects
+    needs: prepare
+    if: github.repository == 'mychaelconnolly/cqlmatic' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment:
+      name: production
+      url: https://cqlmatic.dev
+    steps:
+      - name: Check out the deployment controller and locked tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: deployment-tools
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            tools/verify-site.py
+            tools/deploy-pages.py
+            site/package.json
+            site/package-lock.json
+      - name: Install patched Node.js
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+      - name: Install locked Wrangler without credentials
+        run: npm ci --prefix deployment-tools/site --ignore-scripts --no-audit --no-fund
+      - name: Download the immutable verified transfer
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.transfer_artifact_id }}
+          path: ${{ runner.temp }}/checked-site-transfer
+          merge-multiple: true
+      - name: Recheck and safely extract the approved bytes
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SITE_MANIFEST_SHA256: ${{ inputs.site_manifest_sha256 }}
+        run: |
+          python3 deployment-tools/tools/verify-site.py extract \
+            --archive "$RUNNER_TEMP/checked-site-transfer/site.zip" \
+            --source-sha "$SOURCE_SHA" --manifest-sha256 "$SITE_MANIFEST_SHA256" \
+            --out "$RUNNER_TEMP/checked-site-output"
+      - name: Upload, verify custom domains, and restore on failure
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_PAGES_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SITE_MANIFEST_SHA256: ${{ inputs.site_manifest_sha256 }}
+        run: |
+          python3 deployment-tools/tools/deploy-pages.py \
+            --dist "$RUNNER_TEMP/checked-site-output/site/dist" \
+            --source-sha "$SOURCE_SHA" --manifest-sha256 "$SITE_MANIFEST_SHA256" \
+            --wrangler "$GITHUB_WORKSPACE/deployment-tools/site/node_modules/.bin/wrangler" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"

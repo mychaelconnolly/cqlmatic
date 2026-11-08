@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "cloud": "us2",
+    "tenant": "00000000000000000000000000000000",
+    "view": "search-all"
+  },
+  "start": "2026-10-29T00:00:00Z",
+  "end": "2026-10-29T00:01:00Z",
+  "census": true,
+  "sources": [],
+  "value_fields": [],
+  "contracts": [],
+  "max_queries": 100,
+  "max_seconds": 300
+}

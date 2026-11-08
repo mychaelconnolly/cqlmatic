@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "client": "vs-code",
+  "server_name": "synthetic-cs-mcp",
+  "endpoint": "https://mcp.crowdstrike.com/v1",
+  "authenticated": true,
+  "tools": [
+    { "name": "falcon_search_ngsiem", "available": true }
+  ]
+}

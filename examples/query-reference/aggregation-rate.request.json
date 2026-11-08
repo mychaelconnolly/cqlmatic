@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "input": {
+    "mode": "plan",
+    "plan": {
+      "source": {
+        "repo": "example_auth"
+      },
+      "filters": [],
+      "steps": [
+        {
+          "op": "assign",
+          "field": "failed",
+          "expression": {
+            "kind": "call",
+            "function": "if",
+            "args": [
+              {
+                "value": {
+                  "kind": "call",
+                  "function": "regex",
+                  "args": [
+                    {
+                      "value": {
+                        "kind": "literal",
+                        "value": "^fail$"
+                      }
+                    },
+                    {
+                      "value": {
+                        "kind": "literal",
+                        "value": "status"
+                      },
+                      "name": "field"
+                    }
+                  ]
+                },
+                "name": "condition"
+              },
+              {
+                "value": {
+                  "kind": "literal",
+                  "value": 1
+                },
+                "name": "then"
+              },
+              {
+                "value": {
+                  "kind": "literal",
+                  "value": 0
+                },
+                "name": "else"
+              }
+            ]
+          }
+        },
+        {
+          "op": "group",
+          "keys": [
+            "host"
+          ],
+          "aggregates": [
+            {
+              "function": "count",
+              "as": "events"
+            },
+            {
+              "function": "sum",
+              "field": "failed",
+              "as": "failures"
+            }
+          ]
+        },
+        {
+          "op": "assign",
+          "field": "failure_rate",
+          "expression": {
+            "kind": "binary",
+            "operator": "divide",
+            "left": {
+              "kind": "field",
+              "name": "failures"
+            },
+            "right": {
+              "kind": "field",
+              "name": "events"
+            }
+          }
+        },
+        {
+          "op": "filter",
+          "predicate": {
+            "op": "compare",
+            "field": "failure_rate",
+            "operator": "ge",
+            "value": 0.5
+          }
+        },
+        {
+          "op": "sort",
+          "fields": [
+            "failure_rate"
+          ],
+          "limit": 10
+        },
+        {
+          "op": "select",
+          "fields": [
+            "host",
+            "events",
+            "failures",
+            "failure_rate"
+          ]
+        }
+      ]
+    }
+  }
+}

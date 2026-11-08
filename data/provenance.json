@@ -1,0 +1,399 @@
+{
+  "knowledge_repository": "https://github.com/mychaelconnolly/ngsiem-query-engine",
+  "knowledge_revision": "2158f99fc529e234d5fd6fd4d4af899d7d83a848",
+  "source_files": [
+    {
+      "path": "references/cql/aggregation.md",
+      "sha256": "b6ef044c1305144418185a8e3950ace59380499d8b08e7d22aea36d1924b1bd4"
+    },
+    {
+      "path": "references/cql/core.md",
+      "sha256": "c7a50ee9f7e12f694d1ad87b4ce05b55589313c14b612a0fca0ee9c71b7177b9"
+    },
+    {
+      "path": "references/cql/correlation.md",
+      "sha256": "4ddd49e389763662fa5a830d0c8ea01ea41b90f3e47e864801fcec2a90bf7af9"
+    },
+    {
+      "path": "references/cql/detection-logic.md",
+      "sha256": "b5cc921f8ec909baab57b576516c8ba619562d5107f1d78b40ccc960bbd2f8b1"
+    },
+    {
+      "path": "references/cql/enrichment.md",
+      "sha256": "a4b44d337000a2e7c93b4b32ac8307ed2cccd6b7b0ad5818301c8bbf84cb3e73"
+    },
+    {
+      "path": "references/cql/filtering.md",
+      "sha256": "967561eb19447e309a1a027c14d10eff9a261d9e66ef3d04c163045f67f6237a"
+    },
+    {
+      "path": "references/cql/index.md",
+      "sha256": "53a77b7ef5c14524cc70f261da12fdb182f1e88b80e589a28d7192db19d73864"
+    },
+    {
+      "path": "references/cql/joins.md",
+      "sha256": "ad70242b714905c6679ebd6bd6890dd8cc91f5822312afc169ff5e0d327f356a"
+    },
+    {
+      "path": "references/cql/limits.md",
+      "sha256": "7a37310ba6d68a5b33f367984322946cb88e4c153331906ad2350bef683e76a8"
+    },
+    {
+      "path": "references/cql/matching.md",
+      "sha256": "ac94e8514edcc92aa80d0f68d04665bdc81b64f09419dd376dfe9105044ea213"
+    },
+    {
+      "path": "references/cql/misconceptions.md",
+      "sha256": "41bbcc2dee7745d4be52a62b38dcd22ed39ccc8f92f24a7d16dc3b35d5022979"
+    },
+    {
+      "path": "references/cql/parsing.md",
+      "sha256": "66cc2c7067d7c43f3bb9e365cc415d23afc1acd1b253d84c0e27e492b9e71d4e"
+    },
+    {
+      "path": "references/cql/patterns.md",
+      "sha256": "6dbd626184fb39dc65f9029c581073378269debc5c81c38a07b6eb0c7822c4a5"
+    },
+    {
+      "path": "references/cql/performance.md",
+      "sha256": "64896260d4b73f644955df9c09461e915f4530069c63067d7ee6b75cb8ceb111"
+    },
+    {
+      "path": "references/cql/selection.md",
+      "sha256": "266545ed98964b01b717d18cb30dfc3944649f551f55a97fbeebd4e20fff4b50"
+    },
+    {
+      "path": "references/cql/strings.md",
+      "sha256": "a7be980d3c0181ad41a96316f4048d5ad8ebff5f33c697baab24dfad6743f482"
+    },
+    {
+      "path": "references/cql/syntax.md",
+      "sha256": "0d24bec824bb2e8a41f0a564041a705d317f03ee4ae6a3b5cdc9b1a7a97d7a5a"
+    },
+    {
+      "path": "references/cql/testing.md",
+      "sha256": "b502daaa3239037bbdd59bab9eca7a6c1ba3091f7a2466bbfad6ed3b11095370"
+    },
+    {
+      "path": "references/cql/time.md",
+      "sha256": "675d92a7064e28a67a92e77efdeb7be321ef9f1a19cb6ba4e39be806f73dedd3"
+    },
+    {
+      "path": "references/cql/transformation.md",
+      "sha256": "0860827a4b91fa81b0ee2385f24f220fc393dd15b0c27e31a4c52dc90a473475"
+    },
+    {
+      "path": "references/cql/troubleshooting.md",
+      "sha256": "f7ddf936e4365bd76277e13c0af6662395796e40516d653dc3ba422784e483bf"
+    },
+    {
+      "path": "corpus/standards/cps.jsonl",
+      "sha256": "0cea467fe5d61961170abac39d1426c3919aee0501bc9587f16eeec045e71592"
+    },
+    {
+      "path": "corpus/standards/ecs.jsonl",
+      "sha256": "50cca902e4cdb1b30e7be5f6167407f9441ffc8c01dae02e056aa81c04ac34a5"
+    },
+    {
+      "path": "corpus/provenance/standards.jsonl",
+      "sha256": "b4b02d83230a358c5ff63da9fd2138dd7d221577ba2fb9c9a28957df8a6a8c08"
+    }
+  ],
+  "additional_references": [
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-drop.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:drop",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-test.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:test",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-upper.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:upper",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-split.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:split",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-round.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:round",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-contains.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:array:contains",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-length.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:array:length",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selfjoinfilter.html",
+      "reviewed_at": "2026-10-29",
+      "record_id": "cql:function:selfJoinFilter",
+      "kind": "independent factual summary"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-getfield.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:function:getField",
+      "kind": "independent factual summary; required dependency of pinned coalesce caveat"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-expressions.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:core-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex-flags.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:core-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-eval.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:core-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-kvparse.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:core-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-rename.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:core-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-select.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:select-retention",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-conditional.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:core-v2",
+      "kind": "independent factual summary; bare catch-all and quoted existence wildcard remain distinct"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-collect.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selectfrommax.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selectfrommin.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selectlast.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-top.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-formattime.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-round.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-stats.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-fieldset.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:aggregate-v2",
+      "kind": "independent factual summary; pinned target with explicit conflicts"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-eval.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-filter.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-objectarray-eval.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-objectarray-exists.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-length.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-select.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-wildcard.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-split.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:arrays-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-definetable.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-join.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-match.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-readfile.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-asn.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-iplocation.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-ioc-lookup.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:mixed-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-findtimestamp.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-bucket.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-timechart.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-neighbor.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-series.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-session.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-correlate.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-aggregate.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "primary documentation for the bounded capability profile"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/function-operation-type.html",
+      "reviewed_at": "2026-10-30",
+      "record_id": "cql:qualification:temporal-v2",
+      "kind": "independent factual summary; native multi-pass prefix scope"
+    }
+  ],
+  "edits": "Reference text adapted for CQLmatic; source identifiers and attribution retained."
+}

@@ -1,0 +1,60 @@
+{
+  "format_version": 1,
+  "environment": {
+    "cloud": "us2",
+    "tenant": "00000000000000000000000000000000",
+    "view": "search-all"
+  },
+  "producer_version": "0.1.0",
+  "profile_id": "cqlmatic-ngsiem-core-v1",
+  "knowledge_revision": "2158f99fc529e234d5fd6fd4d4af899d7d83a848",
+  "created_at": "2026-10-30T04:56:39.311317Z",
+  "content_digest": "d7b36c2be21df5082a9a49dfbdabf3bcb87de5b0f59acf6aaa18cadd22fb114d",
+  "data": {
+    "sources": [
+      {
+        "evidence": {
+          "observed": true
+        },
+        "id": "env:repo:example",
+        "inventory_status": "observed-only",
+        "kind": "repo",
+        "name": "example",
+        "provenance_ids": [
+          "prov:historical"
+        ],
+        "selectors": {
+          "repo": "example"
+        }
+      }
+    ],
+    "fields": [
+      {
+        "coverage": {
+          "observed": true
+        },
+        "data_type": "string",
+        "evidence_kind": "observed",
+        "id": "env:field:example:user",
+        "is_tag": false,
+        "path": "user",
+        "provenance_ids": [
+          "prov:historical"
+        ],
+        "source_id": "env:repo:example"
+      }
+    ],
+    "values": [],
+    "provenance": [
+      {
+        "canonical_source": "sanitized legacy compatibility fixture",
+        "coverage_status": "observed-only",
+        "id": "prov:historical",
+        "redaction_status": "none",
+        "retrieved_at": "2026-10-01T00:00:00Z",
+        "source_type": "console-export"
+      }
+    ],
+    "annotations": []
+  }
+}

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-theme-preference="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CQLmatic | CQL that fits your data</title>
+  <meta name="description" content="A local CLI companion for CrowdStrike Next-Gen SIEM. Map your environment, build CQL with your AI assistant, and keep evidence and query checks distinct.">
+  <meta name="theme-color" content="#151517">
+  <link rel="canonical" href="https://cqlmatic.dev/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CQLmatic">
+  <meta property="og:title" content="Map your environment. Write CQL that fits your data.">
+  <meta property="og:description" content="A local CLI companion for analysts and AI assistants using CrowdStrike Next-Gen SIEM. First public release v0.1.0. Testers and feedback welcome.">
+  <meta property="og:url" content="https://cqlmatic.dev/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="CQLmatic | CQL that fits your data">
+  <meta name="twitter:description" content="Map your environment. Write CQL with a local, deterministic companion. First public release v0.1.0. Testers and feedback welcome.">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <script src="/assets/theme.js"></script>
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header wrap">
+    <a class="wordmark" href="/" aria-label="CQLmatic home">CQL<span>matic</span></a>
+    <nav aria-label="Main navigation">
+      <a href="#workflow">Workflow</a>
+      <a href="#requirements">Requirements</a>
+      <a href="#about">About</a>
+      <a href="https://docs.cqlmatic.dev/">Docs</a>
+    </nav>
+    <button class="theme-toggle" type="button" hidden aria-label="Theme: dark. Switch to light." title="Theme: dark. Switch to light.">
+      <svg data-theme-icon="dark" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20.5 14A8.5 8.5 0 0 1 10 3.5 8.5 8.5 0 1 0 20.5 14Z"/></svg>
+      <svg data-theme-icon="light" hidden aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>
+      <svg data-theme-icon="auto" hidden aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <a class="github-link" href="https://github.com/mychaelconnolly/cqlmatic" aria-label="CQLmatic on GitHub" title="CQLmatic on GitHub"><img src="/assets/github-mark.svg" width="24" height="24" alt=""></a>
+  </header>
+
+  <main id="main" class="wrap">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <h1 id="hero-title">Map your environment.<br>Write CQL that fits your data.</h1>
+        <p class="lead">A local CLI companion for analysts and AI assistants using CrowdStrike Next-Gen SIEM.</p>
+        <p>Your assistant interprets the question. CQLmatic supplies query mechanics, checks, and a reusable map of your sources and fields.</p>
+        <p><strong>CQLmatic v0.1.0 is the first public release. Testers and feedback are welcome.</strong></p>
+        <div class="actions">
+          <a class="button" href="#release">Release v0.1.0</a>
+          <a class="text-action" href="#workflow">See the workflow</a>
+        </div>
+        <div class="recognition">
+          <img src="/assets/agentworks-expert-builder-2026.png" width="200" height="200" decoding="async" alt="2026 AgentWorks Hackathon Expert Builder badge awarded to the &quot;THIS IS CQL&quot; agent">
+          <div>
+            <p>The same engine powers the <strong>"THIS IS CQL"</strong> agent, a notable runner-up in the AgentWorks Hackathon. Judges at <a href="https://www.crowdstrike.com/en-us/platform/charlotte-ai/agentworks-hackathon/">CrowdStrike and NVIDIA</a> highlighted its reproducible tests and willingness to return an inconclusive result.</p>
+            <a href="https://www.crowdstrike.com/en-us/blog/five-lessons-from-agentworks-hackathon/">November 2, 2026 hackathon winners announcement</a>
+          </div>
+        </div>
+      </div>
+      <figure class="code-example">
+        <figcaption>From intent to CQL</figcaption>
+        <div class="code-body">
+          <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Over the past 90 days, which of our London and New York workstations ran PowerShell with ‘-enc’ and connected to at least five IPv4 addresses? Show me the busiest processes, their hosts, and the IPs they reached.”</p>
+          <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Use <code>endpoints-prod</code>, with <code>ComputerName</code> matching <code>LON-WKS-*</code> or <code>NYC-WKS-*</code>. Set a 90-day range when executing. Join <code>ProcessRollup2</code> and <code>NetworkConnectIP4</code> by <code>aid</code> and process ID. Require five distinct destinations; rank by destinations, then connections. Return up to 20 rows with connections per IP and up to 20 destination IPs.</p>
+          <p class="code-label output-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.0/examples/powershell-network.plan.json">View agent input</a></p>
+          <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
+  --plan examples/powershell-network.plan.json</code></pre>
+          <p class="code-label output-label">Generated CQL</p>
+          <pre tabindex="0" aria-label="Generated CQL"><code>#repo = <span class="code-string">"endpoints-prod"</span>
+| #event_simpleName = <span class="code-string">"ProcessRollup2"</span>
+| (ComputerName = <span class="code-string">"LON-WKS-*"</span> OR ComputerName = <span class="code-string">"NYC-WKS-*"</span>)
+| (FileName = <span class="code-string">"powershell.exe"</span> OR FileName = <span class="code-string">"pwsh.exe"</span>)
+| <span class="code-function">regex</span>(<span class="code-string">"-enc"</span>, field="CommandLine", flags="")
+| aid = "*" | TargetProcessId = "*"
+| <span class="code-function">join</span>(query={
+    #repo = <span class="code-string">"endpoints-prod"</span>
+    | #event_simpleName = <span class="code-string">"NetworkConnectIP4"</span>
+    | aid = "*" | ContextProcessId = "*" | RemoteAddressIP4 = "*"
+    | <span class="code-function">groupBy</span>(["aid", "ContextProcessId", "RemoteAddressIP4"],
+        function=[<span class="code-function">count</span>(as="destination_events")], limit=max)
+    | <span class="code-function">groupBy</span>(field=["aid", "ContextProcessId"],
+        function=[<span class="code-function">count</span>(as="destinations"),
+          <span class="code-function">sum</span>(field="destination_events", as="connections"),
+          <span class="code-function">collect</span>(fields=["RemoteAddressIP4"], limit=20)], limit=max)
+  }, field=["aid", "TargetProcessId"], key=["aid", "ContextProcessId"],
+     include=["destinations", "connections", "RemoteAddressIP4"],
+     mode="inner", limit=20000, max=1)
+| <span class="code-function">test</span>((destinations &gt;= 5))
+| connections_per_ip := (connections / destinations)
+| <span class="code-function">sort</span>(["destinations", "connections"], order="desc", type="number", limit=20)
+| <span class="code-function">select</span>(["ComputerName", "ParentBaseFileName", "TargetProcessId", "CommandLine",
+    "destinations", "connections", "connections_per_ip", "RemoteAddressIP4"])</code></pre>
+        </div>
+      </figure>
+    </section>
+
+    <section class="environment section-grid" aria-labelledby="environment-title">
+      <div>
+        <h2 id="environment-title">Your environment is the starting point.</h2>
+        <p>A valid query can still ask the wrong data the wrong question. CQLmatic maps sources, fields, parser declarations, measured populations, and optional sample values into a reusable environment pack.</p>
+        <p>Analysts and agents can consult the saved map offline for investigations and reasoning, independently of query generation.</p>
+        <p>Parser declarations, measured evidence, and pending work stay distinct in <code>status</code>.</p>
+      </div>
+      <dl class="evidence-list">
+        <div><dt>Field evidence</dt><dd>With <code>--require-observed</code>, generation withholds the query when referenced deployment fields lack qualifying evidence in the selected snapshot.</dd></div>
+        <div><dt>Local construction</dt><dd>Recipes, typed plans, and bounded English use one deterministic construction pipeline with no model calls. Typed plans support joins and linked searches.</dd></div>
+        <div><dt>Query safeguards</dt><dd>Keep matching, missing-field choices, and exact versus estimated distinct counts explicit. Check supported hazards, including grouping ceilings even with <code>limit=max</code>.</dd></div>
+      </dl>
+    </section>
+
+    <section id="workflow" class="workflow" aria-labelledby="workflow-title">
+      <div class="section-heading">
+        <h2 id="workflow-title">From setup to your first query.</h2>
+        <p>Use your assistant alongside the CLI.</p>
+      </div>
+      <div class="workflow-body">
+        <figure class="workflow-flow" role="img" aria-label="Setup, then discovery, then query writing.">
+          <span class="flow-node">Setup</span>
+          <svg class="flow-arrow" width="16" height="28" viewBox="0 0 16 28" aria-hidden="true" focusable="false"><path d="M8 1v24m-5-5 5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="flow-node">Discovery</span>
+          <svg class="flow-arrow" width="16" height="28" viewBox="0 0 16 28" aria-hidden="true" focusable="false"><path d="M8 1v24m-5-5 5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="flow-node">Query writing</span>
+        </figure>
+        <ol class="steps">
+        <li>
+          <h3>Connect your client</h3>
+          <code class="command">cqlmatic setup</code>
+          <p>Guided setup for CrowdStrike MCP. Complete the required consent and Falcon permissions with your administrator.</p>
+        </li>
+        <li>
+          <h3>Build the environment map</h3>
+          <code class="command">cqlmatic env inventory</code>
+          <p>Scout sources, review parser context, measure fields and reconcile gaps. Saved progress can be resumed.</p>
+        </li>
+        <li>
+          <h3>Check context, then write</h3>
+          <code class="command">cqlmatic status</code>
+          <p>Your assistant can retrieve the saved map with <code>cqlmatic env inspect PACK --full</code>, then select it explicitly with <code>--pack</code> when generating or checking CQL.</p>
+        </li>
+        </ol>
+      </div>
+      <p class="workflow-note">Reading the map requires its location and local access. Discovery does not automatically populate agent context or persistent memory. Bundled CQL and CPS/ECS references are also searchable offline.</p>
+    </section>
+
+    <section id="requirements" class="requirements section-grid" aria-labelledby="requirements-title">
+      <div>
+        <h2 id="requirements-title">Know what you need.</h2>
+        <p>CQLmatic writes and checks queries locally. Your assistant supplies the model; your authorized CrowdStrike client executes searches.</p>
+      </div>
+      <ul class="requirements-list">
+        <li><strong>A local execution path.</strong> An assistant must be able to run the binary. A web chat with only a remote MCP connection cannot do that.</li>
+        <li><strong>Authorized discovery access.</strong> MCP handles scouting and search. Parser inventory uses a separate Falcon API connection with <code>NGSIEM Parsers: READ</code>.</li>
+        <li><strong>Time for the first map.</strong> Discovery can run many searches and take substantial time. Agent-assisted work can also consume significant model tokens. Review scope and limits first.</li>
+        <li><strong>Live confirmation when it matters.</strong> A local <code>ready</code> result means construction and checking passed. It does not prove vendor compilation, execution, complete results or unrestricted-English accuracy.</li>
+      </ul>
+    </section>
+
+    <section id="about" class="about section-grid" aria-labelledby="about-title">
+      <div>
+        <h2 id="about-title">About CQLmatic.</h2>
+      </div>
+      <div>
+        <p>CQLmatic’s query mechanics were refined through seven months of development as an internal CQL toolkit, using environment references to write tailored, functional queries. Perfect CQL is the design goal.</p>
+        <p>The same engine powers the <strong>"THIS IS CQL"</strong> agent, where those mechanics were used to detect errors in queries generated by CrowdStrike’s own tools.</p>
+      </div>
+
+    </section>
+
+    <section id="release" class="release section-grid" aria-labelledby="release-title">
+      <div>
+        <h2 id="release-title">Help shape the first release.</h2>
+        <p>Version 0.1.0 is for analysts willing to try the workflow in their own environment and share what works, what fails and what needs to be clearer.</p>
+      </div>
+      <ul class="project-links" aria-label="Project links for v0.1.0">
+        <li><a href="https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.0">Release v0.1.0</a><small>Downloads · v0.1.0</small></li>
+        <li><a href="https://docs.cqlmatic.dev/">Documentation</a><small>Setup, discovery and query guides</small></li>
+        <li><a href="https://github.com/mychaelconnolly/cqlmatic">Source</a><small>GitHub</small></li>
+        <li><a href="https://github.com/mychaelconnolly/cqlmatic/issues">Share feedback</a><small>GitHub Issues</small></li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer wrap">
+    <p>CQLmatic <span>v0.1.0 · Apache-2.0</span></p>
+    <p>Independent project. Not affiliated with or endorsed by CrowdStrike.</p>
+  </footer>
+</body>
+</html>

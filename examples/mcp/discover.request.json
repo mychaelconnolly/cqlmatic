@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "environment": {
+    "cloud": "us1",
+    "tenant": "00000000000000000000000000000000",
+    "view": "search-all"
+  },
+  "start": "2026-01-01T00:00:00Z",
+  "end": "2026-01-01T01:00:00Z",
+  "sources": [{"repo": "synthetic_repo"}],
+  "value_fields": ["user"],
+  "max_queries": 20,
+  "max_seconds": 900
+}

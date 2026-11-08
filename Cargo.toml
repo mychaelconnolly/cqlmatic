@@ -1,0 +1,31 @@
+[package]
+name = "cqlmatic"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "Map your CrowdStrike NG-SIEM environment and build tailored CQL locally."
+readme = "README.md"
+repository = "https://github.com/mychaelconnolly/cqlmatic"
+homepage = "https://cqlmatic.dev"
+keywords = ["cql", "crowdstrike", "ngsiem", "query-generation", "linter"]
+categories = ["command-line-utilities"]
+publish = false
+default-run = "cqlmatic"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"] }
+sha2 = "0.11"
+ctrlc = { version = "3", features = ["termination"] }
+
+[dev-dependencies]
+proptest = "1"
+schemars = "1"
+
+[profile.release]
+lto = "thin"
+strip = "none"

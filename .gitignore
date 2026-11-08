@@ -1,0 +1,11 @@
+/target/
+/.local/
+/.agent-continuity/
+/packs/
+/runs/
+*.credentials.json
+.DS_Store
+.wrangler/
+/site/node_modules/
+/site/dist/
+__pycache__/

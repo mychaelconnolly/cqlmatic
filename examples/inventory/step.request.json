@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "action": {
+    "kind": "discovery-step",
+    "answers": [
+      {
+        "probe_id": "REPLACE_WITH_EMITTED_PROBE_ID",
+        "result_file": "/private/inventory/probe-result.json"
+      }
+    ]
+  }
+}

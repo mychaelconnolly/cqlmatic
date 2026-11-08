@@ -1,0 +1,54 @@
+name: v0.1.0 tester feedback
+description: Share setup, discovery, status, or query-writing feedback from the first public release.
+body:
+  - type: markdown
+    attributes:
+      value: Submit sanitized or synthetic material only. Do not attach credentials, tenant identifiers, packs, parser definitions, raw search results, or receipts. Use SECURITY.md for sensitive findings.
+  - type: input
+    id: platform
+    attributes:
+      label: Version and OS
+      description: CQLmatic version, OS, and architecture.
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Assistant and client
+      description: Assistant/client name and version, or standalone CLI.
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow step
+      options:
+        - Setup or authentication
+        - Scouting or target confirmation
+        - Parser inventory or review
+        - Source or field discovery
+        - Status or reconciliation
+        - Query construction or checking
+        - Saved-result assessment
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: Gap or status item
+      description: What is missing, confusing, or blocked? Include a sanitized diagnostic code or checklist status when relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Include only the command/request and synthetic input needed to reproduce the issue.
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: Expected and actual behavior
+      description: Describe the intended result, observed output, and exit code if available. Distinguish local checking from authorized execution.
+    validations:
+      required: true
