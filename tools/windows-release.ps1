@@ -16,6 +16,9 @@ if ($output.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringCompari
 if (Test-Path $output) { throw 'Artifact output must be new.' }
 $scratch = Join-Path $env:RUNNER_TEMP ('cqlmatic-check-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
+$priorTemp = @{ TMP = $env:TMP; TEMP = $env:TEMP }
+$ownerToken = [IntPtr]::Zero
+$ownerChanged = $false
 $buildLog = Join-Path $scratch 'build.log'
 $privatePrefixes = @($repo, $env:CARGO_HOME, $env:RUSTUP_HOME, $env:USERPROFILE, $env:RUNNER_TEMP) |
     Where-Object { $_ } | Sort-Object Length -Descending -Unique
@@ -40,6 +43,112 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
 }
 
 try {
+    if ([IO.Path]::GetPathRoot($scratch) -ne [IO.Path]::GetPathRoot($repo)) {
+        throw 'Native test temporary storage must share the source drive.'
+    }
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetOwner($currentSid)
+    $acl.SetAccessRuleProtection($true, $false)
+    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+    foreach ($sid in @($currentSid, $systemSid)) {
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            $sid, 'FullControl', $inherit, [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow))
+    }
+    Set-Acl -LiteralPath $scratch -AclObject $acl
+    $env:TMP = $scratch
+    $env:TEMP = $scratch
+    if (-not ('CqlmaticValidationOwner' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+public static class CqlmaticValidationOwner {
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetTokenInformation(IntPtr token, int kind, IntPtr data, int size, out int needed);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetTokenInformation(IntPtr token, int kind, IntPtr data, int size);
+
+    public static IntPtr Open(bool writable) {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), writable ? 0x88U : 0x08U, out token))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open this process token.");
+        return token;
+    }
+    public static SecurityIdentifier Sid(IntPtr token, int kind) {
+        if (kind != 1 && kind != 4) throw new ArgumentException("Only token user and owner are supported.");
+        int size;
+        bool result = GetTokenInformation(token, kind, IntPtr.Zero, 0, out size);
+        if (result || Marshal.GetLastWin32Error() != 122 || size < IntPtr.Size)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot size this process token SID.");
+        IntPtr data = Marshal.AllocHGlobal(size);
+        try {
+            if (!GetTokenInformation(token, kind, data, size, out size))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot read this process token SID.");
+            return new SecurityIdentifier(Marshal.ReadIntPtr(data));
+        } finally { Marshal.FreeHGlobal(data); }
+    }
+    public static void SetOwner(IntPtr token, SecurityIdentifier sid) {
+        byte[] bytes = new byte[sid.BinaryLength];
+        sid.GetBinaryForm(bytes, 0);
+        IntPtr binary = Marshal.AllocHGlobal(bytes.Length);
+        try {
+            Marshal.Copy(bytes, 0, binary, bytes.Length);
+            IntPtr owner = Marshal.AllocHGlobal(IntPtr.Size);
+            try {
+                Marshal.WriteIntPtr(owner, binary);
+                if (!SetTokenInformation(token, 4, owner, IntPtr.Size))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot set this process default owner.");
+            } finally { Marshal.FreeHGlobal(owner); }
+        } finally { Marshal.FreeHGlobal(binary); }
+    }
+    public static void Close(IntPtr token) { if (token != IntPtr.Zero) CloseHandle(token); }
+}
+'@
+    }
+    $queryToken = [CqlmaticValidationOwner]::Open($false)
+    try {
+        $tokenUser = [CqlmaticValidationOwner]::Sid($queryToken, 1)
+        $originalOwner = [CqlmaticValidationOwner]::Sid($queryToken, 4)
+    } finally { [CqlmaticValidationOwner]::Close($queryToken) }
+    if ($tokenUser.Value -ne $currentSid.Value) { throw 'Validation requires the current process user without impersonation.' }
+    if ($originalOwner.Value -ne $tokenUser.Value) {
+        # Change only this process's TokenOwner; child processes copy its primary token.
+        $ownerToken = [CqlmaticValidationOwner]::Open($true)
+        if ([CqlmaticValidationOwner]::Sid($ownerToken, 4).Value -ne $originalOwner.Value) {
+            throw 'Process default owner changed during validation preflight.'
+        }
+        [CqlmaticValidationOwner]::SetOwner($ownerToken, $tokenUser)
+        $ownerChanged = $true
+        if ([CqlmaticValidationOwner]::Sid($ownerToken, 4).Value -ne $tokenUser.Value) {
+            throw 'Process default owner correction did not apply.'
+        }
+    }
+    # Verify both inherited ACLs and the process default owner before running fixtures.
+    $sentinel = Join-Path $scratch 'fixture-check'
+    New-Item -ItemType Directory -Path $sentinel | Out-Null
+    $sentinelFile = Join-Path $sentinel 'state.json'
+    [IO.File]::WriteAllText($sentinelFile, '{}')
+    foreach ($path in @($scratch, $sentinel, $sentinelFile)) {
+        $actual = Get-Acl -LiteralPath $path
+        if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $currentSid.Value) {
+            throw 'Native test fixture owner is not the current user.'
+        }
+        foreach ($rule in $actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin @($currentSid.Value, $systemSid.Value)) {
+                throw 'Native test fixture is accessible to another principal.'
+            }
+        }
+    }
+    Remove-Item -Recurse -Force $sentinel
     Invoke-Checked 'rustup' @('toolchain', 'install', '1.99.1', '--profile', 'minimal', '--component', 'rustfmt', '--component', 'clippy', '--target', 'x86_64-pc-windows-msvc')
     Invoke-Checked 'cargo' @('+1.99.1', 'fetch', '--locked')
     Invoke-Checked 'cargo' @('+1.99.1', 'fmt', '--all', '--check')
@@ -130,5 +239,17 @@ if "%~1"=="--version" (
     if (@(Get-ChildItem -File $output).Count -ne 2) { throw 'Unexpected Windows artifact files.' }
     Write-Output 'Native Windows checks, PE imports, and public artifact scans passed.'
 } finally {
-    Remove-Item -Recurse -Force $scratch
+    try {
+        if ($ownerChanged) {
+            [CqlmaticValidationOwner]::SetOwner($ownerToken, $originalOwner)
+            if ([CqlmaticValidationOwner]::Sid($ownerToken, 4).Value -ne $originalOwner.Value) {
+                throw 'Process default owner restoration did not apply.'
+            }
+        }
+    } finally {
+        if ($ownerToken -ne [IntPtr]::Zero) { [CqlmaticValidationOwner]::Close($ownerToken) }
+        $env:TMP = $priorTemp.TMP
+        $env:TEMP = $priorTemp.TEMP
+        Remove-Item -Recurse -Force $scratch
+    }
 }

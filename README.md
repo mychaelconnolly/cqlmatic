@@ -1,6 +1,5 @@
 <p align="center">
-  <a href="https://www.crowdstrike.com/en-us/blog/five-lessons-from-agentworks-hackathon/"><img src="site/public/assets/agentworks-expert-builder-2026.png" width="300" height="300" alt="2026 AgentWorks Hackathon Expert Builder badge awarded to the &quot;THIS IS CQL&quot; agent"></a><br>
-  Recognition for the <strong>"THIS IS CQL"</strong> agent, powered by the same engine as CQLmatic.
+  <a href="https://www.crowdstrike.com/en-us/blog/five-lessons-from-agentworks-hackathon/"><img src="site/public/assets/agentworks-expert-builder-2026.png" width="300" height="300" alt="2026 AgentWorks Hackathon Expert Builder badge awarded to the &quot;THIS IS CQL&quot; agent"></a>
 </p>
 
 # CQLmatic

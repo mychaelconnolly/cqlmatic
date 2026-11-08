@@ -44,7 +44,7 @@ h2 { font-size: 1.9rem; letter-spacing: -0.025em; }
 h3 { font-size: 1.05rem; letter-spacing: -0.01em; }
 code { font-family: var(--mono); font-size: 0.88em; }
 p code, li > p code { background: var(--soft); padding: 0.1em 0.25em; overflow-wrap: anywhere; }
-.wrap { width: min(1120px, calc(100% - 96px)); margin-inline: auto; }
+.wrap { width: min(1440px, calc(100% - 96px)); margin-inline: auto; }
 .skip-link { position: absolute; z-index: 1; top: -5rem; left: 1rem; background: var(--paper); padding: 0.6rem 1rem; }
 .skip-link:focus { top: 1rem; }
 .site-header { min-height: 101px; display: flex; gap: 2rem; justify-content: space-between; align-items: center; border-block-end: 1px solid var(--line); }
@@ -106,7 +106,7 @@ dd { margin: 0; color: var(--muted); font-size: 0.88rem; }
 .recognition { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 1.4rem; align-items: center; margin-block-start: 2.5rem; }
 .recognition img { width: 200px; height: 200px; max-width: 100%; object-fit: contain; }
 .recognition p { font-size: 0.875rem; color: var(--muted); }
-.recognition a { display: inline-block; font-size: 0.875rem; margin-block-start: 0.9rem; }
+.recognition > div > a { display: inline-block; font-size: 0.875rem; margin-block-start: 0.9rem; }
 .release { padding-block: 52px 58px; }
 .project-links { padding: 0; margin: 0; list-style: none; }
 .project-links li { border-block-end: 1px solid var(--line); padding-block: 0.7rem; }
@@ -178,7 +178,7 @@ dd { margin: 0; color: var(--muted); font-size: 0.88rem; }
   .workflow-note { margin-block-start: 1.5rem; }
   .recognition { grid-template-columns: 130px 1fr; gap: 1rem; }
   .recognition img { width: 130px; height: 130px; }
-  .recognition a { min-height: 44px; display: inline-flex; align-items: center; }
+  .recognition > div > a { min-height: 44px; display: inline-flex; align-items: center; }
   .project-links a { min-height: 44px; align-items: center; }
   .project-links li { padding-block: 0.5rem; }
   .site-footer span { display: block; margin: 0.25rem 0 0; }
