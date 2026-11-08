@@ -196,7 +196,12 @@ fn request_file_and_stdin_reject_duplicate_keys_before_result_assessment() {
                 .args(["assess", "--request"])
                 .arg(source)
                 .arg("--json");
-            let out = run(command, request.as_bytes());
+            let input = if source == Path::new("-") {
+                request.as_bytes()
+            } else {
+                b""
+            };
+            let out = run(command, input);
             assert_eq!(out.status.code(), Some(2), "{request}");
             assert!(out.stdout.is_empty(), "{request}");
             let diagnostic: Value = serde_json::from_slice(&out.stderr).unwrap();
@@ -250,7 +255,12 @@ fn request_framing_rejects_repeated_documents_in_files_stdin_and_jsonl() {
             .args(["assess", "--request"])
             .arg(source)
             .arg("--json");
-        let out = run(command, repeated.as_bytes());
+        let input = if source == Path::new("-") {
+            repeated.as_bytes()
+        } else {
+            b""
+        };
+        let out = run(command, input);
         assert_eq!(out.status.code(), Some(2));
         assert!(out.stdout.is_empty());
         let diagnostic: Value = serde_json::from_slice(&out.stderr).unwrap();
