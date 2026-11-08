@@ -101,7 +101,7 @@ jobs:
       - name: Install locked Wrangler without credentials
         run: npm ci --prefix deployment-tools/site --ignore-scripts --no-audit --no-fund
       - name: Download the immutable verified transfer
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.transfer_artifact_id }}
           path: ${{ runner.temp }}/checked-site-transfer
