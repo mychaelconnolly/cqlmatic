@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
@@ -10,6 +11,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zipfile
 
 SPEC = importlib.util.spec_from_file_location("package_release", Path(__file__).with_name("package-release.py"))
@@ -175,6 +177,99 @@ class ReleaseTests(unittest.TestCase):
         struct.pack_into("<II", truncated, 0x98 + 120, 0x1000, 20)
         with self.assertRaisesRegex(ValueError, "Unterminated"):
             RELEASE.pe_imports(truncated)
+
+    def test_public_urls_pass_but_absolute_and_embedded_private_paths_fail(self):
+        public = ('https://example.com/reference', 'http://example.com/reference',
+                  'ftp://example.com/reference', 'git+https://example.com/reference',
+                  'References: https://example.com/reference and mailto:public@example.com')
+        paths = ('C:/synthetic/build/main.rs', r'C:\synthetic\build\main.rs',
+                 'C://synthetic/build/main.rs', 'file:///C:/synthetic/build/main.rs',
+                 'embeddedC:/synthetic/build/main.rs', 'embeddedC://synthetic/build/main.rs',
+                 r'embeddedC:\synthetic\build\main.rs',
+                 'https://example.com/?path=C:/synthetic/build/main.rs',
+                 '/home/synthetic/build/main.rs')
+        for encoding in ('ascii', 'utf-16-le'):
+            for value in public:
+                with self.subTest(encoding=encoding, kind='public URL'):
+                    RELEASE.public_bytes(value.encode(encoding), 'synthetic public URL')
+            for value in paths:
+                with self.subTest(encoding=encoding, kind='absolute path'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                    RELEASE.public_bytes(value.encode(encoding), 'synthetic absolute path')
+            with patch.dict(os.environ, {'CARGO_HOME': 'synthetic-private-cache'}):
+                for value in ('embeddedSYNTHETIC-PRIVATE-CACHE/artifact',
+                              'https://example.com/?path=synthetic-private-cache/artifact'):
+                    with self.subTest(encoding=encoding, kind='private prefix'), self.assertRaisesRegex(ValueError, 'Private build path'):
+                        RELEASE.public_bytes(value.encode(encoding), 'synthetic private prefix')
+
+    def test_only_exact_public_literals_are_normalized_without_hiding_adjacent_paths(self):
+        neutral = ('/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs',
+                   '/cargo-registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs')
+        literals = ('git+https://', 'https://', 'http://', 'ftp://', 'file://', 'radr://5614542',
+                    'called `Result::unwrap()` on an `Err` value:', *neutral)
+        for encoding in ('ascii', 'utf-16-le'):
+            for literal in literals:
+                with self.subTest(encoding=encoding, kind='exact literal'):
+                    RELEASE.public_bytes(('merged' + literal + 'public').encode(encoding), 'synthetic literal')
+                for path in ('C:/tmp', r'embeddedC:\synthetic\file', 'embeddedC://synthetic/file', '/private/synthetic/file'):
+                    for value in (path + literal, literal + path):
+                        with self.subTest(encoding=encoding, kind='adjacent path'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                            RELEASE.public_bytes(value.encode(encoding), 'synthetic adjacent path')
+                with patch.dict(os.environ, {'CARGO_HOME': literal}):
+                    with self.subTest(encoding=encoding, kind='unconditional private prefix'), self.assertRaisesRegex(ValueError, 'Private build path'):
+                        RELEASE.public_bytes(literal.encode(encoding), 'synthetic known prefix')
+            for literal in neutral:
+                for value in ('C:' + literal, '/private' + literal):
+                    with self.subTest(encoding=encoding, kind='neutral path prefix'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                        RELEASE.public_bytes(value.encode(encoding), 'synthetic prefixed path')
+            for value in ('radr://5614543', 'radr://56145420',
+                          neutral[0].replace('1.0.229', '1.0.230'),
+                          'called `Result::expect()` on an `Err` value:/assertion'):
+                with self.subTest(encoding=encoding, kind='unrecognized literal'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                    RELEASE.public_bytes(value.encode(encoding), 'synthetic unrecognized literal')
+            for scheme in ('git+https://', 'https://', 'http://', 'ftp://', 'file://'):
+                for remainder in ('example.com/?path=C:/synthetic/file', '/private/synthetic/file'):
+                    with self.subTest(encoding=encoding, kind='URI remainder'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                        RELEASE.public_bytes((scheme + remainder).encode(encoding), 'synthetic URI remainder')
+
+    def test_only_complete_embedded_knowledge_is_decoded_and_adjacent_paths_survive(self):
+        knowledge = self.repo / 'data/knowledge.json'
+        knowledge.parent.mkdir()
+        raw = json.dumps([{'body': 'Syntax:\n\n```\ncount()\n```'}]).encode()
+        knowledge.write_bytes(raw)
+        RELEASE.public_bytes(b'prefix' + raw + b'suffix' + raw, 'synthetic embedded knowledge')
+        RELEASE.public_bytes(b'C:' + raw + b'/tmp', 'synthetic nonadjacent path')
+        for encoding in ('ascii', 'utf-16-le'):
+            path = 'C:/tmp'.encode(encoding)
+            for value in (path + raw, raw + path):
+                with self.subTest(encoding=encoding, kind='short adjacent path'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                    RELEASE.public_bytes(value, 'synthetic adjacent path')
+        other = json.dumps([{'body': 'Example:\n\n```\ncount()\n```'}]).encode()
+        with self.assertRaisesRegex(ValueError, 'workstation path'):
+            RELEASE.public_bytes(other, 'synthetic different JSON')
+
+    def test_decoded_knowledge_checks_duplicate_keys_values_and_escaped_private_prefixes(self):
+        knowledge = self.repo / 'data/knowledge.json'
+        knowledge.parent.mkdir()
+        for raw in (b'{"body":"C:\\\\synthetic\\\\file","body":"public"}',
+                    b'{"C:\\\\synthetic\\\\file":"public","body":"public"}',
+                    b'{"nested":[{"body":"C\\u003a/synthetic/file"}]}'):
+            knowledge.write_bytes(raw)
+            with self.subTest(kind='decoded private path'), self.assertRaisesRegex(ValueError, 'workstation path'):
+                RELEASE.public_bytes(raw, 'synthetic embedded knowledge')
+        private = r'Z:\synthetic-private-cache'
+        raw = json.dumps({'nested': [{'body': private}]}).encode()
+        knowledge.write_bytes(raw)
+        with patch.dict(os.environ, {'CARGO_HOME': private}):
+            with self.assertRaisesRegex(ValueError, 'Private build path'):
+                RELEASE.public_bytes(raw, 'synthetic escaped private prefix')
+
+    def test_malformed_matching_knowledge_fails_before_serialized_bytes_are_excluded(self):
+        knowledge = self.repo / 'data/knowledge.json'
+        knowledge.parent.mkdir()
+        for raw in (b'', b'{"body":', b'{"body":NaN}', b'\xff'):
+            knowledge.write_bytes(raw)
+            with self.subTest(kind='malformed exact knowledge'), self.assertRaises(ValueError):
+                RELEASE.public_bytes(b'prefix' + raw + b'suffix', 'synthetic malformed knowledge')
 
     def test_unsafe_manifest_and_tampered_archive_members_are_rejected(self):
         for name in (".", "../escape", "/absolute", "dir\\file", "dir/../file", "CON.txt", "trailing."):

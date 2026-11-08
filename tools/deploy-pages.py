@@ -301,6 +301,9 @@ def deploy_sites(client, dist, files, source_sha, manifest_sha256, wrangler, mar
             except (InvalidSite, OSError):
                 require(time.monotonic() < deadline, "Custom-domain activation or HTTPS verification exceeded 30 minutes.")
                 time.sleep(min(15, max(0, deadline - time.monotonic())))
+        for name, _, _ in PROJECTS:
+            require(canonical(client, projects[name])["id"] == changed[name],
+                    "Pages production changed after domain verification.")
         proof["status"] = "verified"
         return proof
     except (InvalidSite, OSError, ValueError, KeyError, TypeError, AttributeError) as error:

@@ -32,7 +32,11 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
             $text = [regex]::Replace($text, [regex]::Escape($variant), '/build', 'IgnoreCase')
         }
     }
-    if ($text -match '(?i)[a-z]:[\\/][^\s"<>|]{3,}|/(Users|home|private|Volumes)/') {
+    $scanText = $text
+    foreach ($prefix in @('git+https://', 'https://', 'http://', 'ftp://', 'file://')) {
+        $scanText = $scanText.Replace($prefix, ' ')
+    }
+    if ($scanText -match '(?i)[a-z]:[\\/][^\s"<>|]{3,}|/(Users|home|private|Volumes)/') {
         throw 'Private path remains in command output; output withheld.'
     }
     [IO.File]::AppendAllText($buildLog, $text)

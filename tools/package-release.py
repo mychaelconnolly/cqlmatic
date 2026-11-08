@@ -100,17 +100,49 @@ def committed_source(manifest):
 def public_bytes(data, label):
     prefixes = [str(ROOT), *(os.environ.get(key, "") for key in
                 ("CARGO_HOME", "RUSTUP_HOME", "USERPROFILE", "HOME", "RUNNER_TEMP"))]
-    lowered = data.lower()
-    for prefix in filter(None, prefixes):
-        for value in {prefix, prefix.replace("\\", "/"), prefix.replace("/", "\\")}:
+    prefixes = {variant.lower() for prefix in filter(None, prefixes)
+                for variant in (prefix, prefix.replace("\\", "/"), prefix.replace("/", "\\"))}
+
+    def private_prefixes(raw):
+        lowered = raw.lower()
+        for value in prefixes:
             require(value.lower().encode() not in lowered
                     and value.lower().encode("utf-16-le") not in lowered,
                     "Private build path in " + label)
-    strings = [match.group().decode("ascii") for match in re.finditer(rb"[\x20-\x7e]{7,}", data)]
-    strings += [match.group().decode("utf-16-le") for match in re.finditer(rb"(?:[\x20-\x7e]\x00){7,}", data)]
-    for value in strings:
+
+    private_prefixes(data)
+
+    def text(value):
+        private_prefixes(value.encode("utf-8"))
+        for prefix in ("git+https://", "https://", "http://", "ftp://", "file://"):
+            value = value.replace(prefix, " ")
+        value = re.sub(r"radr://5614542(?![0-9])", " ", value)
+        value = value.replace("called `Result::unwrap()` on an `Err` value:", " ")
+        for path in ("/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs",
+                     "/cargo-registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs"):
+            value = value.replace(path, "/remapped")
         require(not re.search(r"(?i)[a-z]:[\\/][^\s\x00\"<>|]{3,}|/(?:Users|home|private|Volumes)/", value),
                 "Absolute workstation path in " + label)
+
+    knowledge_path = ROOT / "data/knowledge.json"
+    if knowledge_path.exists():
+        knowledge = regular(knowledge_path)
+        if knowledge in data:
+            def scan_json(value):
+                if isinstance(value, str):
+                    text(value)
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        scan_json(item)
+
+            # Preserve duplicate object keys and scan decoded text before removing serialized bytes.
+            scan_json(json.loads(knowledge, object_pairs_hook=list,
+                                 parse_constant=lambda _: require(False, "Invalid embedded knowledge JSON constant")))
+            data = data.replace(knowledge, b" ")
+    strings = [match.group().decode("ascii") for match in re.finditer(rb"[\x20-\x7e]{6,}", data)]
+    strings += [match.group().decode("utf-16-le") for match in re.finditer(rb"(?:[\x20-\x7e]\x00){6,}", data)]
+    for value in strings:
+        text(value)
 
 
 def pe_imports(data):

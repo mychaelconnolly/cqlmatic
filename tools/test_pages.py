@@ -347,6 +347,21 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(client.current["cqlmatic-docs"], newer_id)
         self.assertFalse(any(call[:2] == ("rollback", "cqlmatic-docs") for call in client.calls))
 
+    def test_docs_drift_during_final_domain_check_fails_and_restores_owned_landing(self):
+        client = FakeCloudflare()
+        newer_id = "55555555-5555-5555-5555-555555555555"
+        def check(host, *args):
+            if host == "https://cqlmatic.dev":
+                client.records[newer_id] = client.record("cqlmatic-docs", newer_id, OLD_SOURCE, "another-run")
+                client.current["cqlmatic-docs"] = newer_id
+        result = self.run_deploy(client, check=check)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(client.current["cqlmatic-docs"], newer_id)
+        self.assertEqual(client.current["cqlmatic"], OLD_IDS["cqlmatic"])
+        self.assertEqual(result["restoration"]["cqlmatic-docs"], "blocked-newer-production")
+        self.assertEqual([call for call in client.calls if call[0] == "rollback"],
+                         [("rollback", "cqlmatic", OLD_IDS["cqlmatic"])])
+
     def test_first_launch_failure_never_creates_projects_or_domains(self):
         client = FakeCloudflare(first_launch=True)
         def check(*args):
