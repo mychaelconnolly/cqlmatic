@@ -17,6 +17,7 @@
   <meta name="twitter:description" content="Map your environment. Write CQL with a local, deterministic companion. Testers and feedback welcome.">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <script src="/assets/theme.js"></script>
+  <script src="/assets/quick-start.js" defer></script>
   <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body>
@@ -48,7 +49,16 @@
           <a class="button" href="https://github.com/mychaelconnolly/cqlmatic/releases/latest">Latest release</a>
           <a class="text-action" href="#workflow">See the workflow</a>
         </div>
-        <p>On macOS Apple silicon or Linux x86_64: <code>npx cqlmatic@latest setup</code></p>
+        <section class="quick-start" aria-labelledby="quick-start-title">
+          <h2 id="quick-start-title">Quick start:</h2>
+          <div class="quick-start-panel">
+            <pre tabindex="0"><code id="quick-start-command">npx cqlmatic@latest setup</code></pre>
+            <button class="copy-command" type="button" hidden aria-label="Copy quick start command" title="Copy quick start command">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>
+            </button>
+          </div>
+          <p class="copy-status" role="status" aria-live="polite"></p>
+        </section>
         <div class="recognition">
           <img src="/assets/agentworks-expert-builder-2026.png" width="200" height="200" decoding="async" alt="2026 AgentWorks Hackathon Expert Builder badge awarded to the &quot;THIS IS CQL&quot; agent">
           <div>

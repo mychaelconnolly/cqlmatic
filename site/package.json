@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node --test build.test.mjs theme.test.cjs",
+    "test": "node --test build.test.mjs theme.test.cjs quick-start.test.cjs",
     "preview:landing": "wrangler pages dev dist/landing --ip 127.0.0.1 --port 4175 --inspector-port 0 --compatibility-date 2026-11-07",
     "preview:docs": "wrangler pages dev dist/docs --ip 127.0.0.1 --port 4176 --inspector-port 0 --compatibility-date 2026-11-07"
   },

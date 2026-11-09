@@ -43,7 +43,7 @@ export const DOCUMENTS = [
 ].map(([source, route, label, group]) => ({ source, route, label, group }));
 
 const ASSETS = new Set([
-  'favicon.svg', 'theme.js', 'site.css', 'docs.css', 'github-mark.svg', 'github-mark.LICENSE.txt',
+  'favicon.svg', 'theme.js', 'quick-start.js', 'site.css', 'docs.css', 'github-mark.svg', 'github-mark.LICENSE.txt',
   'agentworks-expert-builder-2026.png', 'setup-discovery-query.png',
 ]);
 const SOURCE_ROOTS = ['src', 'data', 'schemas', 'examples', 'licenses', 'tests', 'npm', 'tools', '.github'];

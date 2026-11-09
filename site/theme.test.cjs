@@ -124,7 +124,7 @@ test('both documents load theme before CSS and hide the control without JS', () 
     const html = readFileSync(join(__dirname, 'public', name), 'utf8');
     assert.ok(html.indexOf('<script src="/assets/theme.js"></script>') < html.indexOf('<link rel="stylesheet"'));
     assert.match(html, /<html[^>]+data-theme="dark"/);
-    assert.equal((html.match(/<button\b/g) || []).length, 1);
+    assert.equal((html.match(/<button\b/g) || []).length, name === 'index.html' ? 2 : 1);
     assert.match(html, /<button[^>]+class="theme-toggle"[^>]+\bhidden\b/);
     assert.doesNotMatch(html, /coming soon|pending publication/i);
   }
