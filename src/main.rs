@@ -1212,17 +1212,6 @@ mod tests {
         result.as_ref().copied().unwrap_or(2)
     }
 
-    fn relative_path(target: &Path) -> PathBuf {
-        let cwd = std::env::current_dir().unwrap();
-        let mut base = cwd.as_path();
-        let mut relative = PathBuf::new();
-        while !target.starts_with(base) {
-            base = base.parent().expect("test files are on this drive");
-            relative.push("..");
-        }
-        relative.join(target.strip_prefix(base).unwrap())
-    }
-
     fn test_directory() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
@@ -1391,14 +1380,20 @@ mod tests {
         for (index, relative) in [(0, true), (1, false)] {
             let p = &first.probes[index];
             let answer = dir.join(format!("answer-{index}.json"));
-            let body = if p["kind"] == "volume" {
-                include_str!("../examples/mcp/count.json")
+            let (fixture, body) = if p["kind"] == "volume" {
+                (
+                    "examples/mcp/count.json",
+                    include_str!("../examples/mcp/count.json"),
+                )
             } else {
-                include_str!("../examples/mcp/dataset.json")
+                (
+                    "examples/mcp/dataset.json",
+                    include_str!("../examples/mcp/dataset.json"),
+                )
             };
             std::fs::write(&answer, body).unwrap();
             let path = if relative {
-                relative_path(&answer)
+                PathBuf::from(fixture)
             } else {
                 answer
             };
