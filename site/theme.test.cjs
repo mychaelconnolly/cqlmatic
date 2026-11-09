@@ -144,7 +144,12 @@ test('opening award credit identifies the agent and keeps documentation discover
   }
   assert.ok(html.indexOf('class="recognition"') < html.indexOf('class="code-example"'));
   assert.match(html, /href="https:\/\/docs\.cqlmatic\.dev\/"/);
-  assert.match(readme, /^<p align="center">\n[^\n]*width="300" height="300"/);
+  assert.match(readme, /^# CQLmatic\n/);
+  const backgroundPosition = readme.indexOf("CQLmatic's query mechanics");
+  const badgePosition = readme.indexOf('src="site/public/assets/agentworks-expert-builder-2026.png"');
+  const enginePosition = readme.indexOf('The same engine powers');
+  assert.ok(backgroundPosition >= 0 && backgroundPosition < badgePosition && badgePosition < enginePosition);
+  assert.match(readme, /agentworks-expert-builder-2026\.png" width="200"/);
   assert.match(readme, /<a id="project-background"><\/a>/);
   assert.match(readme, /\[Read the setup guide\]\(https:\/\/docs\.cqlmatic\.dev\/setup\/\)/);
   for (const name of ['index.html', '404.html']) {
