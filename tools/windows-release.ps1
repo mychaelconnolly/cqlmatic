@@ -6,7 +6,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 if (-not $IsWindows) { throw 'Native Windows is required.' }
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
-if (-not $env:RUNNER_TEMP -or -not $env:CARGO_HOME) { throw 'Isolated RUNNER_TEMP and CARGO_HOME are required.' }
+if (-not $env:RUNNER_TEMP -or -not $env:CARGO_HOME -or -not $env:USERPROFILE) { throw 'Isolated RUNNER_TEMP, CARGO_HOME and USERPROFILE are required.' }
 $env:CARGO_HOME = [IO.Path]::GetFullPath($env:CARGO_HOME)
 if ($env:RUSTFLAGS -or $env:CARGO_ENCODED_RUSTFLAGS) { throw 'Global Rust flags would override target-only release flags.' }
 $output = [IO.Path]::GetFullPath($OutDir)
@@ -14,7 +14,7 @@ if ($output.StartsWith($repo + [IO.Path]::DirectorySeparatorChar, [StringCompari
     throw 'Artifact output must be outside the source tree.'
 }
 if (Test-Path $output) { throw 'Artifact output must be new.' }
-$scratch = Join-Path $env:RUNNER_TEMP ('cqlmatic-check-' + [Guid]::NewGuid().ToString('N'))
+$scratch = Join-Path $env:USERPROFILE ('cqlmatic-check-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $priorTemp = @{ TMP = $env:TMP; TEMP = $env:TEMP }
 $ownerToken = [IntPtr]::Zero
@@ -47,9 +47,6 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
 }
 
 try {
-    if ([IO.Path]::GetPathRoot($scratch) -ne [IO.Path]::GetPathRoot($repo)) {
-        throw 'Native test temporary storage must share the source drive.'
-    }
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $acl = [Security.AccessControl.DirectorySecurity]::new()
