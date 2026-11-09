@@ -70,7 +70,7 @@ def build(args):
     files, modes = staged_source(manifest)
     metadata = json.loads(files["package.json"])
     native = json.loads(files["npm/native-manifest.json"])
-    require(metadata["name"] == "cqlmatic" and metadata["version"] == native["version"] == "0.1.0",
+    require(metadata["name"] == "cqlmatic" and metadata["version"] == native["version"] == "0.1.1",
             "Unexpected npm package identity")
     require(metadata["bin"] == {"cqlmatic": "npm/cqlmatic.cjs"}, "Unexpected launcher")
     selected = {"package.json", "README.md", "LICENSE", "NOTICE"}
@@ -101,7 +101,7 @@ def build(args):
     output = args.out.resolve()
     require(output != ROOT and ROOT not in output.parents, "Output must be outside the source tree")
     output.mkdir(parents=True, exist_ok=True)
-    destination = output / "cqlmatic-0.1.0.tgz"
+    destination = output / "cqlmatic-0.1.1.tgz"
     with tempfile.NamedTemporaryFile(dir=output, prefix=".cqlmatic-", delete=False) as temporary:
         pending = Path(temporary.name)
     try:

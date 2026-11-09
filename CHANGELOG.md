@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1
+
+- Native MCP setup for Claude Code and GitHub Copilot CLI, app and VS Code Copilot harness. Copilot CLI launch names share one adapter and configuration.
+- Tracked guided setup for other capable agents, with a bound saved tool-discovery report.
+- Setup requires the selected session's effective OAuth client ID for Claude and Copilot reports, rejects contradictory IDs in legacy Codex/VS Code reports, and requires exact available `falcon_search_ngsiem` before verifying discovery.
+- The built-in `search-all` inventory scout requires separate authorization; selected-source discovery can continue when scouting remains pending.
+- Removed the dated source-review line from interactive setup.
+
 ## 0.1.0
 
 First public release.

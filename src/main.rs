@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 mod inventory_cli;
 mod setup_cli;
 use clap::{Args, Parser, Subcommand, ValueEnum};

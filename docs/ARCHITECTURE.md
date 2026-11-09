@@ -8,8 +8,8 @@ CQLmatic is a modular monolith in one Cargo package. The executable is the suppo
 
 | Module | Responsibility | I/O |
 | --- | --- | --- |
-| `setup` | Strict native-client selection, preview plans, phases and saved discovery evidence | None |
-| `setup_cli` | Client detection, native command adapters, protected setup state/backups and terminal flow | Filesystem/native processes |
+| `setup` | Strict named-native or external selection, preview plans, phases and saved discovery evidence | None |
+| `setup_cli` | Native-client detection/commands, guarded Copilot configuration writes, external report import, protected setup state/backups and terminal flow | Filesystem/native processes |
 | `inventory` | Strict inventory actions, source/parser review, conservative declarations and completion assessment | None |
 | `inventory_cli` | Inventory/status adapters, parser API reads, saved evidence import and cumulative-pack activation | Filesystem, parser API, relay adapters |
 | `contracts` | Strict versioned requests, semantic plan, result types | None |
@@ -60,7 +60,7 @@ A separate persistent lock file is never unlinked by a normal writer. For authen
 
 Merge requires identical cloud/account/view and a newer snapshot time. Only completed selected sources replace current measurements. Untargeted sources, quiet historical fields, old samples, original declaration dates, parser contracts, and operator annotations remain. Refresh does not turn an old declaration into a new review.
 
-Inventory state is separate from setup state and environment packs. Setup records native-client progress; it cannot implicitly select query identity or load a pack. Inventory stores scouting captures, target/context reviews, parser catalog and exact-byte hashes, bindings, exclusions, discovery runs, and references to retained pack snapshots. Parser declaration extraction is lexical and conservative; unsupported/conditional lines require explicit snapshot-bound semantic review. Neither declaration extraction nor a review asserts field presence.
+Inventory state is separate from setup state and environment packs. Setup records named-native or external progress; it cannot implicitly select query identity or load a pack. Native Claude/Copilot configuration checks bind the selected local entry, while a selected-session report supplies the effective OAuth identity as caller evidence; external import binds a report without inspecting host configuration. Inventory stores scouting captures, target/context reviews, parser catalog and exact-byte hashes, bindings, exclusions, discovery runs, and references to retained pack snapshots. Parser declaration extraction is lexical and conservative; unsupported/conditional lines require explicit snapshot-bound semantic review. Neither declaration extraction nor a review asserts field presence.
 
 Inventory builds a cumulative active pack from successful source/field runs. Historical snapshots remain retained; current completion uses the active pack and current workflow evidence, with reconciliation bound to an evidence fingerprint. A complete selected source or an imported pack does not establish full-environment completion. Status is offline and validates referenced pack identities and digests. `covered_queries_usable` is a workflow allowance, not a per-query proof. See [inventory](INVENTORY.md) for exact completion requirements and [contracts](CONTRACTS.md) for output shapes.
 

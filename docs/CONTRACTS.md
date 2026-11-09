@@ -1,6 +1,6 @@
 # Machine contracts and automation
 
-The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.0**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
+The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.1**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
 
 Use [USAGE](../USAGE.md) for flags, [setup](SETUP.md) and [inventory](INVENTORY.md) for actions, and [query construction](QUERY-REFERENCE.md) for nested plans. All examples are synthetic. Runtime operations require the caller's explicit authorization and environment.
 
@@ -107,17 +107,17 @@ Send `{schema_version:1, id?, action:{type:...}}`. The [setup action table](SETU
 | --- | --- |
 | `schema_version`, `revision` | Version and changing setup revision; previews bind the revision. |
 | `phase` | State machine phase below. |
-| `selection` | Selected `client`, `cloud`, `server_name`, and tagged registration choice, or null. |
+| `selection` | Selected `client`, `cloud`, `server_name`, tagged registration choice, and `host_id` only for `external`, or null. |
 | `clients` | Observed client executables, versions, capability flags and fingerprints. |
-| `plan` | Optional exact native-command preview, baseline, changes, backup path, and confirmation hash. |
+| `plan` | Optional reviewed native-command or Copilot file-write preview, baseline, changes, backup path, and confirmation hash. |
 | `configured` | Native configuration completed or equivalent registration was found; not authentication proof. |
 | `authentication_evidence` | Distinguishes no evidence, user confirmation, and a bound saved host-discovery report. |
-| `configured_sha256`, `discovery_sha256` | Optional configuration-selection and saved-report bindings. |
+| `configured_sha256`, `discovery_sha256` | Optional selected configuration-entry/legacy whole-file and saved-report bindings. |
 | `last_notice` | Optional last pending/error notice. |
 
 Phases are `new`, `selected`, `installation-required`, `review-required`, `command-pending`, `authentication-required`, `authenticated`, `tool-discovery-verified`, `advanced-pending`, and `cancelled`. A phase is not an instruction to skip human consent or pending-command review.
 
-The preview contains `schema_version`, `state_revision`, `operation`, `selection`, `client`, `baseline`, `commands`, `changes`, `backup_path`, and `confirmation_sha256`. Native commands contain exact `program`, `args`, `interactive`, and `timeout_seconds`. Baseline `path`, `sha256` (null for absence), and `server` classification distinguish absent, same, and colliding entries. Apply needs the exact lowercase 64-character confirmation digest and rechecks the baseline/executable. Never reconstruct a preview hash or infer rollback.
+The preview contains `schema_version`, `state_revision`, `operation`, `selection`, `baseline`, `commands`, `changes`, `backup_path`, and `confirmation_sha256`. `client` is present for command adapters; `config_write_sha256` is present for a planned new Copilot user file and covers its exact bytes, including the trailing newline. An existing Copilot file is never rewritten; add a missing entry through Copilot and preview again. Native commands contain exact `program`, `args`, `interactive`, and `timeout_seconds`. Baseline `path`, `sha256` (null for absence), and `server` distinguish absent, same, and colliding entries. Apply needs the exact lowercase confirmation digest and rechecks the baseline/executable when applicable. Never reconstruct a preview hash or infer rollback. Claude/Copilot saved reports additionally bind `effective_oauth_client_id` and `effective_config_source` from the chosen session; these are caller-supplied, not independent identity proof.
 
 The on-disk setup file wraps state with its schema version and `state_sha256`; this storage wrapper is not `SetupResult` or the bare state subschema. Do not hand-edit it. No-request `setup --json` reads saved status without detecting clients, reading native configuration, creating state, or prompting. A request action `status` uses the writer and can save state. Setup returns `0` only at `tool-discovery-verified`; intermediate results return `1`. A global error returns `2` without a `SetupResult`.
 

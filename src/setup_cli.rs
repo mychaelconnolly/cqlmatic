@@ -2,7 +2,7 @@
 use clap::Args;
 use cqlmatic::{
     contracts::Diagnostic,
-    network,
+    mcp, network,
     setup::{self, *},
     sha256_hex, storage,
 };
@@ -13,7 +13,10 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{atomic::Ordering, mpsc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -104,13 +107,7 @@ fn err(code: &str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, message)
 }
 fn absolute(path: PathBuf) -> Result<PathBuf, Diagnostic> {
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        env::current_dir()
-            .map(|p| p.join(path))
-            .map_err(|_| err("SETUP_PATH", "Cannot resolve local path."))
-    }
+    std::path::absolute(path).map_err(|_| err("SETUP_PATH", "Cannot resolve local path."))
 }
 fn parent(path: &Path) -> Result<&Path, Diagnostic> {
     path.parent()
@@ -122,15 +119,115 @@ fn parent(path: &Path) -> Result<&Path, Diagnostic> {
             )
         })
 }
+#[cfg(unix)]
+fn current_unix_uid() -> Result<u32, Diagnostic> {
+    let output = Command::new("/usr/bin/id")
+        .arg("-u")
+        .env_clear()
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|_| private_directory_error())?;
+    if !output.status.success() {
+        return Err(private_directory_error());
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .ok_or_else(private_directory_error)
+}
+
+#[cfg(unix)]
+fn check_unix_ancestors(path: &Path, owner: u32) -> Result<(), Diagnostic> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    for ancestor in path.ancestors().skip(1) {
+        let meta = match fs::metadata(ancestor) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(private_directory_error()),
+        };
+        let mode = meta.permissions().mode();
+        if (meta.uid() != 0 && meta.uid() != owner)
+            || (mode & 0o022 != 0
+                && !(mode & 0o1000 != 0 && (meta.uid() == 0 || meta.uid() == owner)))
+        {
+            return Err(private_directory_error());
+        }
+        #[cfg(target_os = "macos")]
+        check_macos_acl(ancestor)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn check_macos_acl(path: &Path) -> Result<(), Diagnostic> {
+    use std::{
+        ffi::{CString, c_char, c_int, c_void},
+        os::unix::ffi::OsStrExt,
+    };
+    unsafe extern "C" {
+        fn acl_get_file(path: *const c_char, kind: c_int) -> *mut c_void;
+        fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
+        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
+        fn acl_valid(acl: *mut c_void) -> c_int;
+        fn acl_free(acl: *mut c_void) -> c_int;
+    }
+    let name = CString::new(path.as_os_str().as_bytes()).map_err(|_| private_directory_error())?;
+    // Darwin returns ENOENT for no ACL; other read errors must fail closed.
+    let acl = unsafe { acl_get_file(name.as_ptr(), 0x100) };
+    if acl.is_null() {
+        return if io::Error::last_os_error().raw_os_error() == Some(2) && fs::metadata(path).is_ok()
+        {
+            Ok(())
+        } else {
+            Err(private_directory_error())
+        };
+    }
+    let result = (|| {
+        if unsafe { acl_valid(acl) } != 0 {
+            return Err(private_directory_error());
+        }
+        // Darwin returns EINVAL after the last indexed entry and caps ACLs at 128 entries.
+        for index in 0..=128 {
+            let mut entry = std::ptr::null_mut();
+            if unsafe { acl_get_entry(acl, index, &mut entry) } != 0 {
+                return if io::Error::last_os_error().raw_os_error() == Some(22) {
+                    Ok(())
+                } else {
+                    Err(private_directory_error())
+                };
+            }
+            let mut tag = 0;
+            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != 2 {
+                return Err(private_directory_error());
+            }
+        }
+        Err(private_directory_error())
+    })();
+    if unsafe { acl_free(acl) } != 0 {
+        return Err(private_directory_error());
+    }
+    result
+}
 
 /// Create private storage or verify protection without changing an existing directory.
 pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
     reject_links(path)?;
     let created = !path.exists();
+    #[cfg(unix)]
+    let owner = current_unix_uid()?;
+    #[cfg(unix)]
+    check_unix_ancestors(path, owner)?;
+    #[cfg(unix)]
     if created {
-        fs::create_dir_all(path)
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(path)
             .map_err(|_| err("SETUP_STORAGE", "Cannot create private setup directory."))?;
     }
+    #[cfg(not(windows))]
     if !path.is_dir() {
         return Err(err(
             "SETUP_STORAGE",
@@ -139,49 +236,45 @@ pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-        if created {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .map_err(|_| err("SETUP_PROTECTION", "Cannot protect setup directory."))?;
-        }
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let meta = fs::metadata(path).map_err(|_| {
             err(
                 "SETUP_PROTECTION",
                 "Cannot inspect setup directory protection.",
             )
         })?;
-        if meta.permissions().mode() & 0o077 != 0 {
+        if meta.uid() != owner || meta.permissions().mode() & 0o077 != 0 {
             return Err(private_directory_error());
         }
-        // Compare to a private file's actual owner without a new libc dependency.
-        let sentinel = path.join(format!(".owner-{}", std::process::id()));
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&sentinel)
-            .map_err(|_| {
-                err(
-                    "SETUP_PROTECTION",
-                    "Cannot verify setup directory ownership.",
-                )
-            })?;
-        let owner = file
-            .metadata()
-            .map_err(|_| err("SETUP_PROTECTION", "Cannot inspect setup ownership."))?
-            .uid();
-        drop(file);
-        fs::remove_file(&sentinel)
-            .map_err(|_| err("SETUP_PROTECTION", "Cannot finish setup ownership check."))?;
-        if meta.uid() != owner {
-            return Err(private_directory_error());
-        }
+        #[cfg(target_os = "macos")]
+        check_macos_acl(path)?;
+        check_unix_ancestors(path, owner)?;
     }
     #[cfg(windows)]
     {
         // Fixed script, untrusted path is an environment value, never script text.
-        const CHECK: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=[IO.Directory]::GetAccessControl($p); if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value){exit 3}; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -ne $sid.Value -and $r.IdentityReference.Value -ne 'S-1-5-18'){exit 4}}"#;
-        const CREATE: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $prop=[Security.AccessControl.PropagationFlags]::None; $allow=[Security.AccessControl.AccessControlType]::Allow; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,$prop,$allow)); $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$inherit,$prop,$allow)); [IO.Directory]::SetAccessControl($p,$a)"#;
+        const CHECK: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=[IO.Directory]::GetAccessControl($p); if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value){exit 3}; $self=$false; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow'){if($r.IdentityReference.Value -ne $sid.Value -and $r.IdentityReference.Value -ne 'S-1-5-18'){exit 4}; if($r.IdentityReference.Value -eq $sid.Value){$self=$true}}}; if(-not $self){exit 5}"#;
+        // This overload applies the ACL while creating every missing directory.
+        const CREATE: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $prop=[Security.AccessControl.PropagationFlags]::None; $allow=[Security.AccessControl.AccessControlType]::Allow; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,$prop,$allow)); $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$inherit,$prop,$allow)); [IO.Directory]::CreateDirectory($p,$a) | Out-Null"#;
+        const ANCESTORS: &str = r#"
+$trusted=@($sid.Value,'S-1-5-18','S-1-5-32-544','S-1-3-0')
+try {$trusted+=([Security.Principal.NTAccount]::new('NT SERVICE','TrustedInstaller')).Translate([Security.Principal.SecurityIdentifier]).Value} catch {}
+$danger=[Security.AccessControl.FileSystemRights]'Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+for($d=[IO.Directory]::GetParent($p); $null -ne $d; $d=$d.Parent){
+  $ac=$d.GetAccessControl()
+  if($trusted -notcontains ($ac.GetOwner([Security.Principal.SecurityIdentifier]).Value)){exit 6}
+  $rules=$ac.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
+  if(@($rules).Count -eq 0){exit 7}
+  foreach($r in $rules){
+    if($r.AccessControlType -eq 'Allow' -and ($r.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and $trusted -notcontains $r.IdentityReference.Value -and (($r.FileSystemRights -band $danger) -ne 0)){exit 8}
+  }
+}
+"#;
+        let script = if created {
+            format!("{CREATE}; {CHECK}; {ANCESTORS}")
+        } else {
+            format!("{CHECK}; {ANCESTORS}")
+        };
         let mut command = powershell()?;
         command
             .args([
@@ -189,7 +282,7 @@ pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                if created { CREATE } else { CHECK },
+                script.as_str(),
             ])
             .env("CQLMATIC_SETUP_DIRECTORY", path)
             .stdin(Stdio::null())
@@ -218,12 +311,20 @@ pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
             }
         }
     }
+    #[cfg(windows)]
+    if !path.is_dir() {
+        return Err(err(
+            "SETUP_STORAGE",
+            "Private setup storage must be a directory.",
+        ));
+    }
+    reject_links(path)?;
     Ok(())
 }
 fn private_directory_error() -> Diagnostic {
     err(
         "SETUP_PROTECTION",
-        "Existing setup directory is not private to this user and SYSTEM. Use --state in a new dedicated directory, or protect that dedicated directory in the OS first. Setup does not change permissions on existing arbitrary directories.",
+        "Setup storage or its parent path is accessible or replaceable by another user. Choose a fresh --state path under trusted private ancestry. Setup does not change permissions on existing arbitrary directories.",
     )
 }
 #[cfg(windows)]
@@ -325,6 +426,7 @@ fn with_state(
 ) -> Result<SetupState, Diagnostic> {
     protect_directory(parent(path)?)?;
     let writer = storage::Writer::acquire(path)?;
+    protect_directory(parent(path)?)?;
     let mut state = load_state(path)?;
     let mut runner = NativeRunner;
     let result = action(&mut state, &mut runner, &writer);
@@ -566,11 +668,15 @@ fn discover_executable(client: ClientKind) -> Option<PathBuf> {
     let names: &[&str] = match client {
         ClientKind::Codex => &["codex.exe", "codex.cmd", "codex.ps1"],
         ClientKind::VsCode => &["code.exe", "code.cmd", "code.ps1"],
+        ClientKind::ClaudeCode => &["claude.exe", "claude.cmd", "claude.ps1"],
+        _ => return None,
     };
     #[cfg(not(windows))]
     let names: &[&str] = match client {
         ClientKind::Codex => &["codex"],
         ClientKind::VsCode => &["code"],
+        ClientKind::ClaudeCode => &["claude"],
+        _ => return None,
     };
     for directory in env::split_paths(&paths).filter(|p| p.is_absolute()) {
         for name in names {
@@ -594,7 +700,11 @@ fn discover_executable(client: ClientKind) -> Option<PathBuf> {
 }
 fn detect_clients(runner: &mut impl Runner) -> Result<Vec<ClientObservation>, Diagnostic> {
     let mut clients = Vec::new();
-    for client in [ClientKind::Codex, ClientKind::VsCode] {
+    for client in [
+        ClientKind::Codex,
+        ClientKind::VsCode,
+        ClientKind::ClaudeCode,
+    ] {
         let Some(program) = discover_executable(client) else {
             continue;
         };
@@ -634,6 +744,20 @@ fn detect_clients(runner: &mut impl Runner) -> Result<Vec<ClientObservation>, Di
                     false,
                 )
             }
+            ClientKind::ClaudeCode => {
+                let Ok(add) = probe(runner, &program, &["mcp", "add", "--help"]) else {
+                    continue;
+                };
+                let add_text = String::from_utf8_lossy(&add);
+                let http = add_text.contains("--transport")
+                    && add_text.contains("http")
+                    && add_text.contains("--scope");
+                let cimd = http && setup::claude_supports_cimd(&String::from_utf8_lossy(&version));
+                let manual = http && add_text.contains("--client-id");
+                capability.extend(add);
+                (http, cimd, manual, false)
+            }
+            _ => continue,
         };
         let version = String::from_utf8_lossy(&version)
             .lines()
@@ -697,6 +821,26 @@ fn client_config_path(client: ClientKind) -> Result<PathBuf, Diagnostic> {
                 .unwrap_or(home()?.join(".config"));
             root.join("Code/User/mcp.json")
         }
+        ClientKind::ClaudeCode => {
+            let root = match env::var_os("CLAUDE_CONFIG_DIR") {
+                Some(root) => PathBuf::from(root),
+                None => home()?,
+            };
+            root.join(".claude.json")
+        }
+        ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode => {
+            let root = match env::var_os("COPILOT_HOME") {
+                Some(root) => PathBuf::from(root),
+                None => home()?.join(".copilot"),
+            };
+            root.join("mcp-config.json")
+        }
+        _ => {
+            return Err(err(
+                "SETUP_HOST_MANAGED",
+                "This host owns its MCP configuration; CQLmatic does not inspect it.",
+            ));
+        }
     };
     if !path.is_absolute() {
         return Err(err(
@@ -716,6 +860,348 @@ fn config_hash(path: &Path) -> Result<Option<String>, Diagnostic> {
         path,
         MAX_CONFIG_BYTES,
     )?)))
+}
+fn read_json_config(path: &Path) -> Result<Value, Diagnostic> {
+    reject_links(path)?;
+    let value = if path.exists() {
+        let raw = storage::read_bytes(path, MAX_CONFIG_BYTES)?;
+        mcp::parse_saved_result(&raw).map_err(|_| {
+            err(
+                "SETUP_NATIVE_CONFIG",
+                "MCP configuration has duplicate keys or invalid JSON; inspect it in the host before changing it.",
+            )
+        })?;
+        serde_json::from_slice(&raw).map_err(|_| {
+            err(
+                "SETUP_NATIVE_CONFIG",
+                "MCP configuration is not strict JSON; inspect it in the host before changing it.",
+            )
+        })?
+    } else {
+        serde_json::json!({})
+    };
+    if !value.is_object() {
+        return Err(err(
+            "SETUP_NATIVE_CONFIG",
+            "MCP configuration must be a JSON object.",
+        ));
+    }
+    Ok(value)
+}
+fn server_entry<'a>(
+    config: &'a Value,
+    key: &str,
+    name: &str,
+) -> Result<Option<&'a Value>, Diagnostic> {
+    let servers = config
+        .get(key)
+        .map(|value| {
+            value.as_object().ok_or_else(|| {
+                err(
+                    "SETUP_NATIVE_CONFIG",
+                    "MCP server collection must be a JSON object.",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(servers.and_then(|servers| servers.get(name)))
+}
+fn copilot_entry(selection: &Selection) -> Result<Value, Diagnostic> {
+    let RegistrationMode::Manual { client_id, .. } = &selection.registration else {
+        return Err(err(
+            "SETUP_REGISTRATION_MODE",
+            "Copilot requires a pre-registered OAuth client ID.",
+        ));
+    };
+    Ok(
+        serde_json::json!({"type":"http","url":selection.cloud.endpoint(),"tools":[SEARCH_TOOL],"oauthClientId":client_id}),
+    )
+}
+fn copilot_config_bytes(selection: &Selection, path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    if path.exists() {
+        return Err(err(
+            "SETUP_EXISTING_CONFIG",
+            "Copilot configuration already exists. Add the selected HTTP server and registered oauthClientId in Copilot's own configuration flow, then preview again; setup will verify the exact entry without replacing the file.",
+        ));
+    }
+    let mut config = read_json_config(path)?;
+    let root = config.as_object_mut().expect("checked above");
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let servers = servers.as_object_mut().ok_or_else(|| {
+        err(
+            "SETUP_NATIVE_CONFIG",
+            "Copilot mcpServers must be a JSON object.",
+        )
+    })?;
+    if servers.contains_key(&selection.server_name) {
+        return Err(err(
+            "SETUP_COLLISION",
+            "Copilot server already exists; setup will not overwrite it.",
+        ));
+    }
+    servers.insert(selection.server_name.clone(), copilot_entry(selection)?);
+    let mut bytes = serde_json::to_vec_pretty(&config).map_err(|_| {
+        err(
+            "SETUP_SERIALIZATION",
+            "Cannot serialize Copilot MCP configuration.",
+        )
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+fn write_new_copilot_config(
+    path: &Path,
+    bytes: &[u8],
+    private_dir: &Path,
+) -> Result<(), Diagnostic> {
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(err(
+            "SETUP_NATIVE_CONFIG",
+            "Copilot configuration exceeds its size limit.",
+        ));
+    }
+    protect_directory(private_dir)?;
+    let _writer = storage::Writer::acquire(path)?;
+    if config_hash(path)?.is_some() {
+        return Err(err(
+            "SETUP_BASELINE_CHANGED",
+            "Copilot configuration appeared before the reviewed write. Inspect it and preview again.",
+        ));
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(|| {
+        err(
+            "SETUP_CONFIG_PATH",
+            "Copilot configuration needs a parent directory.",
+        )
+    })?;
+    // The host directory can inherit broad Windows ACLs; stage under protected setup storage.
+    let temp = private_dir.join(format!(
+        ".cqlmatic-setup-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temp).map_err(|_| {
+        err(
+            "SETUP_NATIVE_CONFIG",
+            "Cannot create a private Copilot configuration candidate.",
+        )
+    })?;
+    let result = (|| {
+        #[cfg(windows)]
+        protect_copilot_candidate(&temp)?;
+        verify_private_file(&temp)?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| {
+                err(
+                    "SETUP_NATIVE_CONFIG",
+                    "Cannot durably write the private Copilot configuration candidate.",
+                )
+            })?;
+        reject_links(path)?;
+        fs::hard_link(&temp, path).map_err(|cause| {
+            if cause.kind() == io::ErrorKind::AlreadyExists {
+                err(
+                    "SETUP_BASELINE_CHANGED",
+                    "Copilot configuration appeared before activation. Inspect it and preview again.",
+                )
+            } else {
+                err(
+                    "SETUP_NATIVE_CONFIG",
+                    "Cannot atomically create Copilot configuration from protected setup storage. Keep both paths on one volume or add the entry through Copilot's configuration flow.",
+                )
+            }
+        })?;
+        drop(file);
+        fs::remove_file(&temp).map_err(|_| err("SETUP_DURABILITY", "Copilot configuration is visible, but candidate cleanup failed. Inspect it before retrying."))?;
+        sync_directory(private_dir)?;
+        sync_directory(parent)?;
+        if config_hash(path)?.as_deref() != Some(sha256_hex(bytes).as_str()) {
+            return Err(err(
+                "SETUP_POSTCONDITION",
+                "Copilot configuration bytes changed after activation. Inspect the host before retrying.",
+            ));
+        }
+        verify_private_file(path)?;
+        Ok(())
+    })();
+    if temp.exists() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+#[cfg(windows)]
+fn protect_copilot_candidate(path: &Path) -> Result<(), Diagnostic> {
+    const CREATE: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_FILE; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $allow=[Security.AccessControl.AccessControlType]::Allow; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$allow)); $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$allow)); [IO.File]::SetAccessControl($p,$a)"#;
+    let mut command = powershell()?;
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            CREATE,
+        ])
+        .env("CQLMATIC_SETUP_FILE", path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|_| {
+        err(
+            "SETUP_PROTECTION",
+            "Cannot protect Copilot configuration candidate.",
+        )
+    })?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                return Err(err(
+                    "SETUP_PROTECTION",
+                    "Cannot protect Copilot configuration candidate.",
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err(
+                    "SETUP_PROTECTION",
+                    "Copilot candidate ACL protection timed out.",
+                ));
+            }
+        }
+    }
+}
+fn check_portable_shadow(name: &str, copilot: bool) -> Result<(), Diagnostic> {
+    let cwd = env::current_dir()
+        .map_err(|_| err("SETUP_PATH", "Cannot inspect the current host workspace."))?;
+    check_portable_shadow_from(&cwd, name, copilot)
+}
+fn check_portable_shadow_from(cwd: &Path, name: &str, copilot: bool) -> Result<(), Diagnostic> {
+    for directory in cwd.ancestors() {
+        for relative in if copilot {
+            &[".mcp.json", ".github/mcp.json"][..]
+        } else {
+            &[".mcp.json"][..]
+        } {
+            let path = directory.join(relative);
+            if path.exists()
+                && server_entry(&read_json_config(&path)?, "mcpServers", name)?.is_some()
+            {
+                return Err(err(
+                    "SETUP_CONFIG_SHADOW",
+                    "A workspace MCP server with this name can override the selected user configuration. Choose another name or inspect that host entry.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+fn check_claude_managed(name: &str) -> Result<(), Diagnostic> {
+    #[cfg(target_os = "macos")]
+    let root = PathBuf::from("/Library/Application Support/ClaudeCode");
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let root = PathBuf::from("/etc/claude-code");
+    #[cfg(windows)]
+    let root = env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            err(
+                "SETUP_CONFIG_PATH",
+                "Windows ProgramFiles is unavailable for Claude managed MCP inspection.",
+            )
+        })?
+        .join("ClaudeCode");
+    check_claude_managed_at(&root, name)
+}
+fn check_claude_managed_at(root: &Path, name: &str) -> Result<(), Diagnostic> {
+    if root.join("managed-mcp.json").exists() {
+        return Err(err(
+            "SETUP_CONFIG_SHADOW",
+            "Claude's managed MCP file controls the effective servers; inspect it with your administrator before configuring a user entry.",
+        ));
+    }
+    let settings = root.join("managed-settings.json");
+    if settings.exists()
+        && server_entry(&read_json_config(&settings)?, "managedMcpServers", name)?.is_some()
+    {
+        return Err(err(
+            "SETUP_CONFIG_SHADOW",
+            "A managed Claude MCP server with this name overrides the user entry.",
+        ));
+    }
+    Ok(())
+}
+fn check_claude_project_shadow(config: &Value, cwd: &Path, name: &str) -> Result<(), Diagnostic> {
+    let Some(projects) = config.get("projects") else {
+        return Ok(());
+    };
+    let projects = projects.as_object().ok_or_else(|| {
+        err(
+            "SETUP_NATIVE_CONFIG",
+            "Claude projects must be a JSON object.",
+        )
+    })?;
+    let active = cwd.canonicalize().map_err(|_| {
+        err(
+            "SETUP_PATH",
+            "Cannot inspect the active Claude project path.",
+        )
+    })?;
+    for (root, project) in projects {
+        if Path::new(root)
+            .canonicalize()
+            .is_ok_and(|root| active.starts_with(root))
+            && server_entry(project, "mcpServers", name)?.is_some()
+        {
+            return Err(err(
+                "SETUP_CONFIG_SHADOW",
+                "A Claude local-scope server in this project overrides user scope. Choose another name or inspect that entry.",
+            ));
+        }
+    }
+    Ok(())
+}
+fn configured_fingerprint(
+    selection: &Selection,
+    path: &Path,
+) -> Result<Option<String>, Diagnostic> {
+    if !matches!(
+        selection.client,
+        ClientKind::ClaudeCode
+            | ClientKind::CopilotCli
+            | ClientKind::CopilotApp
+            | ClientKind::CopilotVscode
+    ) {
+        return config_hash(path);
+    }
+    let config = read_json_config(path)?;
+    let entry = server_entry(&config, "mcpServers", &selection.server_name)?;
+    entry
+        .map(|entry| {
+            serde_json::to_vec(&(path.to_string_lossy(), entry))
+                .map(|bytes| sha256_hex(&bytes))
+                .map_err(|_| {
+                    err(
+                        "SETUP_SERIALIZATION",
+                        "Cannot fingerprint native server entry.",
+                    )
+                })
+        })
+        .transpose()
 }
 fn inspect_baseline(
     state: &SetupState,
@@ -739,6 +1225,12 @@ fn inspect_baseline_for(
         .selection
         .as_ref()
         .ok_or_else(|| err("SETUP_SELECTION", "Choose a client and cloud first."))?;
+    if !selected.client.is_native() {
+        return Err(err(
+            "SETUP_HOST_MANAGED",
+            "This host owns its MCP configuration; no native baseline is inspected.",
+        ));
+    }
     let config = runner.config_path(selected.client)?;
     let sha256 = config_hash(&config)?;
     let server = match selected.client {
@@ -848,6 +1340,43 @@ fn inspect_baseline_for(
                     }
                 }
             }
+        }
+        ClientKind::ClaudeCode => {
+            check_claude_managed(&selected.server_name)?;
+            check_portable_shadow(&selected.server_name, false)?;
+            let value = read_json_config(&config)?;
+            check_claude_project_shadow(
+                &value,
+                &env::current_dir().map_err(|_| {
+                    err(
+                        "SETUP_PATH",
+                        "Cannot inspect the active Claude project path.",
+                    )
+                })?,
+                &selected.server_name,
+            )?;
+            let expected = serde_json::json!({"type":"http","url":selected.cloud.endpoint()});
+            match server_entry(&value, "mcpServers", &selected.server_name)? {
+                None => ExistingServer::Absent,
+                Some(entry) if *entry == expected => ExistingServer::Same,
+                Some(_) => ExistingServer::Collision,
+            }
+        }
+        ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode => {
+            check_portable_shadow(&selected.server_name, true)?;
+            let value = read_json_config(&config)?;
+            let expected = copilot_entry(selected)?;
+            match server_entry(&value, "mcpServers", &selected.server_name)? {
+                None => ExistingServer::Absent,
+                Some(entry) if *entry == expected => ExistingServer::Same,
+                Some(_) => ExistingServer::Collision,
+            }
+        }
+        _ => {
+            return Err(err(
+                "SETUP_HOST_MANAGED",
+                "This host owns its MCP configuration; no native baseline is inspected.",
+            ));
         }
     };
     Ok(ConfigBaseline {
@@ -1022,7 +1551,7 @@ fn sync_directory(path: &Path) -> Result<(), Diagnostic> {
     result.map_err(|_| {
         err(
             "SETUP_DURABILITY",
-            "Cannot confirm protected backup directory durability. No native command was run.",
+            "Cannot confirm directory durability. Inspect the local files before retrying.",
         )
     })
 }
@@ -1046,6 +1575,8 @@ fn verify_private_file(path: &Path) -> Result<(), Diagnostic> {
                 "Protected setup files must be owner-only regular files without extra hard links.",
             ));
         }
+        #[cfg(target_os = "macos")]
+        check_macos_acl(path)?;
     }
     #[cfg(windows)]
     {
@@ -1119,6 +1650,7 @@ fn perform(
             state.invalidate_plan();
             state.clients = clients;
             if let Some(s) = &state.selection
+                && s.client.needs_executable()
                 && !state.clients.iter().any(|c| c.client == s.client)
             {
                 state.phase = SetupPhase::InstallationRequired;
@@ -1127,13 +1659,29 @@ fn perform(
         }
         SetupAction::Select { selection } => state.select(selection),
         SetupAction::Preview { operation } => {
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(|s| !s.client.is_native())
+            {
+                return Err(err(
+                    "SETUP_HOST_MANAGED",
+                    "This host uses its own MCP configuration. Save and import a host tool-discovery report; no native preview is available.",
+                ));
+            }
             if state.phase == SetupPhase::CommandPending {
                 return Err(err(
                     "SETUP_PENDING",
                     "Inspect and acknowledge the pending native command before previewing another operation.",
                 ));
             }
-            state.clients = runner.detect()?;
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.client.needs_executable())
+            {
+                state.clients = runner.detect()?;
+            }
             state.invalidate_plan();
             let baseline = inspect_baseline(state, state_path, runner)?;
             let backup = if operation == PlanOperation::Configure {
@@ -1142,6 +1690,21 @@ fn perform(
                 None
             };
             let mut plan = setup::build_plan(state, operation, baseline, backup)?;
+            if operation == PlanOperation::Configure
+                && !plan.selection.client.needs_executable()
+                && plan.baseline.server == ExistingServer::Absent
+            {
+                let bytes = copilot_config_bytes(&plan.selection, Path::new(&plan.baseline.path))?;
+                plan.config_write_sha256 = Some(sha256_hex(&bytes));
+                if let RegistrationMode::Manual { client_id, .. } = &plan.selection.registration {
+                    plan.changes.push(format!(
+                        "Effective OAuth client ID to configure: {client_id}"
+                    ));
+                }
+            }
+            if let RegistrationMode::Manual { callback_url, .. } = &plan.selection.registration {
+                plan.changes.push(format!("Expected host callback (operator supplied; setup does not set it): {callback_url}"));
+            }
             plan.changes
                 .push(format!("Protected setup state: {}", state_path.display()));
             if plan.backup_path.is_some() {
@@ -1155,6 +1718,16 @@ fn perform(
         SetupAction::Apply {
             confirmation_sha256,
         } => {
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(|s| !s.client.is_native())
+            {
+                return Err(err(
+                    "SETUP_HOST_MANAGED",
+                    "This host uses its own MCP configuration. No native plan can be applied.",
+                ));
+            }
             if state.phase == SetupPhase::CommandPending {
                 return Err(err(
                     "SETUP_PENDING",
@@ -1176,12 +1749,17 @@ fn perform(
                     "Confirmation does not match the current reviewed plan. Preview again.",
                 ));
             }
-            let current = runner.detect()?;
-            if !current.iter().any(|client| client == &plan.client) {
-                return Err(err(
-                    "SETUP_CLIENT_CHANGED",
-                    "The selected executable or capabilities changed since review. Detect and preview again.",
-                ));
+            if plan.selection.client.needs_executable() {
+                let current = runner.detect()?;
+                if !current
+                    .iter()
+                    .any(|client| Some(client) == plan.client.as_ref())
+                {
+                    return Err(err(
+                        "SETUP_CLIENT_CHANGED",
+                        "The selected executable or capabilities changed since review. Detect and preview again.",
+                    ));
+                }
             }
             let baseline = inspect_baseline(state, state_path, runner)?;
             if baseline != plan.baseline {
@@ -1200,6 +1778,7 @@ fn perform(
             let expected =
                 setup::build_plan(state, plan.operation, baseline, plan.backup_path.clone())?;
             if expected.commands != plan.commands
+                || expected.client != plan.client
                 || plan.backup_path
                     != if plan.operation == PlanOperation::Configure {
                         backup_path(state_path, &plan.baseline)?
@@ -1212,11 +1791,34 @@ fn perform(
                     "Stored command or backup target differs from the native adapter's derived plan. Preview again.",
                 ));
             }
-            if plan.operation == PlanOperation::Configure && !plan.commands.is_empty() {
+            let expected_write = if plan.operation == PlanOperation::Configure
+                && !plan.selection.client.needs_executable()
+                && plan.baseline.server == ExistingServer::Absent
+            {
+                let bytes = copilot_config_bytes(&plan.selection, Path::new(&plan.baseline.path))?;
+                if plan.config_write_sha256.as_deref() != Some(sha256_hex(&bytes).as_str()) {
+                    return Err(err(
+                        "SETUP_PLAN_INTEGRITY",
+                        "Reviewed Copilot configuration differs from the derived write. Preview again.",
+                    ));
+                }
+                Some(bytes)
+            } else {
+                if plan.config_write_sha256.is_some() {
+                    return Err(err(
+                        "SETUP_PLAN_INTEGRITY",
+                        "Stored configuration write is not part of this plan. Preview again.",
+                    ));
+                }
+                None
+            };
+            if plan.operation == PlanOperation::Configure
+                && (!plan.commands.is_empty() || expected_write.is_some())
+            {
                 protect_backup(&plan)?;
             }
             state.phase = SetupPhase::CommandPending;
-            state.last_notice = Some("Native command is pending. If interrupted, inspect the client; no rollback or automatic retry is assumed.".into());
+            state.last_notice = Some("Native configuration action is pending. If interrupted, inspect the client; no rollback or automatic retry is assumed.".into());
             save_state(writer, state)?;
             for command in &plan.commands {
                 match runner.run(command) {
@@ -1230,10 +1832,20 @@ fn perform(
                     Err(diagnostic) => return Err(diagnostic),
                 }
             }
+            if let Some(bytes) = expected_write {
+                let path = Path::new(&plan.baseline.path);
+                if config_hash(path)? != plan.baseline.sha256 {
+                    return Err(err(
+                        "SETUP_BASELINE_CHANGED",
+                        "Copilot configuration changed before the reviewed write. Inspect it before retrying.",
+                    ));
+                }
+                write_new_copilot_config(path, &bytes, parent(state_path)?)?;
+            }
             if plan.operation == PlanOperation::Configure {
                 // Only a fresh reviewed add supplies registration arguments itself.
                 // Native list output can establish the HTTP entry, never OAuth identity.
-                let inspection = if plan.client.client == ClientKind::Codex
+                let inspection = if plan.selection.client == ClientKind::Codex
                     && plan.baseline.server == ExistingServer::Absent
                     && !plan.commands.is_empty()
                 {
@@ -1255,11 +1867,14 @@ fn perform(
                     save_registration_receipt(state_path, &plan, &actual)?;
                 }
                 state.configured = true;
-                state.configured_sha256 = actual.sha256;
+                state.configured_sha256 =
+                    configured_fingerprint(&plan.selection, Path::new(&actual.path))?;
                 state.authentication_evidence = AuthenticationEvidence::None;
                 state.discovery_sha256 = None;
-                state.last_notice = Some(if plan.client.client == ClientKind::Codex {
+                state.last_notice = Some(if plan.selection.client == ClientKind::Codex {
                     "Configured the HTTP entry after the exact reviewed native add command. A protected receipt binds the requested registration arguments to unchanged local configuration; Codex list output does not independently inspect OAuth identity or attest authentication."
+                } else if matches!(plan.selection.client, ClientKind::ClaudeCode | ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode) {
+                    "Configured the selected host's HTTP entry. Its effective session source and OAuth client identity still require host-session confirmation; configuration does not attest authentication."
                 } else {
                     "Configured the selected native client; authentication is still required. Native list/config output does not attest authentication."
                 }.into());
@@ -1271,6 +1886,16 @@ fn perform(
             Ok(())
         }
         SetupAction::ConfirmAuthentication {} => {
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(|s| !s.client.is_native())
+            {
+                return Err(err(
+                    "SETUP_HOST_MANAGED",
+                    "This host owns sign-in and consent. Import its saved tool-discovery report instead of confirming native sign-in.",
+                ));
+            }
             if !state.configured || state.phase == SetupPhase::CommandPending {
                 return Err(err(
                     "SETUP_NOT_CONFIGURED",
@@ -1286,13 +1911,23 @@ fn perform(
         SetupAction::ImportDiscovery { file } => {
             let raw = storage::read_bytes(Path::new(&file), MAX_DISCOVERY_BYTES)?;
             let report: HostToolDiscovery = serde_json::from_slice(&raw).map_err(|_| err("SETUP_DISCOVERY_JSON", "Expected a strict v1 saved HostToolDiscovery report. No query or network call was run."))?;
-            let baseline = inspect_baseline(state, state_path, runner)?;
-            if baseline.server != ExistingServer::Same || baseline.sha256 != state.configured_sha256
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.client.is_native())
             {
-                return Err(err(
-                    "SETUP_BASELINE_CHANGED",
-                    "Client configuration changed after setup. Review configuration before importing discovery evidence.",
-                ));
+                let baseline = inspect_baseline(state, state_path, runner)?;
+                if baseline.server != ExistingServer::Same
+                    || configured_fingerprint(
+                        state.selection.as_ref().expect("checked by baseline"),
+                        Path::new(&baseline.path),
+                    )? != state.configured_sha256
+                {
+                    return Err(err(
+                        "SETUP_BASELINE_CHANGED",
+                        "Client configuration changed after setup. Review configuration before importing discovery evidence.",
+                    ));
+                }
             }
             setup::verify_discovery(state, &report, sha256_hex(&raw))
         }
@@ -1355,6 +1990,9 @@ fn emit(result: SetupResult, json: bool) -> Result<i32, Diagnostic> {
                     serde_json::to_string(&command.args).unwrap_or_default()
                 ));
             }
+            if let Some(hash) = &plan.config_write_sha256 {
+                text.push_str(&format!("- Copilot config write SHA256: {hash}\n"));
+            }
             text.push_str(&format!(
                 "Confirmation SHA256: {}\n",
                 plan.confirmation_sha256
@@ -1405,8 +2043,7 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
         ),
     )?;
     println!(
-        "CQLmatic native-client setup. OAuth, credentials and MCP stay in your chosen client.\nSources reviewed {}: https://developers.openai.com/codex/mcp/ and https://code.visualstudio.com/docs/copilot/customization/mcp-servers\nCIMD metadata and CrowdStrike allowlisting can change; confirm the exact current identity. No DCR fallback.\n",
-        SOURCE_REVIEWED
+        "CQLmatic setup. OAuth, credentials and MCP stay in your chosen agent.\nConfirm the effective OAuth identity and CrowdStrike allowlisting before connecting. No DCR fallback.\n"
     );
     let (tx, rx) = mpsc::channel();
     let (read_tx, read_rx) = mpsc::channel();
@@ -1435,9 +2072,19 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
     loop {
         let state = load_state(state_path)?;
         emit(setup::result(state.clone(), None), false)?;
-        println!(
-            "\nChoose: 1 detect clients, 2 choose client/cloud, 3 preview configuration, 4 preview login, 5 apply reviewed plan, 6 confirm sign-in, 7 import saved host report, 8 quit (progress saved), 9 acknowledge inspected pending command"
-        );
+        let host_managed = state
+            .selection
+            .as_ref()
+            .is_some_and(|s| !s.client.is_native());
+        if host_managed {
+            println!(
+                "\nChoose: 1 detect native clients, 2 choose agent/cloud, 7 import saved host report, 8 quit (progress saved)"
+            );
+        } else {
+            println!(
+                "\nChoose: 1 detect native clients, 2 choose agent/cloud, 3 preview configuration, 4 preview login, 5 apply reviewed plan, 6 confirm sign-in, 7 import saved host report, 8 quit (progress saved), 9 acknowledge inspected pending command"
+            );
+        }
         let Some(choice) = prompt(&rx, "> ")? else {
             with_state(state_path, |s, _, _| {
                 s.cancel();
@@ -1445,38 +2092,65 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
             })?;
             return Ok(1);
         };
+        if host_managed && matches!(choice.as_str(), "3" | "4" | "5" | "6" | "9") {
+            println!(
+                "This agent uses its own MCP configuration and sign-in. Import a saved host tool-discovery report after configuring it."
+            );
+            continue;
+        }
         let action = match choice.as_str() {
             "1" => SetupAction::Detect {},
             "2" => {
-                let clients = with_state(state_path, |s, r, w| {
-                    perform(s, SetupAction::Detect {}, state_path, r, w, true)
-                })?;
-                for client in &clients.clients {
-                    println!(
-                        "{}: {} ({})",
-                        client.client.label(),
-                        client.executable,
-                        client.version
-                    );
-                }
-                let Some(client) = prompt(&rx, "Client [codex/vs-code]: ")? else {
+                let Some(client) = prompt(
+                    &rx,
+                    "Agent [codex/vs-code/claude-code/copilot-cli/copilot-app/copilot-vscode/external]: ",
+                )?
+                else {
                     continue;
                 };
                 let client = match client.as_str() {
                     "codex" => ClientKind::Codex,
                     "vs-code" => ClientKind::VsCode,
+                    "claude-code" => ClientKind::ClaudeCode,
+                    "copilot-cli" | "copilot" | "gh copilot" => ClientKind::CopilotCli,
+                    "copilot-app" => ClientKind::CopilotApp,
+                    "copilot-vscode" => ClientKind::CopilotVscode,
+                    "external" => ClientKind::External,
                     _ => {
-                        println!("Choose codex or vs-code.");
+                        println!("Choose one listed agent or external.");
                         continue;
                     }
                 };
-                if !clients.clients.iter().any(|c| c.client == client) {
-                    println!(
-                        "Install {} from {} and resume this wizard. No installer is run.",
-                        client.label(),
-                        client.install_url()
-                    );
+                if client.needs_executable() {
+                    let clients = with_state(state_path, |s, r, w| {
+                        perform(s, SetupAction::Detect {}, state_path, r, w, true)
+                    })?;
+                    for detected in &clients.clients {
+                        println!(
+                            "{}: {} ({})",
+                            detected.client.label(),
+                            detected.executable,
+                            detected.version
+                        );
+                    }
+                    if !clients.clients.iter().any(|c| c.client == client)
+                        && let Some(url) = client.install_url()
+                    {
+                        println!(
+                            "Install {} from {} and resume this wizard. No installer is run.",
+                            client.label(),
+                            url
+                        );
+                    }
                 }
+                let host_id = if client == ClientKind::External {
+                    let Some(id) = prompt(&rx, "Host ID (1-64 ASCII letters/digits/_/-): ")? else {
+                        continue;
+                    };
+                    Some(id)
+                } else {
+                    None
+                };
                 let Some(cloud) = prompt(&rx, "Falcon cloud [us1/us2/eu1]: ")? else {
                     continue;
                 };
@@ -1497,73 +2171,93 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                 } else {
                     server_name
                 };
-                let Some(mode) = prompt(&rx, "Registration [cimd/manual/api-client]: ")? else {
-                    continue;
-                };
-                let registration = match mode.as_str() {
-                    "cimd" => {
-                        let url = if client == ClientKind::VsCode {
-                            "https://vscode.dev/oauth/client-metadata.json".into()
-                        } else {
+                let registration = if !client.is_native() {
+                    RegistrationMode::HostManaged {}
+                } else {
+                    let options = if client == ClientKind::ClaudeCode {
+                        "Registration [cimd/api-client]: "
+                    } else if matches!(
+                        client,
+                        ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode
+                    ) {
+                        "Registration [manual/api-client]: "
+                    } else {
+                        "Registration [cimd/manual/api-client]: "
+                    };
+                    let Some(mode) = prompt(&rx, options)? else {
+                        continue;
+                    };
+                    match mode.as_str() {
+                        "cimd" => {
+                            let url = if client == ClientKind::ClaudeCode {
+                                "https://claude.ai/oauth/claude-code-client-metadata".into()
+                            } else if client == ClientKind::VsCode {
+                                "https://vscode.dev/oauth/client-metadata.json".into()
+                            } else {
+                                println!(
+                                    "Codex's metadata URL depends on client version/server capabilities. Inspect the exact identity in your native client; there is no assumed universal client ID."
+                                );
+                                let Some(url) = prompt(&rx, "Exact current Codex metadata URL: ")?
+                                else {
+                                    continue;
+                                };
+                                url
+                            };
                             println!(
-                                "Codex's metadata URL depends on client version/server capabilities. Inspect the exact identity in your native client; there is no assumed universal client ID."
+                                "Metadata identity: {url}\nCanonical endpoint: {}\nConfirm current CrowdStrike CIMD allowlisting and your CrowdStrike MCP role in Falcon. This wizard cannot detect your tenant allowlist.",
+                                cloud.endpoint()
                             );
-                            let Some(url) = prompt(&rx, "Exact current Codex metadata URL: ")?
+                            let Some(confirm) = prompt(
+                                &rx,
+                                "Type allowlisted after checking that exact identity: ",
+                            )?
                             else {
                                 continue;
                             };
-                            url
-                        };
-                        println!(
-                            "Metadata identity: {url}\nCanonical endpoint: {}\nConfirm current CrowdStrike CIMD allowlisting and your CrowdStrike MCP role in Falcon. This wizard cannot detect your tenant allowlist.",
-                            cloud.endpoint()
-                        );
-                        let Some(confirm) =
-                            prompt(&rx, "Type allowlisted after checking that exact identity: ")?
-                        else {
-                            continue;
-                        };
-                        RegistrationMode::Cimd {
-                            metadata_url: url,
-                            allowlist_confirmed: confirm == "allowlisted",
+                            RegistrationMode::Cimd {
+                                metadata_url: url,
+                                allowlist_confirmed: confirm == "allowlisted",
+                            }
                         }
-                    }
-                    "manual" => {
-                        println!(
-                            "In Falcon MCP Client Management, register your native client using its exact callback URI. Enter only its generated client ID here; optional secrets belong solely in the native client's protected UI."
-                        );
-                        let Some(client_id) = prompt(&rx, "Generated manual MCP client ID: ")?
-                        else {
-                            continue;
-                        };
-                        let Some(callback_url) = prompt(&rx, "Exact native-client callback URI: ")?
-                        else {
-                            continue;
-                        };
-                        RegistrationMode::Manual {
-                            client_id,
-                            callback_url,
+                        "manual" => {
+                            println!(
+                                "In Falcon MCP Client Management, register your native client using its actual callback behavior. Enter only its generated client ID here; optional secrets belong solely in the native client's protected UI. Setup records the expected callback but cannot set it for every host."
+                            );
+                            let Some(client_id) = prompt(&rx, "Generated manual MCP client ID: ")?
+                            else {
+                                continue;
+                            };
+                            let Some(callback_url) =
+                                prompt(&rx, "Exact native-client callback URI: ")?
+                            else {
+                                continue;
+                            };
+                            RegistrationMode::Manual {
+                                client_id,
+                                callback_url,
+                            }
                         }
-                    }
-                    "api-client" => {
-                        println!(
-                            "Advanced service mode requires a native client's supported plugin. Store credentials through its protected UI. This wizard records only a file reference, does not open it, and leaves service setup pending."
-                        );
-                        let Some(credentials_file) =
-                            prompt(&rx, "Absolute protected credential-file reference: ")?
-                        else {
+                        "api-client" => {
+                            println!(
+                                "Advanced service mode requires a native client's supported plugin. Store credentials through its protected UI. This wizard records only a file reference, does not open it, and leaves service setup pending."
+                            );
+                            let Some(credentials_file) =
+                                prompt(&rx, "Absolute protected credential-file reference: ")?
+                            else {
+                                continue;
+                            };
+                            RegistrationMode::ApiClient { credentials_file }
+                        }
+                        _ => {
+                            println!("Choose cimd, manual or api-client.");
                             continue;
-                        };
-                        RegistrationMode::ApiClient { credentials_file }
-                    }
-                    _ => {
-                        println!("Choose cimd, manual or api-client.");
-                        continue;
+                        }
                     }
                 };
                 SetupAction::Select {
                     selection: Selection {
                         client,
+                        host_id,
                         cloud,
                         server_name,
                         registration,
@@ -1800,8 +2494,11 @@ mod tests {
                     stdout: serde_json::to_vec(&entries).unwrap(),
                 });
             }
-            let codex = command.args.starts_with(&["mcp".into(), "add".into()]);
-            if !codex {
+            let claude = command
+                .args
+                .starts_with(&["mcp".into(), "add".into(), "--scope".into()]);
+            let codex = command.args.starts_with(&["mcp".into(), "add".into()]) && !claude;
+            if !codex && !claude {
                 assert_eq!(command.args.first().map(String::as_str), Some("--add-mcp"));
             }
             self.native_calls += 1;
@@ -1811,10 +2508,18 @@ mod tests {
             if !self.no_mutation {
                 let mut value: Value = if self.config.exists() {
                     serde_json::from_slice(&fs::read(&self.config).unwrap()).unwrap()
+                } else if claude {
+                    json!({"mcpServers":{}})
                 } else {
                     json!({"servers":{}})
                 };
-                let entry: Value = if codex {
+                let entry: Value = if claude {
+                    assert_eq!(
+                        &command.args[2..6],
+                        ["--scope", "user", "--transport", "http"]
+                    );
+                    json!({"name":command.args[6],"type":"http","url":command.args[7]})
+                } else if codex {
                     assert_eq!(command.args[3], "--url");
                     let mut entry = json!({
                         "name": command.args[2],
@@ -1833,7 +2538,7 @@ mod tests {
                 let name = entry["name"].as_str().unwrap().to_owned();
                 let mut entry = entry.as_object().unwrap().clone();
                 entry.remove("name");
-                value["servers"][&name] = Value::Object(entry);
+                value[if claude { "mcpServers" } else { "servers" }][&name] = Value::Object(entry);
                 fs::write(&self.config, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
             }
             Ok(CommandOutput {
@@ -1844,7 +2549,11 @@ mod tests {
         fn detect(&mut self) -> Result<Vec<ClientObservation>, Diagnostic> {
             Ok(self.observations.clone())
         }
-        fn config_path(&self, _: ClientKind) -> Result<PathBuf, Diagnostic> {
+        fn config_path(&self, client: ClientKind) -> Result<PathBuf, Diagnostic> {
+            assert!(
+                client.is_native(),
+                "host-managed setup must not inspect native config"
+            );
             Ok(self.config.clone())
         }
     }
@@ -1881,6 +2590,7 @@ mod tests {
             state
                 .select(Selection {
                     client: ClientKind::VsCode,
+                    host_id: None,
                     cloud: Cloud::Us1,
                     server_name: "cs-mcp".into(),
                     registration: RegistrationMode::Cimd {
@@ -1914,9 +2624,43 @@ mod tests {
             h.state
                 .select(Selection {
                     client: ClientKind::Codex,
+                    host_id: None,
                     cloud: Cloud::Us1,
                     server_name: "cs-mcp".into(),
                     registration,
+                })
+                .unwrap();
+            h
+        }
+        fn claude() -> Self {
+            let mut h = Self::new();
+            h.state.clients[0].client = ClientKind::ClaudeCode;
+            h.runner.observations = h.state.clients.clone();
+            h.state
+                .select(Selection {
+                    client: ClientKind::ClaudeCode,
+                    host_id: None,
+                    cloud: Cloud::Us1,
+                    server_name: "cs-mcp".into(),
+                    registration: RegistrationMode::Cimd {
+                        metadata_url: "https://claude.ai/oauth/claude-code-client-metadata".into(),
+                        allowlist_confirmed: true,
+                    },
+                })
+                .unwrap();
+            h
+        }
+        fn copilot(client: ClientKind) -> Self {
+            let mut h = Self::new();
+            h.runner.observations.clear();
+            h.state.clients.clear();
+            h.state
+                .select(Selection {
+                    client,
+                    host_id: None,
+                    cloud: Cloud::Us1,
+                    server_name: "cs-mcp".into(),
+                    registration: manual_registration("synthetic-copilot-id"),
                 })
                 .unwrap();
             h
@@ -2089,9 +2833,12 @@ mod tests {
             let report = HostToolDiscovery {
                 schema_version: SCHEMA_VERSION,
                 client: ClientKind::Codex,
+                host_id: None,
                 server_name: "cs-mcp".into(),
                 endpoint: Cloud::Us1.endpoint().into(),
                 authenticated: true,
+                effective_oauth_client_id: None,
+                effective_config_source: None,
                 tools: vec![DiscoveryTool {
                     name: SEARCH_TOOL.into(),
                     available: true,
@@ -2306,6 +3053,274 @@ mod tests {
         );
         assert!(h.state.discovery_sha256.is_none());
     }
+    #[test]
+    fn setup_external_import_never_uses_native_adapter() {
+        let mut h = Harness::new();
+        h.state
+            .select(Selection {
+                client: ClientKind::External,
+                host_id: Some("synthetic-host".into()),
+                cloud: Cloud::Us1,
+                server_name: "cs-mcp".into(),
+                registration: RegistrationMode::HostManaged {},
+            })
+            .unwrap();
+        h.runner.observations.clear();
+        h.action(SetupAction::Detect {}).unwrap();
+        assert_eq!(h.state.phase, SetupPhase::Selected);
+        for action in [
+            SetupAction::Preview {
+                operation: PlanOperation::Configure,
+            },
+            SetupAction::Apply {
+                confirmation_sha256: "a".repeat(64),
+            },
+            SetupAction::ConfirmAuthentication {},
+        ] {
+            assert_eq!(h.action(action).unwrap_err().code, "SETUP_HOST_MANAGED");
+        }
+        let report_path = h._temp.0.join("synthetic-host-report.json");
+        fs::write(
+            &report_path,
+            serde_json::to_vec(&HostToolDiscovery {
+                schema_version: SCHEMA_VERSION,
+                client: ClientKind::External,
+                host_id: Some("synthetic-host".into()),
+                server_name: "cs-mcp".into(),
+                endpoint: Cloud::Us1.endpoint().into(),
+                authenticated: true,
+                effective_oauth_client_id: None,
+                effective_config_source: None,
+                tools: vec![DiscoveryTool {
+                    name: SEARCH_TOOL.into(),
+                    available: true,
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        h.action(SetupAction::ImportDiscovery {
+            file: report_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        assert_eq!(h.state.phase, SetupPhase::ToolDiscoveryVerified);
+        assert_eq!(h.runner.native_calls, 0);
+        assert!(!h.runner.config.exists());
+    }
+    #[test]
+    fn setup_claude_native_add_and_session_identity_survive_unrelated_config_change() {
+        let mut h = Harness::claude();
+        let hash = h.preview();
+        assert_eq!(h.state.plan.as_ref().unwrap().commands.len(), 1);
+        h.apply(hash).unwrap();
+        assert!(h.runner.saw_durable_pending);
+        assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+        let mut config: Value =
+            serde_json::from_slice(&fs::read(&h.runner.config).unwrap()).unwrap();
+        assert_eq!(
+            config["mcpServers"]["cs-mcp"],
+            json!({"type":"http","url":Cloud::Us1.endpoint()})
+        );
+        config["unrelatedPreference"] = json!(true);
+        fs::write(&h.runner.config, serde_json::to_vec(&config).unwrap()).unwrap();
+        let report_path = h._temp.0.join("claude-report.json");
+        let mut report = HostToolDiscovery {
+            schema_version: SCHEMA_VERSION,
+            client: ClientKind::ClaudeCode,
+            host_id: None,
+            server_name: "cs-mcp".into(),
+            endpoint: Cloud::Us1.endpoint().into(),
+            authenticated: true,
+            effective_oauth_client_id: Some("wrong-id".into()),
+            effective_config_source: Some("user".into()),
+            tools: vec![DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: true,
+            }],
+        };
+        fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+        assert_eq!(
+            h.action(SetupAction::ImportDiscovery {
+                file: report_path.to_string_lossy().into_owned()
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_DISCOVERY_IDENTITY"
+        );
+        report.effective_oauth_client_id =
+            Some("https://claude.ai/oauth/claude-code-client-metadata".into());
+        fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+        h.action(SetupAction::ImportDiscovery {
+            file: report_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        assert_eq!(h.state.phase, SetupPhase::ToolDiscoveryVerified);
+    }
+    #[test]
+    fn setup_copilot_surfaces_write_shared_native_config_without_executable() {
+        for client in [
+            ClientKind::CopilotCli,
+            ClientKind::CopilotApp,
+            ClientKind::CopilotVscode,
+        ] {
+            let mut h = Harness::copilot(client);
+            let hash = h.preview();
+            let plan = h.state.plan.as_ref().unwrap();
+            assert!(plan.client.is_none());
+            assert!(plan.commands.is_empty());
+            let write_hash = plan.config_write_sha256.clone().unwrap();
+            assert!(plan.backup_path.is_none());
+            h.apply(hash).unwrap();
+            assert_eq!(h.runner.native_calls, 0);
+            verify_private_file(&h.runner.config).unwrap();
+            let bytes = fs::read(&h.runner.config).unwrap();
+            assert_eq!(sha256_hex(&bytes), write_hash);
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            let config: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                config["mcpServers"]["cs-mcp"],
+                json!({"type":"http","url":Cloud::Us1.endpoint(),"tools":[SEARCH_TOOL],"oauthClientId":"synthetic-copilot-id"})
+            );
+            assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+        }
+    }
+    #[test]
+    fn setup_existing_copilot_config_is_preserved_and_verified_after_host_update() {
+        let mut h = Harness::copilot(ClientKind::CopilotCli);
+        let mut config = json!({"mcpServers":{"unrelated":{"type":"http","url":"https://synthetic.example/mcp","tools":["*"]}},"preference":true});
+        let original = serde_json::to_vec(&config).unwrap();
+        fs::write(&h.runner.config, &original).unwrap();
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Configure
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_EXISTING_CONFIG"
+        );
+        assert_eq!(fs::read(&h.runner.config).unwrap(), original);
+        config["mcpServers"]["cs-mcp"] =
+            copilot_entry(h.state.selection.as_ref().unwrap()).unwrap();
+        let updated = serde_json::to_vec(&config).unwrap();
+        fs::write(&h.runner.config, &updated).unwrap();
+        let hash = h.preview();
+        assert!(h.state.plan.as_ref().unwrap().config_write_sha256.is_none());
+        h.apply(hash).unwrap();
+        assert_eq!(fs::read(&h.runner.config).unwrap(), updated);
+        assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+        fs::write(&h.runner.config, b"{\"mcpServers\":{},\"mcpServers\":{}}").unwrap();
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Configure
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_NATIVE_CONFIG"
+        );
+    }
+    #[test]
+    fn setup_copilot_create_never_replaces_a_racing_file() {
+        let temp = Temp::new();
+        let path = temp.0.join("mcp-config.json");
+        let private = temp.0.join("private");
+        fs::write(&path, b"synthetic host update").unwrap();
+        assert_eq!(
+            write_new_copilot_config(&path, b"reviewed cqlmatic config\n", &private)
+                .unwrap_err()
+                .code,
+            "SETUP_BASELINE_CHANGED"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"synthetic host update");
+    }
+    #[test]
+    fn setup_copilot_new_file_stages_outside_host_directory() {
+        let temp = Temp::new();
+        let host = temp.0.join("host");
+        fs::create_dir(&host).unwrap();
+        let path = host.join("mcp-config.json");
+        let private = temp.0.join("private");
+        let bytes = b"reviewed cqlmatic config\n";
+        write_new_copilot_config(&path, bytes, &private).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        verify_private_file(&path).unwrap();
+        assert_eq!(fs::read_dir(&private).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&host).unwrap().count(), 2); // config and its writer lock
+    }
+    #[test]
+    fn setup_copilot_rejects_collision_and_stale_preview_without_write() {
+        let mut h = Harness::copilot(ClientKind::CopilotCli);
+        let conflicting = json!({"mcpServers":{"cs-mcp":{"type":"http","url":Cloud::Us1.endpoint(),"tools":[SEARCH_TOOL],"oauthClientId":"wrong-id"}}});
+        let original = serde_json::to_vec(&conflicting).unwrap();
+        fs::write(&h.runner.config, &original).unwrap();
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Configure
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_COLLISION"
+        );
+        assert_eq!(fs::read(&h.runner.config).unwrap(), original);
+        fs::remove_file(&h.runner.config).unwrap();
+        let hash = h.preview();
+        fs::write(&h.runner.config, b"{\"mcpServers\":{}}").unwrap();
+        assert_eq!(h.apply(hash).unwrap_err().code, "SETUP_BASELINE_CHANGED");
+        assert_eq!(fs::read(&h.runner.config).unwrap(), b"{\"mcpServers\":{}}");
+        assert_eq!(h.runner.native_calls, 0);
+    }
+    #[test]
+    fn setup_checks_known_workspace_and_managed_shadows() {
+        let temp = Temp::new();
+        let nested = temp.0.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(
+            temp.0.join(".mcp.json"),
+            b"{\"mcpServers\":{\"cs-mcp\":{}}}",
+        )
+        .unwrap();
+        assert_eq!(
+            check_portable_shadow_from(&nested, "cs-mcp", true)
+                .unwrap_err()
+                .code,
+            "SETUP_CONFIG_SHADOW"
+        );
+        fs::remove_file(temp.0.join(".mcp.json")).unwrap();
+        fs::write(
+            temp.0.join("managed-settings.json"),
+            b"{\"managedMcpServers\":{\"cs-mcp\":{}}}",
+        )
+        .unwrap();
+        assert_eq!(
+            check_claude_managed_at(&temp.0, "cs-mcp").unwrap_err().code,
+            "SETUP_CONFIG_SHADOW"
+        );
+        fs::remove_file(temp.0.join("managed-settings.json")).unwrap();
+        fs::write(temp.0.join("managed-mcp.json"), b"{\"mcpServers\":{}}").unwrap();
+        assert_eq!(
+            check_claude_managed_at(&temp.0, "cs-mcp").unwrap_err().code,
+            "SETUP_CONFIG_SHADOW"
+        );
+    }
+    #[test]
+    fn setup_claude_project_shadow_applies_only_to_active_project() {
+        let temp = Temp::new();
+        let old = temp.0.join("old");
+        let active = temp.0.join("active");
+        let nested = active.join("nested");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        let old_key = old.to_string_lossy().into_owned();
+        let config = json!({"projects": {old_key: {"mcpServers": {"cs-mcp": {}}}}});
+        check_claude_project_shadow(&config, &nested, "cs-mcp").unwrap();
+        let active_key = active.to_string_lossy().into_owned();
+        let config = json!({"projects": {active_key: {"mcpServers": {"cs-mcp": {}}}}});
+        assert_eq!(
+            check_claude_project_shadow(&config, &nested, "cs-mcp")
+                .unwrap_err()
+                .code,
+            "SETUP_CONFIG_SHADOW"
+        );
+    }
     #[cfg(windows)]
     #[test]
     fn setup_windows_native_shims_preserve_exact_json_argv() {
@@ -2350,6 +3365,139 @@ mod tests {
         );
         assert_eq!(h.runner.native_calls, 0);
     }
+    #[cfg(windows)]
+    #[test]
+    fn setup_new_private_directory_protects_every_parent_at_creation() {
+        let temp = Temp::new();
+        const BROAD_PARENT: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_TEST_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $prop=[Security.AccessControl.PropagationFlags]::None; $allow=[Security.AccessControl.AccessControlType]::Allow; foreach($who in @($sid,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-1-0'))){$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($who,'FullControl',$inherit,$prop,$allow))}; [IO.Directory]::SetAccessControl($p,$a)"#;
+        let status = powershell()
+            .unwrap()
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                BROAD_PARENT,
+            ])
+            .env("CQLMATIC_TEST_DIRECTORY", &temp.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let unsafe_state = temp.0.join("outer/inner/state.json");
+        assert_eq!(
+            with_state(&unsafe_state, |_, _, _| Ok(()))
+                .unwrap_err()
+                .code,
+            "SETUP_PROTECTION"
+        );
+        assert!(!unsafe_state.exists());
+        let clean = Temp::new();
+        let parent = clean.0.join("outer");
+        let leaf = parent.join("inner");
+        protect_directory(&leaf).unwrap();
+        protect_directory(&parent).unwrap();
+        let candidate = leaf.join("candidate");
+        fs::write(&candidate, b"synthetic").unwrap();
+        verify_private_file(&candidate).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_accepts_inherit_only_ancestor_ace() {
+        let temp = Temp::new();
+        const INHERIT_ONLY: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_TEST_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $allow=[Security.AccessControl.AccessControlType]::Allow; foreach($who in @($sid,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'))){$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($who,'FullControl',$inherit,[Security.AccessControl.PropagationFlags]::None,$allow))}; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'),'Modify',$inherit,[Security.AccessControl.PropagationFlags]::InheritOnly,$allow)); [IO.Directory]::SetAccessControl($p,$a)"#;
+        let status = powershell()
+            .unwrap()
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                INHERIT_ONLY,
+            ])
+            .env("CQLMATIC_TEST_DIRECTORY", &temp.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        protect_directory(&temp.0.join("private")).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_resolves_drive_relative_state_paths() {
+        let drive = env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .next()
+            .unwrap();
+        let path = absolute(PathBuf::from(format!("{drive}:private\\state.json"))).unwrap();
+        assert!(path.is_absolute());
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn setup_refuses_macos_acl_grants_on_ancestors_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = Temp::new();
+        let ancestor = temp.0.join("ancestor");
+        fs::create_dir(&ancestor).unwrap();
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            Command::new("/bin/chmod")
+                .args(["+a", "nobody allow search,add_subdirectory,delete_child"])
+                .arg(&ancestor)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let child = ancestor.join("private");
+        assert_eq!(
+            protect_directory(&child).unwrap_err().code,
+            "SETUP_PROTECTION"
+        );
+        assert!(!child.exists());
+
+        let file = temp.0.join("private-file");
+        fs::write(&file, b"synthetic").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            Command::new("/bin/chmod")
+                .args(["+a", "nobody allow read"])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            verify_private_file(&file).unwrap_err().code,
+            "SETUP_PROTECTION"
+        );
+
+        let denied = temp.0.join("denied");
+        let child = denied.join("child");
+        fs::create_dir(&denied).unwrap();
+        fs::create_dir(&child).unwrap();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = check_macos_acl(&child);
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(unreadable.unwrap_err().code, "SETUP_PROTECTION");
+
+        let deny_only = temp.0.join("deny-only");
+        fs::create_dir(&deny_only).unwrap();
+        assert!(
+            Command::new("/bin/chmod")
+                .args(["+a", "nobody deny delete"])
+                .arg(&deny_only)
+                .status()
+                .unwrap()
+                .success()
+        );
+        check_macos_acl(&deny_only).unwrap();
+    }
     #[cfg(unix)]
     #[test]
     fn setup_refuses_shared_existing_directory_and_linked_paths() {
@@ -2369,5 +3517,12 @@ mod tests {
         let linked = temp.0.join("linked");
         symlink(&target, &linked).unwrap();
         assert_eq!(protect_directory(&linked).unwrap_err().code, "SETUP_LINK");
+        fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o777)).unwrap();
+        let unsafe_child = temp.0.join("unsafe");
+        assert_eq!(
+            protect_directory(&unsafe_child).unwrap_err().code,
+            "SETUP_PROTECTION"
+        );
+        assert!(!unsafe_child.exists());
     }
 }

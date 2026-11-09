@@ -95,7 +95,8 @@ pub fn default_state_path() -> Result<PathBuf, Diagnostic> {
 }
 
 fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
-    explicit.map_or_else(default_state_path, Ok)
+    let path = explicit.map_or_else(default_state_path, Ok)?;
+    std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory state path."))
 }
 fn load(path: &Path) -> Result<InventoryState, Diagnostic> {
     if !path
@@ -280,6 +281,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     }
     protect_state(&path)?;
     let writer = storage::Writer::acquire(&path)?;
+    protect_state(&path)?;
     let mut state = load(&path)?;
     let now = discovery::timestamp();
     let extra = apply(&path, &mut state, request.action, &now)?;
@@ -687,13 +689,8 @@ fn apply(
 }
 
 fn absolute_path(path: &Path) -> Result<String, Diagnostic> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|_| fail("Cannot resolve inventory run path."))?
-            .join(path)
-    };
+    let absolute =
+        std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory run path."))?;
     Ok(absolute.to_string_lossy().into_owned())
 }
 
@@ -1095,6 +1092,7 @@ fn interactive(
     };
     protect_state(path)?;
     let writer = storage::Writer::acquire(path)?;
+    protect_state(path)?;
     // Re-read while holding the writer lock in case another process changed it during prompts.
     if path.exists() {
         state = load(path)?;

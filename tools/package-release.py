@@ -17,7 +17,7 @@ import zipfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 PREFIX = "cqlmatic-v" + VERSION + "/"
 TARGET = "x86_64-pc-windows-msvc"
 SYSTEM_DLLS = set("""advapi32 bcrypt bcryptprimitives cfgmgr32 combase crypt32 cryptbase

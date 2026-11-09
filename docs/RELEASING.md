@@ -2,23 +2,23 @@
 
 Release only with owner authorization for the intended actions. Prepare and validate privately before requesting public go-live approval. Approval identifies the exact source commit, annotated tag, package checksums and both website outputs. It does not authorize Falcon operations, real client configuration or paid services.
 
-## First-release repository
+## Repository
 
-Start from the independent publication checkout with no history or remote. Preserve other checkouts and their branches/tags; never import their history or overwrite an existing destination. Create the exact `mychaelconnolly/cqlmatic` destination privately without initializing files. Check authenticated ownership, repository identity, visibility and refs before every push.
+Use the reviewed release-candidate checkout and preserve existing history, branches, tags and published assets. Check authenticated ownership, repository identity, visibility and refs before every push.
 
-Use the owner's GitHub noreply identity for author, committer and annotated-tag metadata. The initial commit must have no parents. Reviewed validation fixes may be ordinary descendants; the release tag names the final reviewed green commit.
+Use the owner's GitHub noreply identity for author, committer and annotated-tag metadata. The release tag names the final reviewed green commit.
 
 Inspect the complete source, comments, reference data, workflows, metadata and history before uploading, including private GitHub uploads. Exclude credentials, tenant identifiers, raw telemetry, operational captures, local notes, caches and personal build paths. Preserve synthetic tests, necessary guides and attribution. Immediately before changing visibility, inspect all retained Actions logs, summaries, annotations and artifacts, including failed attempts.
 
 ## Freeze source and artifacts
 
-1. Align Cargo/npm metadata, README, changelog and notes at `0.1.0`; keep schema and capability versions independent. Inspect and stage explicit reviewed paths. Generated binaries and website outputs stay outside the source allowlist.
+1. Align Cargo/npm metadata, README, changelog and notes at `0.1.1`; keep schema and capability versions independent. Inspect and stage explicit reviewed paths. Generated binaries and website outputs stay outside the source allowlist.
 2. Run the pinned formatting, Clippy, tests and locked builds in [development](DEVELOPMENT.md), all nine schemas, runnable examples and synthetic setup/inventory/MCP workflows without credentials. Reuse approved binaries only when all runtime-input digests remain identical; otherwise rebuild and review affected binaries.
 3. Generate `SOURCE-SHA256SUMS` over every intended index path except itself. Require exact membership, regular files and index/worktree equality. Stage the checksum file, establish the final source commit and verify its tree against a separate full SHA-256 manifest outside the source tree.
 4. Run Windows CI and generate both websites for that exact commit. Record successful run/artifact IDs and native digests outside tracked source. Source changes require new checksums, a new reviewed commit and affected checks/artifacts again. Do not put generated artifact hashes or the final commit ID into tracked source checksums.
 5. Finish all archives, release notes, outer checksums and both website outputs before freezing review. Verify extracted exact membership and every file digest; reject missing, extra, stale, duplicate, linked or unsafe members and private metadata.
 6. Obtain independent Sol max and Astra max reviews of identical frozen source, website and outbound manifests. Keep bytes unchanged during first passes. Resolve blockers, rerun affected checks and obtain targeted re-review. An unavailable required check/reviewer leaves the gate pending.
-7. Create the annotated `v0.1.0` tag after these gates pass. Verify its annotation and peeled target against the reviewed commit. Record full commit/tag IDs and manifest hashes for approval.
+7. Create the annotated `v0.1.1` tag after these gates pass. Verify its annotation and peeled target against the reviewed commit. Record full commit/tag IDs and manifest hashes for approval. Never move the existing `v0.1.0` tag.
 
 ## Native packages
 
@@ -37,13 +37,13 @@ python3 tools/package-release.py build --manifest /path/to/reviewed-source.sha25
 
 Release assets:
 
-- `cqlmatic-v0.1.0-source.zip`
-- `cqlmatic-v0.1.0-linux-x86_64.tar.gz`
-- `cqlmatic-v0.1.0-windows-x86_64.zip`
-- `cqlmatic-0.1.0.tgz`
+- `cqlmatic-v0.1.1-source.zip`
+- `cqlmatic-v0.1.1-linux-x86_64.tar.gz`
+- `cqlmatic-v0.1.1-windows-x86_64.zip`
+- `cqlmatic-0.1.1.tgz`
 - `SHA256SUMS`
 
-Source/native archives use a `cqlmatic-v0.1.0/` root containing reviewed source and licenses. Linux adds `cqlmatic-linux-x86_64`; Windows adds `cqlmatic.exe`. Compare every extracted member with its reviewed source/native digest, rather than checking only the archive checksum.
+Source/native archives use a `cqlmatic-v0.1.1/` root containing reviewed source and licenses. Linux adds `cqlmatic-linux-x86_64`; Windows adds `cqlmatic.exe`. Compare every extracted member with its reviewed source/native digest, rather than checking only the archive checksum.
 
 ## npm package
 
@@ -71,16 +71,16 @@ Push only explicit reviewed objects to explicit destination refs after checking 
 
 ```sh
 release_commit=$(git rev-parse refs/heads/main)
-release_tag=$(git rev-parse refs/tags/v0.1.0)
-git rev-parse 'refs/tags/v0.1.0^{commit}'
+release_tag=$(git rev-parse refs/tags/v0.1.1)
+git rev-parse 'refs/tags/v0.1.1^{commit}'
 git status --porcelain
 git remote -v
 git ls-remote origin
-git push --dry-run origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.0"
-git push --atomic origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.0"
+git push --dry-run origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.1"
+git push --atomic origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.1"
 ```
 
-The peeled tag must equal the reviewed commit; the worktree must be clean and remote refs must match the inspected state. Never wildcard-push, force-push or move an existing release tag. Create the release with `--verify-tag`, reviewed notes through `--notes-file`, and explicitly selected assets/checksums. Verify public downloads, refs, registry integrity and CI. Correct a public executable with a new patch release rather than replacing immutable v0.1.0 assets.
+The peeled tag must equal the reviewed commit; the worktree must be clean and remote refs must match the inspected state. Never wildcard-push, force-push or move an existing release tag. Create the release with `--verify-tag`, reviewed notes through `--notes-file`, and explicitly selected assets/checksums. Verify public downloads, refs, registry integrity and CI. Correct a public executable with a new patch release rather than replacing immutable v0.1.1 assets.
 
 ## Project page and documentation
 

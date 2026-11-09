@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "client": "copilot-cli",
+  "server_name": "cs-mcp",
+  "endpoint": "https://mcp.crowdstrike.com/v1",
+  "authenticated": true,
+  "effective_oauth_client_id": "synthetic-generated-id",
+  "effective_config_source": "user",
+  "tools": [
+    { "name": "falcon_search_ngsiem", "available": true }
+  ]
+}

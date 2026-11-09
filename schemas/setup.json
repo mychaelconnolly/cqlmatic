@@ -31,7 +31,12 @@
       "type": "string",
       "enum": [
         "codex",
-        "vs-code"
+        "vs-code",
+        "claude-code",
+        "copilot-cli",
+        "copilot-app",
+        "copilot-vscode",
+        "external"
       ]
     },
     "ClientObservation": {
@@ -255,6 +260,19 @@
             "mode",
             "credentials_file"
           ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "host-managed"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "mode"
+          ]
         }
       ]
     },
@@ -266,6 +284,12 @@
         },
         "cloud": {
           "$ref": "#/$defs/Cloud"
+        },
+        "host_id": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "registration": {
           "$ref": "#/$defs/RegistrationMode"
@@ -457,13 +481,26 @@
           }
         },
         "client": {
-          "$ref": "#/$defs/ClientObservation"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ClientObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "commands": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/NativeCommand"
           }
+        },
+        "config_write_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "confirmation_sha256": {
           "type": "string"
@@ -491,7 +528,6 @@
         "state_revision",
         "operation",
         "selection",
-        "client",
         "baseline",
         "commands",
         "changes",

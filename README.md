@@ -18,6 +18,8 @@ CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crow
 
 **CQLmatic v0.1.0 is the first public release. Testers and feedback are welcome.** Try it in your environment and share setup, discovery, and query-writing gaps using sanitized examples.
 
+Version `0.1.1` adds native setup for Claude Code and GitHub Copilot surfaces. The published `0.1.0` downloads below do not contain those adapters yet; build `0.1.1` from source until its packages are published.
+
 **[Try v0.1.0](#try-v010)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
 
 **Quick start:**
@@ -80,7 +82,7 @@ npx cqlmatic@0.1.0 status
 
 The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.0` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
 
-For the companion workflow, use an AI assistant that can run local commands and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. The setup adapters support **Codex CLI and VS Code on Windows and Linux**; other clients use their own MCP configuration flow.
+For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. The `0.1.1` source build provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
 
 Your Falcon account needs the MCP and underlying data permissions for the searches you authorize. Full parser inventory also needs a **separate Falcon API client with NGSIEM Parsers: READ**. Setup, OAuth consent, allowlisting, and Falcon permissions are described in [the setup guide](docs/SETUP.md).
 

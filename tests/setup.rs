@@ -4,12 +4,14 @@ use serde_json::json;
 fn selection(client: ClientKind) -> Selection {
     Selection {
         client,
+        host_id: None,
         cloud: Cloud::Us2,
         server_name: "cs-mcp".into(),
         registration: RegistrationMode::Cimd {
             metadata_url: match client {
                 ClientKind::Codex => "https://chatgpt.com/oauth/codex/synthetic/client.json",
                 ClientKind::VsCode => "https://vscode.dev/oauth/client-metadata.json",
+                _ => panic!("native selection only"),
             }
             .into(),
             allowlist_confirmed: true,
@@ -40,6 +42,15 @@ fn selected(client: ClientKind) -> SetupState {
     state.select(selection(client)).unwrap();
     state
 }
+fn host_selection(client: ClientKind, host_id: Option<&str>) -> Selection {
+    Selection {
+        client,
+        host_id: host_id.map(str::to_owned),
+        cloud: Cloud::Eu1,
+        server_name: "cs-mcp".into(),
+        registration: RegistrationMode::HostManaged {},
+    }
+}
 fn baseline(server: ExistingServer) -> ConfigBaseline {
     ConfigBaseline {
         path: std::env::temp_dir()
@@ -68,6 +79,9 @@ fn bundled_setup_examples_match_strict_contracts() {
     for text in [
         include_str!("../examples/setup/detect.request.json"),
         include_str!("../examples/setup/select.request.json"),
+        include_str!("../examples/setup/select-claude.request.json"),
+        include_str!("../examples/setup/select-copilot.request.json"),
+        include_str!("../examples/setup/select-host.request.json"),
         include_str!("../examples/setup/preview.request.json"),
     ] {
         serde_json::from_str::<SetupRequest>(text)
@@ -78,6 +92,26 @@ fn bundled_setup_examples_match_strict_contracts() {
     let report: HostToolDiscovery =
         serde_json::from_str(include_str!("../examples/setup/tool-discovery.json")).unwrap();
     assert_eq!(report.tools[0].name, SEARCH_TOOL);
+    let host_report: HostToolDiscovery =
+        serde_json::from_str(include_str!("../examples/setup/tool-discovery-host.json")).unwrap();
+    assert_eq!(host_report.client, ClientKind::External);
+    assert_eq!(host_report.host_id.as_deref(), Some("example-agent"));
+    for text in [
+        include_str!("../examples/setup/tool-discovery-claude.json"),
+        include_str!("../examples/setup/tool-discovery-copilot.json"),
+    ] {
+        let report: HostToolDiscovery = serde_json::from_str(text).unwrap();
+        assert!(report.effective_oauth_client_id.is_some());
+        assert!(report.effective_config_source.is_some());
+    }
+}
+#[test]
+fn claude_cimd_version_requires_supported_stable_release() {
+    assert!(!claude_supports_cimd("2.1.80 (Claude Code)"));
+    assert!(claude_supports_cimd("2.1.81 (Claude Code)"));
+    assert!(claude_supports_cimd("2.1.314 (Claude Code)"));
+    assert!(!claude_supports_cimd("2.1.81-beta"));
+    assert!(!claude_supports_cimd("unknown"));
 }
 #[test]
 fn fresh_state_has_no_environment_or_authentication_claim() {
@@ -88,6 +122,27 @@ fn fresh_state_has_no_environment_or_authentication_claim() {
     assert!(state.selection.is_none());
     assert_eq!(state.authentication_evidence, AuthenticationEvidence::None);
     assert!(result(state, None).handoff.is_none());
+}
+#[test]
+fn old_v1_native_state_and_preview_remain_readable() {
+    let mut state = selected(ClientKind::Codex);
+    state.plan = Some(
+        build_plan(
+            &state,
+            PlanOperation::Configure,
+            baseline(ExistingServer::Absent),
+            None,
+        )
+        .unwrap(),
+    );
+    state.phase = SetupPhase::ReviewRequired;
+    let old_shape = serde_json::to_value(&state).unwrap();
+    assert!(old_shape["selection"].get("host_id").is_none());
+    assert!(old_shape["plan"].get("config_write_sha256").is_none());
+    assert!(old_shape["plan"]["client"].is_object());
+    let loaded: SetupState = serde_json::from_value(old_shape).unwrap();
+    loaded.validate().unwrap();
+    assert_eq!(loaded.plan.unwrap().commands[0].args[0], "mcp");
 }
 #[test]
 fn endpoints_are_canonical_per_cloud() {
@@ -318,9 +373,12 @@ fn report() -> HostToolDiscovery {
     HostToolDiscovery {
         schema_version: 1,
         client: ClientKind::VsCode,
+        host_id: None,
         server_name: "cs-mcp".into(),
         endpoint: Cloud::Us2.endpoint().into(),
         authenticated: true,
+        effective_oauth_client_id: None,
+        effective_config_source: None,
         tools: vec![DiscoveryTool {
             name: SEARCH_TOOL.into(),
             available: true,
@@ -379,6 +437,16 @@ fn discovery_requires_exact_available_tool_and_bound_client() {
         verify_discovery(&mut state, &wrong, sha256_hex(b"report")).unwrap();
         assert_eq!(state.phase, SetupPhase::Authenticated);
     }
+    let wrong_identity = HostToolDiscovery {
+        effective_oauth_client_id: Some("different-client".into()),
+        ..report()
+    };
+    assert_eq!(
+        verify_discovery(&mut state, &wrong_identity, sha256_hex(b"wrong identity"))
+            .unwrap_err()
+            .code,
+        "SETUP_DISCOVERY_IDENTITY"
+    );
     verify_discovery(&mut state, &report(), sha256_hex(b"report")).unwrap();
     state.validate().unwrap();
     assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
@@ -389,6 +457,272 @@ fn discovery_requires_exact_available_tool_and_bound_client() {
     let handoff = result(state, None).handoff.unwrap();
     assert!(handoff.contains("cqlmatic env inventory"));
     assert!(handoff.contains("saved MCP results"));
+}
+#[test]
+fn host_managed_selection_is_tracked_without_native_detection_or_preview() {
+    {
+        let client = ClientKind::External;
+        let host_id = (client == ClientKind::External).then_some("synthetic-host");
+        let selection = host_selection(client, host_id);
+        selection.validate().unwrap();
+        let mut state = SetupState::default();
+        state.select(selection.clone()).unwrap();
+        assert_eq!(state.phase, SetupPhase::Selected);
+        assert!(state.clients.is_empty());
+        assert_eq!(
+            build_plan(
+                &state,
+                PlanOperation::Configure,
+                baseline(ExistingServer::Absent),
+                None
+            )
+            .unwrap_err()
+            .code,
+            "SETUP_HOST_MANAGED"
+        );
+        let guidance = result(state.clone(), None).next_actions.join(" ");
+        assert!(guidance.contains("HostToolDiscovery"));
+        assert!(!guidance.contains("Preview the exact native-client"));
+        state.cancel();
+        assert!(
+            !result(state, None)
+                .next_actions
+                .join(" ")
+                .contains("Preview the exact native-client")
+        );
+    }
+    let legacy = serde_json::to_value(selection(ClientKind::Codex)).unwrap();
+    assert!(legacy.get("host_id").is_none());
+    serde_json::from_value::<Selection>(legacy)
+        .unwrap()
+        .validate()
+        .unwrap();
+    for bad in [None, Some("bad host"), Some("--bad"), Some("a/b"), Some("")] {
+        assert_eq!(
+            host_selection(ClientKind::External, bad)
+                .validate()
+                .unwrap_err()
+                .code,
+            "SETUP_HOST_ID"
+        );
+    }
+    assert_eq!(
+        host_selection(ClientKind::ClaudeCode, Some("extra"))
+            .validate()
+            .unwrap_err()
+            .code,
+        "SETUP_HOST_ID"
+    );
+    let mut wrong_mode = host_selection(ClientKind::External, Some("synthetic-host"));
+    wrong_mode.registration = selection(ClientKind::Codex).registration;
+    assert_eq!(
+        wrong_mode.validate().unwrap_err().code,
+        "SETUP_REGISTRATION_MODE"
+    );
+    let mut wrong_mode = selection(ClientKind::Codex);
+    wrong_mode.registration = RegistrationMode::HostManaged {};
+    assert_eq!(
+        wrong_mode.validate().unwrap_err().code,
+        "SETUP_REGISTRATION_MODE"
+    );
+}
+#[test]
+fn host_managed_report_binds_surface_and_preserves_incomplete_discovery() {
+    {
+        let client = ClientKind::External;
+        let host_id = (client == ClientKind::External).then_some("synthetic-host");
+        let mut state = SetupState::default();
+        state.select(host_selection(client, host_id)).unwrap();
+        let mut report = HostToolDiscovery {
+            schema_version: SCHEMA_VERSION,
+            client,
+            host_id: host_id.map(str::to_owned),
+            server_name: "cs-mcp".into(),
+            endpoint: Cloud::Eu1.endpoint().into(),
+            authenticated: true,
+            effective_oauth_client_id: Some("synthetic-external-client".into()),
+            effective_config_source: Some("selected host session".into()),
+            tools: vec![DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: false,
+            }],
+        };
+        let original = serde_json::to_value(&state).unwrap();
+        for wrong in [
+            HostToolDiscovery {
+                client: ClientKind::Codex,
+                ..report.clone()
+            },
+            HostToolDiscovery {
+                host_id: Some("other".into()),
+                ..report.clone()
+            },
+            HostToolDiscovery {
+                server_name: "other".into(),
+                ..report.clone()
+            },
+            HostToolDiscovery {
+                endpoint: Cloud::Us1.endpoint().into(),
+                ..report.clone()
+            },
+            HostToolDiscovery {
+                authenticated: false,
+                ..report.clone()
+            },
+            HostToolDiscovery {
+                tools: vec![
+                    DiscoveryTool {
+                        name: SEARCH_TOOL.into(),
+                        available: true,
+                    },
+                    DiscoveryTool {
+                        name: SEARCH_TOOL.into(),
+                        available: true,
+                    },
+                ],
+                ..report.clone()
+            },
+        ] {
+            assert!(verify_discovery(&mut state, &wrong, sha256_hex(b"synthetic report")).is_err());
+            assert_eq!(serde_json::to_value(&state).unwrap(), original);
+        }
+        verify_discovery(&mut state, &report, sha256_hex(b"missing tool")).unwrap();
+        assert_eq!(state.phase, SetupPhase::Authenticated);
+        assert!(state.configured);
+        assert_eq!(state.configured_sha256, None);
+        assert_eq!(
+            state.authentication_evidence,
+            AuthenticationEvidence::SavedHostToolDiscovery
+        );
+        report.tools[0].available = true;
+        verify_discovery(&mut state, &report, sha256_hex(b"available tool")).unwrap();
+        state.validate().unwrap();
+        assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+        let handoff = result(state, None).handoff.unwrap();
+        assert!(handoff.contains("search-all"));
+        assert!(handoff.contains("separate explicit authorization"));
+        if client == ClientKind::External {
+            assert!(handoff.contains("host_id"));
+        }
+    }
+}
+#[test]
+fn named_hosts_use_native_registration_and_bound_session_identity() {
+    for client in [
+        ClientKind::ClaudeCode,
+        ClientKind::CopilotCli,
+        ClientKind::CopilotApp,
+        ClientKind::CopilotVscode,
+    ] {
+        let (registration, expected_id) = if client == ClientKind::ClaudeCode {
+            let id = "https://claude.ai/oauth/claude-code-client-metadata";
+            (
+                RegistrationMode::Cimd {
+                    metadata_url: id.into(),
+                    allowlist_confirmed: true,
+                },
+                id,
+            )
+        } else {
+            (
+                RegistrationMode::Manual {
+                    client_id: "synthetic-copilot-id".into(),
+                    callback_url: "http://localhost:1234/".into(),
+                },
+                "synthetic-copilot-id",
+            )
+        };
+        let selection = Selection {
+            client,
+            host_id: None,
+            cloud: Cloud::Eu1,
+            server_name: "cs-mcp".into(),
+            registration,
+        };
+        selection.validate().unwrap();
+        let mut state = SetupState::default();
+        state.select(selection.clone()).unwrap();
+        assert_eq!(
+            state.phase,
+            if client == ClientKind::ClaudeCode {
+                SetupPhase::InstallationRequired
+            } else {
+                SetupPhase::Selected
+            }
+        );
+        if client == ClientKind::ClaudeCode {
+            state.clients.push(observation(client));
+            state.select(selection).unwrap();
+        }
+        let plan = build_plan(
+            &state,
+            PlanOperation::Configure,
+            baseline(ExistingServer::Absent),
+            None,
+        )
+        .unwrap();
+        if client == ClientKind::ClaudeCode {
+            assert_eq!(
+                &plan.commands[0].args[..6],
+                ["mcp", "add", "--scope", "user", "--transport", "http"]
+            );
+        } else {
+            assert!(plan.client.is_none());
+            assert!(plan.commands.is_empty());
+        }
+        state.configured = true;
+        let mut report = HostToolDiscovery {
+            schema_version: 1,
+            client,
+            host_id: None,
+            server_name: "cs-mcp".into(),
+            endpoint: Cloud::Eu1.endpoint().into(),
+            authenticated: true,
+            effective_oauth_client_id: Some("wrong-id".into()),
+            effective_config_source: Some("user".into()),
+            tools: vec![DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: false,
+            }],
+        };
+        assert_eq!(
+            verify_discovery(&mut state, &report, sha256_hex(b"wrong identity"))
+                .unwrap_err()
+                .code,
+            "SETUP_DISCOVERY_IDENTITY"
+        );
+        report.effective_oauth_client_id = Some(expected_id.into());
+        report.effective_config_source = None;
+        assert_eq!(
+            verify_discovery(&mut state, &report, sha256_hex(b"missing source"))
+                .unwrap_err()
+                .code,
+            "SETUP_DISCOVERY_IDENTITY"
+        );
+        report.effective_config_source = Some("selected session user config".into());
+        verify_discovery(&mut state, &report, sha256_hex(b"missing tool")).unwrap();
+        assert_eq!(state.phase, SetupPhase::Authenticated);
+        report.tools[0].available = true;
+        verify_discovery(&mut state, &report, sha256_hex(b"available tool")).unwrap();
+        assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+    }
+}
+#[test]
+fn claude_native_cimd_does_not_silently_configure_manual_registration() {
+    let value = Selection {
+        client: ClientKind::ClaudeCode,
+        host_id: None,
+        cloud: Cloud::Us1,
+        server_name: "cs-mcp".into(),
+        registration: RegistrationMode::Manual {
+            client_id: "synthetic-id".into(),
+            callback_url: "http://localhost:1234/callback".into(),
+        },
+    };
+    assert_eq!(
+        value.validate().unwrap_err().code,
+        "SETUP_REGISTRATION_MODE"
+    );
 }
 #[test]
 fn pending_native_action_blocks_reselection_and_survives_cancel() {

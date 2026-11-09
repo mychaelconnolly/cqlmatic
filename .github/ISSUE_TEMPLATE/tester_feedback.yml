@@ -1,4 +1,4 @@
-name: v0.1.0 tester feedback
+name: v0.1.1 tester feedback
 description: Share setup, discovery, status, or query-writing feedback from the first public release.
 body:
   - type: markdown

@@ -6,10 +6,11 @@ USER + AI ASSISTANT
         |
         v
 CQLMATIC SETUP
-  Detect client -> CIMD when supported/allowlisted
-                -> manual MCP registration or guided advanced connection
-  Preview -> confirmation -> native client -> browser consent
-  Configured -> native sign-in -> matching saved tool-discovery report
+  Choose agent/cloud -> native Codex CLI or VS Code Local adapter
+                     -> Claude Code or Copilot native adapter, or guided external agent
+  Native: detect -> supported registration -> preview -> confirm -> host consent
+  Host-managed: configure/sign in within host (no CQLmatic config writes)
+  Both: matching caller-supplied tool-discovery report
         |
         v
 ENVIRONMENT INVENTORY  <---------------------- status (offline checklist)
@@ -45,7 +46,7 @@ USER REQUEST -> AI INTERPRETS -> CQLMATIC CONSTRUCTS + CHECKS -> CQL
                                              refine, clarify, or hand off
 ```
 
-The model reasons; the Rust engine applies typed contracts and deterministic rules. CQLmatic does not run its own LLM or replace your MCP client. The client owns OAuth, tool selection, and search execution. CQLmatic also supports explicit native Falcon API discovery for operators who use that path.
+The model reasons; the Rust engine applies typed contracts and deterministic rules. CQLmatic does not run its own LLM or replace your MCP client. The selected host owns OAuth, tool selection, and search execution. Codex, VS Code Local, Claude Code and Copilot surfaces have native setup adapters; other capable agents use tracked external setup. A saved host report is caller-supplied evidence, not independent authentication or configuration attestation. CQLmatic also supports explicit native Falcon API discovery for operators who use that path.
 
 Follow [setup](SETUP.md), then [inventory](INVENTORY.md); use [contracts](CONTRACTS.md) for machine requests. `status --json` is the offline checklist, not a search or authentication refresh. `full_map_complete` is derived from the confirmed full target, applicable source/parser reviews and measurements, an active pack, and current reconciliation. Selected-source coverage remains useful without full-map completion.
 

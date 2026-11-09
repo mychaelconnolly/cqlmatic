@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "client": "claude-code",
+  "server_name": "cs-mcp",
+  "endpoint": "https://mcp.crowdstrike.com/v1",
+  "authenticated": true,
+  "effective_oauth_client_id": "https://claude.ai/oauth/claude-code-client-metadata",
+  "effective_config_source": "user",
+  "tools": [
+    { "name": "falcon_search_ngsiem", "available": true }
+  ]
+}

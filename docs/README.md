@@ -4,7 +4,7 @@ CQLmatic maps a CrowdStrike NG-SIEM environment into a reusable local snapshot a
 
 Read these guides at [docs.cqlmatic.dev](https://docs.cqlmatic.dev/), visit the [project page](https://cqlmatic.dev/), or use the Markdown files offline with a release archive.
 
-This manual describes **CQLmatic 0.1.0**, JSON contracts **v1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Use `cqlmatic catalog --profile` for the running binary's knowledge revision and limits. These identifiers do not attest to a tenant, execution, completeness, or unrestricted-English accuracy.
+This manual describes **CQLmatic 0.1.1**, JSON contracts **v1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Use `cqlmatic catalog --profile` for the running binary's knowledge revision and limits. These identifiers do not attest to a tenant, execution, completeness, or unrestricted-English accuracy.
 
 ## Start as an operator
 
@@ -25,7 +25,7 @@ This manual describes **CQLmatic 0.1.0**, JSON contracts **v1**, and executable 
 
 | Document | Use it for |
 | --- | --- |
-| [Setup](SETUP.md) | Clients, authentication choices/permissions, previews, saved host evidence, native recovery. |
+| [Setup](SETUP.md) | Native Codex, VS Code Local, Claude Code and Copilot adapters; guided external hosts, OAuth identity, saved evidence and recovery. |
 | [Inventory](INVENTORY.md) | Every guided action, parser review/bindings, field batches, completion and status. |
 | [Application flow](FLOW.md) | End-to-end operator/model/CLI boundaries. |
 | [Command reference](../USAGE.md) | Every command/flag, default, mode, input/output and exit policy. |
@@ -45,7 +45,7 @@ This manual describes **CQLmatic 0.1.0**, JSON contracts **v1**, and executable 
 | --- | --- | --- |
 | Generate/check, catalog, schemas, assess, inspect, status | Offline; no Falcon/model key needed. | Read explicit inputs/state; emit assessments. |
 | No-request `setup --json` | Offline; no native capability/config probing. | Read saved setup status without creating state. |
-| Setup detect/select/preview/apply | Capability probes are local; native apply/login can open browser consent and use the client's connection. | Save setup state, preview/backup and reviewed native configuration where applicable. |
+| Setup detect/select/preview/apply/import | Native capability probes are local; Codex apply can open browser consent. Copilot file writes and Claude add do not authenticate. External selection and report import do not connect to Falcon. | Save setup state and caller-supplied report hash; preview/backup and reviewed local configuration for named hosts. |
 | Inventory actions | Most are local; parser fetch uses a separate protected Falcon API client; emitted scout/discovery probes are run by the host's authorized MCP connection. | Save sensitive workflow evidence, snapshots, parser review and cumulative active pack. |
 | `env identity` | Reads credentials, no network. | Emit local account binding; not a provider-verified CID. |
 | `env import` | Offline. | Validate and create/explicitly replace a protected pack. |

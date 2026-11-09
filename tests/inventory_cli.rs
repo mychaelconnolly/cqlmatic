@@ -140,6 +140,81 @@ fn no_state_status_has_no_side_effects_and_explicit_state_is_selected() {
 }
 
 #[test]
+fn relative_inventory_state_path_resolves_before_protection() {
+    let dir = Temp::new();
+    let request = fixture(
+        &dir.0,
+        "request.json",
+        json!({"schema_version":1,"action":{"kind":"record-failure","stage":"synthetic-resume","message":"saved marker","recorded_at":"2026-01-01T00:00:00Z"}}),
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .current_dir(&dir.0)
+        .args([
+            "env",
+            "inventory",
+            "--json",
+            "--state",
+            "workflow/state.json",
+            "--request",
+        ])
+        .arg(request)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"]["failures"][0]["message"], "saved marker");
+    assert!(dir.0.join("workflow/state.json").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn drive_relative_inventory_state_can_resume_from_another_directory() {
+    let dir = Temp::new();
+    let drive = dir.0.to_string_lossy().chars().next().unwrap();
+    let relative = format!("{drive}:workflow\\state.json");
+    let request = fixture(
+        &dir.0,
+        "request.json",
+        json!({"schema_version":1,"action":{"kind":"record-failure","stage":"synthetic-resume","message":"saved marker","recorded_at":"2026-01-01T00:00:00Z"}}),
+    );
+    let first = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .current_dir(&dir.0)
+        .args(["env", "inventory", "--json", "--state"])
+        .arg(&relative)
+        .arg("--request")
+        .arg(request)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let result: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let saved = PathBuf::from(result["state"].as_str().unwrap());
+    assert!(saved.is_absolute());
+    assert_eq!(saved, dir.0.join("workflow/state.json"));
+    let other = Temp::new();
+    let resumed = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .current_dir(&other.0)
+        .args(["status", "--json", "--state"])
+        .arg(&saved)
+        .output()
+        .unwrap();
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let status: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(status["failures"][0]["message"], "saved marker");
+}
+
+#[test]
 fn inventory_refuses_nonprivate_explicit_state_parent() {
     let dir = Temp::new();
     #[cfg(unix)]

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "action": {
+    "type": "select",
+    "selection": {
+      "client": "external",
+      "host_id": "example-agent",
+      "cloud": "us1",
+      "server_name": "cs-mcp",
+      "registration": { "mode": "host-managed" }
+    }
+  }
+}

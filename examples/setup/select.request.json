@@ -8,9 +8,9 @@
       "cloud": "us1",
       "server_name": "synthetic-cs-mcp",
       "registration": {
-        "mode": "cimd",
-        "metadata_url": "https://vscode.dev/oauth/client-metadata.json",
-        "allowlist_confirmed": true
+        "mode": "manual",
+        "client_id": "synthetic-generated-id",
+        "callback_url": "http://127.0.0.1:1234/callback"
       }
     }
   }

@@ -23,12 +23,12 @@ function fixture(t, body = 'process.exit(0);') {
   const packagePath = path.join(root, 'package.json');
   const executable = `#!${process.execPath}\n${body}\n`;
   const manifest = {
-    version: '0.1.0',
+    version: '0.1.1',
     binaries: { [tuple]: { sha256: createHash('sha256').update(executable).digest('hex') } },
   };
   fs.writeFileSync(launcher, launcherSource);
   fs.writeFileSync(binary, executable, { mode: 0o755 });
-  fs.writeFileSync(packagePath, JSON.stringify({ version: '0.1.0' }));
+  fs.writeFileSync(packagePath, JSON.stringify({ version: '0.1.1' }));
   fs.writeFileSync(manifestPath, JSON.stringify(manifest));
   return { root, launcher, binary, manifestPath, packagePath, manifest };
 }

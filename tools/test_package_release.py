@@ -69,7 +69,7 @@ class ReleaseTests(unittest.TestCase):
         self.windows = self.base / "windows.exe"
         self.windows.write_bytes(pe_image(delayed="api-ms-win-core-synch-l1-2-0.dll"))
         self.metadata = self.base / "BUILD-WINDOWS.json"
-        self.meta = {"schema_version": 1, "product": "cqlmatic", "version": "0.1.0", "source_commit": self.commit,
+        self.meta = {"schema_version": 1, "product": "cqlmatic", "version": "0.1.1", "source_commit": self.commit,
                      "target": RELEASE.TARGET, "toolchain": "1.99.1",
                      "rustc": "rustc 1.99.1 (synthetic)\nhost: " + RELEASE.TARGET,
                      "runner": {"os": "Microsoft Windows Server", "version": "10.0.26100", "build": "26100",
@@ -106,7 +106,7 @@ class ReleaseTests(unittest.TestCase):
         self.build()
         self.assertEqual(first, {path.name: path.read_bytes() for path in self.args.out.iterdir()})
         for suffix, binary in (("source.zip", None), ("windows-x86_64.zip", "cqlmatic.exe")):
-            with zipfile.ZipFile(self.args.out / ("cqlmatic-v0.1.0-" + suffix)) as archive:
+            with zipfile.ZipFile(self.args.out / ("cqlmatic-v0.1.1-" + suffix)) as archive:
                 expected = {RELEASE.PREFIX + name for name in self.files}
                 if binary:
                     expected.add(RELEASE.PREFIX + binary)
@@ -114,7 +114,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(set(archive.namelist()), expected)
                 for name, data in self.files.items():
                     self.assertEqual(archive.read(RELEASE.PREFIX + name), data)
-        with tarfile.open(self.args.out / "cqlmatic-v0.1.0-linux-x86_64.tar.gz") as archive:
+        with tarfile.open(self.args.out / "cqlmatic-v0.1.1-linux-x86_64.tar.gz") as archive:
             native = archive.getmember(RELEASE.PREFIX + "cqlmatic-linux-x86_64")
             self.assertEqual(native.mode, 0o755)
             self.assertEqual(archive.extractfile(native).read(), self.linux.read_bytes())
@@ -276,13 +276,13 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Unsafe"):
                 RELEASE.read_manifest(("0" * 64 + "  " + name + "\n").encode())
         self.build()
-        archive = self.args.out / "cqlmatic-v0.1.0-source.zip"
+        archive = self.args.out / "cqlmatic-v0.1.1-source.zip"
         modes = {name: 0o755 if name == "dev" else 0o644 for name in self.files}
         with zipfile.ZipFile(archive, "a") as output:
             output.writestr(RELEASE.PREFIX + "unexpected.txt", b"Unexpected")
         with self.assertRaisesRegex(ValueError, "Unexpected ZIP member"):
             RELEASE.verify_zip(archive, self.files, modes)
-        archive = self.args.out / "cqlmatic-v0.1.0-linux-x86_64.tar.gz"
+        archive = self.args.out / "cqlmatic-v0.1.1-linux-x86_64.tar.gz"
         archive.write_bytes(archive.read_bytes() + b"unexpected gzip tail")
         with self.assertRaisesRegex(ValueError, "Invalid gzip stream"):
             RELEASE.verify_tar(archive, {}, {})
