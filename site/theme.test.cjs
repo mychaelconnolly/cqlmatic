@@ -149,7 +149,7 @@ test('opening award credit identifies the agent and keeps documentation discover
   const badgePosition = readme.indexOf('src="site/public/assets/agentworks-expert-builder-2026.png"');
   const enginePosition = readme.indexOf('The same engine powers');
   assert.ok(backgroundPosition >= 0 && backgroundPosition < badgePosition && badgePosition < enginePosition);
-  assert.match(readme, /agentworks-expert-builder-2026\.png" width="200"/);
+  assert.match(readme, /agentworks-expert-builder-2026\.png" width="250"/);
   assert.match(readme, /<a id="project-background"><\/a>/);
   assert.match(readme, /\[Read the setup guide\]\(https:\/\/docs\.cqlmatic\.dev\/setup\/\)/);
   for (const name of ['index.html', '404.html']) {
