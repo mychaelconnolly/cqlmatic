@@ -6,7 +6,7 @@ Where available, use GitHub's **Report a vulnerability** option on the project r
 
 Include the affected version/commit, the trust boundary crossed, a minimal synthetic reproduction, expected and observed behavior, and the impact. Use systems you own or are explicitly authorized to test. Do not test against a production tenant or disclose another party's data to demonstrate a finding.
 
-This policy covers the first public `0.1.0` release. There is no guaranteed response time or backport commitment. Include the release version and, when available, the source commit in your report.
+This policy covers public releases. There is no guaranteed response time or backport commitment. Include the release version and, when available, the source commit in your report.
 
 ## Security boundaries
 

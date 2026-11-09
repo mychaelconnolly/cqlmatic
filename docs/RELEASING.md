@@ -47,7 +47,7 @@ Source/native archives use a `cqlmatic-v0.1.1/` root containing reviewed source 
 
 ## npm package
 
-The launcher bundles `darwin-arm64` and `linux-x64` executables. It uses supported Node.js built-ins without runtime dependencies, install scripts or additional binary downloads. Use a [supported, patched Node.js release](../README.md#try-v010). Unsupported combinations fail rather than selecting/downloading another binary; Windows uses its ZIP.
+The launcher bundles `darwin-arm64` and `linux-x64` executables. It uses supported Node.js built-ins without runtime dependencies, install scripts or additional binary downloads. Use a [supported, patched Node.js release](../README.md#try-v011). Unsupported combinations fail rather than selecting/downloading another binary; Windows uses its ZIP.
 
 Record approved native digests in `npm/native-manifest.json` before freezing source. From the frozen staged checkout:
 
