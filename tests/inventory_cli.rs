@@ -140,6 +140,39 @@ fn no_state_status_has_no_side_effects_and_explicit_state_is_selected() {
 }
 
 #[test]
+fn text_status_escapes_source_selectors_without_changing_json() {
+    let dir = Temp::new();
+    let repo = "normal\rFORGED: DONE\nFORGED-ROW: DONE\"quote";
+    let type_ = "type\t\"quote";
+    call(&dir.0, json!({"kind":"init"}));
+    let scouting = call(
+        &dir.0,
+        json!({"kind":"prepare-scout","environment":environment(),"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z"}),
+    );
+    let result = fixture(
+        &dir.0,
+        "scout.json",
+        json!({"result":[{"#repo":repo,"#type":type_,"events":1}]}),
+    );
+    let imported = call(
+        &dir.0,
+        json!({"kind":"import-scout","result_file":result,"arguments":scouting["action"]["arguments"],"retrieved_at":"2026-01-02T00:00:00Z"}),
+    );
+    let selectors = &imported["status"]["sources"][0]["selectors"];
+    assert_eq!(selectors["repo"], repo);
+    assert_eq!(selectors["type"], type_);
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--state"])
+        .arg(dir.0.join("workflow/state.json"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains(&format!("[#repo={repo:?} #type={type_:?}]")));
+    assert!(!text.lines().any(|line| line.starts_with("FORGED")));
+}
+
+#[test]
 fn relative_inventory_state_path_resolves_before_protection() {
     let dir = Temp::new();
     let request = fixture(
@@ -278,7 +311,7 @@ fn complete_offline_relay_inventory_derives_completion_and_detects_pack_changes(
         .output()
         .unwrap();
     assert!(text_status.status.success());
-    assert!(String::from_utf8_lossy(&text_status.stdout).contains("[#repo=synthetic]"));
+    assert!(String::from_utf8_lossy(&text_status.stdout).contains("[#repo=\"synthetic\"]"));
     let source = confirmed["status"]["sources"][0]["source_id"].clone();
     call(
         &dir.0,

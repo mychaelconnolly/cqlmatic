@@ -199,7 +199,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
     if let Some(pack) = &status.active_pack {
         writeln!(
             out,
-            "Active pack: {} (SHA-256 {})",
+            "Active pack: {:?} (SHA-256 {})",
             pack.path, pack.content_digest
         )
         .map_err(|_| fail("Cannot emit inventory status."))?;
@@ -220,12 +220,12 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
                 .selectors
                 .repo
                 .as_ref()
-                .map(|repo| format!("#repo={repo}")),
+                .map(|repo| format!("#repo={repo:?}")),
             source
                 .selectors
                 .type_
                 .as_ref()
-                .map(|type_| format!("#type={type_}")),
+                .map(|type_| format!("#type={type_:?}")),
         ]
         .into_iter()
         .flatten()
@@ -249,7 +249,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
     for run in &status.discovery_runs {
         writeln!(
             out,
-            "Discovery {}: {}; queries {}/{}; elapsed {:.1}/{} seconds; sources {}",
+            "Discovery {:?}: {}; queries {}/{}; elapsed {:.1}/{} seconds; sources {}",
             run.state_path,
             run.status,
             run.answered,
@@ -261,7 +261,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         .map_err(|_| fail("Cannot emit inventory status."))?;
     }
     for failure in &status.failures {
-        writeln!(out, "Failure [{}]: {}", failure.stage, failure.message)
+        writeln!(out, "Failure [{:?}]: {:?}", failure.stage, failure.message)
             .map_err(|_| fail("Cannot emit inventory status."))?;
     }
     for action in &status.next_actions {
