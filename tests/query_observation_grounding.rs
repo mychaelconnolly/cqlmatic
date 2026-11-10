@@ -245,6 +245,128 @@ fn later_zero_stale_and_not_reobserved_active_measurements_block_even_with_an_ol
 }
 
 #[test]
+fn broader_active_scopes_block_narrower_observations_and_kind_ambiguity() {
+    let narrow = Scope {
+        repo: Some("synthetic".into()),
+        type_: Some("kind".into()),
+        ..Scope::default()
+    };
+    let observation = QueryObservation::from_result(
+        br#"#repo="synthetic" #type="kind" | select([user]) | head(5)"#,
+        br#"{"result":[{"user":"alice"}]}"#,
+        environment(),
+        narrow,
+        "2026-02-01T00:00:00Z".into(),
+        "2026-02-02T00:00:00Z".into(),
+        "2026-02-03T00:00:00Z".into(),
+        QueryResultAssertion::ExactQueryResultTargetWindow,
+        std::env::temp_dir()
+            .join("synthetic-narrow-audit.json")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .unwrap();
+    let active = |scope: Scope, zero: bool, mixed: bool| {
+        let mut d = data();
+        let id = discovery::source_id(&scope);
+        d.sources[0]["id"] = json!(id);
+        d.sources[0]["selectors"] = serde_json::to_value(&scope).unwrap();
+        d.fields[0]["source_id"] = json!(id);
+        d.provenance[0]["retrieved_at"] = json!("2026-03-03T00:00:00Z");
+        d.provenance[0]["observation_window"] = json!("2026-03-01T00:00:00Z/2026-03-02T00:00:00Z");
+        if zero {
+            d.fields[0]["coverage"]["observed"] = json!(false);
+        }
+        if mixed {
+            d.sources[0]["relationship"] = json!({"datasets":["first","second"]});
+        }
+        pack(d, "2026-03-04T00:00:00Z")
+    };
+    for broad in [
+        Scope {
+            repo: Some("synthetic".into()),
+            ..Scope::default()
+        },
+        Scope {
+            type_: Some("kind".into()),
+            ..Scope::default()
+        },
+    ] {
+        let zero = active(broad.clone(), true, false);
+        let result = checked(
+            "#repo=synthetic #type=kind | user=*",
+            None,
+            Some(&zero),
+            std::slice::from_ref(&observation),
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::NeedsContext,
+            "{broad:?}: {:?}",
+            result.grounding
+        );
+        let mixed = active(broad.clone(), false, true);
+        let result = checked(
+            "#repo=synthetic #type=kind | top(user)",
+            None,
+            Some(&mixed),
+            std::slice::from_ref(&observation),
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::NeedsContext,
+            "{broad:?}: {:?}",
+            result.grounding
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_RECORD_KIND_AMBIGUOUS")
+        );
+    }
+    for unrelated in [
+        Scope {
+            repo: Some("other".into()),
+            type_: Some("kind".into()),
+            ..Scope::default()
+        },
+        Scope {
+            repo: Some("synthetic".into()),
+            type_: Some("other".into()),
+            ..Scope::default()
+        },
+    ] {
+        let zero = active(unrelated.clone(), true, false);
+        let result = checked(
+            "#repo=synthetic #type=kind | user=*",
+            None,
+            Some(&zero),
+            std::slice::from_ref(&observation),
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{unrelated:?}: {:?}",
+            result.grounding
+        );
+        let mixed = active(unrelated.clone(), false, true);
+        let result = checked(
+            "#repo=synthetic #type=kind | top(user)",
+            None,
+            Some(&mixed),
+            std::slice::from_ref(&observation),
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{unrelated:?}: {:?}",
+            result.grounding
+        );
+    }
+}
+
+#[test]
 fn unordered_or_overlapping_measurements_cannot_be_revived() {
     let observation = observation();
     for (created_at, retrieved_at, window) in [

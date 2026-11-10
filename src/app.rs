@@ -1997,20 +1997,7 @@ fn record_kind_gaps(
         .iter()
         .flat_map(|pack| &pack.data.sources)
         .filter_map(|value| environment::source(value).ok())
-        .filter(|source| {
-            source.selectors.as_ref().is_some_and(|selectors| {
-                state
-                    .scope
-                    .repo
-                    .as_ref()
-                    .is_none_or(|repo| selectors.repo.as_ref() == Some(repo))
-                    && state
-                        .scope
-                        .type_
-                        .as_ref()
-                        .is_none_or(|type_| selectors.type_.as_ref() == Some(type_))
-            })
-        })
+        .filter(|source| source_overlaps_scope(source, &state.scope))
     {
         if let Some(type_) = source.selectors.as_ref().and_then(|s| s.type_.as_ref()) {
             let (values, ids, _) = kinds.entry("#type".into()).or_default();
@@ -2442,6 +2429,22 @@ fn source_matches_requirement(source: &environment::LegacySource, r: &Requiremen
     })
 }
 
+fn source_overlaps_scope(source: &environment::LegacySource, scope: &Scope) -> bool {
+    // Broader source measurements and kind facets still apply to narrowed queries.
+    source.selectors.as_ref().is_some_and(|selectors| {
+        selectors
+            .repo
+            .as_ref()
+            .zip(scope.repo.as_ref())
+            .is_none_or(|(stored, query)| stored == query)
+            && selectors
+                .type_
+                .as_ref()
+                .zip(scope.type_.as_ref())
+                .is_none_or(|(stored, query)| stored == query)
+    })
+}
+
 fn field_matches_requirement(field: &environment::LegacyField, r: &Requirement) -> bool {
     field.path.trim_start_matches('#') == r.field.trim_start_matches('#')
         && field.is_tag == Some(r.field.starts_with('#'))
@@ -2461,7 +2464,7 @@ fn query_observation_basis(
             .sources
             .iter()
             .filter_map(|value| environment::source(value).ok())
-            .filter(|source| source_matches_requirement(source, r))
+            .filter(|source| source_overlaps_scope(source, &r.scope))
             .collect::<Vec<_>>();
         let fields = pack
             .data
@@ -2482,6 +2485,7 @@ fn query_observation_basis(
                 .filter(|field| field.source_id == source.id)
                 .collect::<Vec<_>>();
             if !source_fields.is_empty()
+                && source_matches_requirement(source, r)
                 && let Some(selectors) = &source.selectors
             {
                 namespaces.insert((
