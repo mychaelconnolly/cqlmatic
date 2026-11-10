@@ -2309,6 +2309,18 @@ fn write_setup_banner(output: &mut impl Write, color: bool) -> Result<(), Diagno
     .and_then(|()| writeln!(output, "CQLmatic v{}\n", env!("CARGO_PKG_VERSION")))
     .map_err(|_| err("SETUP_OUTPUT", "Cannot write setup banner."))
 }
+fn fatal_interactive_error(code: &str) -> bool {
+    matches!(
+        code,
+        "SETUP_STATE"
+            | "SETUP_STATE_INTEGRITY"
+            | "SETUP_PLAN_INTEGRITY"
+            | "SETUP_STATE_SAVE"
+            | "SETUP_SERIALIZATION"
+            | "SETUP_OUTPUT"
+            | "SETUP_INPUT"
+    )
+}
 fn interactive_action(
     state_path: &Path,
     action: SetupAction,
@@ -2316,17 +2328,7 @@ fn interactive_action(
     let mut action_error = None;
     let state = with_state(state_path, |state, runner, writer| {
         match perform(state, action, state_path, runner, writer, true) {
-            Err(diagnostic)
-                if !matches!(
-                    diagnostic.code.as_str(),
-                    "SETUP_STATE"
-                        | "SETUP_STATE_INTEGRITY"
-                        | "SETUP_STATE_SAVE"
-                        | "SETUP_SERIALIZATION"
-                        | "SETUP_OUTPUT"
-                        | "SETUP_INPUT"
-                ) =>
-            {
+            Err(diagnostic) if !fatal_interactive_error(&diagnostic.code) => {
                 action_error = Some(diagnostic);
                 Ok(())
             }
@@ -2933,6 +2935,8 @@ mod tests {
     }
     #[test]
     fn setup_interactive_action_errors_resume_but_invalid_state_is_fatal() {
+        assert!(fatal_interactive_error("SETUP_PLAN_INTEGRITY"));
+        assert!(!fatal_interactive_error("SETUP_DISCOVERY_INPUT"));
         let temp = Temp::new();
         let path = temp.0.join("private/state.json");
         let selection = Selection {
