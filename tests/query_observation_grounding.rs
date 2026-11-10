@@ -32,7 +32,10 @@ fn observation() -> QueryObservation {
         "2026-02-02T00:00:00Z".into(),
         "2026-02-03T00:00:00Z".into(),
         QueryResultAssertion::ExactQueryResultTargetWindow,
-        "/synthetic/query-observation-audit.json".into(),
+        std::env::temp_dir()
+            .join("synthetic-query-observation-audit.json")
+            .to_string_lossy()
+            .into_owned(),
     )
     .unwrap()
 }
