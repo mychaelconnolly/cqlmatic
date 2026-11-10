@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4
+
+- Generation, checking and saved-result assessment automatically reuse a matching confirmed Full or Quick inventory's active pack and otherwise unspecified target. Explicit packs remain primary; matching inventory guards still apply to generation/checking. Assessment adds `--inventory-state` without deriving population rates from the query ledger or saving leads.
+- Inventory selection checks metadata and identity before opening the active snapshot, separately for every JSONL row. Foreign inventory is skipped with a notice. A missing default remains benign; explicit missing state and broken matching active evidence fail closed even in ordinary mode. Protected reads do not create directories.
+- Ordinary mixed or incompletely sampled record kinds produce informational `CQL_RECORD_KIND_NOTICE`. Strict observed mode retains kind requirements and accepted warnings, including nested queries and `--fail-on-warning` behavior.
+- Discovery separates fieldset listings from actual field measurements. Exact population batches preserve untargeted records and dates; current auxiliary zero measurements can retain a null population rate. Current proof and retained history remain distinct in field/status evidence.
+- Refresh rejects contradictory backdated, tied or unorderable field measurements while preserving the existing newer-snapshot requirement, exact source restrictions and atomic replacement. An empty optional value facet for an absent field no longer aborts other source measurements; malformed nonempty facets still fail.
+- Undated negative sources recover only from a qualified source measurement whose window starts after the retained snapshot. Null or missing source observations cannot erase retained negative or historical source evidence.
+- Saved-query grounding requires a window strictly after the snapshot for negative sources or fields without qualifying record-bound measurement proof. Qualified dated negatives retain their original ordering after repackaging; stale markers retain the snapshot boundary.
+- Existing request/schema versions, pack shape and executable profile remain unchanged. Legacy evidence and imported metadata retain their compatibility boundaries.
+
 ## 0.1.3
 
 - Quick inventory offers a persistent selected-source workflow with an explicit target, UTC window and finite scout budget. Switching to Full retains evidence without marking the full map complete.
@@ -29,7 +40,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v013).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v014).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

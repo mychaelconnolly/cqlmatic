@@ -53,7 +53,9 @@ impl Scenario {
                 .iter()
                 .map(|field| json!({"field":field}))
                 .collect(),
-            "tag-detect" => vec![json!({"events":0})],
+            "tag-detect" => vec![
+                json!({"events":self.counts.get(&format!("tag:#{}", probe.field.as_deref().unwrap())).copied().unwrap_or(0)}),
+            ],
             "population" => {
                 let mut row = json!({"total":1000});
                 for (i, field) in probe.fields.iter().enumerate() {
@@ -61,6 +63,12 @@ impl Scenario {
                 }
                 vec![row]
             }
+            "value-facet" => self
+                .counts
+                .get(probe.field.as_ref().unwrap())
+                .filter(|count| **count > 0)
+                .map(|count| vec![json!({probe.field.as_ref().unwrap():"sample","events":count})])
+                .unwrap_or_default(),
             other => panic!("Unexpected probe {other}"),
         }
     }
@@ -87,6 +95,7 @@ struct Backend {
     answers: BTreeMap<String, Vec<Value>>,
     emitted: Vec<String>,
     observed_at: String,
+    retrievals: BTreeMap<String, String>,
 }
 impl SearchBackend for Backend {
     fn start(
@@ -111,8 +120,13 @@ impl SearchBackend for Backend {
     fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
         Ok(())
     }
-    fn observed_at(&self, _: &str) -> Option<String> {
-        Some(self.observed_at.clone())
+    fn observed_at(&self, job: &str) -> Option<String> {
+        Some(
+            self.retrievals
+                .get(job)
+                .unwrap_or(&self.observed_at)
+                .clone(),
+        )
     }
 }
 fn execute(
@@ -127,6 +141,7 @@ fn execute(
         answers,
         emitted: vec![],
         observed_at: date.clone(),
+        retrievals: BTreeMap::new(),
     };
     let (pack, report) =
         discovery::execute_with_origin(r, &mut backend, origin, Duration::from_secs(3600));
@@ -217,8 +232,8 @@ fn declared_unsampled_fields_are_counted_without_promoting_zero_declarations() {
             let zero = field(&pack, "zero", false);
             assert_eq!(zero["coverage"]["observed"], false);
             assert_eq!(zero["coverage"]["rate"], 0.0);
-            assert_eq!(zero["evidence_kind"], "declared");
-            assert!(zero["observation_window"].is_null());
+            assert_eq!(zero["evidence_kind"], "observed");
+            assert_eq!(zero["observation_window"], format!("{}/{}", r.start, r.end));
             let provenance = zero["provenance_ids"]
                 .as_array()
                 .unwrap()
@@ -302,7 +317,7 @@ fn batches_do_not_refill_the_first_fields_or_cross_source_and_tag_namespaces() {
     }
     for path in ["f0000", "f0299"] {
         let pending = field(&pack, path, false);
-        assert_eq!(pending["coverage"]["observed"], false);
+        assert!(pending["coverage"]["observed"].is_null());
         assert!(pending["coverage"]["rate"].is_null());
     }
 }
@@ -326,7 +341,7 @@ fn native_batches_retain_unmeasured_fieldset_namespaces_without_grounding_them()
             assert_eq!(populations.len(), 1);
             assert_eq!(populations[0].fields, vec!["pair"]);
             let pending = field(&first, "pair", true);
-            assert_eq!(pending["coverage"]["observed"], false);
+            assert!(pending["coverage"]["observed"].is_null());
             assert!(pending["coverage"]["rate"].is_null());
             assert!(pending["coverage"]["declared"].is_null());
             let result = app::check(
@@ -377,11 +392,11 @@ fn parser_declarations_keep_tag_and_event_namespaces_separate() {
     assert_eq!(tag["coverage"]["declared"], true);
     assert_eq!(tag["coverage"]["observed"], false);
     assert_eq!(tag["is_array"], true);
-    assert_eq!(tag["evidence_kind"], "declared");
+    assert_eq!(tag["evidence_kind"], "observed");
 }
 
 #[test]
-fn a_default_refresh_still_marks_omitted_fields_historical() {
+fn a_default_refresh_preserves_fields_outside_its_actual_measurements() {
     let mut r = request(&["previous"]);
     r.contracts.clear();
     let scenario = Scenario {
@@ -396,15 +411,14 @@ fn a_default_refresh_still_marks_omitted_fields_historical() {
         ..Scenario::default()
     };
     let (candidate, _) = execute(&r, &scenario, 2, Origin::Api);
-    assert!(
-        candidate.data.sources[0]["evidence"]
-            .get("measured_fields")
-            .is_none()
+    assert_eq!(
+        candidate.data.sources[0]["evidence"]["measured_fields"],
+        json!(["recent"])
     );
     let merged = environment::merge(&old, &candidate).unwrap();
     assert_eq!(
-        field(&merged, "previous", false)["refresh_status"],
-        "not-reobserved"
+        field(&merged, "previous", false),
+        field(&old, "previous", false)
     );
 }
 
@@ -454,8 +468,7 @@ fn selected_and_sampled_population_windows_remain_distinct() {
 }
 
 #[test]
-fn repeated_batches_preserve_earlier_observations_and_only_selected_zero_fields_become_historical()
-{
+fn repeated_batches_preserve_earlier_observations_and_selected_zeros_are_current() {
     let first = request(&["first"]);
     let scenario = Scenario {
         counts: BTreeMap::from([("first".into(), 1), ("second".into(), 2)]),
@@ -476,10 +489,7 @@ fn repeated_batches_preserve_earlier_observations_and_only_selected_zero_fields_
         field(&next, "second", false),
         field(&merged, "second", false)
     );
-    assert_eq!(
-        field(&next, "first", false)["refresh_status"],
-        "not-reobserved"
-    );
+    assert_eq!(field(&next, "first", false)["refresh_status"], Value::Null);
     assert_eq!(field(&next, "first", false)["coverage"]["observed"], false);
     assert_eq!(
         next.data.sources[0]["evidence"]["measured_fields"],
@@ -505,8 +515,15 @@ fn unobserved_undeclared_selected_fields_record_zero_measurements() {
     assert_eq!(zero["coverage"]["declared"], false);
     assert_eq!(zero["coverage"]["observed"], false);
     assert_eq!(zero["coverage"]["rate"], 0.0);
-    assert_eq!(zero["evidence_kind"], "declared");
-    assert!(zero["observation_window"].is_null());
+    assert_eq!(zero["evidence_kind"], "observed");
+    assert_eq!(
+        zero["observation_window"],
+        format!(
+            "{}/{}",
+            request(&["not.declared"]).start,
+            request(&["not.declared"]).end
+        )
+    );
     assert_eq!(zero["provenance_ids"].as_array().unwrap().len(), 1);
     let provenance = pack
         .data
@@ -548,10 +565,7 @@ fn selecting_an_ordinary_zero_keeps_the_prior_tag_observation_and_stable_ids() {
     r.population_fields[0].fields = vec!["pair".into()];
     let (candidate, _) = execute(&r, &Scenario::default(), 2, Origin::Api);
     let merged = environment::merge(&old, &candidate).unwrap();
-    assert_eq!(
-        field(&merged, "pair", false)["refresh_status"],
-        "not-reobserved"
-    );
+    assert_eq!(field(&merged, "pair", false)["refresh_status"], Value::Null);
     assert_eq!(field(&merged, "pair", true), field(&old, "pair", true));
     assert_eq!(merged.data.sources[0]["id"], "env:repo:stable");
     assert!(
@@ -700,4 +714,328 @@ fn type_only_population_batches_and_source_only_refresh_preserve_field_evidence(
     let merged = environment::merge(&old, &candidate).unwrap();
     assert_eq!(merged.data.fields, old.data.fields);
     assert_eq!(merged.data.values, old.data.values);
+}
+
+#[test]
+fn a_twenty_field_refresh_preserves_other_current_records_and_dates() {
+    let names = (0..40)
+        .map(|index| format!("f{index:02}"))
+        .collect::<Vec<_>>();
+    let mut r = request(&["placeholder"]);
+    r.contracts.clear();
+    r.population_fields[0].fields = names.clone();
+    r.max_population_fields_per_source = Some(40);
+    let scenario = Scenario {
+        sampled: names.clone(),
+        counts: names.iter().map(|name| (name.clone(), 1)).collect(),
+    };
+    let (old, _) = execute(&r, &scenario, 1, Origin::Mcp);
+    r.population_fields.clear();
+    r.max_population_fields_per_source = Some(20);
+    let (candidate, _) = execute(&r, &scenario, 2, Origin::Mcp);
+    assert_eq!(
+        candidate.data.sources[0]["evidence"]["measured_fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    let merged = environment::merge(&old, &candidate).unwrap();
+    for name in &names[20..] {
+        assert_eq!(field(&merged, name, false), field(&old, name, false));
+    }
+    assert!(field(&merged, "f20", false)["refresh_status"].is_null());
+}
+
+#[test]
+fn auxiliary_measurements_keep_exact_namespaces_and_zero_facets_outside_the_population_cap() {
+    let mut r = request(&["first"]);
+    r.contracts.clear();
+    r.max_population_fields_per_source = Some(1);
+    let scenario = Scenario {
+        sampled: vec!["Vendor".into(), "event.kind".into()],
+        counts: BTreeMap::from([("first".into(), 1), ("tag:#Vendor".into(), 7)]),
+    };
+    let (pack, _) = execute(&r, &scenario, 1, Origin::Mcp);
+    assert_eq!(
+        pack.data.sources[0]["evidence"]["measured_fields"],
+        json!(["first"])
+    );
+    assert!(field(&pack, "Vendor", false)["coverage"]["observed"].is_null());
+    assert_eq!(field(&pack, "Vendor", true)["coverage"]["observed"], true);
+    for (path, tag) in [("event.dataset", true), ("event.kind", false)] {
+        let zero = field(&pack, path, tag);
+        assert_eq!(zero["evidence_kind"], "observed");
+        assert_eq!(zero["coverage"]["observed"], false);
+        assert!(zero["coverage"]["rate"].is_null());
+        assert!(zero["observation_window"].is_string());
+        assert_eq!(zero["provenance_ids"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn population_batches_near_the_limit_do_not_absorb_auxiliary_fields() {
+    let mut r = request(&["placeholder"]);
+    r.contracts.clear();
+    r.max_population_fields_per_source = Some(4000);
+    r.max_queries = 1000;
+    r.population_fields[0].fields = (0..3998).map(|index| format!("f{index:04}")).collect();
+    let (pack, _) = execute(&r, &Scenario::default(), 1, Origin::Api);
+    assert_eq!(
+        pack.data.sources[0]["evidence"]["measured_fields"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3998
+    );
+    assert!(pack.data.fields.len() > 4000);
+    assert_eq!(field(&pack, "Vendor", true)["coverage"]["observed"], false);
+    pack.validate().unwrap();
+}
+
+#[test]
+fn a_narrower_auxiliary_zero_controls_presence_without_borrowing_the_population_rate() {
+    let mut r = request(&["#Vendor"]);
+    r.contracts.clear();
+    let scenario = Scenario {
+        counts: BTreeMap::from([("#Vendor".into(), 10)]),
+        ..Scenario::default()
+    };
+    let (pack, _) = execute(&r, &scenario, 1, Origin::Api);
+    let vendor = field(&pack, "Vendor", true);
+    assert_eq!(vendor["coverage"]["observed"], false);
+    assert!(vendor["coverage"]["rate"].is_null());
+    assert_eq!(
+        vendor["observation_window"],
+        "2026-01-01T00:45:00Z/2026-01-01T01:00:00Z"
+    );
+    let proof = pack
+        .data
+        .provenance
+        .iter()
+        .find(|proof| proof["id"] == vendor["provenance_ids"][0])
+        .unwrap();
+    assert_eq!(proof["observation_window"], vendor["observation_window"]);
+    assert!(proof["id"].as_str().unwrap().contains("tag-detect"));
+    assert!(
+        pack.data
+            .provenance
+            .iter()
+            .any(|proof| proof["id"].as_str().unwrap().contains("population"))
+    );
+}
+
+#[test]
+fn heterogeneous_empty_value_facets_succeed_but_nonempty_unknown_fields_are_rejected() {
+    let mut r = request(&["first"]);
+    r.contracts.clear();
+    r.value_fields = vec!["absent".into()];
+    let (pack, probes) = execute(&r, &Scenario::default(), 1, Origin::Api);
+    assert!(pack.data.values.is_empty());
+    assert!(probes.iter().any(|probe| probe.kind == "value-facet"));
+    let scenario = Scenario {
+        counts: BTreeMap::from([("absent".into(), 1)]),
+        ..Scenario::default()
+    };
+    let (_, answers) = scenario.graph(&r);
+    let mut backend = Backend {
+        answers,
+        emitted: vec![],
+        observed_at: "2026-02-01T00:00:00Z".into(),
+        retrievals: BTreeMap::new(),
+    };
+    let (pack, report) = discovery::execute(&r, &mut backend);
+    assert!(pack.is_none());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("value field"))
+    );
+}
+
+#[test]
+fn current_proofs_keep_each_winning_captures_retrieval_date() {
+    let mut r = request(&["first"]);
+    r.contracts.clear();
+    r.value_fields = vec!["absent".into()];
+    let scenario = Scenario {
+        counts: BTreeMap::from([("first".into(), 5)]),
+        ..Scenario::default()
+    };
+    let (probes, answers) = scenario.graph(&r);
+    let retrievals = probes
+        .iter()
+        .map(|probe| {
+            let date = match probe.kind.as_str() {
+                "population" => "2026-02-02T00:00:00Z",
+                "tag-detect" => "2026-02-03T00:00:00Z",
+                "value-facet" => "2026-02-04T00:00:00Z",
+                _ => "2026-02-01T00:00:00Z",
+            };
+            (discovery::probe_id(&r.environment.view, probe), date.into())
+        })
+        .collect();
+    let mut backend = Backend {
+        answers,
+        emitted: vec![],
+        observed_at: "2026-02-01T00:00:00Z".into(),
+        retrievals,
+    };
+    let (pack, report) = discovery::execute(&r, &mut backend);
+    assert_eq!(report.status, "complete", "{:?}", report.diagnostics);
+    let pack = pack.unwrap();
+    for (path, tag, date) in [
+        ("first", false, "2026-02-02T00:00:00Z"),
+        ("Vendor", true, "2026-02-03T00:00:00Z"),
+        ("recent", false, "2026-02-01T00:00:00Z"),
+    ] {
+        let record = field(&pack, path, tag);
+        let proof = pack
+            .data
+            .provenance
+            .iter()
+            .find(|proof| proof["id"] == record["provenance_ids"][0])
+            .unwrap();
+        assert_eq!(proof["retrieved_at"], date);
+        assert_eq!(proof["observation_window"], record["observation_window"]);
+        assert_eq!(record["provenance_ids"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn tied_native_capture_presence_conflicts_prevent_pack_construction() {
+    let mut r = request(&["#Vendor"]);
+    r.contracts.clear();
+    r.start = "2026-01-01T00:45:00Z".into();
+    let scenario = Scenario {
+        counts: BTreeMap::from([("#Vendor".into(), 1)]),
+        ..Scenario::default()
+    };
+    let (_, answers) = scenario.graph(&r);
+    let mut backend = Backend {
+        answers,
+        emitted: vec![],
+        observed_at: "2026-02-01T00:00:00Z".into(),
+        retrievals: BTreeMap::new(),
+    };
+    let (pack, report) = discovery::execute(&r, &mut backend);
+    assert!(pack.is_none());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("Tied field measurements"))
+    );
+}
+
+#[test]
+fn every_fieldset_alias_retains_unmeasured_sample_and_kind_capture_proof() {
+    for alias in ["field", "fieldname", "name", "_field"] {
+        for rare_kind in [false, true] {
+            let mut r = request(&["first"]);
+            r.contracts.clear();
+            r.max_population_fields_per_source = Some(1);
+            let scenario = Scenario {
+                counts: BTreeMap::from([("first".into(), 1)]),
+                ..Scenario::default()
+            };
+            let mut answers = BTreeMap::new();
+            let mut probes = Vec::new();
+            loop {
+                let pending = discovery::frontier(&r, &answers).unwrap();
+                if pending.is_empty() {
+                    break;
+                }
+                assert!(probes.len() < 100);
+                for probe in pending {
+                    let rows = match probe.kind.as_str() {
+                        "fieldset" => {
+                            let names = if rare_kind {
+                                vec!["recent", "event.kind"]
+                            } else {
+                                vec!["unmeasured"]
+                            };
+                            names.into_iter().map(|name| json!({alias:name})).collect()
+                        }
+                        "kind-fieldset" => vec![json!({alias:"unmeasured"})],
+                        "record-kind-facet"
+                            if rare_kind && probe.field.as_deref() == Some("event.kind") =>
+                        {
+                            vec![
+                                json!({"event.kind":"alpha","events":1}),
+                                json!({"event.kind":"beta","events":2}),
+                            ]
+                        }
+                        _ => scenario.rows(&probe),
+                    };
+                    answers.insert(discovery::probe_id(&r.environment.view, &probe), rows);
+                    probes.push(probe);
+                }
+            }
+            let retrievals = probes
+                .iter()
+                .enumerate()
+                .map(|(index, probe)| {
+                    (
+                        discovery::probe_id(&r.environment.view, probe),
+                        format!("2026-02-01T00:00:{index:02}Z"),
+                    )
+                })
+                .collect();
+            let mut backend = Backend {
+                answers,
+                emitted: vec![],
+                observed_at: "2026-02-01T00:00:00Z".into(),
+                retrievals,
+            };
+            let (pack, report) = discovery::execute(&r, &mut backend);
+            assert_eq!(
+                report.status, "complete",
+                "{alias}, rare={rare_kind}: {:?}",
+                report.diagnostics
+            );
+            let pack = pack.unwrap();
+            let unmeasured = field(&pack, "unmeasured", false);
+            assert_eq!(unmeasured["evidence_kind"], "documented");
+            assert!(unmeasured["coverage"]["observed"].is_null());
+            assert!(unmeasured["coverage"]["rate"].is_null());
+            assert_eq!(unmeasured["provenance_ids"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                pack.data.sources[0]["evidence"]["measured_fields"],
+                json!(["first"])
+            );
+            let kind = if rare_kind {
+                "kind-fieldset"
+            } else {
+                "fieldset"
+            };
+            let capture =
+                report
+                    .captures
+                    .iter()
+                    .find(|capture| {
+                        capture.probe.kind == kind
+                            && capture.receipt.events.iter().any(|row| {
+                                row.get(alias).and_then(Value::as_str) == Some("unmeasured")
+                            })
+                    })
+                    .unwrap();
+            let proof = pack
+                .data
+                .provenance
+                .iter()
+                .find(|proof| proof["id"] == unmeasured["provenance_ids"][0])
+                .unwrap();
+            assert_eq!(proof["retrieved_at"], capture.retrieved_at);
+            assert_eq!(
+                proof["observation_window"],
+                format!("{}/{}", capture.probe.start, capture.probe.end)
+            );
+            assert_eq!(
+                proof["observation_window"],
+                unmeasured["observation_window"]
+            );
+        }
+    }
 }

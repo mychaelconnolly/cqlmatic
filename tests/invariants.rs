@@ -337,7 +337,7 @@ fn discovery_keeps_namespaces_unknown_shapes_and_duplicate_values_distinct() {
     assert!(!report.active_pack_updated);
 }
 #[test]
-fn discovered_type_kinds_require_context_for_generated_counts() {
+fn discovered_type_kinds_require_context_for_strict_generated_counts() {
     let mut request = discovery_request();
     request.value_fields.clear();
     let mut fake = kind_fake(
@@ -375,6 +375,7 @@ fn discovered_type_kinds_require_context_for_generated_counts() {
             .unwrap_or_default();
         let generation: GenerateRequest = serde_json::from_value(json!({
             "schema_version":1,
+            "context":{"require_observed":true},
             "input":{"mode":"plan","plan":{"source":{"repo":"selected"},"filters":filters,"steps":[{"op":"count"}]}}
         }))
         .unwrap();
@@ -410,7 +411,10 @@ fn discovered_type_kinds_require_context_for_generated_counts() {
                 schema_version: 1,
                 id: None,
                 query: query.into(),
-                context: Context::default(),
+                context: Context {
+                    require_observed: true,
+                    ..Context::default()
+                },
             },
             Some(&pack),
         );
@@ -528,19 +532,20 @@ fn empty_string_kind_value_keeps_an_unscoped_count_ambiguous() {
         }
     }))
     .unwrap();
-    let result = app::generate(generation, Some(&pack));
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
+    let result = app::generate(generation.clone(), Some(&pack));
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     assert!(
         result
             .diagnostics
             .iter()
-            .any(|d| d.code == "CQL_RECORD_KIND_AMBIGUOUS")
+            .any(|d| d.code == "CQL_RECORD_KIND_NOTICE" && d.severity == Severity::Info)
     );
+    assert!(result.query.is_some());
+    let mut strict = generation;
+    strict.context.require_observed = true;
+    let strict = app::generate(strict, Some(&pack));
+    assert_eq!(strict.outcome, Outcome::NeedsContext);
+    assert!(strict.query.is_none());
 }
 #[test]
 fn kind_facet_value_forbidden_in_cql_must_not_activate_a_pack() {

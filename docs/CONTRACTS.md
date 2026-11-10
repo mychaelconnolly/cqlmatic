@@ -1,6 +1,6 @@
 # Machine contracts and automation
 
-The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.3**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
+The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.4**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
 
 Use [USAGE](../USAGE.md) for flags, [setup](SETUP.md) and [inventory](INVENTORY.md) for actions, and [query construction](QUERY-REFERENCE.md) for nested plans. All examples are synthetic. Runtime operations require the caller's explicit authorization and environment.
 
@@ -59,11 +59,12 @@ The CLI shortcut `--plan` takes only a Plan, while `--request` takes the outer r
 | `environment` | Null | Optional `{cloud, tenant, view}` binding; when provided, it must agree with the supplied pack. |
 | `confirmed_fields` | `[]` | Caller assertions about explicit field names; not observed deployment evidence. |
 | `require_observed` | `false` | Require qualifying observed snapshot evidence for referenced deployment fields. |
-| `accept_mixed_record_kinds` | `false` | Accept ambiguity with a warning after explicit user permission; does not select a kind. |
+| `accept_mixed_record_kinds` | `false` | In strict observed mode, accept kind ambiguity with a warning after user permission; does not select a kind. Ordinary mode reports kind ambiguity as information. |
+| `accept_partial_coverage` | `false` | In strict mode, accept qualifying current positive partial source/field evidence with a warning; stale, absent or ambiguous evidence still blocks. |
 
 `EnvironmentId.cloud` is `us1`, `us2`, or `eu1`. `tenant` is a validated CID or API-client binding where accepted; `view` is the explicit searchable API/MCP target. `view` and a CQL `#repo` selector are different namespaces. Obtain real identity through the [environment workflow](ENVIRONMENT.md#bind-an-account), not the illustrative all-zero example.
 
-CLI `--require-observed` and `--accept-mixed-record-kinds` strengthen/enable the same request flags with logical OR. They cannot turn a true request value off. A process reads one `--pack` for all JSONL records; record contexts can assert matching identity but cannot select another pack.
+CLI policy flags strengthen/enable the same request flags with logical OR. They cannot turn a true request value off. A process reads one explicit `--pack` for all JSONL records; record contexts can assert matching identity but cannot select another explicit pack. Inventory target selection and active-pack reuse happen separately for each record. Full and Quick can fill an otherwise unspecified environment; foreign inventory is skipped before opening its snapshot. An explicit pack remains primary, and matching active-pack/ledger safeguards still apply. `--inventory-state FILE` is a CLI path selection, not a new request property.
 
 ### Analysis results
 
@@ -175,6 +176,8 @@ MCP step output contains `mode`, `status`, `answered`, `max_queries`, `probes`, 
 ## Result assessment
 
 Send `{schema_version:1, id?, query:STRING, result:ENTIRE_SAVED_MCP_JSON, context?:{}}`. A valid request includes the entire payload, not only rows. `--query-file`/`--result` is an alternative adapter, not this wrapper. Assessment requests reject duplicate object keys, including inside `result`, and require one JSON document. Saved-result files separately support identical host-rendered repeats.
+
+All assessment modes reuse a matching inventory's active pack unless an explicit `--pack` is selected. `--inventory-state FILE` selects a different protected inventory without changing the JSON contract. Assessment never captures leads or interprets saved-query ledger counts as population rates. See [inventory selection and failures](INVENTORY.md#imports-and-query-writing).
 
 The result is `{schema_version,id,outcome,query_sha256,rows,caps,columns,findings}`. It is **not** `Analysis`. Outcomes, cap defaults, null statistics, normalization, hashes, and recovery are detailed in [result assessment](RESULT-ASSESSMENT.md). Runtime accepts only version `1`.
 

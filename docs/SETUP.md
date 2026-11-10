@@ -1,6 +1,6 @@
 # Setup and authentication
 
-With a [supported, patched Node.js release](../README.md#try-v013) on macOS Apple silicon or Linux x86_64, use `npx cqlmatic@0.1.3 setup` from outside a CQLmatic source checkout. Use your source-built executable inside that checkout: npm can select the local package, which has no bundled executable. The npm package runs the native executable on demand without installing a global command. The guides use `cqlmatic` as shorthand for that pinned command or your standalone executable. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`. Windows x64 uses the [release ZIP](#install-on-windows); other architectures use a [source build](DEVELOPMENT.md).
+With a [supported, patched Node.js release](../README.md#try-v014) on macOS Apple silicon or Linux x86_64, use `npx cqlmatic@0.1.4 setup` from outside a CQLmatic source checkout. Use your source-built executable inside that checkout: npm can select the local package, which has no bundled executable. The npm package runs the native executable on demand without installing a global command. The guides use `cqlmatic` as shorthand for that pinned command or your standalone executable. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`. Windows x64 uses the [release ZIP](#install-on-windows); other architectures use a [source build](DEVELOPMENT.md).
 
 Run `npx` in a foreground terminal. For unattended process supervision, use the native executable directly: npm can add stderr notices, and cancellation directed only at its parent PID may not reach the command. See [input and output rules](../USAGE.md#input-and-output-rules).
 
@@ -12,14 +12,14 @@ Native setup covers **Codex CLI**, **VS Code Local**, **Claude Code**, **GitHub 
 
 ## Install on Windows
 
-Download `cqlmatic-v0.1.3-windows-x86_64.zip` and `SHA256SUMS` from the official [v0.1.3 release](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.3). Use the x64 ZIP only on an x64 Windows system. The prebuilt executable needs neither Rust nor C++ build tools. Source builds require the toolchain described in [development](DEVELOPMENT.md#native-windows).
+Download `cqlmatic-v0.1.4-windows-x86_64.zip` and `SHA256SUMS` from the official [v0.1.4 release](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.4). Use the x64 ZIP only on an x64 Windows system. The prebuilt executable needs neither Rust nor C++ build tools. Source builds require the toolchain described in [development](DEVELOPMENT.md#native-windows).
 
-Before extraction, compare `Get-FileHash -Algorithm SHA256` for the ZIP with the exact filename's entry in `SHA256SUMS`. Stop if the entry is missing, duplicated or different. Extract into a new version-specific directory under your user profile, such as `%LOCALAPPDATA%\Programs\CQLmatic\v0.1.3`; do not overwrite an existing installation. The archive's `cqlmatic-v0.1.3` directory contains `cqlmatic.exe`, guides, examples and licenses.
+Before extraction, compare `Get-FileHash -Algorithm SHA256` for the ZIP with the exact filename's entry in `SHA256SUMS`. Stop if the entry is missing, duplicated or different. Extract into a new version-specific directory under your user profile, such as `%LOCALAPPDATA%\Programs\CQLmatic\v0.1.4`; do not overwrite an existing installation. The archive's `cqlmatic-v0.1.4` directory contains `cqlmatic.exe`, guides, examples and licenses.
 
 Run the extracted executable directly:
 
 ```powershell
-$Cqlmatic = Join-Path $env:LOCALAPPDATA 'Programs/CQLmatic/v0.1.3/cqlmatic-v0.1.3/cqlmatic.exe'
+$Cqlmatic = Join-Path $env:LOCALAPPDATA 'Programs/CQLmatic/v0.1.4/cqlmatic-v0.1.4/cqlmatic.exe'
 & $Cqlmatic --version
 & $Cqlmatic --help
 & $Cqlmatic setup

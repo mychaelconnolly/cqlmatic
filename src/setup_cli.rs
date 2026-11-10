@@ -214,8 +214,26 @@ fn check_macos_acl(path: &Path) -> Result<(), Diagnostic> {
 
 /// Create private storage or verify protection without changing an existing directory.
 pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
+    private_directory(path, true)
+}
+
+/// Verify existing private storage without creating missing directories.
+pub(crate) fn verify_directory(path: &Path) -> Result<(), Diagnostic> {
+    private_directory(path, false)
+}
+
+fn private_directory(path: &Path, create: bool) -> Result<(), Diagnostic> {
     reject_links(path)?;
-    let created = !path.exists();
+    let created = match fs::symlink_metadata(path) {
+        Ok(_) => false,
+        Err(error) if create && error.kind() == io::ErrorKind::NotFound => true,
+        Err(_) => {
+            return Err(err(
+                "SETUP_STORAGE",
+                "Cannot inspect private setup directory.",
+            ));
+        }
+    };
     #[cfg(unix)]
     let owner = current_unix_uid()?;
     #[cfg(unix)]
@@ -431,31 +449,51 @@ fn powershell() -> Result<Command, Diagnostic> {
     Ok(command)
 }
 fn reject_links(path: &Path) -> Result<(), Diagnostic> {
+    let path = std::path::absolute(path)
+        .map_err(|_| err("SETUP_PROTECTION", "Cannot resolve protected path."))?;
     for ancestor in path.ancestors() {
-        if let Ok(meta) = fs::symlink_metadata(ancestor) {
-            #[cfg(windows)]
-            let linked = {
-                use std::os::windows::fs::MetadataExt;
-                meta.file_attributes() & 0x400 != 0
-            };
-            #[cfg(not(windows))]
-            let linked = meta.file_type().is_symlink();
-            if linked {
-                return Err(err(
-                    "SETUP_LINK",
-                    "Setup paths must not traverse symlinks or Windows reparse points.",
-                ));
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) => {
+                #[cfg(windows)]
+                let linked = {
+                    use std::os::windows::fs::MetadataExt;
+                    meta.file_attributes() & 0x400 != 0
+                };
+                #[cfg(not(windows))]
+                let linked = meta.file_type().is_symlink();
+                if linked {
+                    return Err(err(
+                        "SETUP_LINK",
+                        "Setup paths must not traverse symlinks or Windows reparse points.",
+                    ));
+                }
             }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(err("SETUP_PROTECTION", "Cannot inspect protected path.")),
         }
     }
     Ok(())
+}
+
+/// Missing files are distinguished from unsafe or inaccessible protected paths.
+pub(crate) fn private_input_exists(path: &Path) -> Result<bool, Diagnostic> {
+    reject_links(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            verify_directory(parent(path)?)?;
+            verify_private_file(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(err("SETUP_PROTECTION", "Cannot inspect protected input.")),
+    }
 }
 fn load_state(path: &Path) -> Result<SetupState, Diagnostic> {
     reject_links(path)?;
     if !path.exists() {
         return Ok(SetupState::default());
     }
-    protect_directory(parent(path)?)?;
+    verify_directory(parent(path)?)?;
     verify_private_file(path)?;
     #[cfg(unix)]
     {
@@ -3928,6 +3966,15 @@ mod tests {
         );
         assert_eq!(h.runner.native_calls, 0);
     }
+    #[test]
+    fn private_read_verification_does_not_create_directories() {
+        let temp = Temp::new();
+        let missing = temp.0.join("missing/nested");
+        assert!(verify_directory(&missing).is_err());
+        assert!(!private_input_exists(&missing.join("state.json")).unwrap());
+        assert!(!temp.0.join("missing").exists());
+    }
+
     #[cfg(windows)]
     #[test]
     fn setup_new_private_directory_protects_every_parent_at_creation() {

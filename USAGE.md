@@ -1,8 +1,8 @@
 # CQLmatic command reference
 
-This reference describes CQLmatic **0.1.3**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
+This reference describes CQLmatic **0.1.4**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
 
-Commands below use `cqlmatic` as shorthand for your executable path or the published `npx cqlmatic@0.1.3` (a [supported, patched Node.js release](README.md#try-v013), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the verified [release ZIP](docs/SETUP.md#install-on-windows). From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
+Commands below use `cqlmatic` as shorthand for your executable path or `npx cqlmatic@0.1.4` (a [supported, patched Node.js release](README.md#try-v014), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the [release ZIP](docs/SETUP.md#install-on-windows) after verifying its checksum. From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
 
 ## Help, version, and schemas
 
@@ -83,14 +83,16 @@ cqlmatic generate --jsonl < examples/requests.jsonl
 | --- | --- | --- |
 | `--json` | Human output | Compact newline-terminated `Analysis`. |
 | `--jsonl` | Off | Read versioned requests from stdin; continue after record errors. |
-| `--pack FILE` | None | Read and validate one local pack; never refresh it or select the inventory's active pack implicitly. |
-| `--inventory-state FILE` | Local inventory state | Use a protected inventory's confirmed target and query-observation ledger. In Quick mode, accepted query source/input-field names can be saved as unverified leads. |
+| `--pack FILE` | Matching inventory's active pack, when available | Select and validate a primary snapshot explicitly; a matching inventory's active pack and query ledger still supply safeguards. Never triggers discovery. |
+| `--inventory-state FILE` | Local inventory state | Reuse a protected inventory's confirmed target, active pack and query-observation ledger in Full or Quick mode. Only Quick can save accepted query source/input-field names as unverified leads. |
 | `--require-observed` | False | Require qualifying current pack or saved-query field evidence for referenced deployment fields; without either, strict grounding needs context. |
 | `--accept-partial-coverage` | False | In strict mode, accept current positive partial source/field observations with a warning. Stale, absent and ambiguous evidence still blocks. |
 | `--fail-on-warning` | False | Return `1` on warning diagnostics even when `outcome` remains `ready`; informational diagnostics do not trigger it. |
-| `--accept-mixed-record-kinds` | False | Permit kind ambiguity with a warning; use only after the user explicitly accepts mixing kinds. |
+| `--accept-mixed-record-kinds` | False | In strict observed mode, accept mixed kinds with a warning after the user permits it. Ordinary mode already reports kind ambiguity as information. |
 
-The three policy flags `--require-observed`, `--accept-partial-coverage` and `--accept-mixed-record-kinds` are ORed with the corresponding request context values. Omitting a flag cannot disable a request's true value. No CLI flag supplies `confirmed_fields` or `context.environment`; use a full request for those fields. A confirmed Quick target can supply missing environment context, but never replace an explicit request or pack identity; the result says when it did so. Saved-query evidence depends on the caller's assertion that the query, response, target and window belong together.
+The three policy flags `--require-observed`, `--accept-partial-coverage` and `--accept-mixed-record-kinds` are ORed with the corresponding request context values. Omitting a flag cannot disable a request's true value. No CLI flag supplies `confirmed_fields` or `context.environment`; use a full request for explicit values. A confirmed Full or Quick inventory can fill otherwise unspecified environment context, reported as `CQL_QUICK_TARGET`; it never replaces an explicit request or pack identity. Inventory selection is checked separately for each JSONL row. Saved-query evidence depends on the caller's assertion that the query, response, target and window belong together.
+
+A missing default state creates nothing and leaves basic commands available. An explicitly selected missing state, or a matching active snapshot that is missing, corrupt or unsafe, blocks the result even without `--require-observed` and even with an older explicit pack. An invalid default inventory can be ignored with `CQL_QUICK_INVENTORY_IGNORED` when a valid explicit pack is supplied; unsafe protected paths still fail closed. Foreign inventory produces `CQL_QUICK_TARGET_MISMATCH` without opening its active snapshot or capturing leads. Retained snapshots without an active selection require repair rather than an inferred choice.
 
 Human generation prints the query only when ready; on other outcomes stdout can be empty. Diagnostics and grounding problems go to stderr. JSON includes the interpretation and evidence; generation withholds `query` on every nonready outcome. Inspect the returned plan before executing the exact query through an authorized client.
 
@@ -117,7 +119,7 @@ Empty/whitespace input and `*` are valid match-all checks. Static acceptance doe
 
 ## Assess saved results
 
-Choose exactly one of `--request FILE`, `--jsonl`, or the pair `--query-file FILE --result FILE`. Optional flags are `--pack FILE` and `--json`; generation/check policy flags do not apply.
+Choose exactly one of `--request FILE`, `--jsonl`, or the pair `--query-file FILE --result FILE`. Optional flags are `--pack FILE`, `--inventory-state FILE` and `--json`; generation/check policy flags do not apply. Assessment reuses a matching inventory's active pack unless an explicit pack is selected, and never saves leads or converts the query ledger into population rates.
 
 ```sh
 cqlmatic assess --request examples/assess.request.json --json
@@ -237,4 +239,4 @@ Client configuration is version-sensitive. Native setup checks installed capabil
 
 ## Use it from an agent
 
-Follow the [analyst workflow](docs/ANALYST-WORKFLOW.md) and [MCP companion guide](docs/MCP-COMPANION.md). Use full requests for explicit context, retain query bytes, consume the documented output type for each command, select the pack explicitly, and inspect results after authorized execution. [Packaged agent instructions](integrations/agent/AGENTS-snippet.md) are optional guidance; no skill installation is required for the CLI.
+Follow the [analyst workflow](docs/ANALYST-WORKFLOW.md) and [MCP companion guide](docs/MCP-COMPANION.md). Use full requests for explicit context, retain query bytes, consume the documented output type for each command, inspect the automatically selected inventory or choose an explicit pack, and inspect results after authorized execution. [Packaged agent instructions](integrations/agent/AGENTS-snippet.md) are optional guidance; no skill installation is required for the CLI.

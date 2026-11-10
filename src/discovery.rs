@@ -415,13 +415,16 @@ fn census_sources(rows: &[Value], sources: &mut Vec<Scope>) -> Result<(), Diagno
     }
     Ok(())
 }
+fn fieldset_name(row: &Value) -> Option<&str> {
+    ["field", "fieldname", "name", "_field"]
+        .into_iter()
+        .find_map(|key| row.get(key).and_then(Value::as_str))
+}
+
 fn fieldset_fields(rows: &[Value]) -> Result<Vec<String>, Diagnostic> {
     let mut fields = Vec::new();
     for row in rows {
-        let name = ["field", "fieldname", "name", "_field"]
-            .iter()
-            .find_map(|k| row.get(*k).and_then(Value::as_str))
-            .ok_or_else(|| fail("Unrecognized fieldset result shape."))?;
+        let name = fieldset_name(row).ok_or_else(|| fail("Unrecognized fieldset result shape."))?;
         plan::checked_field(name)?;
         fields.push(name.to_string());
     }
@@ -698,6 +701,104 @@ struct SourceMeasurements {
     record_kinds: Vec<Value>,
     full_fields: BTreeSet<String>,
     kind_fields: BTreeSet<String>,
+}
+
+fn capture_key(
+    capture: &Capture,
+) -> Result<
+    (
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+    ),
+    Diagnostic,
+> {
+    let start = environment::parse_time(&capture.probe.start)?;
+    let end = environment::parse_time(&capture.probe.end)?;
+    let retrieved = environment::parse_time(&capture.retrieved_at)?;
+    if start >= end || end > retrieved {
+        return Err(fail(
+            "Measurement retrieval must follow its increasing observation window.",
+        ));
+    }
+    Ok((end, start, retrieved))
+}
+
+type FieldCaptures = BTreeMap<String, (usize, bool, Option<f64>)>;
+
+fn field_captures(captures: &[Capture], source: &Scope) -> Result<FieldCaptures, Diagnostic> {
+    let mut result = FieldCaptures::new();
+    for (index, capture) in captures
+        .iter()
+        .enumerate()
+        .filter(|(_, capture)| &capture.probe.source == source)
+    {
+        let probe = &capture.probe;
+        let rows = &capture.receipt.events;
+        let values = match probe.kind.as_str() {
+            "population" => {
+                let mut counts = BTreeMap::new();
+                population_counts(probe, rows, &mut counts)?;
+                counts
+                    .into_iter()
+                    .map(|(field, (count, total))| {
+                        (field, count > 0, Some(count as f64 / total as f64))
+                    })
+                    .collect::<Vec<_>>()
+            }
+            "tag-detect" => vec![(
+                format!(
+                    "#{}",
+                    probe.field.as_deref().expect("tag probe has a field")
+                ),
+                count_row(rows)? > 0,
+                None,
+            )],
+            "dataset-facet" | "record-kind-facet" => {
+                let field = if probe.kind == "dataset-facet" {
+                    "#event.dataset"
+                } else {
+                    probe.field.as_deref().expect("kind probe has a field")
+                };
+                let facet = kind_facet(
+                    rows,
+                    field,
+                    if probe.kind == "dataset-facet" {
+                        None
+                    } else {
+                        Some(KIND_FACET_LIMIT)
+                    },
+                )?;
+                vec![(
+                    field.into(),
+                    facet.values.iter().any(|(_, count)| *count > 0),
+                    None,
+                )]
+            }
+            _ => continue,
+        };
+        let key = capture_key(capture)?;
+        for (field, observed, rate) in values {
+            if let Some((previous, previous_observed, previous_rate)) = result.get(&field) {
+                let previous_key = capture_key(&captures[*previous])?;
+                if key == previous_key
+                    && (observed != *previous_observed
+                        || rate.zip(*previous_rate).is_some_and(|(a, b)| a != b))
+                {
+                    return Err(fail(
+                        "Tied field measurements contain contradictory presence or population rates.",
+                    ));
+                }
+                if key < previous_key
+                    || key == previous_key && (rate.is_none() || previous_rate.is_some())
+                {
+                    continue;
+                }
+            }
+            result.insert(field, (index, observed, rate));
+        }
+    }
+    Ok(result)
 }
 
 fn selected_population_probes(
@@ -1039,6 +1140,17 @@ struct Run<'a, B> {
     report: DiscoverReport,
 }
 impl<B: SearchBackend> Run<'_, B> {
+    fn provenance(&self, index: usize) -> Value {
+        let capture = &self.report.captures[index];
+        let source = source_id(&capture.probe.source);
+        json!({
+            "id":format!("{}{}:{}:{}:{index}", self.origin.id_prefix(), compact(&capture.retrieved_at), source.trim_start_matches("env:repo:"), capture.probe.kind),
+            "source_type":self.origin.source_type(), "canonical_source":self.origin.canonical_source(),
+            "retrieved_at":capture.retrieved_at,"redaction_status":"none","coverage_status":self.origin.coverage(),
+            "observation_window":format!("{}/{}",capture.probe.start,capture.probe.end),"notes":self.origin.notes()
+        })
+    }
+
     fn execute(&mut self, probe: Probe) -> Result<Vec<Value>, Diagnostic> {
         if self.report.captures.len() >= self.request.max_queries as usize
             || Instant::now() >= self.deadline
@@ -1182,33 +1294,34 @@ impl<B: SearchBackend> Run<'_, B> {
             let SourceMeasurements {
                 fields,
                 fieldset_seen,
-                full_fieldset_seen,
                 population,
-                tags,
                 record_kinds,
-                full_fields,
-                kind_fields,
+                ..
             } = if self.request.depth == DiscoveryDepth::SourcesOnly {
                 sampled_measurements(self.request, &s, vec![])
             } else {
                 self.measure_source(&s, fields, answered)?
             };
             let sid = source_id(&s);
-            let pid = format!(
-                "{}{}:{}",
-                self.origin.id_prefix(),
-                compact(&self.report.captures.last().unwrap().retrieved_at),
-                sid.trim_start_matches("env:repo:")
-            );
-            let sample_start = stamp(
-                environment::parse_time(&self.request.start)?
-                    .max(environment::parse_time(&self.request.end)? - time::Duration::minutes(15)),
-            );
-            let window = format!("{sample_start}/{}", self.request.end);
             let full_window = format!("{}/{}", self.request.start, self.request.end);
-            let full_pid = format!("{pid}:full");
-            data.provenance.push(json!({"id":pid,"source_type":self.origin.source_type(),"canonical_source":self.origin.canonical_source(),"retrieved_at":self.report.captures.last().unwrap().retrieved_at,"redaction_status":"none","coverage_status":self.origin.coverage(),"observation_window":window,"notes":self.origin.notes()}));
-            data.provenance.push(json!({"id":full_pid,"source_type":self.origin.source_type(),"canonical_source":self.origin.canonical_source(),"retrieved_at":self.report.captures.last().unwrap().retrieved_at,"redaction_status":"none","coverage_status":self.origin.coverage(),"observation_window":full_window,"notes":self.origin.notes()}));
+            let measurements = field_captures(&self.report.captures, &s)?;
+            let volume = self
+                .report
+                .captures
+                .iter()
+                .position(|capture| capture.probe.source == s && capture.probe.kind == "volume")
+                .expect("completed source has a volume capture");
+            let source_provenance = self.provenance(volume);
+            let source_pid = source_provenance["id"].clone();
+            for (index, _) in self
+                .report
+                .captures
+                .iter()
+                .enumerate()
+                .filter(|(_, capture)| capture.probe.source == s)
+            {
+                data.provenance.push(self.provenance(index));
+            }
             let contract = self
                 .request
                 .contracts
@@ -1228,12 +1341,13 @@ impl<B: SearchBackend> Run<'_, B> {
             {
                 data.provenance.push(json!({"id":cpid,"source_type":"manual-curation","canonical_source":"Explicit parser contract supplied by the operator","retrieved_at":c.retrieved_at,"source_hash":c.source_hash,"redaction_status":"none","coverage_status":"declared-only","notes":"Declaration evidence retains its original date; search observations do not re-review it."}));
             }
-            let mut source = json!({"id":sid,"kind":if s.repo.is_some(){"repo"}else{"source"},"name":s.type_.as_ref().or(s.repo.as_ref()).unwrap(),"inventory_status":"observed-only","selectors":{"repo":s.repo,"type":s.type_},"relationship":{"datasets":datasets},"evidence":{"declared":contract.is_some(),"observed":true,"observation_window":full_window},"provenance_ids":[full_pid]});
+            let mut source = json!({"id":sid,"kind":if s.repo.is_some(){"repo"}else{"source"},"name":s.type_.as_ref().or(s.repo.as_ref()).unwrap(),"inventory_status":"observed-only","selectors":{"repo":s.repo,"type":s.type_},"relationship":{"datasets":datasets},"evidence":{"declared":contract.is_some(),"observed":true,"observation_window":full_window},"provenance_ids":[source_pid]});
             if self.request.depth == DiscoveryDepth::SourcesOnly {
                 source["evidence"]["discovery_depth"] = json!("sources-only");
             }
-            if let Some(fields) = field_selection(self.request, &s) {
-                source["evidence"]["measured_fields"] = json!(fields);
+            if self.request.depth != DiscoveryDepth::SourcesOnly {
+                source["evidence"]["measured_fields"] =
+                    json!(population.keys().collect::<Vec<_>>());
             }
             if !record_kinds.is_empty() {
                 source["relationship"]["record_kinds"] = json!(record_kinds);
@@ -1250,7 +1364,7 @@ impl<B: SearchBackend> Run<'_, B> {
             let mut namespace_fields: BTreeSet<(String, bool)> = fields
                 .iter()
                 .chain(&fieldset_seen)
-                .chain(&kind_fields)
+                .chain(measurements.keys())
                 .map(|f| {
                     (
                         f.strip_prefix('#').unwrap_or(f).to_string(),
@@ -1258,11 +1372,6 @@ impl<B: SearchBackend> Run<'_, B> {
                     )
                 })
                 .collect();
-            for (t, n) in &tags {
-                if *n > 0 {
-                    namespace_fields.insert((t.clone(), true));
-                }
-            }
             if let Some(c) = &contract {
                 for f in &c.declared_fields {
                     namespace_fields.insert((
@@ -1277,60 +1386,79 @@ impl<B: SearchBackend> Run<'_, B> {
                 } else {
                     path.clone()
                 };
-                let observed = population
-                    .get(&original)
-                    .map(|(n, _)| *n > 0)
-                    .unwrap_or(false)
-                    || is_tag && tags.get(&path).is_some_and(|n| *n > 0)
-                    || !population.contains_key(&original) && kind_fields.contains(&original);
+                let measurement = measurements.get(&original);
+                let observed = measurement.map(|(_, observed, _)| *observed);
                 let declaration = contract
                     .as_ref()
                     .and_then(|c| contract_field(c, &path, is_tag));
                 let declared = contract.as_ref().map(|_| declaration.is_some());
-                let rate = population
-                    .get(&original)
-                    .map(|(n, total)| *n as f64 / *total as f64);
-                let fieldset_seen = fieldset_seen.contains(&original);
-                let full = full_fields.contains(&original)
-                    || full_fieldset_seen.contains(&original)
-                    || !population.contains_key(&original) && kind_fields.contains(&original);
-                let field_window = if full { &full_window } else { &window };
+                let rate = measurement.and_then(|(_, _, rate)| *rate);
+                let seen = fieldset_seen.contains(&original);
+                let capture = measurement.map(|(index, _, _)| *index).or_else(|| {
+                    self.report
+                        .captures
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, capture)| {
+                            (capture.probe.source == s
+                                && matches!(
+                                    capture.probe.kind.as_str(),
+                                    "fieldset" | "kind-fieldset"
+                                )
+                                && capture
+                                    .receipt
+                                    .events
+                                    .iter()
+                                    .any(|row| fieldset_name(row) == Some(original.as_str())))
+                            .then_some(index)
+                        })
+                });
+                let field_window = capture.map(|index| {
+                    format!(
+                        "{}/{}",
+                        self.report.captures[index].probe.start,
+                        self.report.captures[index].probe.end
+                    )
+                });
                 let is_array = contract.as_ref().zip(declaration).map(|(c, field)| {
                     c.array_fields
                         .iter()
                         .any(|array| array == field || array == &path)
                 });
                 let mut provenance = Vec::new();
-                // A zero population is still a dated measurement, never an observation.
-                if observed || fieldset_seen || population.contains_key(&original) {
-                    provenance.push(if full { full_pid.clone() } else { pid.clone() });
+                if let Some(index) = capture {
+                    provenance.push(self.provenance(index)["id"].clone());
                 }
                 if declared == Some(true)
                     && let Some(cpid) = &contract_pid
                 {
-                    provenance.push(cpid.clone());
+                    provenance.push(json!(cpid));
                 }
                 if provenance.is_empty() {
-                    if population.contains_key(&original) && !observed {
-                        continue;
-                    }
                     return Err(fail(
                         "A field has neither observation nor declaration evidence.",
                     ));
                 }
-                data.fields.push(json!({"id":field_id(&sid,&path,is_tag),"source_id":sid,"path":path,"data_type":"unknown","is_tag":is_tag,"is_array":is_array,"evidence_kind":if observed||fieldset_seen{"observed"}else{"declared"},"observation_window":if observed||fieldset_seen{Some(field_window.clone())}else{None},"coverage":{"declared":declared,"observed":observed,"rate":rate},"provenance_ids":provenance}));
+                data.fields.push(json!({"id":field_id(&sid,&path,is_tag),"source_id":sid,"path":path,"data_type":"unknown","is_tag":is_tag,"is_array":is_array,"evidence_kind":if measurement.is_some(){"observed"}else if seen{"documented"}else{"declared"},"observation_window":field_window,"coverage":{"declared":declared,"observed":observed,"rate":rate},"provenance_ids":provenance}));
             }
             for p in value_probes(self.request, &s)? {
                 let f = p.field.clone().expect("value probe has a name");
                 let tag = f.starts_with('#');
                 let path = f.strip_prefix('#').unwrap_or(&f);
                 let fid = field_id(&sid, path, tag);
+                let rows = self.execute(p)?;
+                if rows.is_empty() {
+                    continue;
+                }
                 if !data.fields.iter().any(|v| v["id"] == fid) {
                     return Err(fail(
                         "Requested value field was not observed or declared in this source.",
                     ));
                 }
-                for row in self.execute(p)? {
+                let proof = self.provenance(self.report.captures.len() - 1);
+                let pid = proof["id"].clone();
+                data.provenance.push(proof);
+                for row in rows {
                     let value = row
                         .get(&f)
                         .filter(|v| !v.is_array() && !v.is_object())
@@ -1341,7 +1469,22 @@ impl<B: SearchBackend> Run<'_, B> {
                 }
             }
         }
-        Pack::new(self.request.environment.clone(), timestamp(), data)
+        let pack = Pack::new(self.request.environment.clone(), timestamp(), data)?;
+        if pack
+            .data
+            .fields
+            .iter()
+            .filter_map(|value| environment::field(value).ok())
+            .any(|field| {
+                field.evidence_kind == "observed"
+                    && environment::field_measurement(&pack, &field).is_none()
+            })
+        {
+            return Err(fail(
+                "Current field measurements require exact scoped, causal observation provenance.",
+            ));
+        }
+        Ok(pack)
     }
 }
 pub fn execute(

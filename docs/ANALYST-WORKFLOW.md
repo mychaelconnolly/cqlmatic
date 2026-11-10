@@ -13,7 +13,11 @@ cqlmatic env inspect .local/pack.json
 cqlmatic env inspect .local/pack.json --field user --source example_repo
 ```
 
+Start with `cqlmatic status --json --summary` to find the confirmed target and active snapshot. Generation, checking and assessment automatically reuse matching active inventory in Full or Quick mode. `--inventory-state FILE` selects another protected inventory; `--pack FILE` keeps an explicit snapshot primary without bypassing matching inventory safeguards. Otherwise unspecified target context can be filled in either mode. Foreign inventory is skipped before its active snapshot is opened. A missing default inventory leaves basic commands available, while an explicitly selected missing state or broken matching snapshot fails closed. The agent still retrieves relevant map records for reasoning; automatic CLI reuse does not create model context or execution authorization.
+
 A documented CPS/ECS field name, parser declaration or hand-confirmed mapping is not an observed tenant field. Fieldset listing also does not establish populated-field coverage: inspect `coverage.observed`, the rate when measured, namespace and provenance window. Use source-bound [population batches](ENVIRONMENT.md#explicit-population-batches-and-targeted-refresh) to measure specific fields, and `kind_fields`/`value_fields` to sample missing discriminator/value evidence. A pack observation also does not guarantee presence on every event. Ask a precise question when the required source, meaning, matching behavior or environment evidence is missing. Do not repair uncertainty by inventing names or dropping constraints.
+
+Capped refreshes retain fields they did not measure and preserve original evidence dates. A listed field with null observation/rate is unmeasured; an actual zero remains current negative evidence and does not mark a parser review complete. Inspect each field's own measurement window and proof. A newer snapshot wrapper cannot repair backdated, tied or unorderable contradictory field measurements.
 
 ## Consult the reference and construct the query
 
@@ -34,6 +38,8 @@ cqlmatic generate --request .local/request.json --pack .local/pack.json --requir
 ```
 
 `needs-context` identifies missing/conflicting/stale evidence. `unsupported` marks a coverage limit, and `invalid` identifies a checked rule violation. Generation withholds the query unless ready. Never hand-edit emitted CQL to bypass a diagnostic; revise the request or typed plan and regenerate. Preserve the assessment, interpretation, diagnostics and original input rather than reporting only the outcome word.
+
+Ordinary mixed-kind queries continue with informational `CQL_RECORD_KIND_NOTICE`, including truncated kind facets and nested queries. With `--require-observed`, unresolved mixed kinds require an exact kind filter, applicable event selector, early grouping by kind, or explicit acceptance through `--accept-mixed-record-kinds`. Accepted strict ambiguity retains a warning; `--fail-on-warning` still returns 1. A normal informational notice alone does not trigger that flag. Only Quick generation/checking can save unverified source/input-field leads; Full mode and assessment never do so.
 
 When typed construction or local checking lacks coverage, reference-reviewed raw CQL may proceed through the agent's existing authorized execution boundary. Disclose that it was not locally validated and retain the coverage diagnostic. Resolve demonstrated semantic defects before execution; a coverage fallback does not excuse an incorrect interpretation or missing required context.
 
@@ -62,6 +68,8 @@ cqlmatic assess --query-file .local/query.cql --result .local/mcp-result.json --
 ```
 
 Review `no-findings`, `advisory`, `inconclusive` or `error` and any findings, including empty results, caps, incomplete results, null fields, missing key coverage and unattested completeness. Assessment never certifies query correctness. A timeout or `inconclusive` result is not “no results”; narrow, re-run or clarify before reporting. See [result assessment](RESULT-ASSESSMENT.md) for cap and completeness findings, the [MCP companion workflow](MCP-COMPANION.md) for the probe loop and exact-result handoff, and [troubleshooting](TROUBLESHOOTING.md) for recovery.
+
+Assessment reuses pack measurements only; saved-query ledger positives are not population rates. Generation/checking may use qualifying ledger fields for strict grounding, with the caller's query/result/target/window assertion and matching active-pack safeguards retained.
 
 If execution exposes an error or an incorrect interpretation, revise the plan/query against the actual evidence, rerun the static checks, and execute the new exact bytes. Keep prior attempts and explain the change. Ask for missing context instead of guessing.
 

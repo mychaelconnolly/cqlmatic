@@ -1696,9 +1696,14 @@ mod recovery_tests {
     fn activation_only_retry_remains_available_after_budget_expiration() {
         let run = ready(false);
         let mut state = read_state(&run.state).unwrap();
-        state.created_at = "2020-01-01T00:00:00Z".into();
-        for answer in state.answers.values_mut() {
-            answer.ingested_at = "2020-01-01T00:00:01Z".into();
+        state.created_at = state.request.end.clone();
+        let end = environment::parse_time(&state.request.end).unwrap();
+        let mut answers = state.answers.values_mut().collect::<Vec<_>>();
+        answers.sort_by_key(|answer| environment::parse_time(&answer.ingested_at).unwrap());
+        for (index, answer) in answers.into_iter().enumerate() {
+            answer.ingested_at = (end + time::Duration::seconds(index as i64 + 1))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap();
         }
         fs::write(&run.state, state_bytes(&state).unwrap()).unwrap();
         let output = step(&run.state, &[]).unwrap();

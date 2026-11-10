@@ -273,13 +273,15 @@ fn finish(
                 || evidence.starts_with("record-kind facet truncated ("))
         {
             let message = format!("{key}: {evidence}");
-            result
-                .diagnostics
-                .push(if context.accept_mixed_record_kinds {
-                    Diagnostic::warning("CQL_RECORD_KIND_AMBIGUOUS", message)
-                } else {
-                    Diagnostic::error("CQL_RECORD_KIND_AMBIGUOUS", message)
-                });
+            result.diagnostics.push(if !context.require_observed {
+                let mut notice = Diagnostic::error("CQL_RECORD_KIND_NOTICE", message);
+                notice.severity = Severity::Info;
+                notice
+            } else if context.accept_mixed_record_kinds {
+                Diagnostic::warning("CQL_RECORD_KIND_AMBIGUOUS", message)
+            } else {
+                Diagnostic::error("CQL_RECORD_KIND_AMBIGUOUS", message)
+            });
         }
     }
     if result.outcome == Outcome::Ready && emit_query {
@@ -2025,7 +2027,14 @@ fn record_kind_gaps(
             continue;
         }
         let visible = values.into_iter().collect::<Vec<_>>().join(", ");
-        let guidance = if field == "#event.dataset" && state.scope.event.is_some() {
+        let guidance = if !context.require_observed
+            && field == "#event.dataset"
+            && state.scope.event.is_some()
+        {
+            "the exact #event_simpleName selector does not establish #event.dataset; this query can include these kinds; add an exact #event.dataset filter or group by #event.dataset when you need separate results"
+        } else if !context.require_observed {
+            "this query can include these kinds; filter or group by the kind field when you need separate results"
+        } else if field == "#event.dataset" && state.scope.event.is_some() {
             "the exact #event_simpleName selector does not establish #event.dataset; add an exact #event.dataset filter, group by #event.dataset, or explicitly accept mixed record kinds with accept_mixed_record_kinds"
         } else {
             "constrain one, group by it, or set accept_mixed_record_kinds"
@@ -2064,7 +2073,7 @@ fn record_kind_gaps(
         for id in ids {
             let key = format!("{id}:@record-kind");
             record_basis(g, key.clone(), message.clone());
-            if !context.accept_mixed_record_kinds {
+            if context.require_observed && !context.accept_mixed_record_kinds {
                 g.missing.push(format!("{key}: {message}"));
             }
         }
@@ -2355,6 +2364,10 @@ fn ground(
                 "observed in a bounded sample".into()
             } else if !source_observed {
                 "source has no current observed evidence".into()
+            } else if f.evidence_kind == "documented"
+                && f.coverage.as_ref().is_none_or(|c| c.observed.is_none())
+            {
+                "listed field namespace; population not measured".into()
             } else if !field_observed {
                 "not observed in the selected sample".into()
             } else {
@@ -2479,6 +2492,7 @@ fn query_observation_basis(
         let mut provenance_ids = BTreeSet::new();
         let mut windows = Vec::new();
         let mut contradicted = false;
+        let mut snapshot_bound = false;
         for source in &sources {
             let source_fields = fields
                 .iter()
@@ -2495,39 +2509,51 @@ fn query_observation_basis(
                     selectors.sourcetype.clone(),
                 ));
             }
+            let source_evidence = observation(pack, &source.provenance_ids);
             let source_negative = source.inventory_status == "stale"
                 || source
                     .evidence
                     .as_ref()
                     .and_then(|evidence| evidence.observed)
                     == Some(false)
-                || observation(pack, &source.provenance_ids) == Observation::Stale;
-            let field_negative = source_fields.iter().any(|field| {
-                field.refresh_status.as_deref() == Some("not-reobserved")
-                    || field
-                        .coverage
-                        .as_ref()
-                        .and_then(|coverage| coverage.observed)
-                        == Some(false)
-                    || observation(pack, &field.provenance_ids) == Observation::Stale
-            });
-            let measured_absent = source_fields.is_empty()
+                || source_evidence == Observation::Stale;
+            let negative_fields = source_fields
+                .into_iter()
+                .filter(|field| {
+                    field.refresh_status.as_deref() == Some("not-reobserved")
+                        || field
+                            .coverage
+                            .as_ref()
+                            .and_then(|coverage| coverage.observed)
+                            == Some(false)
+                        || observation(pack, &field.provenance_ids) == Observation::Stale
+                })
+                .collect::<Vec<_>>();
+            let measured_absent = !fields.iter().any(|field| field.source_id == source.id)
                 && source.evidence.as_ref().is_some_and(|evidence| {
                     evidence
                         .measured_fields
                         .as_ref()
                         .is_some_and(|fields| fields.iter().any(|field| field == &r.field))
                 });
-            if source_negative || field_negative || measured_absent {
+            if source_negative || !negative_fields.is_empty() || measured_absent {
                 contradicted = true;
-                provenance_ids.extend(source.provenance_ids.iter().cloned());
-                windows.extend(
-                    source
-                        .evidence
-                        .as_ref()
-                        .and_then(|evidence| evidence.observation_window.clone()),
-                );
-                for field in source_fields {
+                if source_negative || measured_absent {
+                    snapshot_bound |= source.inventory_status == "stale"
+                        || environment::linked_stale(pack, &source.provenance_ids)
+                        || environment::source_measurement(pack, source).is_none();
+                    provenance_ids.extend(source.provenance_ids.iter().cloned());
+                    windows.extend(
+                        source
+                            .evidence
+                            .as_ref()
+                            .and_then(|evidence| evidence.observation_window.clone()),
+                    );
+                }
+                for field in negative_fields {
+                    snapshot_bound |= field.refresh_status.as_deref() == Some("not-reobserved")
+                        || environment::linked_stale(pack, &field.provenance_ids)
+                        || environment::field_measurement(pack, field).is_none();
                     provenance_ids.extend(field.provenance_ids.iter().cloned());
                     windows.extend(field.observation_window.clone());
                 }
@@ -2537,7 +2563,7 @@ fn query_observation_basis(
             active_contradiction |= evidence
                 .active_pack
                 .is_some_and(|active| active.content_digest == pack.content_digest);
-            contradictions.push((pack, provenance_ids, windows));
+            contradictions.push((pack, provenance_ids, windows, snapshot_bound));
         }
     }
     if namespaces.len() > 1 {
@@ -2560,9 +2586,12 @@ fn query_observation_basis(
             continue;
         };
         matching = true;
-        if contradictions.iter().all(|(pack, ids, windows)| {
-            measurement_precedes_observation(pack, ids, windows, observation)
-        }) {
+        if contradictions
+            .iter()
+            .all(|(pack, ids, windows, snapshot_bound)| {
+                measurement_precedes_observation(pack, ids, windows, *snapshot_bound, observation)
+            })
+        {
             return Ok(Some(format!(
                 "caller-attested query observation; id={}; positive_rows={}; retrieved_at={}; observation_window={}/{}",
                 observation.id,
@@ -2584,17 +2613,18 @@ fn measurement_precedes_observation(
     pack: &Pack,
     ids: &BTreeSet<String>,
     windows: &[String],
+    snapshot_bound: bool,
     observation: &QueryObservation,
 ) -> bool {
     let Ok(start) = environment::parse_time(&observation.start) else {
         return false;
     };
-    let Some(created) = environment::parse_time(&pack.created_at)
-        .ok()
-        .filter(|created| *created < start)
-    else {
+    let Ok(created) = environment::parse_time(&pack.created_at) else {
         return false;
     };
+    if snapshot_bound && created >= start {
+        return false;
+    }
     let window_before = |window: &str, before| {
         window.split_once('/').is_some_and(|(from, to)| {
             matches!((environment::parse_time(from), environment::parse_time(to)), (Ok(from), Ok(to)) if from < to && to <= before)
@@ -2621,6 +2651,7 @@ fn measurement_precedes_observation(
             return false;
         };
         if retrieved > created
+            || retrieved >= start
             || provenance["observation_window"]
                 .as_str()
                 .is_some_and(|window| !window_before(window, retrieved))

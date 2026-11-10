@@ -358,6 +358,159 @@ pub(crate) fn observation(pack: &Pack, ids: &[String]) -> Observation {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FieldMeasurement {
+    pub start: time::OffsetDateTime,
+    pub end: time::OffsetDateTime,
+    pub retrieved_at: time::OffsetDateTime,
+    pub observed: bool,
+    pub rate: Option<f64>,
+}
+
+impl FieldMeasurement {
+    pub(crate) fn key(
+        self,
+    ) -> (
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+    ) {
+        (self.end, self.start, self.retrieved_at)
+    }
+}
+
+fn deployment_provenance(value: &Value) -> bool {
+    matches!(
+        value["source_type"].as_str(),
+        Some("ngsiem-api" | "mcp-observation" | "console-export")
+    )
+}
+
+pub(crate) fn linked_stale(pack: &Pack, ids: &[String]) -> bool {
+    pack.data.provenance.iter().any(|value| {
+        deployment_provenance(value)
+            && value["coverage_status"] == "stale"
+            && ids.iter().any(|id| value["id"] == *id)
+    })
+}
+
+fn measurement_key(
+    pack: &Pack,
+    provenance_ids: &[String],
+    window: &str,
+) -> Option<(
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+)> {
+    let (start, end) = window.split_once('/')?;
+    let start = parse_time(start).ok()?;
+    let end = parse_time(end).ok()?;
+    let created = parse_time(&pack.created_at).ok()?;
+    if start >= end {
+        return None;
+    }
+    let retrieved = pack
+        .data
+        .provenance
+        .iter()
+        .filter(|value| {
+            deployment_provenance(value)
+                && provenance_ids.iter().any(|id| value["id"] == *id)
+                && matches!(
+                    value["coverage_status"].as_str(),
+                    Some("complete" | "observed-only" | "reconciled")
+                )
+                && value["observation_window"].as_str() == Some(window)
+        })
+        .filter_map(|value| parse_time(value["retrieved_at"].as_str()?).ok())
+        .filter(|retrieved| end <= *retrieved && *retrieved <= created)
+        .max()?;
+    Some((end, start, retrieved))
+}
+
+pub(crate) fn source_measurement(
+    pack: &Pack,
+    source: &LegacySource,
+) -> Option<(
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+)> {
+    let evidence = source.evidence.as_ref()?;
+    evidence.observed?;
+    measurement_key(
+        pack,
+        &source.provenance_ids,
+        evidence.observation_window.as_deref()?,
+    )
+}
+
+pub(crate) fn field_measurement(pack: &Pack, field: &LegacyField) -> Option<FieldMeasurement> {
+    if field.evidence_kind != "observed"
+        || field.refresh_status.is_some()
+        || linked_stale(pack, &field.provenance_ids)
+        || field.is_tag.is_none()
+        || field.path.starts_with('#') && field.is_tag == Some(false)
+    {
+        return None;
+    }
+    let observed = field.coverage.as_ref()?.observed?;
+    let source = source(
+        pack.data
+            .sources
+            .iter()
+            .find(|value| value["id"] == field.source_id)?,
+    )
+    .ok()?;
+    let selectors = source.selectors?;
+    if !selectors
+        .repo
+        .as_ref()
+        .is_some_and(|value| required_text(value))
+        && !selectors
+            .type_
+            .as_ref()
+            .is_some_and(|value| required_text(value))
+    {
+        return None;
+    }
+    let (end, start, retrieved_at) = measurement_key(
+        pack,
+        &field.provenance_ids,
+        field.observation_window.as_deref()?,
+    )?;
+    Some(FieldMeasurement {
+        start,
+        end,
+        retrieved_at,
+        observed,
+        rate: field.coverage.as_ref().and_then(|coverage| coverage.rate),
+    })
+}
+
+fn compatible_field_decisions(left: &LegacyField, right: &LegacyField) -> bool {
+    let decision = |field: &LegacyField| {
+        if field.refresh_status.is_some() {
+            Some(false)
+        } else {
+            field
+                .coverage
+                .as_ref()
+                .and_then(|coverage| coverage.observed)
+        }
+    };
+    let rates = left
+        .coverage
+        .as_ref()
+        .and_then(|coverage| coverage.rate)
+        .zip(right.coverage.as_ref().and_then(|coverage| coverage.rate));
+    decision(left)
+        .zip(decision(right))
+        .is_none_or(|(a, b)| a == b)
+        && rates.is_none_or(|(a, b)| a == b)
+}
+
 fn typed<T: serde::de::DeserializeOwned>(v: &Value, kind: &str) -> Result<T, Diagnostic> {
     serde_json::from_value(v.clone())
         .map_err(|e| Diagnostic::error("PACK_RECORD", format!("Invalid {kind} structure: {e}")))
@@ -740,6 +893,55 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
         }
         if let Some(index) = previous {
             let prior = data.sources[index].clone();
+            let retained = source(&prior)?;
+            let old_selectors = retained.selectors.clone().unwrap_or_default();
+            if (
+                &old_selectors.repo,
+                &old_selectors.type_,
+                &old_selectors.event_family,
+                &old_selectors.sourcetype,
+            ) != (
+                &selector.repo,
+                &selector.type_,
+                &selector.event_family,
+                &selector.sourcetype,
+            ) {
+                return Err(invalid(&format!(
+                    "Source selector restrictions differ for source {}; a broad measurement cannot replace narrower source evidence.",
+                    retained.id
+                )));
+            }
+            let stale =
+                retained.inventory_status == "stale" || linked_stale(old, &retained.provenance_ids);
+            let negative = stale
+                || retained
+                    .evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.observed)
+                    == Some(false);
+            let retained_measurement = source_measurement(old, &retained);
+            let incoming_source = source_measurement(candidate, &f);
+            let ordered_source = if stale || negative && retained_measurement.is_none() {
+                incoming_source.is_some_and(|(_, start, _)| {
+                    parse_time(&old.created_at).is_ok_and(|created| start > created)
+                })
+            } else {
+                retained_measurement
+                    .zip(incoming_source)
+                    .is_some_and(|(previous, incoming)| incoming > previous)
+            };
+            let preserve_source_negative = negative
+                && f.evidence.as_ref().and_then(|evidence| evidence.observed) == Some(false)
+                && !ordered_source;
+            if negative
+                && f.evidence.as_ref().and_then(|evidence| evidence.observed) != Some(false)
+                && !ordered_source
+            {
+                return Err(invalid(&format!(
+                    "Source measurement ordering conflict for source {}: positive or unknown source evidence cannot replace current negative evidence without a newer qualifying measurement.",
+                    retained.id
+                )));
+            }
             let old_id = id(&prior).to_string();
             let new_id = f.id.clone();
             replaced.insert(old_id.clone(), new_id.clone());
@@ -815,7 +1017,12 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                 .cloned()
                 .unwrap_or_default();
             for p in prior["provenance_ids"].as_array().into_iter().flatten() {
-                if !evidence.contains(p) {
+                if !evidence.contains(p)
+                    && !data
+                        .provenance
+                        .iter()
+                        .any(|value| value["id"] == *p && deployment_provenance(value))
+                {
                     evidence.push(p.clone());
                 }
             }
@@ -825,6 +1032,11 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     if let Some(v) = selectors.get(key) {
                         merged["selectors"][key] = v.clone();
                     }
+                }
+            }
+            if preserve_source_negative {
+                for key in ["evidence", "inventory_status", "provenance_ids"] {
+                    merged[key] = prior[key].clone();
                 }
             }
             data.sources[index] = merged;
@@ -849,13 +1061,16 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     == fresh.is_tag.unwrap_or(false)
         }) {
             field_ids.insert(fresh.id.clone(), id(prior).to_string());
+            let retained = field(prior)?;
+            let incoming_measurement = field_measurement(candidate, &fresh);
+            let retained_measurement = field_measurement(old, &retained);
             if let Some(batch) = field_batches.get(&source_id) {
                 let name = if fresh.is_tag == Some(true) {
                     format!("#{}", fresh.path)
                 } else {
                     fresh.path.clone()
                 };
-                if !batch.contains(&name) {
+                if !batch.contains(&name) && incoming_measurement.is_none() {
                     *f = prior.clone();
                     continue;
                 }
@@ -864,9 +1079,83 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     .as_ref()
                     .and_then(|coverage| coverage.observed)
                     .unwrap_or(fresh.evidence_kind == "observed");
-                if !observed {
+                if !observed && incoming_measurement.is_none() {
                     f["refresh_status"] = Value::String("not-reobserved".into());
                 }
+            }
+            if fresh
+                .coverage
+                .as_ref()
+                .is_none_or(|coverage| coverage.observed.is_none())
+            {
+                *f = prior.clone();
+                continue;
+            }
+            let retained_negative = retained.refresh_status.is_some()
+                || linked_stale(old, &retained.provenance_ids)
+                || retained
+                    .coverage
+                    .as_ref()
+                    .and_then(|coverage| coverage.observed)
+                    == Some(false);
+            let after_undated_negative = retained_measurement.is_none()
+                && retained_negative
+                && incoming_measurement.is_some_and(|measurement| {
+                    parse_time(&old.created_at).is_ok_and(|created| measurement.start > created)
+                });
+            if retained_measurement.is_none() && retained_negative && !after_undated_negative {
+                let incoming_negative = fresh
+                    .coverage
+                    .as_ref()
+                    .and_then(|coverage| coverage.observed)
+                    == Some(false);
+                let compatible_rate = retained
+                    .coverage
+                    .as_ref()
+                    .and_then(|coverage| coverage.rate)
+                    .zip(fresh.coverage.as_ref().and_then(|coverage| coverage.rate))
+                    .is_none_or(|(previous, incoming)| previous == incoming);
+                if !incoming_negative || !compatible_rate {
+                    return Err(invalid(&format!(
+                        "Field measurement ordering conflict for source {} field {}: contradictory evidence has no orderable measurement after the retained negative snapshot boundary.",
+                        source_id, fresh.path
+                    )));
+                }
+                *f = prior.clone();
+                continue;
+            }
+            let compatible = retained_measurement.zip(incoming_measurement).map_or_else(
+                || compatible_field_decisions(&retained, &fresh),
+                |(previous, incoming)| {
+                    previous.observed == incoming.observed
+                        && previous.rate.zip(incoming.rate).is_none_or(|(a, b)| a == b)
+                },
+            ) && !(retained_negative
+                && incoming_measurement.is_some_and(|measurement| measurement.observed));
+            match (retained_measurement, incoming_measurement) {
+                (Some(previous), Some(incoming)) if incoming.key() <= previous.key() => {
+                    if !compatible {
+                        return Err(invalid(&format!(
+                            "Field measurement ordering conflict for source {} field {}: an older or tied contradictory measurement cannot replace current evidence.",
+                            source_id, fresh.path
+                        )));
+                    }
+                    *f = prior.clone();
+                    continue;
+                }
+                (Some(_), None) | (None, Some(_)) | (None, None)
+                    if !compatible && !after_undated_negative =>
+                {
+                    return Err(invalid(&format!(
+                        "Field measurement ordering conflict for source {} field {}: contradictory evidence has no orderable current measurement.",
+                        source_id, fresh.path
+                    )));
+                }
+                (Some(_), None) => {
+                    *f = prior.clone();
+                    continue;
+                }
+                _ => {}
             }
             f["id"] = Value::String(id(prior).into());
             for key in ["schema_variant", "retained_context"] {
@@ -901,7 +1190,12 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
             }
             let mut evidence = f["provenance_ids"].as_array().cloned().unwrap_or_default();
             for p in prior["provenance_ids"].as_array().into_iter().flatten() {
-                if !evidence.contains(p) {
+                if !evidence.contains(p)
+                    && !data
+                        .provenance
+                        .iter()
+                        .any(|value| value["id"] == *p && deployment_provenance(value))
+                {
                     evidence.push(p.clone());
                 }
             }

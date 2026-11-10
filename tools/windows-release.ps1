@@ -199,7 +199,7 @@ if "%~1"=="--version" (
         $null = $stderr.GetAwaiter().GetResult()
         return $stdout.GetAwaiter().GetResult()
     }
-    if ((Invoke-Cli @('--version')).Trim() -ne 'cqlmatic 0.1.3') { throw 'Unexpected CLI version.' }
+    if ((Invoke-Cli @('--version')).Trim() -ne 'cqlmatic 0.1.4') { throw 'Unexpected CLI version.' }
     $generated = Invoke-Cli @('generate', '--request', 'examples/generate.request.json', '--json') | ConvertFrom-Json
     if ($generated.outcome -ne 'ready') { throw 'Synthetic generation was not ready.' }
     foreach ($schema in @('generate', 'check', 'pack', 'discovery', 'result', 'assess', 'setup', 'inventory', 'status')) {

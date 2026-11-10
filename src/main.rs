@@ -93,7 +93,7 @@ struct Common {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Quick inventory state; defaults to the local inventory state"
+        help = "Saved inventory state; defaults to the local inventory state"
     )]
     inventory_state: Option<PathBuf>,
     #[arg(
@@ -174,6 +174,12 @@ struct AssessArgs {
         help = "Optional local environment snapshot; never triggers discovery"
     )]
     pack: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Saved inventory state; defaults to the local inventory state"
+    )]
+    inventory_state: Option<PathBuf>,
     #[arg(long, value_name = "FILE", help = "Full v1 AssessRequest JSON")]
     request: Option<PathBuf>,
     #[arg(
@@ -473,85 +479,125 @@ fn pack(common: &Common) -> Result<Option<Pack>, Diagnostic> {
     common.pack.as_deref().map(storage::read_pack).transpose()
 }
 
-struct QuickInventory {
+struct SavedInventory {
     path: PathBuf,
     state: InventoryState,
     active_pack: Option<Pack>,
 }
 
-fn quick_inventory(common: &Common) -> Result<Option<QuickInventory>, Diagnostic> {
-    let path = if let Some(path) = &common.inventory_state {
+fn select_inventory(
+    selected_path: Option<&Path>,
+    context: &mut Context,
+    pack: Option<&Pack>,
+) -> Result<(Option<SavedInventory>, bool), Diagnostic> {
+    let path = if let Some(path) = selected_path {
         std::path::absolute(path)
-            .map_err(|_| input_error("Cannot resolve Quick inventory state path."))?
+            .map_err(|_| input_error("Cannot resolve inventory state path."))?
     } else {
         inventory_cli::default_state_path()?
     };
-    if !path
-        .try_exists()
-        .map_err(|_| input_error("Cannot inspect Quick inventory state."))?
-    {
-        return if common.inventory_state.is_some() {
-            Err(input_error(
-                "Selected Quick inventory state does not exist.",
-            ))
+    if !setup_cli::private_input_exists(&path)? {
+        return if selected_path.is_some() {
+            Err(input_error("Selected inventory state does not exist."))
         } else {
-            Ok(None)
+            Ok((None, false))
         };
     }
-    load_quick_inventory(&path)
-}
-
-fn load_quick_inventory(path: &Path) -> Result<Option<QuickInventory>, Diagnostic> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| input_error("Quick inventory state needs a parent directory."))?;
-    setup_cli::protect_directory(parent)?;
-    setup_cli::verify_private_file(path)?;
-    let data = storage::read_bytes(path, inventory::MAX_STATE_BYTES)?;
-    let state: InventoryState = serde_json::from_slice(&data)
-        .map_err(|_| input_error("Quick inventory state is invalid JSON."))?;
-    state.validate()?;
-    if state.discovery_mode != DiscoveryMode::Quick && state.target.is_none() {
-        return Ok(None);
-    }
-    let target = state.target.as_ref().ok_or_else(|| {
-        input_error("Confirm a Quick inventory target before capturing query leads.")
-    })?;
+    let data = storage::read_bytes(&path, inventory::MAX_STATE_BYTES)?;
+    let state = match parse_inventory_state(&data) {
+        Ok(state) => state,
+        Err(d) if selected_path.is_none() && pack.is_some() => {
+            return Err(Diagnostic::warning(
+                "CQL_QUICK_INVENTORY_IGNORED",
+                format!(
+                    "Default inventory is invalid and was ignored; the explicit pack was used: {}",
+                    d.message
+                ),
+            ));
+        }
+        Err(d) => return Err(d),
+    };
     if state.active_pack.is_none() && !state.packs.is_empty() {
         return Err(input_error(
-            "Quick inventory has retained packs but no active pack for evidence checks.",
+            "Inventory has retained packs but no active pack for evidence checks.",
         ));
     }
-    let active_pack = state
+    if state.target.is_none() {
+        if !state.unverified_leads.is_empty()
+            || !state.query_observations.is_empty()
+            || state.scout_plan.is_some()
+            || !state.scouting.is_empty()
+            || !state.sources.is_empty()
+            || !state.parser_pages.is_empty()
+            || !state.parsers.is_empty()
+            || !state.parser_exclusions.is_empty()
+            || !state.packs.is_empty()
+            || !state.discovery_runs.is_empty()
+            || !state.parser_runs.is_empty()
+            || !state.failures.is_empty()
+            || state.reconciled_evidence_sha256.is_some()
+            || state.reconciled_at.is_some()
+        {
+            return Err(input_error(
+                "Inventory evidence requires a confirmed target.",
+            ));
+        }
+        return Ok((None, false));
+    }
+    let mut quick = SavedInventory {
+        path,
+        state,
+        active_pack: None,
+    };
+    let target_applied = apply_inventory_target(context, pack, &quick)?;
+    quick.active_pack = load_active_pack(&quick.state)?;
+    Ok((Some(quick), target_applied))
+}
+
+fn read_inventory_state(path: &Path) -> Result<InventoryState, Diagnostic> {
+    let data = storage::read_bytes(path, inventory::MAX_STATE_BYTES)?;
+    parse_inventory_state(&data)
+}
+
+fn parse_inventory_state(data: &[u8]) -> Result<InventoryState, Diagnostic> {
+    let state: InventoryState = serde_json::from_slice(data)
+        .map_err(|_| input_error("Inventory state is invalid JSON."))?;
+    state.validate()?;
+    Ok(state)
+}
+
+fn load_active_pack(state: &InventoryState) -> Result<Option<Pack>, Diagnostic> {
+    if state.active_pack.is_none() && !state.packs.is_empty() {
+        return Err(input_error(
+            "Inventory has retained packs but no active pack for evidence checks.",
+        ));
+    }
+    state
         .active_pack
         .as_ref()
         .map(|reference| {
             let file = Path::new(&reference.path);
-            let parent = file
-                .parent()
-                .ok_or_else(|| input_error("Active pack needs a parent directory."))?;
-            setup_cli::protect_directory(parent)?;
-            setup_cli::verify_private_file(file)?;
+            if !setup_cli::private_input_exists(file)? {
+                return Err(input_error("Active inventory pack does not exist."));
+            }
             let pack = storage::read_pack(file)?;
             if pack.content_digest != reference.content_digest
-                || pack.environment != target.environment
+                || state
+                    .target
+                    .as_ref()
+                    .is_none_or(|target| pack.environment != target.environment)
             {
                 return Err(input_error(
-                    "Active Quick pack differs from its protected inventory reference.",
+                    "Active pack differs from its protected inventory reference.",
                 ));
             }
             Ok(pack)
         })
-        .transpose()?;
-    Ok(Some(QuickInventory {
-        path: path.to_path_buf(),
-        state,
-        active_pack,
-    }))
+        .transpose()
 }
 
 fn save_quick_leads(
-    quick: &QuickInventory,
+    quick: &SavedInventory,
     leads: Vec<UnverifiedFieldLead>,
 ) -> Result<usize, Diagnostic> {
     if leads.is_empty() {
@@ -563,21 +609,18 @@ fn save_quick_leads(
         .ok_or_else(|| input_error("Quick inventory state needs a parent directory."))?;
     setup_cli::protect_directory(parent)?;
     let writer = storage::Writer::acquire(&quick.path)?;
-    let Some(mut current) = load_quick_inventory(&quick.path)? else {
+    if !setup_cli::private_input_exists(&quick.path)? {
         return Err(input_error(
-            "Quick inventory mode changed before leads could be saved.",
+            "Quick inventory disappeared before leads could be saved.",
         ));
-    };
-    if current.state.discovery_mode != DiscoveryMode::Quick {
+    }
+    let mut current = read_inventory_state(&quick.path)?;
+    if current.discovery_mode != DiscoveryMode::Quick {
         return Err(input_error(
             "Quick inventory mode changed before leads could be saved.",
         ));
     }
-    if current
-        .state
-        .target
-        .as_ref()
-        .map(|target| &target.environment)
+    if current.target.as_ref().map(|target| &target.environment)
         != quick
             .state
             .target
@@ -588,35 +631,36 @@ fn save_quick_leads(
             "Quick inventory target changed before leads could be saved.",
         ));
     }
-    let before = current.state.unverified_leads.len();
-    current.state.add_unverified_leads(leads)?;
-    let added = current.state.unverified_leads.len() - before;
+    load_active_pack(&current)?;
+    let before = current.unverified_leads.len();
+    current.add_unverified_leads(leads)?;
+    let added = current.unverified_leads.len() - before;
     if added == 0 {
         return Ok(0);
     }
-    current.state.schema_version = 2;
-    current.state.updated_at = discovery::timestamp();
-    current.state.validate()?;
+    current.schema_version = 2;
+    current.updated_at = discovery::timestamp();
+    current.validate()?;
     setup_cli::protect_directory(parent)?;
     writer.commit_bytes(
-        &serde_json::to_vec_pretty(&current.state)
+        &serde_json::to_vec_pretty(&current)
             .map_err(|_| input_error("Cannot serialize Quick inventory state."))?,
         inventory::MAX_STATE_BYTES,
     )?;
     Ok(added)
 }
 
-fn quick_info(code: &str, message: impl Into<String>) -> Diagnostic {
+fn inventory_info(code: &str, message: impl Into<String>) -> Diagnostic {
     let mut diagnostic = Diagnostic::error(code, message);
     diagnostic.severity = Severity::Info;
     diagnostic
 }
 
-fn quick_target(
+fn apply_inventory_target(
     context: &mut Context,
     pack: Option<&Pack>,
-    quick: &QuickInventory,
-) -> Result<(bool, bool), Diagnostic> {
+    quick: &SavedInventory,
+) -> Result<bool, Diagnostic> {
     let target = &quick
         .state
         .target
@@ -628,23 +672,20 @@ fn quick_target(
     {
         return Err(Diagnostic::warning(
             "CQL_QUICK_TARGET_MISMATCH",
-            "Quick inventory target differs from the explicit request or pack; no Quick evidence or query leads were applied.",
+            "Inventory target differs from the explicit request or pack; no inventory evidence or query leads were applied.",
         ));
     }
-    if quick.state.discovery_mode == DiscoveryMode::Full {
-        return Ok((false, context.environment.is_some() || pack.is_some()));
-    }
-    if context.environment.is_none() && pack.is_none() {
+    if context.environment.is_none() {
         context.environment = Some(target.clone());
-        Ok((true, true))
+        Ok(true)
     } else {
-        Ok((false, true))
+        Ok(false)
     }
 }
 
-fn quick_result(
+fn inventory_result(
     mut result: Analysis,
-    quick: Option<&QuickInventory>,
+    quick: Option<&SavedInventory>,
     target_applied: bool,
     capture_leads: bool,
     notice: Option<Diagnostic>,
@@ -657,25 +698,22 @@ fn quick_result(
             .as_ref()
             .expect("Quick inventory has a confirmed target")
             .environment;
-        result.diagnostics.push(quick_info(
+        result.diagnostics.push(inventory_info(
             "CQL_QUICK_TARGET",
             format!(
-                "Confirmed Quick inventory target supplied: {}.",
+                "Confirmed inventory target supplied: {}.",
                 serde_json::to_string(target).expect("environment identity serializes")
             ),
         ));
     }
-    if let Some(mut notice) = notice {
-        if notice.code == "CQL_QUICK_INVENTORY" && result.grounding.policy.require_observed {
-            notice.severity = Severity::Error;
-            if result.validation.status == Acceptance::Accepted {
-                result.outcome = Outcome::NeedsContext;
-                result.query = None;
-                result.grounding.conflicting.push(
-                    "Selected inventory state or active evidence is unavailable for strict grounding."
-                        .into(),
-                );
-            }
+    if let Some(notice) = notice {
+        if notice.severity == Severity::Error && result.validation.status == Acceptance::Accepted {
+            result.outcome = Outcome::NeedsContext;
+            result.query = None;
+            result
+                .grounding
+                .conflicting
+                .push("Selected inventory state or active evidence is unavailable.".into());
         }
         result.diagnostics.push(notice);
         return result;
@@ -691,7 +729,7 @@ fn quick_result(
     };
     match app::unverified_leads(&query).and_then(|leads| save_quick_leads(quick, leads)) {
         Ok(0) => {}
-        Ok(added) => result.diagnostics.push(quick_info(
+        Ok(added) => result.diagnostics.push(inventory_info(
             "CQL_QUICK_LEADS",
             format!("Saved {added} unverified source/field lead(s) in Quick inventory."),
         )),
@@ -703,47 +741,43 @@ fn quick_result(
     result
 }
 
+fn inventory_notice(diagnostic: Diagnostic) -> Diagnostic {
+    if diagnostic.severity == Severity::Warning {
+        diagnostic
+    } else {
+        Diagnostic::error(
+            "CQL_QUICK_INVENTORY",
+            format!("Inventory unavailable: {}", diagnostic.message),
+        )
+    }
+}
+
 fn analyze_generate(
     mut request: GenerateRequest,
     common: &Common,
     pack: Option<&Pack>,
 ) -> Analysis {
     request.context = context(request.context, common);
-    let (quick, mut notice) = match quick_inventory(common) {
-        Ok(quick) => (quick, None),
-        Err(d) => (
-            None,
-            Some(Diagnostic::warning(
-                "CQL_QUICK_INVENTORY",
-                format!("Quick inventory unavailable: {}", d.message),
-            )),
-        ),
+    let (quick, target_applied, notice) = match select_inventory(
+        common.inventory_state.as_deref(),
+        &mut request.context,
+        pack,
+    ) {
+        Ok((quick, applied)) => (quick, applied, None),
+        Err(d) => (None, false, Some(inventory_notice(d))),
     };
-    let mut target_applied = false;
-    let mut use_evidence = false;
-    if let Some(quick) = &quick {
-        match quick_target(&mut request.context, pack, quick) {
-            Ok((applied, evidence)) => {
-                target_applied = applied;
-                use_evidence = evidence;
-            }
-            Err(d) => notice = Some(d),
-        }
-    }
-    let evidence = quick
-        .as_ref()
-        .filter(|_| use_evidence && notice.is_none())
-        .map(|quick| app::GroundingEvidence {
-            environment: &quick
-                .state
-                .target
-                .as_ref()
-                .expect("confirmed target")
-                .environment,
-            active_pack: quick.active_pack.as_ref(),
-            query_observations: &quick.state.query_observations,
-        });
-    let result = app::generate_with_evidence(request, pack, evidence);
+    let evidence = quick.as_ref().map(|quick| app::GroundingEvidence {
+        environment: &quick
+            .state
+            .target
+            .as_ref()
+            .expect("confirmed target")
+            .environment,
+        active_pack: quick.active_pack.as_ref(),
+        query_observations: &quick.state.query_observations,
+    });
+    let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
+    let result = app::generate_with_evidence(request, primary, evidence);
     let query = result.query.clone().or_else(|| {
         result.interpretation.plan.as_ref().and_then(|plan| {
             cqlmatic::language::plan::lower(plan)
@@ -751,14 +785,13 @@ fn analyze_generate(
                 .map(|pipeline| pipeline.render())
         })
     });
-    quick_result(
+    inventory_result(
         result,
         quick.as_ref(),
         target_applied,
-        use_evidence
-            && quick
-                .as_ref()
-                .is_some_and(|quick| quick.state.discovery_mode == DiscoveryMode::Quick),
+        quick
+            .as_ref()
+            .is_some_and(|quick| quick.state.discovery_mode == DiscoveryMode::Quick),
         notice,
         query,
     )
@@ -766,50 +799,34 @@ fn analyze_generate(
 
 fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>) -> Analysis {
     request.context = context(request.context, common);
-    let (quick, mut notice) = match quick_inventory(common) {
-        Ok(quick) => (quick, None),
-        Err(d) => (
-            None,
-            Some(Diagnostic::warning(
-                "CQL_QUICK_INVENTORY",
-                format!("Quick inventory unavailable: {}", d.message),
-            )),
-        ),
+    let (quick, target_applied, notice) = match select_inventory(
+        common.inventory_state.as_deref(),
+        &mut request.context,
+        pack,
+    ) {
+        Ok((quick, applied)) => (quick, applied, None),
+        Err(d) => (None, false, Some(inventory_notice(d))),
     };
-    let mut target_applied = false;
-    let mut use_evidence = false;
-    if let Some(quick) = &quick {
-        match quick_target(&mut request.context, pack, quick) {
-            Ok((applied, evidence)) => {
-                target_applied = applied;
-                use_evidence = evidence;
-            }
-            Err(d) => notice = Some(d),
-        }
-    }
-    let evidence = quick
-        .as_ref()
-        .filter(|_| use_evidence && notice.is_none())
-        .map(|quick| app::GroundingEvidence {
-            environment: &quick
-                .state
-                .target
-                .as_ref()
-                .expect("confirmed target")
-                .environment,
-            active_pack: quick.active_pack.as_ref(),
-            query_observations: &quick.state.query_observations,
-        });
+    let evidence = quick.as_ref().map(|quick| app::GroundingEvidence {
+        environment: &quick
+            .state
+            .target
+            .as_ref()
+            .expect("confirmed target")
+            .environment,
+        active_pack: quick.active_pack.as_ref(),
+        query_observations: &quick.state.query_observations,
+    });
     let query = request.query.clone();
-    let result = app::check_with_evidence(request, pack, evidence);
-    quick_result(
+    let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
+    let result = app::check_with_evidence(request, primary, evidence);
+    inventory_result(
         result,
         quick.as_ref(),
         target_applied,
-        use_evidence
-            && quick
-                .as_ref()
-                .is_some_and(|quick| quick.state.discovery_mode == DiscoveryMode::Quick),
+        quick
+            .as_ref()
+            .is_some_and(|quick| quick.state.discovery_mode == DiscoveryMode::Quick),
         notice,
         Some(query),
     )
@@ -1047,7 +1064,40 @@ fn parse_assess_request(raw: &[u8]) -> Result<AssessRequest, Diagnostic> {
     serde_json::from_slice(raw)
         .map_err(|e| Diagnostic::error("REQUEST_JSON", format!("Invalid request: {e}")))
 }
-fn assess_jsonl(pack: Option<&Pack>) -> Result<i32, Diagnostic> {
+fn analyze_assess(
+    mut request: AssessRequest,
+    args: &AssessArgs,
+    pack: Option<&Pack>,
+) -> AssessResult {
+    let (quick, target_applied, notice) =
+        match select_inventory(args.inventory_state.as_deref(), &mut request.context, pack) {
+            Ok((quick, applied)) => (quick, applied, None),
+            Err(d) => {
+                let notice = inventory_notice(d);
+                if notice.severity == Severity::Error {
+                    return failed_assessment(request.id, &request.query, notice);
+                }
+                (None, false, Some(notice))
+            }
+        };
+    let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
+    let mut result = assess::assess(request, primary);
+    if target_applied {
+        result.findings.push(inventory_info(
+            "CQL_QUICK_TARGET",
+            "Confirmed inventory supplied the otherwise unspecified assessment target.",
+        ));
+    }
+    if let Some(notice) = notice {
+        if result.outcome == AssessOutcome::NoFindings {
+            result.outcome = AssessOutcome::Advisory;
+        }
+        result.findings.push(notice);
+    }
+    result
+}
+
+fn assess_jsonl(args: &AssessArgs, pack: Option<&Pack>) -> Result<i32, Diagnostic> {
     let mut reader = io::stdin().lock();
     let mut exit = 0;
     let mut row = 0;
@@ -1066,7 +1116,7 @@ fn assess_jsonl(pack: Option<&Pack>) -> Result<i32, Diagnostic> {
             )
         } else {
             match parse_assess_request(&line) {
-                Ok(request) => assess::assess(request, pack),
+                Ok(request) => analyze_assess(request, args, pack),
                 Err(mut diagnostic) => {
                     diagnostic.message = format!("Line {row}: {}", diagnostic.message);
                     failed_assessment(None, "", diagnostic.at(&format!("/line/{row}")))
@@ -1093,17 +1143,17 @@ fn assess(args: AssessArgs) -> Result<i32, Diagnostic> {
     }
     let pack = args.pack.as_deref().map(storage::read_pack).transpose()?;
     if args.jsonl {
-        return assess_jsonl(pack.as_ref());
+        return assess_jsonl(&args, pack.as_ref());
     }
-    let result = if let Some(path) = args.request {
-        let raw = bytes(&path, MAX_REQUEST_BYTES)?;
-        assess::assess(parse_assess_request(&raw)?, pack.as_ref())
+    let result = if let Some(path) = &args.request {
+        let raw = bytes(path, MAX_REQUEST_BYTES)?;
+        analyze_assess(parse_assess_request(&raw)?, &args, pack.as_ref())
     } else {
-        let query = String::from_utf8(bytes(&args.query_file.unwrap(), MAX_REQUEST_BYTES)?)
+        let query = String::from_utf8(bytes(args.query_file.as_ref().unwrap(), MAX_REQUEST_BYTES)?)
             .map_err(|_| input_error("CQL must be UTF-8."))?;
-        let raw = bytes(&args.result.unwrap(), mcp::MAX_RESULT_BYTES)?;
+        let raw = bytes(args.result.as_ref().unwrap(), mcp::MAX_RESULT_BYTES)?;
         match mcp::parse_saved_result(&raw) {
-            Ok(result) => assess::assess(
+            Ok(result) => analyze_assess(
                 AssessRequest {
                     schema_version: 1,
                     id: None,
@@ -1111,6 +1161,7 @@ fn assess(args: AssessArgs) -> Result<i32, Diagnostic> {
                     result,
                     context: Context::default(),
                 },
+                &args,
                 pack.as_ref(),
             ),
             Err(diagnostic) if diagnostic.code == "MCP_TOO_LARGE" => {

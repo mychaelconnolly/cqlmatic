@@ -442,7 +442,7 @@ fn assess_schema_matches_bundled_contract() {
 }
 
 #[test]
-fn mixed_record_kind_flag_changes_generate_outcome_and_warning() {
+fn normal_mixed_record_kind_generate_reports_information_with_either_acceptance_setting() {
     let dir = TestDir::new();
     let pack = mixed_pack(&dir);
     let mut command = binary();
@@ -451,10 +451,10 @@ fn mixed_record_kind_flag_changes_generate_outcome_and_warning() {
         .arg("--pack")
         .arg(&pack)
         .arg("--json");
-    let blocked = result(&run(command, b""), 1);
-    assert_eq!(blocked["outcome"], "needs-context");
-    assert!(blocked["query"].is_null());
-    diagnostic(&blocked, "CQL_RECORD_KIND_AMBIGUOUS", "error");
+    let normal = result(&run(command, b""), 0);
+    assert_eq!(normal["outcome"], "ready");
+    assert!(normal["query"].as_str().is_some());
+    diagnostic(&normal, "CQL_RECORD_KIND_NOTICE", "info");
 
     let mut command = binary();
     command
@@ -465,35 +465,76 @@ fn mixed_record_kind_flag_changes_generate_outcome_and_warning() {
     let accepted = result(&run(command, b""), 0);
     assert_eq!(accepted["outcome"], "ready");
     assert!(accepted["query"].as_str().is_some());
-    diagnostic(&accepted, "CQL_RECORD_KIND_AMBIGUOUS", "warning");
+    diagnostic(&accepted, "CQL_RECORD_KIND_NOTICE", "info");
+
+    let mut command = binary();
+    command
+        .args(["generate", "--intent", "count events", "--repo", "fw_repo"])
+        .arg("--pack")
+        .arg(pack)
+        .args(["--fail-on-warning", "--json"]);
+    let informational = result(&run(command, b""), 0);
+    assert_eq!(informational["outcome"], "ready");
+    diagnostic(&informational, "CQL_RECORD_KIND_NOTICE", "info");
 }
 
 #[test]
 fn mixed_record_kind_flag_applies_to_check_and_request_modes() {
     let dir = TestDir::new();
     let pack = mixed_pack(&dir);
-    let query = dir.file("query.cql", "#repo=fw_repo | top(dst)");
-    let request = dir.file(
-        "request.json",
-        json!({"schema_version":1,"id":"check-request","query":"#repo=fw_repo | top(dst)"})
+    let query = dir.file("query.cql", "#repo=fw_repo | count()");
+    for strict in [false, true] {
+        let request = dir.file(
+            "request.json",
+            json!({"schema_version":1,"id":"check-request","query":"#repo=fw_repo | count()",
+                "context":{"require_observed":strict}})
             .to_string(),
-    );
-    for mode in [query, request] {
-        let flag = if mode.ends_with("query.cql") {
-            "--file"
-        } else {
-            "--request"
-        };
-        let mut command = binary();
-        command
-            .args(["check", flag])
-            .arg(mode)
-            .arg("--pack")
-            .arg(&pack)
-            .args(["--accept-mixed-record-kinds", "--json"]);
-        let row = result(&run(command, b""), 0);
-        assert_eq!(row["outcome"], "ready");
-        diagnostic(&row, "CQL_RECORD_KIND_AMBIGUOUS", "warning");
+        );
+        for (flag, mode) in [("--file", &query), ("--request", &request)] {
+            for accept in [false, true] {
+                let mut command = binary();
+                command
+                    .args(["check", flag])
+                    .arg(mode)
+                    .arg("--pack")
+                    .arg(&pack)
+                    .arg("--json");
+                if strict && flag == "--file" {
+                    command.arg("--require-observed");
+                }
+                if accept {
+                    command.arg("--accept-mixed-record-kinds");
+                }
+                if !strict {
+                    command.arg("--fail-on-warning");
+                }
+                let row = result(&run(command, b""), i32::from(strict && !accept));
+                assert_eq!(
+                    row["outcome"],
+                    if strict && !accept {
+                        "needs-context"
+                    } else {
+                        "ready"
+                    }
+                );
+                assert_eq!(row["grounding"]["policy"]["require_observed"], strict);
+                diagnostic(
+                    &row,
+                    if strict {
+                        "CQL_RECORD_KIND_AMBIGUOUS"
+                    } else {
+                        "CQL_RECORD_KIND_NOTICE"
+                    },
+                    if !strict {
+                        "info"
+                    } else if accept {
+                        "warning"
+                    } else {
+                        "error"
+                    },
+                );
+            }
+        }
     }
 }
 

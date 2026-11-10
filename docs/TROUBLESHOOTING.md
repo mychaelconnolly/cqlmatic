@@ -43,11 +43,16 @@ Generation emits CQL only when ready. Checking always returns `query:null`; reta
 | Symptom | Safe next action |
 | --- | --- |
 | `CQL_CONTEXT_REQUIRED` | Inspect `grounding.missing`, `conflicting`, `stale`, and especially `basis`. Identify the source/field/shape/provenance requirement rather than inferring it from the outcome word. |
-| `CQL_RECORD_KIND_AMBIGUOUS` | Select a measured exact kind value, use the applicable event selector, or group by kind before field-changing/aggregating stages. Only enable mixed-kind acceptance after explicit user permission. |
+| `CQL_RECORD_KIND_NOTICE` | Ordinary mixed/incompletely sampled kinds are informational. Continue query writing while reviewing whether the intended result needs separate kinds; the notice alone does not trigger `--fail-on-warning`. |
+| `CQL_RECORD_KIND_AMBIGUOUS` | Strict observed mode requires one measured exact kind value, the applicable event selector, or grouping by kind before field-changing/aggregating stages. Explicitly accepted strict mixing retains a warning and still triggers `--fail-on-warning`. |
+| `CQL_QUICK_TARGET` / `CQL_QUICK_TARGET_MISMATCH` | Full or Quick inventory supplied unspecified target context, or foreign inventory was skipped before opening its active snapshot. Explicit request/pack identities remain authoritative. |
+| `CQL_QUICK_INVENTORY` | Repair the explicitly selected state or matching active snapshot and its private storage. Missing/corrupt/unsafe active evidence blocks even ordinary mode and an older explicit pack. Read checks do not create missing directories. |
+| `CQL_QUICK_INVENTORY_IGNORED` | An invalid default inventory was ignored for a valid explicit pack. Inspect and repair the default separately; explicit malformed states and unsafe protected paths still fail closed. |
 | Confirmed field still fails strict mode | `confirmed_fields`, CPS/ECS names and parser declarations are not observations. Measure the exact source, tag/data namespace and required shape with qualifying provenance. |
 | Listed field does not satisfy strict grounding | A fieldset listing can be unmeasured or zero-population. Retained `not-reobserved` evidence is historical. Inspect population coverage and provenance rather than relabeling the record. |
 | Source-only query is ready without source evidence | Strict grounding requires observed deployment **fields**, not source availability; still confirm target/source/window independently. |
 | Snapshot appears old but no expiry error | There is no clock-based freshness cutoff. Review original dates/windows and refresh when ingestion, access, or parsers change. |
+| `PACK_INTEGRITY` measurement ordering conflict | Keep the previous pack and inspect actual source/field measurement windows and retrieval dates. A newer snapshot wrapper cannot promote contradictory older or unorderable field evidence. Retained negative or stale sources require a newer qualifying source measurement for recovery. For a stale or not-reobserved marker, or a negative without orderable proof, collect a qualifying new measurement whose window starts after the retained snapshot date. |
 | Nullable output/reused name needs incoming evidence | A transform may retain an existing value. Use an explicit intended projection/drop or fresh output name; do not assume every event was overwritten. |
 
 Full evidence rules are in [environment packs](ENVIRONMENT.md), and [inventory status](INVENTORY.md) distinguishes declared, measured, observed and historical work.

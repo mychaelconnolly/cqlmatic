@@ -72,48 +72,45 @@ fn ambiguity(result: &Analysis) -> &Diagnostic {
     result
         .diagnostics
         .iter()
-        .find(|diagnostic| diagnostic.code == "CQL_RECORD_KIND_AMBIGUOUS")
+        .find(|diagnostic| {
+            matches!(
+                diagnostic.code.as_str(),
+                "CQL_RECORD_KIND_AMBIGUOUS" | "CQL_RECORD_KIND_NOTICE"
+            )
+        })
         .expect("record-kind diagnostic")
 }
 
 fn assert_no_ambiguity(result: &Analysis) {
     assert!(
-        result
-            .diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.code != "CQL_RECORD_KIND_AMBIGUOUS"),
+        result.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic.code.as_str(),
+            "CQL_RECORD_KIND_AMBIGUOUS" | "CQL_RECORD_KIND_NOTICE"
+        )),
         "{:?}",
         result.diagnostics
     );
 }
 
 #[test]
-fn multi_dataset_top_requires_record_kind_context_without_strict_observation() {
+fn multi_dataset_top_proceeds_with_a_notice_without_strict_observation() {
     let pack = datasets(&["traffic", "event"]);
     let result = check("#repo=fw_repo | top(dst)", Some(&pack), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     assert_eq!(result.validation.status, Acceptance::Accepted);
     let evidence = &result.grounding.basis["env:repo:fw_repo:@record-kind"];
     assert!(
         evidence.contains("#event.dataset: event, traffic"),
         "{evidence}"
     );
-    assert!(evidence.contains("accept_mixed_record_kinds"), "{evidence}");
-    assert_eq!(
-        result.grounding.missing,
-        [format!("env:repo:fw_repo:@record-kind: {evidence}")]
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert!(evidence.contains("filter or group"), "{evidence}");
+    assert!(result.grounding.missing.is_empty());
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
     assert!(
         result
             .diagnostics
             .iter()
-            .any(|d| d.code == "CQL_CONTEXT_REQUIRED")
+            .all(|d| d.code != "CQL_CONTEXT_REQUIRED")
     );
 }
 
@@ -138,17 +135,12 @@ fn exact_event_selector_explains_dataset_ambiguity() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     let message = &ambiguity(&result).message;
     assert!(message.contains("#event_simpleName selector does not establish #event.dataset"));
     assert!(message.contains("exact #event.dataset filter"));
     assert!(message.contains("group by #event.dataset"));
-    assert!(message.contains("accept_mixed_record_kinds"));
+    assert!(message.contains("this query can include these kinds"));
 }
 
 #[test]
@@ -164,12 +156,12 @@ fn groupby_dataset_key_satisfies_record_kind_requirement() {
 }
 
 #[test]
-fn explicit_acceptance_retains_warning_and_ready_outcome() {
+fn normal_explicit_acceptance_retains_a_calm_notice() {
     let pack = datasets(&["traffic", "event"]);
     let result = check("#repo=fw_repo | top(dst)", Some(&pack), true);
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     assert!(result.grounding.missing.is_empty());
-    assert_eq!(ambiguity(&result).severity, Severity::Warning);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
     assert!(
         ambiguity(&result)
             .message
@@ -205,13 +197,8 @@ fn type_only_scope_matches_pack_and_no_pack_does_not_assert_ambiguity() {
     typed.validate().unwrap();
 
     let result = check("#type=firewall | top(dst)", Some(&typed), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 
     let no_pack = check("#type=firewall | top(dst)", None, false);
     assert_eq!(no_pack.outcome, Outcome::Ready, "{:?}", no_pack.diagnostics);
@@ -219,20 +206,15 @@ fn type_only_scope_matches_pack_and_no_pack_does_not_assert_ambiguity() {
 }
 
 #[test]
-fn kind_unrelated_filter_before_source_selector_still_requires_context() {
+fn kind_unrelated_filter_before_source_selector_retains_notice() {
     let pack = datasets(&["traffic", "event"]);
     let result = check(
         r#"in(dst, values=["x"]) | #repo=fw_repo | top(dst)"#,
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 }
 
 #[test]
@@ -248,7 +230,7 @@ fn unrelated_field_basis_cannot_create_record_kind_diagnostic() {
 }
 
 #[test]
-fn generation_withholds_query_until_record_kind_is_accepted() {
+fn generation_returns_a_query_and_notice_for_mixed_record_kinds() {
     let pack = datasets(&["traffic", "event"]);
     let request = GenerateRequest {
         schema_version: 1,
@@ -266,15 +248,15 @@ fn generation_withholds_query_until_record_kind_is_accepted() {
         },
         context: Context::default(),
     };
-    let blocked = app::generate(request.clone(), Some(&pack));
+    let generated = app::generate(request.clone(), Some(&pack));
     assert_eq!(
-        blocked.outcome,
-        Outcome::NeedsContext,
+        generated.outcome,
+        Outcome::Ready,
         "{:?}",
-        blocked.diagnostics
+        generated.diagnostics
     );
-    assert!(blocked.query.is_none());
-    assert_eq!(ambiguity(&blocked).severity, Severity::Error);
+    assert!(generated.query.is_some());
+    assert_eq!(ambiguity(&generated).severity, Severity::Info);
 
     let accepted = app::generate(
         GenerateRequest {
@@ -293,7 +275,7 @@ fn generation_withholds_query_until_record_kind_is_accepted() {
         accepted.diagnostics
     );
     assert!(accepted.query.is_some());
-    assert_eq!(ambiguity(&accepted).severity, Severity::Warning);
+    assert_eq!(ambiguity(&accepted).severity, Severity::Info);
 }
 
 #[test]
@@ -305,13 +287,8 @@ fn explicit_record_kinds_field_triggers_ambiguity_and_groupby_resolves_it() {
         "2026-01-01T00:00:00Z",
     );
     let result = check("#repo=fw_repo | top(dst)", Some(&pack), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
     assert!(ambiguity(&result).message.contains("#type: a, b"));
 
     let grouped = check("#repo=fw_repo | groupBy([#type, dst])", Some(&pack), false);
@@ -345,13 +322,8 @@ fn merge_unions_record_kind_values_per_field_and_preserves_truncation() {
         ])
     );
     let result = check("#repo=fw_repo | top(dst)", Some(&merged), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 }
 
 #[test]
@@ -405,11 +377,11 @@ fn negated_disjunction_and_presence_do_not_constrain_record_kind() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
-        assert_eq!(ambiguity(&result).severity, Severity::Error);
+        assert_eq!(ambiguity(&result).severity, Severity::Info);
     }
 }
 
@@ -444,12 +416,12 @@ fn catch_all_match_arm_does_not_separate_record_kinds() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
         assert_eq!(result.validation.status, Acceptance::Accepted, "{query}");
-        assert_eq!(ambiguity(&result).severity, Severity::Error, "{query}");
+        assert_eq!(ambiguity(&result).severity, Severity::Info, "{query}");
     }
 }
 
@@ -461,13 +433,8 @@ fn multi_value_in_does_not_constrain_a_single_record_kind() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 }
 
 #[test]
@@ -483,11 +450,11 @@ fn regex_kind_filters_do_not_prove_a_single_kind() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
-        assert_eq!(ambiguity(&result).severity, Severity::Error, "{query}");
+        assert_eq!(ambiguity(&result).severity, Severity::Info, "{query}");
     }
 }
 
@@ -504,13 +471,8 @@ fn named_regex_capture_before_kind_grouping_does_not_separate_kinds() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 }
 
 #[test]
@@ -555,7 +517,7 @@ fn strict_observation_does_not_make_overwritten_kind_a_record_kind() {
 }
 
 #[test]
-fn truncated_single_value_kind_facet_requires_context() {
+fn truncated_single_value_kind_facet_gets_a_notice() {
     let pack = pack(
         Some(json!({"record_kinds": [
             {"field": "kind", "values": ["a"], "truncated": true}
@@ -563,13 +525,8 @@ fn truncated_single_value_kind_facet_requires_context() {
         "2026-01-01T00:00:00Z",
     );
     let result = check("#repo=fw_repo | top(dst)", Some(&pack), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
     assert!(ambiguity(&result).message.contains("truncated"));
 }
 
@@ -584,11 +541,11 @@ fn projection_or_rewrite_before_kind_grouping_cannot_clear_ambiguity() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
-        assert_eq!(ambiguity(&result).severity, Severity::Error, "{query}");
+        assert_eq!(ambiguity(&result).severity, Severity::Info, "{query}");
     }
 }
 
@@ -600,13 +557,8 @@ fn aggregation_before_kind_grouping_cannot_clear_ambiguity() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        late.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        late.diagnostics
-    );
-    assert_eq!(ambiguity(&late).severity, Severity::Error);
+    assert_eq!(late.outcome, Outcome::Ready, "{:?}", late.diagnostics);
+    assert_eq!(ambiguity(&late).severity, Severity::Info);
     assert!(late.grounding.basis["env:repo:fw_repo:@record-kind"].contains("#event.dataset"));
 
     let early = check(
@@ -629,11 +581,11 @@ fn aggregation_before_kind_case_match_or_top_cannot_clear_ambiguity() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
-        assert_eq!(ambiguity(&result).severity, Severity::Error);
+        assert_eq!(ambiguity(&result).severity, Severity::Info);
     }
 
     let early_top = check("#repo=fw_repo | top(#event.dataset)", Some(&pack), false);
@@ -647,7 +599,7 @@ fn aggregation_before_kind_case_match_or_top_cannot_clear_ambiguity() {
 }
 
 #[test]
-fn independently_scoped_table_and_join_subqueries_require_kind_context() {
+fn independently_scoped_table_and_join_subqueries_retain_kind_notices() {
     let pack = datasets(&["traffic", "event"]);
     for query in [
         "defineTable(name=t, query={ #repo=fw_repo | top(dst) }, include=[dst]) | readFile(t)",
@@ -656,11 +608,11 @@ fn independently_scoped_table_and_join_subqueries_require_kind_context() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
-        assert_eq!(ambiguity(&result).severity, Severity::Error);
+        assert_eq!(ambiguity(&result).severity, Severity::Info);
         assert!(
             ambiguity(&result)
                 .message
@@ -699,12 +651,7 @@ fn kind_values_union_across_sources_selected_by_repo_only() {
     pack.validate().unwrap();
 
     let result = check("#repo=fw_repo | top(dst)", Some(&pack), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     for id in ["env:repo:fw_repo:type:a", "env:repo:fw_repo:type:b"] {
         let evidence = &result.grounding.basis[&format!("{id}:@record-kind")];
         assert!(evidence.contains("#type: a, b"), "{evidence}");
@@ -713,7 +660,7 @@ fn kind_values_union_across_sources_selected_by_repo_only() {
             "{evidence}"
         );
     }
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 
     let narrowed = check("#repo=fw_repo #type=a | top(dst)", Some(&pack), false);
     assert_eq!(
@@ -738,12 +685,7 @@ fn distinct_type_selectors_are_kind_evidence_without_relationship_entries() {
     pack.validate().unwrap();
 
     let result = check("#repo=fw_repo | top(dst)", Some(&pack), false);
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     assert!(ambiguity(&result).message.contains("#type: a, b"));
     let grouped = check("#repo=fw_repo | groupBy([#type, dst])", Some(&pack), false);
     assert_eq!(grouped.outcome, Outcome::Ready, "{:?}", grouped.diagnostics);
@@ -758,13 +700,8 @@ fn case_insensitive_single_value_in_does_not_constrain_a_single_kind() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
     let exact = check(
         r#"#repo=fw_repo | in(#event.dataset, values=["traffic"]) | top(dst)"#,
         Some(&pack),
@@ -782,13 +719,8 @@ fn lookup_enrichment_of_kind_must_not_count_as_original_kind_grouping() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 }
 
 #[test]
@@ -799,13 +731,8 @@ fn lookup_enrichment_of_kind_must_not_count_as_original_kind_filter() {
         Some(&pack),
         false,
     );
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
-    assert_eq!(ambiguity(&result).severity, Severity::Error);
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    assert_eq!(ambiguity(&result).severity, Severity::Info);
 }
 
 #[test]
@@ -821,11 +748,11 @@ fn only_non_assigning_filter_calls_can_precede_kind_separation() {
         let result = check(query, Some(&pack), false);
         assert_eq!(
             result.outcome,
-            Outcome::NeedsContext,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
-        assert_eq!(ambiguity(&result).severity, Severity::Error, "{query}");
+        assert_eq!(ambiguity(&result).severity, Severity::Info, "{query}");
     }
     let filtered = check(
         r#"#repo=fw_repo | in(src, values=["a"]) | regex("a", field=src) | wildcard("a", field=src) | kind=a | top(dst)"#,
@@ -842,11 +769,76 @@ fn only_non_assigning_filter_calls_can_precede_kind_separation() {
 }
 
 #[test]
+fn strict_mode_requires_kind_acceptance_and_keeps_warning_exit_codes() {
+    let pack = datasets(&["traffic", "event"]);
+    for accept in [false, true] {
+        let context = Context {
+            require_observed: true,
+            accept_mixed_record_kinds: accept,
+            ..Context::default()
+        };
+        let checked = app::check(
+            CheckRequest {
+                schema_version: 1,
+                id: None,
+                query: "#repo=fw_repo | count()".into(),
+                context: context.clone(),
+            },
+            Some(&pack),
+        );
+        let generated = app::generate(
+            GenerateRequest {
+                schema_version: 1,
+                id: None,
+                context,
+                input: GenerateInput::Recipe {
+                    request: Recipe::CountEvents {
+                        source: Scope {
+                            repo: Some("fw_repo".into()),
+                            ..Scope::default()
+                        },
+                        filters: vec![],
+                    },
+                },
+            },
+            Some(&pack),
+        );
+        for result in [&checked, &generated] {
+            assert_eq!(
+                result.outcome,
+                if accept {
+                    Outcome::Ready
+                } else {
+                    Outcome::NeedsContext
+                }
+            );
+            assert_eq!(ambiguity(result).code, "CQL_RECORD_KIND_AMBIGUOUS");
+            assert_eq!(
+                ambiguity(result).severity,
+                if accept {
+                    Severity::Warning
+                } else {
+                    Severity::Error
+                }
+            );
+            assert_eq!(result.exit_code(false), if accept { 0 } else { 1 });
+            assert_ne!(result.exit_code(true), 0);
+        }
+        assert_eq!(generated.query.is_some(), accept);
+    }
+    let normal = check("#repo=fw_repo | count()", Some(&pack), false);
+    assert_eq!(normal.outcome, Outcome::Ready);
+    assert_eq!(ambiguity(&normal).code, "CQL_RECORD_KIND_NOTICE");
+    assert_eq!(ambiguity(&normal).severity, Severity::Info);
+    assert_eq!(normal.exit_code(true), 0);
+}
+
+#[test]
 fn multi_value_truncated_kind_facet_discloses_unknown_kinds_in_both_outcomes() {
     let pack = named_kinds("kind", &["a", "b"], true);
     for (accept, outcome, severity) in [
-        (false, Outcome::NeedsContext, Severity::Error),
-        (true, Outcome::Ready, Severity::Warning),
+        (false, Outcome::Ready, Severity::Info),
+        (true, Outcome::Ready, Severity::Info),
     ] {
         let result = check("#repo=fw_repo | top(dst)", Some(&pack), accept);
         assert_eq!(result.outcome, outcome, "{:?}", result.diagnostics);
