@@ -674,6 +674,12 @@
           ],
           "default": null
         },
+        "discovery_depth": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "measured_fields": {
           "type": [
             "array",

@@ -2,17 +2,38 @@
 use crate::{
     contracts::*,
     environment::{self, Observation, Pack, observation},
+    inventory::{QueryObservation, UnverifiedFieldLead},
     language::{self, ast::*},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone, Copy)]
+pub struct GroundingEvidence<'a> {
+    pub environment: &'a EnvironmentId,
+    pub active_pack: Option<&'a Pack>,
+    pub query_observations: &'a [QueryObservation],
+}
+
 pub fn generate(request: GenerateRequest, pack: Option<&Pack>) -> Analysis {
-    let id = request.id.clone();
+    generate_with_evidence(request, pack, None)
+}
+
+pub fn generate_with_evidence(
+    request: GenerateRequest,
+    pack: Option<&Pack>,
+    evidence: Option<GroundingEvidence<'_>>,
+) -> Analysis {
+    let mut result = Analysis::failed(
+        request.id.clone(),
+        Diagnostic::error("INTERNAL", "Analysis did not complete."),
+    );
+    result.grounding.policy = (&request.context).into();
     if request.schema_version != 1 {
-        return Analysis::failed(
-            id,
-            Diagnostic::error("REQUEST_VERSION", "Only schema_version=1 is supported."),
-        );
+        result.diagnostics = vec![Diagnostic::error(
+            "REQUEST_VERSION",
+            "Only schema_version=1 is supported.",
+        )];
+        return result;
     }
     let (path, plan) = match &request.input {
         GenerateInput::Plan { plan } => ("plan", Ok(plan.clone())),
@@ -21,10 +42,6 @@ pub fn generate(request: GenerateRequest, pack: Option<&Pack>) -> Analysis {
             ("english", language::english::interpret(text, source))
         }
     };
-    let mut result = Analysis::failed(
-        id,
-        Diagnostic::error("INTERNAL", "Analysis did not complete."),
-    );
     result.interpretation.path = path.into();
     result.diagnostics.clear();
     let plan = match plan {
@@ -75,21 +92,39 @@ pub fn generate(request: GenerateRequest, pack: Option<&Pack>) -> Analysis {
             return result;
         }
     };
-    finish(result, &parsed, &query, &request.context, pack, true)
+    finish(
+        result,
+        &parsed,
+        &query,
+        &request.context,
+        pack,
+        evidence,
+        true,
+    )
 }
 pub fn check(request: CheckRequest, pack: Option<&Pack>) -> Analysis {
+    check_with_evidence(request, pack, None)
+}
+
+pub fn check_with_evidence(
+    request: CheckRequest,
+    pack: Option<&Pack>,
+    evidence: Option<GroundingEvidence<'_>>,
+) -> Analysis {
     let mut result = Analysis::failed(
         request.id,
         Diagnostic::error("INTERNAL", "Analysis did not complete."),
     );
+    result.grounding.policy = (&request.context).into();
+    if request.schema_version != 1 {
+        result.diagnostics = vec![Diagnostic::error(
+            "REQUEST_VERSION",
+            "Only schema_version=1 is supported.",
+        )];
+        return result;
+    }
     result.diagnostics.clear();
     result.interpretation.path = "check".into();
-    if request.schema_version != 1 {
-        return Analysis::failed(
-            result.id,
-            Diagnostic::error("REQUEST_VERSION", "Only schema_version=1 is supported."),
-        );
-    }
     match language::parser::parse(&request.query) {
         Ok(parsed) => finish(
             result,
@@ -97,6 +132,7 @@ pub fn check(request: CheckRequest, pack: Option<&Pack>) -> Analysis {
             &request.query,
             &request.context,
             pack,
+            evidence,
             false,
         ),
         Err(e) => {
@@ -115,18 +151,69 @@ pub fn check(request: CheckRequest, pack: Option<&Pack>) -> Analysis {
         }
     }
 }
+
+pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnostic> {
+    let pipeline = language::parser::parse(query).map_err(|error| error.diagnostic)?;
+    let report = language::validate::validate(&pipeline, query);
+    if let Some(error) = report
+        .diagnostics
+        .into_iter()
+        .find(|d| d.severity == Severity::Error)
+    {
+        return Err(error);
+    }
+    let mut grounding = Grounding::default();
+    let mut leads = BTreeMap::new();
+    for r in requirements(&pipeline, None, &Context::default(), &[], &mut grounding) {
+        if r.derived
+            || r.conditional
+            || r.unavailable
+            || r.uncertain_source
+            || r.origin != Origin::Deployment
+            || r.target.is_some()
+            || (r.scope.repo.is_none() && r.scope.type_.is_none())
+            || matches!(
+                r.field.as_str(),
+                "#repo" | "#type" | "@timestamp" | "@rawstring" | "@timestamp.nanos"
+            )
+        {
+            continue;
+        }
+        let source = Scope {
+            event: None,
+            ..r.scope
+        };
+        let key = (source.repo.clone(), source.type_.clone(), r.field.clone());
+        leads.insert(
+            key,
+            UnverifiedFieldLead {
+                source,
+                field: r.field,
+            },
+        );
+        if leads.len() > 1000 {
+            return Err(Diagnostic::error(
+                "CQL_LEAD_BUDGET",
+                "Query input fields exceed the 1000-lead inventory limit.",
+            ));
+        }
+    }
+    Ok(leads.into_values().collect())
+}
+
 fn finish(
     mut result: Analysis,
     pipeline: &Pipeline,
     query: &str,
     context: &Context,
     pack: Option<&Pack>,
+    evidence: Option<GroundingEvidence<'_>>,
     emit_query: bool,
 ) -> Analysis {
     let report = language::validate::validate(pipeline, query);
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
-    result.grounding = ground(pipeline, context, pack);
+    result.grounding = ground(pipeline, context, pack, evidence);
     result.outcome = match report.status {
         Acceptance::Rejected => Outcome::Invalid,
         Acceptance::Unknown => Outcome::Unsupported,
@@ -145,6 +232,42 @@ fn finish(
         result.diagnostics.push(Diagnostic::error("CQL_CONTEXT_REQUIRED","Resolve the missing, conflicting or stale grounding requirements; grounding.basis explains the evidence. Language acceptance remains separate."));
     }
     for (key, evidence) in &result.grounding.basis {
+        if evidence
+            .split(" | ")
+            .any(|basis| basis.starts_with("caller-attested query observation;"))
+        {
+            result.diagnostics.push(Diagnostic::warning(
+                "CQL_QUERY_OBSERVATION",
+                format!("{key}: {evidence}; exact query/result/target/window binding is caller-attested, not independent execution attestation."),
+            ));
+        }
+        if evidence
+            .split(" | ")
+            .any(|basis| basis.starts_with("observed with accepted partial coverage;"))
+        {
+            result.diagnostics.push(Diagnostic::warning(
+                "CQL_PARTIAL_COVERAGE",
+                format!(
+                    "{key}: {evidence}; positive observations do not establish complete coverage."
+                ),
+            ));
+        }
+        if result.outcome == Outcome::Ready
+            && !context.require_observed
+            && !key.ends_with(":@record-kind")
+            && evidence.split(" | ").any(|basis| {
+                !matches!(
+                    basis,
+                    "query-produced" | "language-built-in" | "observed in a bounded sample"
+                ) && !basis.starts_with("observed with accepted partial coverage;")
+                    && !basis.starts_with("caller-attested query observation;")
+            })
+        {
+            result.diagnostics.push(Diagnostic::warning(
+                "CQL_GROUNDING_LENIENT",
+                format!("{key}: {evidence}; ready relies on lenient grounding because require_observed is false."),
+            ));
+        }
         if key.ends_with(":@record-kind")
             && (evidence.starts_with("multiple record kinds observed (")
                 || evidence.starts_with("record-kind facet truncated ("))
@@ -181,7 +304,7 @@ struct Requirement {
 }
 struct GroundingScan<'a> {
     requirements: Vec<Requirement>,
-    record_kind_context: Option<(&'a Context, &'a Pack, &'a mut Grounding)>,
+    record_kind_context: Option<(&'a Context, Vec<&'a Pack>, &'a mut Grounding)>,
     first_pipeline: bool,
     skip_next_kind_check: bool,
 }
@@ -585,12 +708,12 @@ fn requirements(
     p: &Pipeline,
     target: Option<String>,
     context: &Context,
-    pack: Option<&Pack>,
+    packs: &[&Pack],
     grounding: &mut Grounding,
 ) -> Vec<Requirement> {
     let mut out = GroundingScan {
         requirements: Vec::new(),
-        record_kind_context: pack.map(|pack| (context, pack, grounding)),
+        record_kind_context: (!packs.is_empty()).then(|| (context, packs.to_vec(), grounding)),
         first_pipeline: true,
         skip_next_kind_check: false,
     };
@@ -1403,10 +1526,12 @@ fn check_record_kinds(p: &Pipeline, state: &Flow, out: &mut GroundingScan<'_>, n
     if state.scope == Scope::default()
         && state.origin == Origin::Deployment
         && !state.uncertain_source
-        && let Some((context, pack, grounding)) = &mut out.record_kind_context
-        && state.target.as_deref() == Some(pack.environment.view.as_str())
+        && let Some((context, packs, grounding)) = &mut out.record_kind_context
+        && packs
+            .iter()
+            .any(|pack| state.target.as_deref() == Some(pack.environment.view.as_str()))
     {
-        record_kind_gaps(p, context, pack, grounding, nested);
+        record_kind_gaps(p, context, packs, grounding, nested);
     }
 }
 
@@ -1847,7 +1972,7 @@ fn uses_record_kind(pipeline: &Pipeline, field: &str, scope: &Scope) -> bool {
 fn record_kind_gaps(
     pipeline: &Pipeline,
     context: &Context,
-    pack: &Pack,
+    packs: &[&Pack],
     g: &mut Grounding,
     nested: bool,
 ) {
@@ -1868,10 +1993,9 @@ fn record_kind_gaps(
         return;
     }
     let mut kinds = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>, bool)>::new();
-    for source in pack
-        .data
-        .sources
+    for source in packs
         .iter()
+        .flat_map(|pack| &pack.data.sources)
         .filter_map(|value| environment::source(value).ok())
         .filter(|source| {
             source.selectors.as_ref().is_some_and(|selectors| {
@@ -1960,8 +2084,16 @@ fn record_kind_gaps(
     }
 }
 
-fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Grounding {
-    let mut g = Grounding::default();
+fn ground(
+    pipeline: &Pipeline,
+    context: &Context,
+    pack: Option<&Pack>,
+    evidence: Option<GroundingEvidence<'_>>,
+) -> Grounding {
+    let mut g = Grounding {
+        policy: context.into(),
+        ..Grounding::default()
+    };
     if let Some(e) = &context.environment
         && environment::validate_identity(e).is_err()
     {
@@ -1984,15 +2116,56 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
                 .push("Cloud, tenant or searchable target conflicts with selected pack.".into());
             return g;
         }
-    } else if context.require_observed {
-        g.missing
-            .push("A measured environment pack is required.".into());
+    }
+    let mut kind_packs = pack.into_iter().collect::<Vec<_>>();
+    if let Some(evidence) = evidence {
+        if environment::validate_identity(evidence.environment).is_err()
+            || context
+                .environment
+                .as_ref()
+                .is_some_and(|environment| environment != evidence.environment)
+            || pack.is_some_and(|pack| &pack.environment != evidence.environment)
+        {
+            g.conflicting
+                .push("Query evidence conflicts with the selected environment identity.".into());
+            return g;
+        }
+        if evidence.query_observations.len() > 1000
+            || evidence.query_observations.iter().any(|observation| {
+                observation.validate().is_err() || &observation.environment != evidence.environment
+            })
+        {
+            g.conflicting
+                .push("Query observation integrity, identity or budget validation failed.".into());
+            return g;
+        }
+        if let Some(active) = evidence.active_pack {
+            if active.validate().is_err() || &active.environment != evidence.environment {
+                g.conflicting
+                    .push("Active pack integrity or environment validation failed.".into());
+                return g;
+            }
+            if !kind_packs
+                .iter()
+                .any(|pack| pack.content_digest == active.content_digest)
+            {
+                kind_packs.push(active);
+            }
+        }
     }
     let primary_target = pack
         .map(|p| &p.environment)
         .or(context.environment.as_ref())
+        .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
-    for r in requirements(pipeline, primary_target.clone(), context, pack, &mut g) {
+    let mut query_observed = false;
+    for r in requirements(
+        pipeline,
+        primary_target.clone(),
+        context,
+        &kind_packs,
+        &mut g,
+    ) {
         let key = format!(
             "{}{}:{}:{}",
             r.target
@@ -2024,6 +2197,7 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
             && pack
                 .map(|p| &p.environment)
                 .or(context.environment.as_ref())
+                .or(evidence.map(|evidence| evidence.environment))
                 .is_none_or(|e| &e.view != target)
         {
             record_basis(
@@ -2068,10 +2242,27 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
             record_basis(&mut g, key, "language-built-in".into());
             continue;
         }
+        if let Some(evidence) = evidence {
+            match query_observation_basis(&r, pack, evidence) {
+                Ok(Some(basis)) => {
+                    query_observed = true;
+                    record_basis(&mut g, key, basis);
+                    continue;
+                }
+                Err(basis) => {
+                    record_basis(&mut g, key.clone(), basis);
+                    if context.require_observed {
+                        g.missing.push(key);
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+            }
+        }
         let Some(p) = pack else {
             record_basis(
                 &mut g,
-                key,
+                key.clone(),
                 if context.confirmed_fields.contains(&r.field) {
                     "caller-confirmed"
                 } else {
@@ -2079,6 +2270,9 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
                 }
                 .into(),
             );
+            if context.require_observed && evidence.is_some() {
+                g.missing.push(key);
+            }
             continue;
         };
         let sources = p
@@ -2086,23 +2280,7 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
             .sources
             .iter()
             .filter_map(|v| environment::source(v).ok())
-            .filter(|s| {
-                s.selectors.as_ref().is_some_and(|x| {
-                    r.scope
-                        .repo
-                        .as_ref()
-                        .is_none_or(|repo| x.repo.as_ref() == Some(repo))
-                        && r.scope
-                            .type_
-                            .as_ref()
-                            .is_none_or(|t| x.type_.as_ref() == Some(t))
-                        && (!r.relaxed_type
-                            || ((r.scope.type_.is_some() || x.type_.is_none())
-                                && x.event_family.is_none()
-                                && x.sourcetype.is_none()))
-                        && (!r.relaxed_event || x.event_family.is_none())
-                })
-            })
+            .filter(|source| source_matches_requirement(source, &r))
             .collect::<Vec<_>>();
         let matches = p
             .data
@@ -2111,8 +2289,7 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
             .filter_map(|v| environment::field(v).ok())
             .filter(|f| {
                 sources.iter().any(|s| s.id == f.source_id)
-                    && f.path.trim_start_matches('#') == r.field.trim_start_matches('#')
-                    && f.is_tag == Some(r.field.starts_with('#'))
+                    && field_matches_requirement(f, &r)
                     && (!r.array || f.is_array == Some(true) || f.data_type == "array")
             })
             .collect::<Vec<_>>();
@@ -2139,16 +2316,54 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
                 || source.inventory_status == "stale"
                 || field_evidence == Observation::Stale
                 || source_evidence == Observation::Stale;
+            let partial_applicable =
+                context.accept_partial_coverage && !stale && field_observed && source_observed;
+            let field_partial = if partial_applicable && field_evidence == Observation::Missing {
+                partial_observation(p, &f.provenance_ids)
+            } else {
+                None
+            };
+            let source_partial = if partial_applicable && source_evidence == Observation::Missing {
+                partial_observation(p, &source.provenance_ids)
+            } else {
+                None
+            };
+            let accepted_partial = partial_applicable
+                && (field_evidence == Observation::Qualified || field_partial.is_some())
+                && (source_evidence == Observation::Qualified
+                    || (source.evidence.as_ref().and_then(|e| e.observed) == Some(true)
+                        && source_partial.is_some()))
+                && (field_evidence != Observation::Qualified
+                    || source_evidence != Observation::Qualified);
             let observed = field_observed
                 && source_observed
-                && field_evidence == Observation::Qualified
-                && source_evidence == Observation::Qualified;
+                && ((field_evidence == Observation::Qualified
+                    && source_evidence == Observation::Qualified)
+                    || accepted_partial);
             let evidence = if historical {
                 "historical; not re-observed".into()
             } else if source.inventory_status == "stale" {
                 "source marked stale".into()
             } else if stale {
                 "observation evidence marked stale".into()
+            } else if accepted_partial {
+                let mut details = Vec::new();
+                if field_evidence != Observation::Qualified {
+                    details.push(format!(
+                        "field {}",
+                        field_partial.expect("accepted field coverage")
+                    ));
+                }
+                if source_evidence != Observation::Qualified {
+                    details.push(format!(
+                        "source {}",
+                        source_partial.expect("accepted source coverage")
+                    ));
+                }
+                format!(
+                    "observed with accepted partial coverage; {}",
+                    details.join("; ")
+                )
             } else if observed {
                 "observed in a bounded sample".into()
             } else if !source_observed {
@@ -2192,11 +2407,246 @@ fn ground(pipeline: &Pipeline, context: &Context, pack: Option<&Pack>) -> Ground
             }
         }
     }
+    if pack.is_none() && context.require_observed && !query_observed {
+        g.missing.push(
+            if evidence.is_some() {
+                "A measured environment pack or qualifying query observation is required."
+            } else {
+                "A measured environment pack is required."
+            }
+            .into(),
+        );
+    }
     g.missing.sort();
     g.missing.dedup();
     g.stale.sort();
     g.stale.dedup();
     g
+}
+
+fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {
+    source.selectors.as_ref().is_some_and(|selectors| {
+        r.scope
+            .repo
+            .as_ref()
+            .is_none_or(|repo| selectors.repo.as_ref() == Some(repo))
+            && r.scope
+                .type_
+                .as_ref()
+                .is_none_or(|kind| selectors.type_.as_ref() == Some(kind))
+            && (!r.relaxed_type
+                || ((r.scope.type_.is_some() || selectors.type_.is_none())
+                    && selectors.event_family.is_none()
+                    && selectors.sourcetype.is_none()))
+            && (!r.relaxed_event || selectors.event_family.is_none())
+    })
+}
+
+fn field_matches_requirement(field: &environment::LegacyField, r: &Requirement) -> bool {
+    field.path.trim_start_matches('#') == r.field.trim_start_matches('#')
+        && field.is_tag == Some(r.field.starts_with('#'))
+}
+
+fn query_observation_basis(
+    r: &Requirement,
+    pack: Option<&Pack>,
+    evidence: GroundingEvidence<'_>,
+) -> Result<Option<String>, String> {
+    let mut namespaces = BTreeSet::new();
+    let mut contradictions = Vec::new();
+    let mut active_contradiction = false;
+    for pack in pack.into_iter().chain(evidence.active_pack) {
+        let sources = pack
+            .data
+            .sources
+            .iter()
+            .filter_map(|value| environment::source(value).ok())
+            .filter(|source| source_matches_requirement(source, r))
+            .collect::<Vec<_>>();
+        let fields = pack
+            .data
+            .fields
+            .iter()
+            .filter_map(|value| environment::field(value).ok())
+            .filter(|field| {
+                sources.iter().any(|source| source.id == field.source_id)
+                    && field_matches_requirement(field, r)
+            })
+            .collect::<Vec<_>>();
+        let mut provenance_ids = BTreeSet::new();
+        let mut windows = Vec::new();
+        let mut contradicted = false;
+        for source in &sources {
+            let source_fields = fields
+                .iter()
+                .filter(|field| field.source_id == source.id)
+                .collect::<Vec<_>>();
+            if !source_fields.is_empty()
+                && let Some(selectors) = &source.selectors
+            {
+                namespaces.insert((
+                    selectors.repo.clone(),
+                    selectors.type_.clone(),
+                    selectors.event_family.clone(),
+                    selectors.sourcetype.clone(),
+                ));
+            }
+            let source_negative = source.inventory_status == "stale"
+                || source
+                    .evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.observed)
+                    == Some(false)
+                || observation(pack, &source.provenance_ids) == Observation::Stale;
+            let field_negative = source_fields.iter().any(|field| {
+                field.refresh_status.as_deref() == Some("not-reobserved")
+                    || field
+                        .coverage
+                        .as_ref()
+                        .and_then(|coverage| coverage.observed)
+                        == Some(false)
+                    || observation(pack, &field.provenance_ids) == Observation::Stale
+            });
+            let measured_absent = source_fields.is_empty()
+                && source.evidence.as_ref().is_some_and(|evidence| {
+                    evidence
+                        .measured_fields
+                        .as_ref()
+                        .is_some_and(|fields| fields.iter().any(|field| field == &r.field))
+                });
+            if source_negative || field_negative || measured_absent {
+                contradicted = true;
+                provenance_ids.extend(source.provenance_ids.iter().cloned());
+                windows.extend(
+                    source
+                        .evidence
+                        .as_ref()
+                        .and_then(|evidence| evidence.observation_window.clone()),
+                );
+                for field in source_fields {
+                    provenance_ids.extend(field.provenance_ids.iter().cloned());
+                    windows.extend(field.observation_window.clone());
+                }
+            }
+        }
+        if contradicted {
+            active_contradiction |= evidence
+                .active_pack
+                .is_some_and(|active| active.content_digest == pack.content_digest);
+            contradictions.push((pack, provenance_ids, windows));
+        }
+    }
+    if namespaces.len() > 1 {
+        return Err("multiple source-specific observations; not interchangeable".into());
+    }
+    let source_id = crate::discovery::source_id(&r.scope);
+    let mut matching = false;
+    for observation in evidence.query_observations.iter().filter(|observation| {
+        observation.source_id == source_id
+            && r.target
+                .as_ref()
+                .is_some_and(|target| target == &observation.environment.view)
+            && !r.array
+    }) {
+        let Some(field) = observation
+            .fields
+            .iter()
+            .find(|field| field.field == r.field)
+        else {
+            continue;
+        };
+        matching = true;
+        if contradictions.iter().all(|(pack, ids, windows)| {
+            measurement_precedes_observation(pack, ids, windows, observation)
+        }) {
+            return Ok(Some(format!(
+                "caller-attested query observation; id={}; positive_rows={}; retrieved_at={}; observation_window={}/{}",
+                observation.id,
+                field.positive_rows,
+                observation.retrieved_at,
+                observation.start,
+                observation.end
+            )));
+        }
+    }
+    if active_contradiction || (matching && !contradictions.is_empty()) {
+        Err("stale, not-reobserved or nonobserved pack measurement remains authoritative; query observation is absent, older or cannot be ordered after that measurement".into())
+    } else {
+        Ok(None)
+    }
+}
+
+fn measurement_precedes_observation(
+    pack: &Pack,
+    ids: &BTreeSet<String>,
+    windows: &[String],
+    observation: &QueryObservation,
+) -> bool {
+    let Ok(start) = environment::parse_time(&observation.start) else {
+        return false;
+    };
+    let Some(created) = environment::parse_time(&pack.created_at)
+        .ok()
+        .filter(|created| *created < start)
+    else {
+        return false;
+    };
+    let window_before = |window: &str, before| {
+        window.split_once('/').is_some_and(|(from, to)| {
+            matches!((environment::parse_time(from), environment::parse_time(to)), (Ok(from), Ok(to)) if from < to && to <= before)
+        })
+    };
+    if windows.iter().any(|window| !window_before(window, start)) {
+        return false;
+    }
+    let mut measured = false;
+    for provenance in &pack.data.provenance {
+        if !provenance["id"].as_str().is_some_and(|id| ids.contains(id))
+            || !matches!(
+                provenance["source_type"].as_str(),
+                Some("ngsiem-api" | "mcp-observation" | "console-export")
+            )
+        {
+            continue;
+        }
+        measured = true;
+        let Some(retrieved) = provenance["retrieved_at"]
+            .as_str()
+            .and_then(|retrieved| environment::parse_time(retrieved).ok())
+        else {
+            return false;
+        };
+        if retrieved > created
+            || provenance["observation_window"]
+                .as_str()
+                .is_some_and(|window| !window_before(window, retrieved))
+        {
+            return false;
+        }
+    }
+    measured
+}
+
+fn partial_observation(pack: &Pack, ids: &[String]) -> Option<String> {
+    pack.data.provenance.iter().find_map(|evidence| {
+        (evidence["id"]
+            .as_str()
+            .is_some_and(|id| ids.iter().any(|candidate| candidate == id))
+            && matches!(
+                evidence["source_type"].as_str(),
+                Some("ngsiem-api" | "mcp-observation" | "console-export")
+            )
+            && evidence["coverage_status"] == "partial")
+            .then(|| {
+                format!(
+                    "retrieved_at={} observation_window={}",
+                    evidence["retrieved_at"].as_str().unwrap_or("not recorded"),
+                    evidence["observation_window"]
+                        .as_str()
+                        .unwrap_or("not recorded")
+                )
+            })
+    })
 }
 
 pub fn recipe_catalog() -> serde_json::Value {

@@ -1,6 +1,6 @@
 # Setup and authentication
 
-With a [supported, patched Node.js release](../README.md#try-v012) on macOS Apple silicon or Linux x86_64, use `npx cqlmatic@0.1.2 setup` from outside a CQLmatic source checkout. Use your source-built executable inside that checkout: npm can select the local package, which has no bundled executable. The npm package runs the native executable on demand without installing a global command. The guides use `cqlmatic` as shorthand for that pinned command or your standalone executable. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`. Windows x64 uses the [release ZIP](#install-on-windows); other architectures use a [source build](DEVELOPMENT.md).
+With a [supported, patched Node.js release](../README.md#try-v013) on macOS Apple silicon or Linux x86_64, use `npx cqlmatic@0.1.3 setup` from outside a CQLmatic source checkout. Use your source-built executable inside that checkout: npm can select the local package, which has no bundled executable. The npm package runs the native executable on demand without installing a global command. The guides use `cqlmatic` as shorthand for that pinned command or your standalone executable. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`. Windows x64 uses the [release ZIP](#install-on-windows); other architectures use a [source build](DEVELOPMENT.md).
 
 Run `npx` in a foreground terminal. For unattended process supervision, use the native executable directly: npm can add stderr notices, and cancellation directed only at its parent PID may not reach the command. See [input and output rules](../USAGE.md#input-and-output-rules).
 
@@ -12,14 +12,14 @@ Native setup covers **Codex CLI**, **VS Code Local**, **Claude Code**, **GitHub 
 
 ## Install on Windows
 
-Download `cqlmatic-v0.1.2-windows-x86_64.zip` and `SHA256SUMS` from the official [v0.1.2 release](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.2). Use the x64 ZIP only on an x64 Windows system. The prebuilt executable needs neither Rust nor C++ build tools. Source builds require the toolchain described in [development](DEVELOPMENT.md#native-windows).
+Download `cqlmatic-v0.1.3-windows-x86_64.zip` and `SHA256SUMS` from the official [v0.1.3 release](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.3). Use the x64 ZIP only on an x64 Windows system. The prebuilt executable needs neither Rust nor C++ build tools. Source builds require the toolchain described in [development](DEVELOPMENT.md#native-windows).
 
-Before extraction, compare `Get-FileHash -Algorithm SHA256` for the ZIP with the exact filename's entry in `SHA256SUMS`. Stop if the entry is missing, duplicated or different. Extract into a new version-specific directory under your user profile, such as `%LOCALAPPDATA%\Programs\CQLmatic\v0.1.2`; do not overwrite an existing installation. The archive's `cqlmatic-v0.1.2` directory contains `cqlmatic.exe`, guides, examples and licenses.
+Before extraction, compare `Get-FileHash -Algorithm SHA256` for the ZIP with the exact filename's entry in `SHA256SUMS`. Stop if the entry is missing, duplicated or different. Extract into a new version-specific directory under your user profile, such as `%LOCALAPPDATA%\Programs\CQLmatic\v0.1.3`; do not overwrite an existing installation. The archive's `cqlmatic-v0.1.3` directory contains `cqlmatic.exe`, guides, examples and licenses.
 
 Run the extracted executable directly:
 
 ```powershell
-$Cqlmatic = Join-Path $env:LOCALAPPDATA 'Programs/CQLmatic/v0.1.2/cqlmatic-v0.1.2/cqlmatic.exe'
+$Cqlmatic = Join-Path $env:LOCALAPPDATA 'Programs/CQLmatic/v0.1.3/cqlmatic-v0.1.3/cqlmatic.exe'
 & $Cqlmatic --version
 & $Cqlmatic --help
 & $Cqlmatic setup
@@ -121,7 +121,19 @@ Import records the saved bytes' SHA-256 and `saved-host-tool-discovery` authenti
 
 Additional available tools produce an advisory to review host permissions and restrict unneeded tools. Their names do not establish read or write behavior, and their presence does not change whether the exact search tool satisfies setup discovery.
 
-The handoff's `search-all` guidance is not search authorization. Inventory's built-in scout actually fixes that target independently of the saved environment view. Confirm authorization for search-all before relaying it; otherwise leave scouting pending and use selected-source discovery on the authorized view. Later discovery and query execution must retain their confirmed target.
+The handoff asks you to choose persistent **Quick** or **Full** discovery in inventory **Settings**. Quick limits coverage to selected sources, a window and a chosen depth. Full remains the default and adds broader field and parser review, which can consume substantial time and model tokens.
+
+For Quick, choose the searchable target and depth before starting:
+
+| Choice | Impact |
+| --- | --- |
+| Chosen view or explicit `search-all` | The chosen view keeps its visibility boundary; `search-all` widens the visible-source census and needs separate authorization. |
+| Sources only | Checks source presence without field inventory. |
+| Sources + field samples | Adds bounded field observations; other fields and parser reviews remain pending. |
+
+Confirm the cloud/CID, source IDs, exact target/view, absolute UTC window, finite query/time budgets and authorization before any search. `search-all` is an explicit choice, never automatic authorization. Full scouting emits that target regardless of the saved environment view; without permission for it, use an authorized Quick or selected-source workflow and leave full-map coverage pending. Later query execution must retain its confirmed target and view.
+
+Settings can switch to Full later without discarding saved evidence. Quick evidence alone does not establish Full completion. See [inventory modes and completion](INVENTORY.md#full-and-quick-discovery).
 
 ## Parser inventory is a separate connection
 

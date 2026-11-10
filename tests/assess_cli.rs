@@ -723,3 +723,27 @@ fn full_env_inspect_filters_synthetic_pack_and_preserves_metadata() {
         assert_eq!(missing["data"][key], json!([]), "{key}");
     }
 }
+
+#[test]
+fn env_inspect_summary_is_opt_in_and_default_json_stays_detailed() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-core-v1-pack.json");
+    let mut command = binary();
+    command.args(["env", "inspect"]).arg(&path);
+    let default = result(&run(command, b""), 0);
+    assert!(default.get("summary").is_none());
+    assert!(default["sources"].is_array());
+    assert!(default["annotations"].is_array());
+
+    let mut command = binary();
+    command.args(["env", "inspect"]).arg(&path).arg("--summary");
+    let summary = result(&run(command, b""), 0);
+    assert_eq!(summary["summary"], true);
+    assert_eq!(summary["pack_id"], default["pack_id"]);
+    assert_eq!(
+        summary["counts"]["sources"],
+        default["sources"].as_array().unwrap().len()
+    );
+    assert!(summary.get("annotations").is_none());
+    assert!(summary["sources"][0].get("field_count").is_some());
+}

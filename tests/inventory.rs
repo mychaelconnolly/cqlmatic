@@ -429,3 +429,472 @@ fn dynamic_parser_semantics_require_review_of_each_exact_snapshot_line() {
     }
     assert!(state.validate_binding(&stale).is_err());
 }
+
+fn imported_pack(selectors: Scope, label: &str, date: &str) -> Pack {
+    let sid = discovery::source_id(&selectors);
+    Pack::new(environment(), date.into(), PackData {
+        sources: vec![json!({"id":sid,"kind":"source","name":label,"inventory_status":"observed-only",
+            "selectors":{"repo":selectors.repo,"type":selectors.type_},
+            "evidence":{"observed":true,"observation_window":format!("{START}/{NOW}")},
+            "provenance_ids":[format!("prov:{label}")]})],
+        fields:vec![json!({"id":format!("env:field:{label}"),"source_id":sid,"path":"direct",
+            "data_type":"unknown","evidence_kind":"observed","coverage":{"observed":true},"provenance_ids":[format!("prov:{label}")]})],
+        provenance: vec![json!({"id":format!("prov:{label}"),"source_type":"mcp-observation","canonical_source":"Synthetic saved response",
+            "retrieved_at":NOW,"redaction_status":"none","coverage_status":"observed-only"})],
+        ..PackData::default()
+    }).unwrap()
+}
+
+#[test]
+fn type_only_sources_and_historical_imports_are_visible_but_unconfirmed() {
+    let mut state = prepared();
+    let selectors = Scope {
+        type_: Some("type-only".into()),
+        ..Scope::default()
+    };
+    let old = imported_pack(source(), "old", NOW);
+    let historical = imported_pack(selectors.clone(), "historical", START);
+    let merged = cqlmatic::environment::import_history(&old, &historical).unwrap();
+    assert_eq!(merged.data.fields.len(), 2);
+    assert_eq!(merged.created_at, NOW);
+    assert_eq!(
+        cqlmatic::environment::import_history(&merged, &historical)
+            .unwrap()
+            .content_digest,
+        merged.content_digest
+    );
+    state.register_pack_sources(&historical).unwrap();
+    let registered = state
+        .sources
+        .iter()
+        .find(|s| s.selectors == selectors)
+        .unwrap();
+    assert!(!registered.expected);
+    assert!(registered.review.is_none());
+    assert!(registered.scouted_events.is_none());
+    assert!(
+        assess(&state, &[])
+            .unwrap()
+            .sources
+            .iter()
+            .any(|s| s.selectors == selectors && !s.expected)
+    );
+    state
+        .confirm(
+            environment(),
+            TargetScope::SelectedSources,
+            "Selected synthetic source".into(),
+            vec![selectors],
+            NOW,
+        )
+        .unwrap();
+    let request = state
+        .discovery_request(
+            START.into(),
+            NOW.into(),
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            10,
+            120,
+        )
+        .unwrap();
+    let plan = discovery::initial_plan(&request).unwrap();
+    assert!(
+        plan["initial_probes"][0]["query"]
+            .as_str()
+            .unwrap()
+            .starts_with("#type")
+    );
+}
+
+#[test]
+fn conflicting_import_ids_reject_without_mutating_retained_pack() {
+    let old = imported_pack(source(), "conflict", NOW);
+    let before = old.content_digest.clone();
+    let mut conflicting = old.clone();
+    conflicting.data.fields[0]["data_type"] = json!("string");
+    conflicting.content_digest = conflicting.digest().unwrap();
+    assert!(cqlmatic::environment::import_history(&old, &conflicting).is_err());
+    assert_eq!(old.content_digest, before);
+    old.validate().unwrap();
+}
+
+#[test]
+fn quick_mode_is_explicit_and_sources_only_probes_never_measure_fields() {
+    let mut state = prepared();
+    state.discovery_mode = DiscoveryMode::Quick;
+    state.quick_depth = QuickDepth::SourcesOnly;
+    state
+        .confirm(
+            environment(),
+            TargetScope::SelectedSources,
+            "Quick synthetic source".into(),
+            vec![source()],
+            NOW,
+        )
+        .unwrap();
+    let request = state
+        .discovery_request(
+            START.into(),
+            NOW.into(),
+            &[],
+            vec![],
+            vec![],
+            vec![],
+            10,
+            120,
+        )
+        .unwrap();
+    let probes = discovery::frontier(&request, &Default::default()).unwrap();
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0].kind, "volume");
+    let mut answered = std::collections::BTreeMap::new();
+    answered.insert(
+        discovery::probe_id(&request.environment.view, &probes[0]),
+        vec![json!({"events":5})],
+    );
+    assert!(discovery::frontier(&request, &answered).unwrap().is_empty());
+    answered.insert(
+        discovery::probe_id(&request.environment.view, &probes[0]),
+        vec![json!({"events":0})],
+    );
+    assert!(discovery::frontier(&request, &answered).is_err());
+    assert!(
+        state
+            .discovery_request(
+                START.into(),
+                NOW.into(),
+                &[],
+                vec!["direct".into()],
+                vec![],
+                vec![],
+                10,
+                120
+            )
+            .is_err()
+    );
+    assert!(!assess(&state, &[]).unwrap().full_map_complete);
+}
+
+fn query_observation(
+    query: &str,
+    result: serde_json::Value,
+) -> Result<QueryObservation, cqlmatic::contracts::Diagnostic> {
+    QueryObservation::from_result(
+        query.as_bytes(),
+        &serde_json::to_vec(&result).unwrap(),
+        environment(),
+        source(),
+        START.into(),
+        NOW.into(),
+        NOW.into(),
+        QueryResultAssertion::ExactQueryResultTargetWindow,
+        std::env::temp_dir()
+            .join("synthetic-audit.json")
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[test]
+fn saved_query_observations_keep_only_direct_positive_fields_with_exact_binding() {
+    let observation = query_observation(r##"#repo="synthetic" #type="synthetic-type" | select([present, zero, flag, empty, null_value]) | head(10)"##,
+        json!({"result":[{"present":"yes","zero":0,"flag":false,"empty":"","null_value":null}]})).unwrap();
+    let fields: Vec<_> = observation
+        .fields
+        .iter()
+        .map(|f| f.field.as_str())
+        .collect();
+    assert_eq!(fields, ["flag", "present", "zero"]);
+    assert!(observation.fields.iter().all(|f| f.positive_rows == 1));
+    let state_text = serde_json::to_string(&observation).unwrap();
+    assert!(!state_text.contains("synthetic-type"));
+    assert!(!state_text.contains("select("));
+    let mut state = prepared();
+    state.record_query_observation(observation.clone()).unwrap();
+    state.record_query_observation(observation).unwrap();
+    assert_eq!(state.query_observations.len(), 1);
+    assert!(state.packs.is_empty());
+    state
+        .add_unverified_leads(vec![
+            UnverifiedFieldLead {
+                source: source(),
+                field: "lead".into(),
+            },
+            UnverifiedFieldLead {
+                source: source(),
+                field: "lead".into(),
+            },
+        ])
+        .unwrap();
+    assert_eq!(state.unverified_leads.len(), 1);
+    let full = assess(&state, &[]).unwrap();
+    assert_eq!(full.unverified_leads.len(), 1);
+    assert_eq!(full.query_observations.len(), 1);
+    assert_eq!(
+        full.query_observations[0].caller_assertion,
+        QueryResultAssertion::ExactQueryResultTargetWindow
+    );
+    let compact = summary(&full);
+    assert!(compact.get("unverified_leads").is_none());
+    assert!(compact.get("query_observations").is_none());
+    assert_eq!(compact["counts"]["query_observations"], 1);
+    assert!(state.sources[0].review.is_none());
+}
+
+#[test]
+fn saved_query_observations_reject_derived_aliased_aggregate_join_and_other_sources() {
+    for query in [
+        r##"#repo="synthetic" #type="synthetic-type" | /(?<derived>.+)/ | select(derived)"##,
+        r##"#repo="synthetic" #type="synthetic-type" | direct=/(?<derived>.+)/ | select(derived)"##,
+    ] {
+        let error =
+            query_observation(query, json!({"result":[{"derived":"captured"}]})).unwrap_err();
+        assert!(
+            error.message.contains("Regex capture"),
+            "{query}: {error:?}"
+        );
+    }
+    for query in [
+        r##"#repo="other" #type="synthetic-type" | head(10)"##,
+        r##"(#repo="synthetic" OR #repo="other") #type="synthetic-type""##,
+        r##"#repo="synthetic" #type="synthetic-type" | n := 1"##,
+        r##"#repo="synthetic" #type="synthetic-type" | rename(field=direct,as=alias)"##,
+        r##"#repo="synthetic" #type="synthetic-type" | count(as=events)"##,
+        r##"#repo="synthetic" #type="synthetic-type" | join({#repo="other"},field=direct)"##,
+        r##"#repo="synthetic" | head(10)"##,
+    ] {
+        assert!(
+            query_observation(query, json!({"result":[{"direct":true}]})).is_err(),
+            "{query}"
+        );
+    }
+    for result in [
+        json!({"result":[]}),
+        json!({"result":[{"direct":null}]}),
+        json!({"result":[{"direct":[] }]}),
+        json!({"result":[{"direct":"yes"}],"truncated":true}),
+        json!({"result":[{"#repo":"other","direct":1}]}),
+    ] {
+        assert!(
+            query_observation(
+                r##"#repo="synthetic" #type="synthetic-type" | head(10)"##,
+                result
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn version_one_state_defaults_to_full_and_compact_status_omits_field_histories() {
+    let original = InventoryState::new(NOW).unwrap();
+    let mut old = serde_json::to_value(original).unwrap();
+    old["schema_version"] = json!(1);
+    for field in [
+        "discovery_mode",
+        "quick_depth",
+        "unverified_leads",
+        "query_observations",
+    ] {
+        old.as_object_mut().unwrap().remove(field);
+    }
+    let restored: InventoryState = serde_json::from_value(old).unwrap();
+    restored.validate().unwrap();
+    assert_eq!(restored.discovery_mode, DiscoveryMode::Full);
+    let full = assess(&restored, &[]).unwrap();
+    let compact = summary(&full);
+    assert_eq!(compact["summary"], true);
+    assert_eq!(compact["counts"]["sources"], 0);
+    assert!(compact.get("scouting_evidence").is_none());
+}
+
+#[test]
+fn saved_query_observations_accept_scalar_and_lowered_literal_projections_only() {
+    let scalar = query_observation(
+        r##"#repo="synthetic" #type="synthetic-type" | select(direct)"##,
+        json!({"result":[{"direct":true}]}),
+    )
+    .unwrap();
+    assert_eq!(scalar.fields[0].field, "direct");
+    let lowered = cqlmatic::language::plan::lower(&cqlmatic::contracts::Plan {
+        source: source(),
+        filters: vec![],
+        steps: vec![],
+    })
+    .unwrap()
+    .render();
+    assert!(query_observation(&lowered, json!({"result":[{"direct":true}]})).is_ok());
+    assert!(
+        query_observation(
+            r##"#repo="synthetic" #type="synthetic-type" | select([direct])"##,
+            json!({"result":[{"other":true}]})
+        )
+        .is_err()
+    );
+    assert!(
+        query_observation(
+            r##"#repo="synthetic" #type="synthetic-type" | select([direct]) | select([other])"##,
+            json!({"result":[{"other":true}]})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn full_environment_completion_requires_newly_imported_selectors_to_be_confirmed() {
+    let mut state = prepared();
+    state.sources[0].review = Some(SourceReview {
+        purpose: "Synthetic source".into(),
+        data_model: "Synthetic events".into(),
+        reviewed_at: NOW.into(),
+        evidence: "Synthetic source contract".into(),
+    });
+    state.sources[0].binding = Some(ParserBinding::NotApplicable {
+        reason: NativeSourceReason::FalconSensorNative,
+        reviewed_at: NOW.into(),
+        evidence: "Synthetic native source".into(),
+    });
+    state
+        .import_parser_inventory(vec![catalog_page(&[], 0, Some(0))], vec![])
+        .unwrap();
+    let pack = imported_pack(source(), "complete", NOW);
+    let reference = PackReference {
+        path: "synthetic-pack.json".into(),
+        content_digest: pack.content_digest.clone(),
+        imported_at: NOW.into(),
+        discovery_run: Some("synthetic-run.json".into()),
+    };
+    state.packs.push(reference.clone());
+    state.active_pack = Some(reference);
+    state.discovery_runs.push(serde_json::from_value(json!({"state_path":"synthetic-run.json","pack_path":"synthetic-pack.json","receipt_path":"synthetic-receipt.json","start":START,"end":NOW,"source_ids":[state.sources[0].id],"value_fields":[],"max_queries":20,"max_seconds":300,"answered":5,"elapsed_seconds":1.0,"status":"complete"})).unwrap());
+    state.reconciled_evidence_sha256 = Some(state.evidence_digest().unwrap());
+    state.reconciled_at = Some(NOW.into());
+    assert!(
+        assess(&state, std::slice::from_ref(&pack))
+            .unwrap()
+            .full_map_complete
+    );
+    let imported = imported_pack(
+        Scope {
+            type_: Some("unconfirmed".into()),
+            ..Scope::default()
+        },
+        "new",
+        START,
+    );
+    state.register_pack_sources(&imported).unwrap();
+    state.reconciled_evidence_sha256 = Some(state.evidence_digest().unwrap());
+    let status = assess(&state, &[pack]).unwrap();
+    assert!(!status.full_map_complete);
+    assert!(
+        status
+            .next_actions
+            .iter()
+            .any(|action| action.contains("known source selectors"))
+    );
+}
+
+#[test]
+fn direct_data_filter_alternatives_do_not_broaden_an_exact_saved_query_source() {
+    assert!(query_observation(r##"#repo="synthetic" #type="synthetic-type" | (value="a" OR value="b") | select(direct)"##,
+        json!({"result":[{"direct":true}]})).is_ok());
+    assert!(
+        query_observation(
+            r##"#repo="synthetic" #type="synthetic-type" | !(#type="other") | select(direct)"##,
+            json!({"result":[{"direct":true}]})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn source_selector_extension_keeps_empty_selector_validation() {
+    for selectors in [
+        Scope {
+            repo: Some("".into()),
+            type_: Some("valid-type".into()),
+            event: None,
+        },
+        Scope {
+            type_: Some(" ".into()),
+            ..Scope::default()
+        },
+        Scope::default(),
+    ] {
+        let mut state = InventoryState::new(NOW).unwrap();
+        assert!(
+            state
+                .confirm(
+                    environment(),
+                    TargetScope::SelectedSources,
+                    "Synthetic source".into(),
+                    vec![selectors.clone()],
+                    NOW
+                )
+                .is_err()
+        );
+        let request:cqlmatic::discovery::DiscoverRequest=serde_json::from_value(json!({"schema_version":1,"environment":environment(),"start":START,"end":NOW,"sources":[selectors]})).unwrap();
+        assert!(discovery::validate_request(&request).is_err());
+    }
+}
+
+#[test]
+fn quick_scout_requires_explicit_target_and_finite_host_budget_without_breaking_full_requests() {
+    let mut state = InventoryState::new(NOW).unwrap();
+    let legacy = state
+        .prepare_scout(environment(), START.into(), NOW.into())
+        .unwrap();
+    assert_eq!(legacy.arguments.repository, "search-all");
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("max_seconds")
+            .is_none()
+    );
+    state.discovery_mode = DiscoveryMode::Quick;
+    let legacy_arguments = legacy.arguments;
+    assert!(
+        state
+            .import_scout(
+                legacy_arguments,
+                br##"{"result":[{"#type":"synthetic","events":1}]}"##,
+                NOW
+            )
+            .is_err()
+    );
+    state.scout_plan = None;
+    for max_seconds in [None, Some(0), Some(601)] {
+        assert!(
+            state
+                .prepare_scout_with_budget(environment(), START.into(), NOW.into(), max_seconds)
+                .is_err()
+        );
+        assert!(state.scout_plan.is_none());
+    }
+    let mut selected = environment();
+    selected.view = "selected-view".into();
+    let plan = state
+        .prepare_scout_with_budget(selected.clone(), START.into(), NOW.into(), Some(120))
+        .unwrap();
+    assert_eq!(plan.arguments.repository, "selected-view");
+    assert_eq!(plan.max_seconds, Some(120));
+    selected.view.clear();
+    assert!(
+        state
+            .prepare_scout_with_budget(selected, START.into(), NOW.into(), Some(120))
+            .is_err()
+    );
+    assert!(
+        state
+            .prepare_scout_with_budget(
+                environment(),
+                "2026-01-01T00:00:00-05:00".into(),
+                NOW.into(),
+                Some(120)
+            )
+            .is_err()
+    );
+}

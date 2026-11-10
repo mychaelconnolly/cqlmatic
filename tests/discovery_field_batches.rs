@@ -668,3 +668,36 @@ fn explicit_batches_relay_the_same_api_frontier_without_plan_drift() {
         json!(["first", "zero"])
     );
 }
+
+#[test]
+fn type_only_population_batches_and_source_only_refresh_preserve_field_evidence() {
+    let mut r = request(&["first"]);
+    r.sources[0].repo = None;
+    r.population_fields[0].source.repo = None;
+    r.contracts[0].source.repo = None;
+    let scenario = Scenario {
+        counts: BTreeMap::from([("first".into(), 500)]),
+        ..Scenario::default()
+    };
+    let (old, _) = execute(&r, &scenario, 1, Origin::Mcp);
+    assert_eq!(old.data.sources[0]["selectors"]["repo"], Value::Null);
+    assert_eq!(field(&old, "first", false)["coverage"]["observed"], true);
+    let mut quick = r.clone();
+    quick.depth = discovery::DiscoveryDepth::SourcesOnly;
+    quick.population_fields.clear();
+    quick.contracts.clear();
+    quick.value_fields.clear();
+    quick.kind_fields.clear();
+    quick.max_population_fields_per_source = None;
+    let (candidate, probes) = execute(&quick, &scenario, 2, Origin::Mcp);
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0].kind, "volume");
+    assert!(candidate.data.fields.is_empty());
+    assert_eq!(
+        candidate.data.sources[0]["evidence"]["discovery_depth"],
+        "sources-only"
+    );
+    let merged = environment::merge(&old, &candidate).unwrap();
+    assert_eq!(merged.data.fields, old.data.fields);
+    assert_eq!(merged.data.values, old.data.values);
+}

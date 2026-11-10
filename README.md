@@ -16,19 +16,19 @@ The same engine powers the **"THIS IS CQL"** agent, where those mechanics were u
 
 CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crowdstrike.com/en-us/blog/five-lessons-from-agentworks-hackathon/) recognized the agent as a notable runner-up in the AgentWorks Hackathon. Judges at [CrowdStrike and NVIDIA](https://www.crowdstrike.com/en-us/platform/charlotte-ai/agentworks-hackathon/) highlighted its reproducible tests and willingness to return inconclusive verdicts.
 
-**CQLmatic v0.1.2 is available for testing. Testers and feedback are welcome.** Try it in your environment and share setup, discovery, and query-writing gaps using sanitized examples.
+**CQLmatic v0.1.3 is available for testing. Testers and feedback are welcome.** Try it in your environment and share setup, discovery, and query-writing gaps using sanitized examples.
 
-Version `0.1.2` improves setup reliability and makes inventory and record-kind diagnostics clearer.
+Version `0.1.3` adds Quick inventory, saved-query field observations, and explicit partial-coverage choices. Version `0.1.2` improved setup reliability and diagnostics.
 
-**[Try v0.1.2](#try-v012)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
+**[Try v0.1.3](#try-v013)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
 
 **Quick start:**
 
 ```sh
-npx cqlmatic@0.1.2 setup
+npx cqlmatic@0.1.3 setup
 ```
 
-Use an assistant with local command access and an authorized CrowdStrike connection. Initial discovery can take substantial time and assistant tokens.
+Use an assistant with local command access and an authorized CrowdStrike connection. Basic `generate` and `check` work without discovery. Quick inventory scopes a short, authorized scout to a chosen view or `search-all`; full discovery can take substantial time and assistant tokens.
 
 ## Why CQLmatic
 
@@ -45,7 +45,7 @@ Use an assistant with local command access and an authorized CrowdStrike connect
 </p>
 
 1. **Set up your connection.** Connect your local assistant to authorized CrowdStrike MCP and review the required permissions.
-2. **Discover your environment.** Scout sources, review parser context, measure fields, and use status to see remaining gaps.
+2. **Choose inventory depth.** Start with Quick inventory for selected-source evidence, or use Full to review parser context and broader coverage. Status shows remaining gaps.
 3. **Write with the saved map.** Your assistant consults the map and interprets the question. CQLmatic constructs and checks the query. Use your authorized client for live execution and result review.
 
 ## From intent to CQL
@@ -66,7 +66,7 @@ Use the [tester feedback form](https://github.com/mychaelconnolly/cqlmatic/issue
 
 ## Technical details
 
-### Try v0.1.2
+### Try v0.1.3
 
 Use the latest security patch on a supported Node.js release line: **22.x at 22.23.4 or later, 24.x at 24.22.1 or later, or 26.x at 26.12.1 or later**. These minimums include the [Node2Shell fix in Node.js's October security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). End-of-life lines are excluded.
 
@@ -75,37 +75,37 @@ Run these commands from outside the CQLmatic source checkout. Inside that checko
 Run setup on demand:
 
 ```sh
-npx cqlmatic@0.1.2 setup
-npx cqlmatic@0.1.2 env inventory
-npx cqlmatic@0.1.2 status
+npx cqlmatic@0.1.3 setup
+npx cqlmatic@0.1.3 env inventory
+npx cqlmatic@0.1.3 status
 ```
 
-The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.2` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
+The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.3` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
 
-For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. Version `0.1.2` provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
+For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. Version `0.1.3` provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
 
 Your Falcon account needs the MCP and underlying data permissions for the searches you authorize. Full parser inventory also needs a **separate Falcon API client with NGSIEM Parsers: READ**. Setup, OAuth consent, allowlisting, and Falcon permissions are described in [the setup guide](docs/SETUP.md).
 
-For **Windows x86_64**, use the prebuilt `cqlmatic-v0.1.2-windows-x86_64.zip` from [Release v0.1.2](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.2). It contains `cqlmatic.exe`; Rust and C++ build tools are not required.
+For **Windows x86_64**, use the prebuilt `cqlmatic-v0.1.3-windows-x86_64.zip` from [Release v0.1.3](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.3). It contains `cqlmatic.exe`; Rust and C++ build tools are not required.
 
 1. Download the ZIP and `SHA256SUMS` into the same folder. In PowerShell, change to that folder and compute the ZIP's hash:
 
    ```powershell
-   Get-FileHash .\cqlmatic-v0.1.2-windows-x86_64.zip -Algorithm SHA256
+   Get-FileHash .\cqlmatic-v0.1.3-windows-x86_64.zip -Algorithm SHA256
    ```
 
 2. Compare the hash with the ZIP's entry in `SHA256SUMS`. Continue only if they match. Extract into a new folder under your user profile:
 
    ```powershell
-   Expand-Archive .\cqlmatic-v0.1.2-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.2"
+   Expand-Archive .\cqlmatic-v0.1.3-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.3"
    ```
 
 3. Check the executable, then start setup:
 
    ```powershell
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.2\cqlmatic-v0.1.2\cqlmatic.exe" --version
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.2\cqlmatic-v0.1.2\cqlmatic.exe" --help
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.2\cqlmatic-v0.1.2\cqlmatic.exe" setup
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.3\cqlmatic-v0.1.3\cqlmatic.exe" --version
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.3\cqlmatic-v0.1.3\cqlmatic.exe" --help
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.3\cqlmatic-v0.1.3\cqlmatic.exe" setup
    ```
 
 Administrator access and a global PATH change are unnecessary. See [Windows installation](docs/SETUP.md#install-on-windows) for the full procedure.

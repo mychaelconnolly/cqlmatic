@@ -26,6 +26,7 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         correlation_seen: false,
         table_columns: BTreeMap::new(),
         correlation_columns: BTreeMap::new(),
+        narrowed: false,
     };
     checker.pipeline(pipeline, QueryContext::Plain, &mut BTreeSet::new());
     if checker.definitions > 0 && checker.joins {
@@ -82,6 +83,7 @@ struct PipelineState {
     replaced: bool,
     extracted: bool,
     ordered: bool,
+    narrowed: bool,
     projected: Option<BTreeSet<String>>,
 }
 impl PipelineState {
@@ -96,6 +98,7 @@ impl PipelineState {
         merged.replaced = branches.iter().any(|b| b.replaced);
         merged.extracted = branches.iter().all(|b| b.extracted);
         merged.ordered = branches.iter().all(|b| b.ordered);
+        merged.narrowed = branches.iter().all(|b| b.narrowed);
         for branch in branches {
             if let (Some(left), Some(right)) = (&mut merged.projected, &branch.projected) {
                 left.extend(right.iter().cloned());
@@ -119,6 +122,7 @@ struct Checker<'a> {
     correlation_seen: bool,
     table_columns: BTreeMap<String, Option<BTreeSet<String>>>,
     correlation_columns: BTreeMap<usize, Option<BTreeSet<String>>>,
+    narrowed: bool,
 }
 impl Checker<'_> {
     fn emit(&mut self, code: &str, message: impl Into<String>, call: Option<&Call>, warning: bool) {
@@ -137,6 +141,14 @@ impl Checker<'_> {
         self.emit(code, message, call, true);
         self.diagnostics.last_mut().expect("just emitted").severity = Severity::Info;
     }
+    fn raw_scan_warning(&mut self, call: Option<&Call>) {
+        self.emit(
+            "CQL_RAW_SCAN_COST",
+            "Regex or wildcard scans raw event text without a guaranteed preceding source/tag or field filter. Narrow earlier when possible and review execution cost; the query is unchanged.",
+            call,
+            true,
+        );
+    }
     fn unsupported(
         &mut self,
         code: &str,
@@ -151,7 +163,15 @@ impl Checker<'_> {
         self.fields.insert(f.into());
     }
     fn pipeline(&mut self, p: &Pipeline, context: QueryContext, tables: &mut BTreeSet<String>) {
-        self.pipeline_state(p, context, tables, &mut PipelineState::default());
+        self.pipeline_state(
+            p,
+            context,
+            tables,
+            &mut PipelineState {
+                narrowed: context == QueryContext::Continuing && self.narrowed,
+                ..PipelineState::default()
+            },
+        );
     }
     fn branches(
         &mut self,
@@ -183,6 +203,7 @@ impl Checker<'_> {
         state: &mut PipelineState,
     ) {
         self.nesting += 1;
+        let enclosing_narrowed = self.narrowed;
         let PipelineState {
             mut has_input,
             mut aggregated,
@@ -190,10 +211,12 @@ impl Checker<'_> {
             mut replaced,
             mut extracted,
             mut ordered,
+            mut narrowed,
             mut projected,
         } = state.clone();
         let mut mandatory_link = false;
         for step in &p.steps {
+            self.narrowed = narrowed;
             if context == QueryContext::Mandatory
                 && mandatory_link
                 && !matches!(step, Step::Link { .. })
@@ -215,6 +238,7 @@ impl Checker<'_> {
                 Step::Filter(f) => {
                     let previous = std::mem::take(&mut self.fields);
                     self.filter(f, tables, false);
+                    narrowed |= narrowing_filter(f);
                     let reads = self.fields.clone();
                     self.fields.extend(previous);
                     if let Some(available) = &mut projected {
@@ -263,6 +287,7 @@ impl Checker<'_> {
                             replaced,
                             extracted,
                             ordered,
+                            narrowed,
                             projected: projected.clone(),
                         },
                     );
@@ -271,10 +296,17 @@ impl Checker<'_> {
                     replaced = merged.replaced;
                     extracted = merged.extracted;
                     ordered = merged.ordered;
+                    narrowed = merged.narrowed;
                     projected = merged.projected;
                 }
                 Step::Match { field, arms } => {
                     self.field(field);
+                    if !narrowed
+                        && field == "@rawstring"
+                        && arms.iter().any(|(pattern, _)| costly_raw_pattern(pattern))
+                    {
+                        self.raw_scan_warning(None);
+                    }
                     for (pattern, _) in arms {
                         self.pattern(pattern);
                     }
@@ -289,6 +321,7 @@ impl Checker<'_> {
                             replaced,
                             extracted,
                             ordered,
+                            narrowed,
                             projected: projected.clone(),
                         },
                     );
@@ -297,6 +330,7 @@ impl Checker<'_> {
                     replaced = merged.replaced;
                     extracted = merged.extracted;
                     ordered = merged.ordered;
+                    narrowed = merged.narrowed;
                     projected = merged.projected;
                 }
                 Step::Link { field, target } => {
@@ -370,6 +404,7 @@ impl Checker<'_> {
                                 replaced,
                                 extracted,
                                 ordered,
+                                narrowed,
                                 projected: projected.clone(),
                             },
                         );
@@ -404,7 +439,10 @@ impl Checker<'_> {
                         extracted = false;
                         aggregated = false;
                         ordered = false;
+                        narrowed = false;
                         projected = None;
+                    } else {
+                        narrowed |= narrowing_call(c);
                     }
                     if effect == Effect::Correlation && (aggregated || replaced) {
                         self.emit(
@@ -579,6 +617,7 @@ impl Checker<'_> {
             }
         }
         self.nesting -= 1;
+        self.narrowed = enclosing_narrowed;
         *state = PipelineState {
             has_input,
             aggregated,
@@ -586,10 +625,22 @@ impl Checker<'_> {
             replaced,
             extracted,
             ordered,
+            narrowed,
             projected,
         };
     }
     fn filter(&mut self, f: &Filter, tables: &mut BTreeSet<String>, negated: bool) {
+        if !self.narrowed
+            && match f {
+                Filter::Compare { field, value, .. } => {
+                    field == "@rawstring" && costly_raw_pattern(value)
+                }
+                Filter::Text(pattern) => costly_raw_pattern(pattern),
+                _ => false,
+            }
+        {
+            self.raw_scan_warning(None);
+        }
         match f {
             Filter::Compare { field, op, value } => {
                 self.field(field);
@@ -775,6 +826,12 @@ impl Checker<'_> {
             self.diagnostics.push(diagnostic);
         }
         let args = resolved.arguments;
+        if !self.narrowed
+            && matches!(spec.name, "regex" | "wildcard")
+            && raw_scan_field(spec.name, &args)
+        {
+            self.raw_scan_warning(Some(c));
+        }
         let mut query_projection = None;
         if spec.name == "defineTable" {
             if matches!(args.get("include"), Some(Value::Array(xs)) if xs.iter().any(catalog::all_columns))
@@ -1724,17 +1781,31 @@ impl Checker<'_> {
     fn inline(&mut self, value: &Value, tables: &mut BTreeSet<String>) {
         // Element pseudo-fields do not belong to the enclosing event's projection.
         let outer_fields = std::mem::take(&mut self.fields);
+        let mut state = PipelineState {
+            narrowed: self.narrowed,
+            ..PipelineState::default()
+        };
         match value {
             Value::Query { pipeline, .. } => {
                 self.nonaggregate(pipeline);
-                self.pipeline(pipeline, QueryContext::Plain, &mut tables.clone());
+                self.pipeline_state(
+                    pipeline,
+                    QueryContext::Plain,
+                    &mut tables.clone(),
+                    &mut state,
+                );
             }
             Value::Call(call) => {
                 let pipeline = Pipeline {
                     steps: vec![Step::Call(call.clone())],
                 };
                 self.nonaggregate(&pipeline);
-                self.pipeline(&pipeline, QueryContext::Plain, &mut tables.clone());
+                self.pipeline_state(
+                    &pipeline,
+                    QueryContext::Plain,
+                    &mut tables.clone(),
+                    &mut state,
+                );
             }
             _ => {}
         }
@@ -2117,6 +2188,72 @@ fn argument_type(v: &Value, kind: &str) -> bool {
 fn arg_fields(v: Option<&Value>) -> BTreeSet<String> {
     v.map(catalog::fields).unwrap_or_default()
 }
+fn costly_raw_pattern(pattern: &Pattern) -> bool {
+    matches!(pattern, Pattern::Regex { .. })
+        || matches!(pattern, Pattern::Text(text) if text.contains('*') && text.chars().any(|character| character != '*'))
+}
+
+fn raw_scan_field(name: &str, args: &BTreeMap<String, &Value>) -> bool {
+    let fields = args.get("field").map(|value| catalog::fields(value));
+    fields.is_none_or(|fields| {
+        fields.contains("@rawstring")
+            || fields.contains("*")
+            || (name == "wildcard" && fields.is_empty())
+    })
+}
+
+fn narrowing_call(call: &Call) -> bool {
+    let Some(resolved) = catalog::resolve(call) else {
+        return false;
+    };
+    if resolved.function.resolved_effect(&resolved.arguments) != Effect::Filter {
+        return false;
+    }
+    let field = resolved
+        .arguments
+        .get("field")
+        .map(|value| catalog::fields(value));
+    if field.is_none_or(|fields| {
+        fields.is_empty() || fields.contains("@rawstring") || fields.contains("*")
+    }) {
+        return false;
+    }
+    match resolved.function.name {
+        "in" => {
+            matches!(resolved.arguments.get("values"), Some(Value::Array(values)) if !values.is_empty())
+        }
+        "regex" => resolved
+            .arguments
+            .get("regex")
+            .and_then(|value| value.text())
+            .is_some_and(|pattern| !matches!(pattern, "" | ".*" | ".+")),
+        "wildcard" => resolved
+            .arguments
+            .get("pattern")
+            .and_then(|value| value.text())
+            .is_some_and(|pattern| pattern.chars().any(|character| character != '*')),
+        _ => false,
+    }
+}
+
+fn narrowing_filter(filter: &Filter) -> bool {
+    match filter {
+        Filter::Compare { field, op, value } => {
+            field != "@rawstring"
+                && matches!(op.as_str(), "=" | ">" | ">=" | "<" | "<=")
+                && match value {
+                    Pattern::Text(text) => text.chars().any(|character| character != '*'),
+                    Pattern::Regex { pattern, .. } => !matches!(pattern.as_str(), "" | ".*" | ".+"),
+                    _ => false,
+                }
+        }
+        Filter::And(filters) => filters.iter().any(narrowing_filter),
+        Filter::Or(filters) => !filters.is_empty() && filters.iter().all(narrowing_filter),
+        Filter::Call(call) => narrowing_call(call),
+        _ => false,
+    }
+}
+
 fn has_non_raw_comparison(f: &Filter) -> bool {
     match f {
         Filter::Compare { field, .. } => !matches!(

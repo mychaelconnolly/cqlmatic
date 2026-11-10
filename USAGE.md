@@ -1,8 +1,8 @@
 # CQLmatic command reference
 
-This reference describes CQLmatic **0.1.2**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
+This reference describes CQLmatic **0.1.3**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
 
-Commands below use `cqlmatic` as shorthand for your executable path or the published `npx cqlmatic@0.1.2` (a [supported, patched Node.js release](README.md#try-v012), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the verified [release ZIP](docs/SETUP.md#install-on-windows). From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
+Commands below use `cqlmatic` as shorthand for your executable path or the published `npx cqlmatic@0.1.3` (a [supported, patched Node.js release](README.md#try-v013), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the verified [release ZIP](docs/SETUP.md#install-on-windows). From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
 
 ## Help, version, and schemas
 
@@ -84,11 +84,13 @@ cqlmatic generate --jsonl < examples/requests.jsonl
 | `--json` | Human output | Compact newline-terminated `Analysis`. |
 | `--jsonl` | Off | Read versioned requests from stdin; continue after record errors. |
 | `--pack FILE` | None | Read and validate one local pack; never refresh it or select the inventory's active pack implicitly. |
-| `--require-observed` | False | Require qualifying current pack evidence for referenced deployment fields; a valid pack is required even if no deployment fields are referenced. |
+| `--inventory-state FILE` | Local inventory state | Use a protected inventory's confirmed target and query-observation ledger. In Quick mode, accepted query source/input-field names can be saved as unverified leads. |
+| `--require-observed` | False | Require qualifying current pack or saved-query field evidence for referenced deployment fields; without either, strict grounding needs context. |
+| `--accept-partial-coverage` | False | In strict mode, accept current positive partial source/field observations with a warning. Stale, absent and ambiguous evidence still blocks. |
 | `--fail-on-warning` | False | Return `1` on warning diagnostics even when `outcome` remains `ready`; informational diagnostics do not trigger it. |
 | `--accept-mixed-record-kinds` | False | Permit kind ambiguity with a warning; use only after the user explicitly accepts mixing kinds. |
 
-The two policy flags `--require-observed` and `--accept-mixed-record-kinds` are ORed with the corresponding request context values. Omitting a flag cannot disable a request's true value. No CLI flag supplies `confirmed_fields` or `context.environment`; use a full request for those fields.
+The three policy flags `--require-observed`, `--accept-partial-coverage` and `--accept-mixed-record-kinds` are ORed with the corresponding request context values. Omitting a flag cannot disable a request's true value. No CLI flag supplies `confirmed_fields` or `context.environment`; use a full request for those fields. A confirmed Quick target can supply missing environment context, but never replace an explicit request or pack identity; the result says when it did so. Saved-query evidence depends on the caller's assertion that the query, response, target and window belong together.
 
 Human generation prints the query only when ready; on other outcomes stdout can be empty. Diagnostics and grounding problems go to stderr. JSON includes the interpretation and evidence; generation withholds `query` on every nonready outcome. Inspect the returned plan before executing the exact query through an authorized client.
 
@@ -169,7 +171,7 @@ cqlmatic env inspect .local/pack.json --full
 
 `FILE` is required. `--source TEXT` matches an exact source ID, display name, or repository selector; it does not directly match a type selector. Prefer a source ID. `--field TEXT` is a case-sensitive path substring. `--limit N` defaults to `20` (range 1–100), independently bounding field and value records in compact filtered output.
 
-Without filters the summary includes all source records, field/value counts, annotations, identity, digest, and date. With filters it returns `environment`, `pack_id`, selected fields and their sampled values. `--full` returns the pack-shaped view and ignores `--limit`; optional filters still apply, retaining only related records and provenance. A filtered full view retains the original digest and is **not** an importable replacement snapshot. Use the original unfiltered file for import. Inspection is offline and never reads credentials.
+Without filters the default view includes all source records, field/value counts, annotations, identity, digest, and date. `--summary` returns a smaller source-selector/count overview; it cannot be combined with `--full`, `--source`, or `--field`. With filters the detailed view returns `environment`, `pack_id`, selected fields and their sampled values. `--full` returns the pack-shaped view and ignores `--limit`; optional filters still apply, retaining only related records and provenance. A filtered full view retains the original digest and is **not** an importable replacement snapshot. Use the original unfiltered file for import. Inspection is offline and never reads credentials.
 
 ### Import
 

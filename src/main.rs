@@ -9,6 +9,7 @@ use cqlmatic::{
     contracts::*,
     discovery,
     environment::{self, Pack},
+    inventory::{self, DiscoveryMode, InventoryState, UnverifiedFieldLead},
     mcp, network, sha256_hex, storage,
 };
 use serde_json::{Value, json};
@@ -91,9 +92,20 @@ struct Common {
     pack: Option<PathBuf>,
     #[arg(
         long,
+        value_name = "FILE",
+        help = "Quick inventory state; defaults to the local inventory state"
+    )]
+    inventory_state: Option<PathBuf>,
+    #[arg(
+        long,
         help = "Require current observed pack evidence for source fields"
     )]
     require_observed: bool,
+    #[arg(
+        long,
+        help = "Accept positive current partial source/field observations with a coverage warning"
+    )]
+    accept_partial_coverage: bool,
     #[arg(
         long,
         help = "Return exit 1 for advisory warnings as well as unsuccessful checks"
@@ -217,6 +229,11 @@ enum EnvCommand {
     /// Read a snapshot, never credentials or the network.
     Inspect {
         file: PathBuf,
+        #[arg(
+            long,
+            help = "Emit compact source and count overview; use detail flags to narrow"
+        )]
+        summary: bool,
         #[arg(long)]
         full: bool,
         #[arg(long)]
@@ -449,10 +466,353 @@ fn emit_analysis(a: &Analysis, common: &Common, generated: bool) -> Result<i32, 
 fn context(mut c: Context, common: &Common) -> Context {
     c.require_observed |= common.require_observed;
     c.accept_mixed_record_kinds |= common.accept_mixed_record_kinds;
+    c.accept_partial_coverage |= common.accept_partial_coverage;
     c
 }
 fn pack(common: &Common) -> Result<Option<Pack>, Diagnostic> {
     common.pack.as_deref().map(storage::read_pack).transpose()
+}
+
+struct QuickInventory {
+    path: PathBuf,
+    state: InventoryState,
+    active_pack: Option<Pack>,
+}
+
+fn quick_inventory(common: &Common) -> Result<Option<QuickInventory>, Diagnostic> {
+    let path = if let Some(path) = &common.inventory_state {
+        std::path::absolute(path)
+            .map_err(|_| input_error("Cannot resolve Quick inventory state path."))?
+    } else {
+        inventory_cli::default_state_path()?
+    };
+    if !path
+        .try_exists()
+        .map_err(|_| input_error("Cannot inspect Quick inventory state."))?
+    {
+        return if common.inventory_state.is_some() {
+            Err(input_error(
+                "Selected Quick inventory state does not exist.",
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    load_quick_inventory(&path)
+}
+
+fn load_quick_inventory(path: &Path) -> Result<Option<QuickInventory>, Diagnostic> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| input_error("Quick inventory state needs a parent directory."))?;
+    setup_cli::protect_directory(parent)?;
+    setup_cli::verify_private_file(path)?;
+    let data = storage::read_bytes(path, inventory::MAX_STATE_BYTES)?;
+    let state: InventoryState = serde_json::from_slice(&data)
+        .map_err(|_| input_error("Quick inventory state is invalid JSON."))?;
+    state.validate()?;
+    if state.discovery_mode != DiscoveryMode::Quick && state.target.is_none() {
+        return Ok(None);
+    }
+    let target = state.target.as_ref().ok_or_else(|| {
+        input_error("Confirm a Quick inventory target before capturing query leads.")
+    })?;
+    if state.active_pack.is_none() && !state.packs.is_empty() {
+        return Err(input_error(
+            "Quick inventory has retained packs but no active pack for evidence checks.",
+        ));
+    }
+    let active_pack = state
+        .active_pack
+        .as_ref()
+        .map(|reference| {
+            let file = Path::new(&reference.path);
+            let parent = file
+                .parent()
+                .ok_or_else(|| input_error("Active pack needs a parent directory."))?;
+            setup_cli::protect_directory(parent)?;
+            setup_cli::verify_private_file(file)?;
+            let pack = storage::read_pack(file)?;
+            if pack.content_digest != reference.content_digest
+                || pack.environment != target.environment
+            {
+                return Err(input_error(
+                    "Active Quick pack differs from its protected inventory reference.",
+                ));
+            }
+            Ok(pack)
+        })
+        .transpose()?;
+    Ok(Some(QuickInventory {
+        path: path.to_path_buf(),
+        state,
+        active_pack,
+    }))
+}
+
+fn save_quick_leads(
+    quick: &QuickInventory,
+    leads: Vec<UnverifiedFieldLead>,
+) -> Result<usize, Diagnostic> {
+    if leads.is_empty() {
+        return Ok(0);
+    }
+    let parent = quick
+        .path
+        .parent()
+        .ok_or_else(|| input_error("Quick inventory state needs a parent directory."))?;
+    setup_cli::protect_directory(parent)?;
+    let writer = storage::Writer::acquire(&quick.path)?;
+    let Some(mut current) = load_quick_inventory(&quick.path)? else {
+        return Err(input_error(
+            "Quick inventory mode changed before leads could be saved.",
+        ));
+    };
+    if current.state.discovery_mode != DiscoveryMode::Quick {
+        return Err(input_error(
+            "Quick inventory mode changed before leads could be saved.",
+        ));
+    }
+    if current
+        .state
+        .target
+        .as_ref()
+        .map(|target| &target.environment)
+        != quick
+            .state
+            .target
+            .as_ref()
+            .map(|target| &target.environment)
+    {
+        return Err(input_error(
+            "Quick inventory target changed before leads could be saved.",
+        ));
+    }
+    let before = current.state.unverified_leads.len();
+    current.state.add_unverified_leads(leads)?;
+    let added = current.state.unverified_leads.len() - before;
+    if added == 0 {
+        return Ok(0);
+    }
+    current.state.schema_version = 2;
+    current.state.updated_at = discovery::timestamp();
+    current.state.validate()?;
+    setup_cli::protect_directory(parent)?;
+    writer.commit_bytes(
+        &serde_json::to_vec_pretty(&current.state)
+            .map_err(|_| input_error("Cannot serialize Quick inventory state."))?,
+        inventory::MAX_STATE_BYTES,
+    )?;
+    Ok(added)
+}
+
+fn quick_info(code: &str, message: impl Into<String>) -> Diagnostic {
+    let mut diagnostic = Diagnostic::error(code, message);
+    diagnostic.severity = Severity::Info;
+    diagnostic
+}
+
+fn quick_target(
+    context: &mut Context,
+    pack: Option<&Pack>,
+    quick: &QuickInventory,
+) -> Result<(bool, bool), Diagnostic> {
+    let target = &quick
+        .state
+        .target
+        .as_ref()
+        .expect("Quick inventory has a confirmed target")
+        .environment;
+    if context.environment.as_ref().is_some_and(|e| e != target)
+        || pack.is_some_and(|pack| &pack.environment != target)
+    {
+        return Err(Diagnostic::warning(
+            "CQL_QUICK_TARGET_MISMATCH",
+            "Quick inventory target differs from the explicit request or pack; no Quick evidence or query leads were applied.",
+        ));
+    }
+    if quick.state.discovery_mode == DiscoveryMode::Full {
+        return Ok((false, context.environment.is_some() || pack.is_some()));
+    }
+    if context.environment.is_none() && pack.is_none() {
+        context.environment = Some(target.clone());
+        Ok((true, true))
+    } else {
+        Ok((false, true))
+    }
+}
+
+fn quick_result(
+    mut result: Analysis,
+    quick: Option<&QuickInventory>,
+    target_applied: bool,
+    capture_leads: bool,
+    notice: Option<Diagnostic>,
+    query: Option<String>,
+) -> Analysis {
+    if target_applied && let Some(quick) = quick {
+        let target = &quick
+            .state
+            .target
+            .as_ref()
+            .expect("Quick inventory has a confirmed target")
+            .environment;
+        result.diagnostics.push(quick_info(
+            "CQL_QUICK_TARGET",
+            format!(
+                "Confirmed Quick inventory target supplied: {}.",
+                serde_json::to_string(target).expect("environment identity serializes")
+            ),
+        ));
+    }
+    if let Some(mut notice) = notice {
+        if notice.code == "CQL_QUICK_INVENTORY" && result.grounding.policy.require_observed {
+            notice.severity = Severity::Error;
+            if result.validation.status == Acceptance::Accepted {
+                result.outcome = Outcome::NeedsContext;
+                result.query = None;
+                result.grounding.conflicting.push(
+                    "Selected inventory state or active evidence is unavailable for strict grounding."
+                        .into(),
+                );
+            }
+        }
+        result.diagnostics.push(notice);
+        return result;
+    }
+    let Some(quick) = quick.filter(|_| capture_leads) else {
+        return result;
+    };
+    if result.validation.status != Acceptance::Accepted {
+        return result;
+    }
+    let Some(query) = query else {
+        return result;
+    };
+    match app::unverified_leads(&query).and_then(|leads| save_quick_leads(quick, leads)) {
+        Ok(0) => {}
+        Ok(added) => result.diagnostics.push(quick_info(
+            "CQL_QUICK_LEADS",
+            format!("Saved {added} unverified source/field lead(s) in Quick inventory."),
+        )),
+        Err(d) => result.diagnostics.push(Diagnostic::warning(
+            "CQL_QUICK_LEAD_SAVE",
+            format!("Quick inventory could not save query leads: {}", d.message),
+        )),
+    }
+    result
+}
+
+fn analyze_generate(
+    mut request: GenerateRequest,
+    common: &Common,
+    pack: Option<&Pack>,
+) -> Analysis {
+    request.context = context(request.context, common);
+    let (quick, mut notice) = match quick_inventory(common) {
+        Ok(quick) => (quick, None),
+        Err(d) => (
+            None,
+            Some(Diagnostic::warning(
+                "CQL_QUICK_INVENTORY",
+                format!("Quick inventory unavailable: {}", d.message),
+            )),
+        ),
+    };
+    let mut target_applied = false;
+    let mut use_evidence = false;
+    if let Some(quick) = &quick {
+        match quick_target(&mut request.context, pack, quick) {
+            Ok((applied, evidence)) => {
+                target_applied = applied;
+                use_evidence = evidence;
+            }
+            Err(d) => notice = Some(d),
+        }
+    }
+    let evidence = quick
+        .as_ref()
+        .filter(|_| use_evidence && notice.is_none())
+        .map(|quick| app::GroundingEvidence {
+            environment: &quick
+                .state
+                .target
+                .as_ref()
+                .expect("confirmed target")
+                .environment,
+            active_pack: quick.active_pack.as_ref(),
+            query_observations: &quick.state.query_observations,
+        });
+    let result = app::generate_with_evidence(request, pack, evidence);
+    let query = result.query.clone().or_else(|| {
+        result.interpretation.plan.as_ref().and_then(|plan| {
+            cqlmatic::language::plan::lower(plan)
+                .ok()
+                .map(|pipeline| pipeline.render())
+        })
+    });
+    quick_result(
+        result,
+        quick.as_ref(),
+        target_applied,
+        use_evidence
+            && quick
+                .as_ref()
+                .is_some_and(|quick| quick.state.discovery_mode == DiscoveryMode::Quick),
+        notice,
+        query,
+    )
+}
+
+fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>) -> Analysis {
+    request.context = context(request.context, common);
+    let (quick, mut notice) = match quick_inventory(common) {
+        Ok(quick) => (quick, None),
+        Err(d) => (
+            None,
+            Some(Diagnostic::warning(
+                "CQL_QUICK_INVENTORY",
+                format!("Quick inventory unavailable: {}", d.message),
+            )),
+        ),
+    };
+    let mut target_applied = false;
+    let mut use_evidence = false;
+    if let Some(quick) = &quick {
+        match quick_target(&mut request.context, pack, quick) {
+            Ok((applied, evidence)) => {
+                target_applied = applied;
+                use_evidence = evidence;
+            }
+            Err(d) => notice = Some(d),
+        }
+    }
+    let evidence = quick
+        .as_ref()
+        .filter(|_| use_evidence && notice.is_none())
+        .map(|quick| app::GroundingEvidence {
+            environment: &quick
+                .state
+                .target
+                .as_ref()
+                .expect("confirmed target")
+                .environment,
+            active_pack: quick.active_pack.as_ref(),
+            query_observations: &quick.state.query_observations,
+        });
+    let query = request.query.clone();
+    let result = app::check_with_evidence(request, pack, evidence);
+    quick_result(
+        result,
+        quick.as_ref(),
+        target_applied,
+        use_evidence
+            && quick
+                .as_ref()
+                .is_some_and(|quick| quick.state.discovery_mode == DiscoveryMode::Quick),
+        notice,
+        Some(query),
+    )
 }
 
 /// Bounded line reader drains oversized records before continuing to the next request.
@@ -490,6 +850,11 @@ fn jsonl<T: serde::de::DeserializeOwned>(
     let mut reader = io::stdin().lock();
     let mut exit = 0;
     let mut row = 0;
+    let failed = |diagnostic| {
+        let mut result = Analysis::failed(None, diagnostic);
+        result.grounding.policy = (&context(Context::default(), common)).into();
+        result
+    };
     while let Some((line, oversized)) =
         next_line(&mut reader).map_err(|_| input_error("Cannot read request stream."))?
     {
@@ -498,15 +863,11 @@ fn jsonl<T: serde::de::DeserializeOwned>(
             continue;
         }
         let result = if oversized {
-            Analysis::failed(
-                None,
-                input_error("Request line exceeds 1 MiB.").at(&format!("/line/{row}")),
-            )
+            failed(input_error("Request line exceeds 1 MiB.").at(&format!("/line/{row}")))
         } else {
             match serde_json::from_slice::<T>(&line) {
                 Ok(r) => analyze(r),
-                Err(e) => Analysis::failed(
-                    None,
+                Err(e) => failed(
                     Diagnostic::error("REQUEST_JSON", format!("Line {row}: {e}"))
                         .at(&format!("/line/{row}")),
                 ),
@@ -541,14 +902,11 @@ fn generate(args: GenerateArgs) -> Result<i32, Diagnostic> {
     if args.common.jsonl {
         return jsonl(
             &args.common,
-            |mut r: GenerateRequest| {
-                r.context = context(r.context, &args.common);
-                app::generate(r, p.as_ref())
-            },
+            |r: GenerateRequest| analyze_generate(r, &args.common, p.as_ref()),
             true,
         );
     }
-    let mut request = if let Some(path) = &args.request {
+    let request = if let Some(path) = &args.request {
         json_file(path)?
     } else {
         let input = if let Some(path) = &args.plan {
@@ -579,8 +937,11 @@ fn generate(args: GenerateArgs) -> Result<i32, Diagnostic> {
             context: Context::default(),
         }
     };
-    request.context = context(request.context, &args.common);
-    emit_analysis(&app::generate(request, p.as_ref()), &args.common, true)
+    emit_analysis(
+        &analyze_generate(request, &args.common, p.as_ref()),
+        &args.common,
+        true,
+    )
 }
 fn check(args: CheckArgs) -> Result<i32, Diagnostic> {
     let modes = usize::from(args.request.is_some())
@@ -596,14 +957,11 @@ fn check(args: CheckArgs) -> Result<i32, Diagnostic> {
     if args.common.jsonl {
         return jsonl(
             &args.common,
-            |mut r: CheckRequest| {
-                r.context = context(r.context, &args.common);
-                app::check(r, p.as_ref())
-            },
+            |r: CheckRequest| analyze_check(r, &args.common, p.as_ref()),
             false,
         );
     }
-    let mut request = if let Some(path) = args.request {
+    let request = if let Some(path) = args.request {
         json_file(&path)?
     } else {
         let query = if let Some(path) = args.file {
@@ -625,8 +983,11 @@ fn check(args: CheckArgs) -> Result<i32, Diagnostic> {
             context: Context::default(),
         }
     };
-    request.context = context(request.context, &args.common);
-    emit_analysis(&app::check(request, p.as_ref()), &args.common, false)
+    emit_analysis(
+        &analyze_check(request, &args.common, p.as_ref()),
+        &args.common,
+        false,
+    )
 }
 fn emit_assessment(result: &AssessResult, json: bool) -> Result<i32, Diagnostic> {
     if json {
@@ -828,13 +1189,39 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
         }
         EnvCommand::Inspect {
             file,
+            summary,
             full,
             field,
             source,
             limit,
         } => {
             let mut p = storage::read_pack(&file)?;
-            if full {
+            if summary {
+                if full || field.is_some() || source.is_some() {
+                    return Err(input_error(
+                        "--summary is an overview; use --full, --field, or --source for details.",
+                    ));
+                }
+                let sources = p
+                    .data
+                    .sources
+                    .iter()
+                    .map(|source| {
+                        let id = source["id"].as_str().unwrap_or("");
+                        json!({"id":id,"name":source["name"],"selectors":source["selectors"],
+                            "inventory_status":source["inventory_status"],
+                            "field_count":p.data.fields.iter().filter(|field| field["source_id"] == id).count()})
+                    })
+                    .collect::<Vec<_>>();
+                output(
+                    &json!({"summary":true,"format_version":p.format_version,
+                    "environment":p.environment,"pack_id":p.content_digest,"created_at":p.created_at,
+                    "counts":{"sources":sources.len(),"fields":p.data.fields.len(),
+                        "values":p.data.values.len(),"provenance":p.data.provenance.len(),
+                        "annotations":p.data.annotations.len()},"sources":sources}),
+                    true,
+                )?;
+            } else if full {
                 if source.is_some() || field.is_some() {
                     p.data.sources.retain(|s| {
                         source.as_ref().is_none_or(|q| {

@@ -64,6 +64,13 @@
         "message"
       ]
     },
+    "DiscoveryMode": {
+      "type": "string",
+      "enum": [
+        "full",
+        "quick"
+      ]
+    },
     "DiscoveryRun": {
       "type": "object",
       "properties": {
@@ -89,8 +96,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "mode": {
+          "$ref": "#/$defs/DiscoveryMode",
+          "default": "full"
+        },
         "pack_path": {
           "type": "string"
+        },
+        "quick_depth": {
+          "$ref": "#/$defs/QuickDepth",
+          "default": "sources-and-fields"
         },
         "receipt_path": {
           "type": "string"
@@ -151,6 +166,24 @@
         "cloud",
         "tenant",
         "view"
+      ]
+    },
+    "FieldObservation": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "positive_rows": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "positive_rows"
       ]
     },
     "FieldStatus": {
@@ -251,6 +284,9 @@
         "covered_queries_usable": {
           "type": "boolean"
         },
+        "discovery_mode": {
+          "$ref": "#/$defs/DiscoveryMode"
+        },
         "discovery_runs": {
           "type": "array",
           "items": {
@@ -310,6 +346,23 @@
             "$ref": "#/$defs/ParserSummary"
           }
         },
+        "query_observation_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "query_observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueryObservation"
+          }
+        },
+        "quick_depth": {
+          "$ref": "#/$defs/QuickDepth"
+        },
+        "quick_scope_complete": {
+          "type": "boolean"
+        },
         "reconciliation": {
           "$ref": "#/$defs/Progress"
         },
@@ -326,6 +379,9 @@
           "items": {
             "$ref": "#/$defs/ScoutSummary"
           }
+        },
+        "selected_scope_complete": {
+          "type": "boolean"
         },
         "sources": {
           "type": "array",
@@ -351,6 +407,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "unverified_lead_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unverified_leads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnverifiedFieldLead"
+          }
         }
       },
       "additionalProperties": false,
@@ -358,6 +425,14 @@
         "schema_version",
         "blank_canvas",
         "full_map_complete",
+        "selected_scope_complete",
+        "quick_scope_complete",
+        "discovery_mode",
+        "quick_depth",
+        "unverified_lead_count",
+        "query_observation_count",
+        "unverified_leads",
+        "query_observations",
         "message",
         "target",
         "scouting",
@@ -595,6 +670,74 @@
         "n-a"
       ]
     },
+    "QueryObservation": {
+      "type": "object",
+      "properties": {
+        "audit_path": {
+          "type": "string"
+        },
+        "caller_assertion": {
+          "$ref": "#/$defs/QueryResultAssertion"
+        },
+        "end": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FieldObservation"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "query_sha256": {
+          "type": "string"
+        },
+        "result_sha256": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_id",
+        "environment",
+        "query_sha256",
+        "result_sha256",
+        "audit_path",
+        "start",
+        "end",
+        "retrieved_at",
+        "caller_assertion",
+        "fields"
+      ]
+    },
+    "QueryResultAssertion": {
+      "type": "string",
+      "enum": [
+        "exact-query-result-target-window"
+      ]
+    },
+    "QuickDepth": {
+      "type": "string",
+      "enum": [
+        "sources-only",
+        "sources-and-fields"
+      ]
+    },
     "RecordKind": {
       "type": "object",
       "properties": {
@@ -650,6 +793,15 @@
         },
         "environment": {
           "$ref": "#/$defs/EnvironmentId"
+        },
+        "max_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 600,
+          "minimum": 1
         },
         "query_sha256": {
           "type": "string"
@@ -780,6 +932,9 @@
             }
           ]
         },
+        "expected": {
+          "type": "boolean"
+        },
         "fields": {
           "type": "array",
           "items": {
@@ -847,6 +1002,7 @@
       "additionalProperties": false,
       "required": [
         "source_id",
+        "expected",
         "selectors",
         "status",
         "interpretation",
@@ -915,6 +1071,22 @@
       "enum": [
         "full-environment",
         "selected-sources"
+      ]
+    },
+    "UnverifiedFieldLead": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "field"
       ]
     }
   }

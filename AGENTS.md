@@ -68,7 +68,7 @@ Use existing diagnostic/result types in production paths. Keep `unwrap()` for te
 
 ## Always
 
-- Follow setup -> scouting -> target/context -> parser inventory/review -> measured discovery -> reconciliation. Use `status --json` to identify actual gaps. Keep declarations, measured presence, historical evidence, and pending work distinct; confirm source/parser bindings. Read `docs/SETUP.md`, `docs/INVENTORY.md`, and `docs/FLOW.md` for the product workflow. The host model supplies intent and semantic interpretation; CQLmatic supplies deterministic construction and evidence tracking.
+- Basic generation and checking work without setup, discovery or a pack. Start inventory work with `status --json --summary`, then choose Quick selected-source work or Full discovery according to the task. Confirm the target and authorize bounded searches before scouting; return to Full for parser review and the broader map. Keep declarations, measured presence, historical evidence, and pending work distinct; confirm source/parser bindings. Read `docs/SETUP.md`, `docs/INVENTORY.md`, and `docs/FLOW.md` for the product workflow. The host model supplies intent and semantic interpretation; CQLmatic supplies deterministic construction and evidence tracking.
 
 - Keep `contracts`, `language`, `catalog`, `environment` and generation in `app` pure: no credential reads, filesystem/network access or wall-clock decisions. Inject data at existing I/O boundaries.
 - Preserve literal/glob/regex matching, explicit missing policies, exact/estimated accuracy, effect placement and source namespaces. Packs supply evidence, never executable semantics.

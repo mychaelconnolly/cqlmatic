@@ -517,6 +517,8 @@ pub struct Context {
     pub require_observed: bool,
     #[serde(default)]
     pub accept_mixed_record_kinds: bool,
+    #[serde(default)]
+    pub accept_partial_coverage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -591,11 +593,32 @@ pub struct Validation {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct Grounding {
+    #[serde(default)]
+    pub policy: GroundingPolicy,
     pub pack_id: Option<String>,
     pub basis: BTreeMap<String, String>,
     pub missing: Vec<String>,
     pub conflicting: Vec<String>,
     pub stale: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GroundingPolicy {
+    pub require_observed: bool,
+    pub accept_mixed_record_kinds: bool,
+    pub accept_partial_coverage: bool,
+}
+
+impl From<&Context> for GroundingPolicy {
+    fn from(context: &Context) -> Self {
+        Self {
+            require_observed: context.require_observed,
+            accept_mixed_record_kinds: context.accept_mixed_record_kinds,
+            accept_partial_coverage: context.accept_partial_coverage,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

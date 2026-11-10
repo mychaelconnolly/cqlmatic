@@ -7,6 +7,7 @@
       "$ref": "#/$defs/Context",
       "default": {
         "accept_mixed_record_kinds": false,
+        "accept_partial_coverage": false,
         "confirmed_fields": [],
         "environment": null,
         "require_observed": false
@@ -212,6 +213,10 @@
       "type": "object",
       "properties": {
         "accept_mixed_record_kinds": {
+          "type": "boolean",
+          "default": false
+        },
+        "accept_partial_coverage": {
           "type": "boolean",
           "default": false
         },

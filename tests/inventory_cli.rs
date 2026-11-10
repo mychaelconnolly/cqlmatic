@@ -599,3 +599,334 @@ fn native_fieldset_batches_keep_unselected_fields_pending() {
         );
     }
 }
+
+#[test]
+fn compact_inventory_and_status_are_opt_in_and_keep_default_reports() {
+    let dir = Temp::new();
+    let initialized = call(&dir.0, json!({"kind":"init"}));
+    assert!(initialized["status"].get("scouting_evidence").is_some());
+    assert!(initialized.get("summary").is_none());
+    let page = fixture(
+        &dir.0,
+        "summary-page.json",
+        json!({"resources":["summary-parser"],"meta":{"pagination":{"offset":0,"total":1}}}),
+    );
+    let detail = fixture(
+        &dir.0,
+        "summary-parser.json",
+        json!({"resources":[{"id":"summary-parser","name":"Synthetic summary parser","script":(0..100).map(|n|format!("field_{n} := \"synthetic\"\n")).collect::<String>()}]}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"import-parsers","pages":[{"offset":0,"limit":100,"result_file":page}],"details":[{"parser_id":"summary-parser","result_file":detail}],"retrieved_at":"2026-01-02T00:00:00Z"}),
+    );
+    let state = dir.0.join("workflow/state.json");
+    for command in [vec!["status"], vec!["env", "inventory"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(command.clone())
+            .args(["--json", "--summary", "--state"])
+            .arg(&state)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["summary"], true);
+        assert_eq!(value["counts"]["sources"], 0);
+        assert!(value.get("scouting_evidence").is_none());
+        let normal = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(command.clone())
+            .args(["--json", "--state"])
+            .arg(&state)
+            .output()
+            .unwrap();
+        assert!(normal.status.success());
+        let full: Value = serde_json::from_slice(&normal.stdout).unwrap();
+        for key in [
+            "schema_version",
+            "blank_canvas",
+            "full_map_complete",
+            "message",
+            "target",
+            "environment",
+            "target_scope",
+            "context",
+            "scouting",
+            "parser_catalog",
+            "reconciliation",
+            "parser_count",
+            "parser_page_count",
+            "parsers",
+            "scouting_evidence",
+            "unclassified_parser_ids",
+            "sources",
+            "discovery_runs",
+            "parser_runs",
+            "failures",
+            "next_actions",
+            "covered_queries_usable",
+            "active_pack",
+        ] {
+            assert!(full.get(key).is_some(), "Default status lost {key}");
+        }
+        assert!(
+            full["parsers"][0]["declared_fields"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 100
+        );
+        assert!(out.stdout.len() < normal.stdout.len());
+        let invalid = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(command)
+            .args(["--summary", "--state"])
+            .arg(&state)
+            .output()
+            .unwrap();
+        assert!(!invalid.status.success());
+    }
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    legacy["schema_version"] = json!(1);
+    for field in [
+        "discovery_mode",
+        "quick_depth",
+        "unverified_leads",
+        "query_observations",
+    ] {
+        legacy.as_object_mut().unwrap().remove(field);
+    }
+    fs::write(&state, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    let migrated: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    assert_eq!(migrated["schema_version"], 2);
+    assert_eq!(migrated["discovery_mode"], "quick");
+}
+
+#[test]
+fn quick_type_only_sources_use_the_chosen_view_and_complete_only_the_selected_depth() {
+    let dir = Temp::new();
+    let mut target = environment();
+    target["view"] = json!("selected-view");
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    let scout = call(
+        &dir.0,
+        json!({"kind":"prepare-scout","environment":target,"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_seconds":120}),
+    );
+    assert_eq!(scout["action"]["arguments"]["repository"], "selected-view");
+    assert_eq!(scout["action"]["search_budget"]["max_queries"], 1);
+    assert_eq!(scout["action"]["search_budget"]["max_seconds"], 120);
+    assert_eq!(scout["action"]["search_budget"]["enforced_by"], "mcp-host");
+    assert_eq!(scout["action"]["authorization_required"], true);
+    assert!(scout["action"]["arguments"].get("max_seconds").is_none());
+    assert!(
+        scout["action"]["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("cannot enforce host elapsed time")
+    );
+    let capture = fixture(
+        &dir.0,
+        "scout.json",
+        json!({"result":[{"#type":"type-only","events":10}]}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"import-scout","result_file":capture,"arguments":scout["action"]["arguments"],"retrieved_at":"2026-01-02T00:00:00Z"}),
+    );
+    let confirmed = call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":target,"scope":"selected-sources","context":"Synthetic Quick view","expected_sources":[{"type":"type-only"}]}),
+    );
+    assert_eq!(confirmed["status"]["discovery_mode"], "quick");
+    let progress = call(
+        &dir.0,
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_queries":3,"max_seconds":120}),
+    );
+    assert_eq!(
+        progress["action"]["relay"]["probes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(progress["action"]["relay"]["probes"][0]["kind"], "volume");
+    let completed = relay(&dir.0, progress, &[], &[], None);
+    assert_eq!(completed["status"]["quick_scope_complete"], false);
+    let reconciled = call(
+        &dir.0,
+        json!({"kind":"reconcile","reviewed_at":"2026-01-02T00:00:00Z"}),
+    );
+    assert_eq!(
+        reconciled["status"]["quick_scope_complete"], true,
+        "{reconciled}"
+    );
+    assert_eq!(reconciled["status"]["full_map_complete"], false);
+    assert_eq!(reconciled["status"]["parser_catalog"], "unknown");
+    assert!(
+        reconciled["status"]["sources"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let upgraded = call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
+    );
+    assert_eq!(upgraded["status"]["quick_scope_complete"], false);
+    assert_ne!(upgraded["status"]["sources"][0]["measurements"], "done");
+    let full = call(&dir.0, json!({"kind":"set-discovery-mode","mode":"full"}));
+    assert_eq!(full["status"]["selected_scope_complete"], false);
+    assert_ne!(full["status"]["sources"][0]["measurements"], "done");
+}
+
+#[test]
+fn imported_pack_selectors_remain_visible_unconfirmed_and_duplicate_imports_are_idempotent() {
+    use cqlmatic::{
+        contracts::{Cloud, EnvironmentId, Scope},
+        discovery,
+        environment::{Pack, PackData},
+    };
+    let dir = Temp::new();
+    let target = EnvironmentId {
+        cloud: Cloud::Us1,
+        tenant: "0".repeat(32),
+        view: "search-all".into(),
+    };
+    call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":target,"scope":"selected-sources","context":"Synthetic import target","expected_sources":[{"repo":"expected"}]}),
+    );
+    let selector = Scope {
+        type_: Some("imported-type".into()),
+        ..Scope::default()
+    };
+    let sid = discovery::source_id(&selector);
+    let pack=Pack::new(target,"2026-01-02T00:00:00Z".into(),PackData{
+        sources:vec![json!({"id":sid,"kind":"source","name":"Imported synthetic type","inventory_status":"observed-only","selectors":{"type":"imported-type"},"provenance_ids":["prov:synthetic-import"]})],
+        fields:vec![json!({"id":"env:field:synthetic-import","source_id":sid,"path":"direct","data_type":"string","evidence_kind":"observed","provenance_ids":["prov:synthetic-import"]})],
+        provenance:vec![json!({"id":"prov:synthetic-import","source_type":"mcp-observation","canonical_source":"Synthetic import","retrieved_at":"2026-01-02","redaction_status":"none","coverage_status":"observed-only"})],
+        ..PackData::default()
+    }).unwrap();
+    let input = fixture(&dir.0, "import.json", serde_json::to_value(&pack).unwrap());
+    let imported = call(&dir.0, json!({"kind":"import-pack","pack_file":input}));
+    let source = imported["status"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["selectors"]["type"] == "imported-type")
+        .unwrap();
+    assert_eq!(source["expected"], false);
+    assert_eq!(source["scouted_events"], Value::Null);
+    assert_eq!(source["fields"].as_array().unwrap().len(), 1);
+    let repeated = call(&dir.0, json!({"kind":"import-pack","pack_file":input}));
+    assert_eq!(repeated["action"]["already_imported"], true);
+    assert_eq!(
+        repeated["status"]["active_pack"],
+        imported["status"]["active_pack"]
+    );
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let saved: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(saved["packs"].as_array().unwrap().len(), 1);
+    let mut conflicting = pack;
+    conflicting.data.fields[0]["data_type"] = json!("int");
+    conflicting.content_digest = conflicting.digest().unwrap();
+    fixture(
+        &dir.0,
+        "import.json",
+        serde_json::to_value(conflicting).unwrap(),
+    );
+    let request = dir.0.join("request.json");
+    fs::write(
+        &request,
+        serde_json::to_vec(
+            &json!({"schema_version":1,"action":{"kind":"import-pack","pack_file":input}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rejected = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["env", "inventory", "--json", "--state"])
+        .arg(&state_path)
+        .arg("--request")
+        .arg(&request)
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(fs::read(state_path).unwrap(), before);
+}
+
+#[test]
+fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_summary() {
+    let dir = Temp::new();
+    call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic saved query","expected_sources":[{"type":"synthetic"}]}),
+    );
+    let query = dir.0.join("workflow/query.cql");
+    fs::write(
+        &query,
+        r##"#type="synthetic" | select([value, zero, flag, missing]) | head(10)"##,
+    )
+    .unwrap();
+    let result = PathBuf::from(fixture(
+        &dir.0.join("workflow"),
+        "query-result.json",
+        json!({"result":[{"value":"positive synthetic value","zero":0,"flag":false,"missing":null}]}),
+    ));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&query, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let action = json!({"kind":"import-query-observations","query_file":query,"result_file":result,"environment":environment(),"source":{"type":"synthetic"},"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","retrieved_at":"2026-01-02T00:00:00Z","caller_assertion":"exact-query-result-target-window"});
+    let imported = call(&dir.0, action.clone());
+    assert_eq!(imported["action"]["field_count"], 3);
+    assert_eq!(imported["action"]["pack_updated"], false);
+    assert_eq!(imported["status"]["query_observation_count"], 1);
+    assert!(imported["status"]["active_pack"].is_null());
+    let repeated = call(&dir.0, action);
+    assert_eq!(repeated["status"]["query_observation_count"], 1);
+    let state_path = dir.0.join("workflow/state.json");
+    let state = fs::read_to_string(&state_path).unwrap();
+    assert!(!state.contains("positive synthetic value"));
+    assert!(!state.contains("select(["));
+    let audit = fs::read_to_string(imported["action"]["audit_path"].as_str().unwrap()).unwrap();
+    assert!(!audit.contains("positive synthetic value"));
+    assert!(!audit.contains("select(["));
+    assert!(audit.contains("query_file"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(imported["action"]["audit_path"].as_str().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o644)).unwrap();
+        let request = dir.0.join("request.json");
+        let before = fs::read(&state_path).unwrap();
+        let denied = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["env", "inventory", "--json", "--state"])
+            .arg(&state_path)
+            .arg("--request")
+            .arg(&request)
+            .output()
+            .unwrap();
+        assert!(!denied.status.success());
+        assert_eq!(fs::read(state_path).unwrap(), before);
+    }
+}

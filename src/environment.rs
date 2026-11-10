@@ -14,7 +14,7 @@ const COMPATIBLE_PACKS: &[(u32, &str, &str)] = &[
     (1, "cqlmatic-ngsiem-core-v1", KNOWLEDGE_REVISION),
     (1, PROFILE, KNOWLEDGE_REVISION),
 ];
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PackData {
@@ -196,6 +196,8 @@ pub struct SourceEvidence {
     pub observation_window: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_fields: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery_depth: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -467,6 +469,16 @@ impl PackData {
                 ));
             }
             provenance_ids(&s.provenance_ids, &pids)?;
+            if s.evidence.as_ref().is_some_and(|e| {
+                e.discovery_depth
+                    .as_deref()
+                    .is_some_and(|depth| depth != "sources-only")
+                    || e.discovery_depth.is_some() && e.measured_fields.is_some()
+            }) {
+                return Err(invalid(
+                    "Sources-only depth cannot assert a measured field batch.",
+                ));
+            }
             if let Some(evidence) = s.evidence.as_ref()
                 && let Some(fields) = &evidence.measured_fields
             {
@@ -491,10 +503,10 @@ impl PackData {
                 });
                 let measured = evidence.observed == Some(true)
                     && valid_window
-                    && s.selectors
-                        .as_ref()
-                        .and_then(|selectors| selectors.repo.as_ref())
-                        .is_some_and(|repo| required_text(repo))
+                    && s.selectors.as_ref().is_some_and(|selectors| {
+                        selectors.repo.as_ref().is_some_and(|v| required_text(v))
+                            || selectors.type_.as_ref().is_some_and(|v| required_text(v))
+                    })
                     && self.provenance.iter().any(|provenance| {
                         s.provenance_ids.iter().any(|pid| provenance["id"] == *pid)
                             && matches!(
@@ -630,6 +642,57 @@ impl PackData {
     }
 }
 
+/// Import compatible historical records without refreshing or weakening retained evidence.
+pub fn import_history(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
+    old.validate()?;
+    candidate.validate()?;
+    if old.environment != candidate.environment {
+        return Err(Diagnostic::error(
+            "PACK_ENVIRONMENT_MISMATCH",
+            "Cloud, tenant and searchable target must all match.",
+        ));
+    }
+    if old.content_digest == candidate.content_digest {
+        return Ok(old.clone());
+    }
+    let mut data = old.data.clone();
+    for (retained, imported, key) in [
+        (&mut data.sources, &candidate.data.sources, "id"),
+        (&mut data.fields, &candidate.data.fields, "id"),
+        (&mut data.values, &candidate.data.values, "id"),
+        (&mut data.provenance, &candidate.data.provenance, "id"),
+        (
+            &mut data.annotations,
+            &candidate.data.annotations,
+            "source_id",
+        ),
+    ] {
+        for record in imported {
+            if let Some(previous) = retained
+                .iter()
+                .find(|previous| previous[key] == record[key])
+            {
+                if previous != record {
+                    return Err(invalid(
+                        "Imported record ID conflicts with retained evidence.",
+                    ));
+                }
+            } else {
+                retained.push(record.clone());
+            }
+        }
+    }
+    if data == old.data {
+        return Ok(old.clone());
+    }
+    let created_at = if parse_time(&candidate.created_at)? > parse_time(&old.created_at)? {
+        candidate.created_at.clone()
+    } else {
+        old.created_at.clone()
+    };
+    Pack::new(old.environment.clone(), created_at, data)
+}
+
 /// Replace only fully measured selected sources. Quiet fields retain their original evidence.
 pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
     old.validate()?;
@@ -668,6 +731,12 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
             .unwrap_or_else(|| f.id.clone());
         if let Some(fields) = f.evidence.as_ref().and_then(|e| e.measured_fields.as_ref()) {
             field_batches.insert(source_id, fields.iter().cloned().collect::<BTreeSet<_>>());
+        } else if f
+            .evidence
+            .as_ref()
+            .is_some_and(|e| e.discovery_depth.as_deref() == Some("sources-only"))
+        {
+            field_batches.insert(source_id, BTreeSet::new());
         }
         if let Some(index) = previous {
             let prior = data.sources[index].clone();

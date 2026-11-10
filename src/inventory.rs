@@ -28,10 +28,28 @@ pub struct InventoryRequest {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum InventoryAction {
     Init {},
+    SetDiscoveryMode {
+        mode: DiscoveryMode,
+        #[serde(default)]
+        quick_depth: QuickDepth,
+    },
+    ImportQueryObservations {
+        query_file: String,
+        result_file: String,
+        environment: EnvironmentId,
+        source: Scope,
+        start: String,
+        end: String,
+        retrieved_at: String,
+        caller_assertion: QueryResultAssertion,
+    },
     PrepareScout {
         environment: EnvironmentId,
         start: String,
         end: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, schemars(range(min = 1, max = 600)))]
+        max_seconds: Option<u64>,
     },
     ImportScout {
         result_file: String,
@@ -128,6 +146,64 @@ pub struct StatusRequest {
 pub enum TargetScope {
     FullEnvironment,
     SelectedSources,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoveryMode {
+    #[default]
+    Full,
+    Quick,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickDepth {
+    SourcesOnly,
+    #[default]
+    SourcesAndFields,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum QueryResultAssertion {
+    ExactQueryResultTargetWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FieldObservation {
+    pub field: String,
+    pub positive_rows: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct QueryObservation {
+    pub id: String,
+    pub source_id: String,
+    pub environment: EnvironmentId,
+    pub query_sha256: String,
+    pub result_sha256: String,
+    pub audit_path: String,
+    pub start: String,
+    pub end: String,
+    pub retrieved_at: String,
+    pub caller_assertion: QueryResultAssertion,
+    pub fields: Vec<FieldObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct UnverifiedFieldLead {
+    pub source: Scope,
+    pub field: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +336,9 @@ pub struct ScoutPlan {
     pub environment: EnvironmentId,
     pub arguments: SearchArguments,
     pub query_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, schemars(range(min = 1, max = 600)))]
+    pub max_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,6 +465,10 @@ pub struct DiscoveryRun {
     pub answered: usize,
     pub elapsed_seconds: f64,
     pub status: String,
+    #[serde(default)]
+    pub mode: DiscoveryMode,
+    #[serde(default)]
+    pub quick_depth: QuickDepth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -406,6 +489,14 @@ pub struct InventoryState {
     pub schema_version: u32,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub discovery_mode: DiscoveryMode,
+    #[serde(default)]
+    pub quick_depth: QuickDepth,
+    #[serde(default)]
+    pub unverified_leads: Vec<UnverifiedFieldLead>,
+    #[serde(default)]
+    pub query_observations: Vec<QueryObservation>,
     pub scout_plan: Option<ScoutPlan>,
     pub scouting: Vec<ScoutEvidence>,
     pub target: Option<ConfirmedTarget>,
@@ -457,6 +548,7 @@ pub struct FieldStatus {
 #[serde(deny_unknown_fields)]
 pub struct SourceStatus {
     pub source_id: String,
+    pub expected: bool,
     pub selectors: Scope,
     pub scouted_events: Option<u64>,
     pub review: Option<SourceReview>,
@@ -503,6 +595,14 @@ pub struct InventoryStatus {
     pub schema_version: u32,
     pub blank_canvas: bool,
     pub full_map_complete: bool,
+    pub selected_scope_complete: bool,
+    pub quick_scope_complete: bool,
+    pub discovery_mode: DiscoveryMode,
+    pub quick_depth: QuickDepth,
+    pub unverified_lead_count: usize,
+    pub query_observation_count: usize,
+    pub unverified_leads: Vec<UnverifiedFieldLead>,
+    pub query_observations: Vec<QueryObservation>,
     pub message: String,
     pub target: Progress,
     pub environment: Option<EnvironmentId>,
@@ -525,6 +625,344 @@ pub struct InventoryStatus {
     pub active_pack: Option<PackReference>,
 }
 
+impl QueryObservation {
+    fn digest(&self) -> Result<String, Diagnostic> {
+        let mut copy = self.clone();
+        copy.id.clear();
+        serde_json::to_vec(&copy)
+            .map(|bytes| sha256_hex(&bytes))
+            .map_err(|_| fail("Cannot fingerprint query observations."))
+    }
+    pub fn validate(&self) -> Result<(), Diagnostic> {
+        environment::validate_identity(&self.environment)?;
+        let request: DiscoverRequest = serde_json::from_value(json!({
+            "schema_version":1,"environment":self.environment,"start":self.start,"end":self.end,
+            "sources":[{"type":"observation-validation"}],"max_queries":1,"max_seconds":1
+        }))
+        .map_err(|_| fail("Invalid query observation window."))?;
+        discovery::validate_request(&request)?;
+        if environment::parse_time(&self.retrieved_at)? < environment::parse_time(&self.end)? {
+            return Err(fail(
+                "Query result retrieval must not precede its completed window.",
+            ));
+        }
+        let digest_ok =
+            |digest: &str| digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
+        if !digest_ok(&self.query_sha256)
+            || !digest_ok(&self.result_sha256)
+            || self.id != self.digest()?
+            || !std::path::Path::new(&self.audit_path).is_absolute()
+            || self.fields.is_empty()
+            || self.fields.len() > 4000
+        {
+            return Err(fail(
+                "Invalid query observation fingerprints, audit path or fields.",
+            ));
+        }
+        let mut fields = BTreeSet::new();
+        for field in &self.fields {
+            crate::language::plan::checked_field(&field.field)?;
+            if field.positive_rows == 0
+                || field.positive_rows >= 10_000
+                || !fields.insert(&field.field)
+            {
+                return Err(fail(
+                    "Query observations require distinct fields with 1..9999 positive rows.",
+                ));
+            }
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_result(
+        query: &[u8],
+        result: &[u8],
+        environment: EnvironmentId,
+        source: Scope,
+        start: String,
+        end: String,
+        retrieved_at: String,
+        caller_assertion: QueryResultAssertion,
+        audit_path: String,
+    ) -> Result<Self, Diagnostic> {
+        use crate::language::ast::{Filter, Pattern, Step, Value as AstValue};
+        scope_ok(&source)?;
+        let query_text = std::str::from_utf8(query)
+            .map_err(|_| fail("Query file must contain exact UTF-8 CQL."))?;
+        let pipeline = crate::language::parser::parse(query_text).map_err(|e| e.diagnostic)?;
+        if crate::language::validate::validate(&pipeline, query_text).status
+            != crate::contracts::Acceptance::Accepted
+        {
+            return Err(fail(
+                "Query observations require a query accepted by the bundled language profile.",
+            ));
+        }
+        // Lower the attested selector through the same literal encoder used by generated queries.
+        let expected_query = crate::language::plan::lower(&crate::contracts::Plan {
+            source: source.clone(),
+            filters: vec![],
+            steps: vec![],
+        })?
+        .render();
+        let expected = crate::language::parser::parse(&expected_query).map_err(|e| e.diagnostic)?;
+        let mut expected_patterns = BTreeMap::new();
+        fn comparisons<'a>(
+            filter: &'a Filter,
+            out: &mut Vec<(&'a str, &'a str, &'a Pattern)>,
+        ) -> Result<(), Diagnostic> {
+            match filter {
+                Filter::And(filters) => {
+                    for filter in filters {
+                        comparisons(filter, out)?;
+                    }
+                }
+                Filter::Compare { field, op, value } => {
+                    if let Pattern::Regex { pattern, .. } = value
+                        && !crate::language::validate::regex_captures(pattern).is_empty()
+                    {
+                        return Err(fail(
+                            "Regex capture fields cannot establish direct source observations.",
+                        ));
+                    }
+                    out.push((field, op, value));
+                }
+                Filter::Or(filters) => {
+                    let mut alternatives = vec![];
+                    for filter in filters {
+                        comparisons(filter, &mut alternatives)?;
+                    }
+                    if alternatives
+                        .iter()
+                        .any(|(field, _, _)| matches!(*field, "#repo" | "#type"))
+                    {
+                        return Err(fail(
+                            "Alternate source selectors cannot establish one observed source.",
+                        ));
+                    }
+                }
+                Filter::Not(filter) => {
+                    let mut negated = vec![];
+                    comparisons(filter, &mut negated)?;
+                    if negated
+                        .iter()
+                        .any(|(field, _, _)| matches!(*field, "#repo" | "#type"))
+                    {
+                        return Err(fail(
+                            "Negated source selectors cannot establish one observed source.",
+                        ));
+                    }
+                }
+                Filter::Call(_) => {
+                    return Err(fail(
+                        "Computed filter calls cannot establish direct query observations.",
+                    ));
+                }
+                Filter::Text(Pattern::Regex { pattern, .. })
+                    if !crate::language::validate::regex_captures(pattern).is_empty() =>
+                {
+                    return Err(fail(
+                        "Regex capture fields cannot establish direct source observations.",
+                    ));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        for step in &expected.steps {
+            if let Step::Filter(filter) = step {
+                let mut found = vec![];
+                comparisons(filter, &mut found)?;
+                for (field, _, pattern) in found {
+                    expected_patterns.insert(field, pattern);
+                }
+            }
+        }
+        let mut seen_selectors = BTreeSet::new();
+        let mut selected: Option<BTreeSet<String>> = None;
+        for step in &pipeline.steps {
+            match step {
+                Step::Filter(filter) => {
+                    let mut found = vec![];
+                    comparisons(filter, &mut found)?;
+                    for (field, op, pattern) in found {
+                        if !matches!(field, "#repo" | "#type") {
+                            continue;
+                        }
+                        let value = if field == "#repo" {
+                            source.repo.as_deref()
+                        } else {
+                            source.type_.as_deref()
+                        };
+                        let exact = value.is_some_and(|value| {
+                            matches!(pattern, Pattern::Text(text) if text == value && !text.contains('*'))
+                                || expected_patterns.get(field).is_some_and(|expected| *expected == pattern)
+                        });
+                        if op != "=" || !exact {
+                            return Err(fail(
+                                "Query source selectors must exactly match one attested source.",
+                            ));
+                        }
+                        seen_selectors.insert(field);
+                    }
+                }
+                Step::Call(call) if call.name == "select" => {
+                    let values = call
+                        .args
+                        .first()
+                        .filter(|_| call.args.len() == 1)
+                        .filter(|arg| arg.name.as_deref().is_none_or(|name| name == "fields"))
+                        .map(|arg| &arg.value)
+                        .ok_or_else(|| {
+                            fail("Observation select requires one direct field list.")
+                        })?;
+                    let values = match values {
+                        AstValue::Array(values) => values.as_slice(),
+                        value => std::slice::from_ref(value),
+                    };
+                    let mut fields = BTreeSet::new();
+                    for value in values {
+                        let field = match value {
+                            AstValue::Word(field) | AstValue::String(field) => field,
+                            _ => {
+                                return Err(fail(
+                                    "Derived or aliased observation projections are unsupported.",
+                                ));
+                            }
+                        };
+                        crate::language::plan::checked_field(field)?;
+                        if field.contains('*')
+                            || selected
+                                .as_ref()
+                                .is_some_and(|previous| !previous.contains(field))
+                        {
+                            return Err(fail(
+                                "Observation projections must preserve direct unchanged fields.",
+                            ));
+                        }
+                        fields.insert(field.clone());
+                    }
+                    selected = Some(fields);
+                }
+                Step::Call(call) if matches!(call.name.as_str(), "head" | "tail" | "sort") => {
+                    fn direct(value: &AstValue) -> bool {
+                        match value {
+                            AstValue::Word(_)
+                            | AstValue::String(_)
+                            | AstValue::Number(_)
+                            | AstValue::Bool(_) => true,
+                            AstValue::Array(values) => values.iter().all(direct),
+                            _ => false,
+                        }
+                    }
+                    if call.args.iter().any(|arg| !direct(&arg.value)) {
+                        return Err(fail(
+                            "Observation row selection cannot compute or import fields.",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(fail(
+                        "Derived, aliased, aggregate, join and synthetic result pipelines cannot establish direct field observations.",
+                    ));
+                }
+            }
+        }
+        if expected_patterns
+            .keys()
+            .any(|field| !seen_selectors.contains(field))
+        {
+            return Err(fail(
+                "Query must explicitly constrain every attested source selector.",
+            ));
+        }
+        let normalized = mcp::normalize(result)?;
+        if normalized.rows.is_empty() || normalized.rows.len() >= 10_000 {
+            return Err(fail(
+                "Empty or cap-sized results cannot establish field observations.",
+            ));
+        }
+        let mut fields = BTreeMap::<String, u64>::new();
+        for row in normalized.rows {
+            for (selector, expected) in [("#repo", &source.repo), ("#type", &source.type_)] {
+                if let Some(value) = row.get(selector)
+                    && expected
+                        .as_ref()
+                        .is_some_and(|expected| value.as_str() != Some(expected))
+                {
+                    return Err(fail(
+                        "Result source selectors differ from the attested query source.",
+                    ));
+                }
+            }
+            for (field, value) in row {
+                if selected
+                    .as_ref()
+                    .is_some_and(|selected| !selected.contains(&field))
+                {
+                    return Err(fail(
+                        "Result contains a field outside its unchanged projection.",
+                    ));
+                }
+                crate::language::plan::checked_field(&field)?;
+                let positive = match value {
+                    Value::Null => false,
+                    Value::String(value) => !value.trim().is_empty(),
+                    Value::Array(value) => !value.is_empty(),
+                    Value::Object(value) => !value.is_empty(),
+                    _ => true,
+                };
+                if positive {
+                    *fields.entry(field).or_default() += 1;
+                }
+            }
+        }
+        let mut observation = Self {
+            id: String::new(),
+            source_id: discovery::source_id(&source),
+            environment,
+            query_sha256: sha256_hex(query),
+            result_sha256: sha256_hex(result),
+            audit_path,
+            start,
+            end,
+            retrieved_at,
+            caller_assertion,
+            fields: fields
+                .into_iter()
+                .map(|(field, positive_rows)| FieldObservation {
+                    field,
+                    positive_rows,
+                })
+                .collect(),
+        };
+        observation.id = observation.digest()?;
+        observation.validate()?;
+        Ok(observation)
+    }
+}
+
+/// Compact opt-in status. Full reports retain their existing JSON contract.
+pub fn summary(status: &InventoryStatus) -> Value {
+    json!({
+        "schema_version":status.schema_version,"summary":true,"blank_canvas":status.blank_canvas,
+        "full_map_complete":status.full_map_complete,"selected_scope_complete":status.selected_scope_complete,
+        "quick_scope_complete":status.quick_scope_complete,"discovery_mode":status.discovery_mode,"quick_depth":status.quick_depth,
+        "message":status.message,"environment":status.environment,"target_scope":status.target_scope,
+        "progress":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
+            "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
+            "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
+            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count},
+        "sources":status.sources.iter().map(|source| json!({"source_id":source.source_id,"selectors":source.selectors,
+            "expected":source.expected,"status":source.status,"interpretation":source.interpretation,"parser":source.parser,
+            "measurements":source.measurements,"observation":source.observation,"scouted_events":source.scouted_events,
+            "fields":{"total":source.fields.len(),"declared":source.fields.iter().filter(|f|f.declared).count(),
+                "observed":source.fields.iter().filter(|f|f.observed).count(),"measured":source.fields.iter().filter(|f|f.measured).count(),
+                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).collect::<Vec<_>>(),
+        "active_pack":status.active_pack,"covered_queries_usable":status.covered_queries_usable,"next_actions":status.next_actions
+    })
+}
+
 fn fail(message: &str) -> Diagnostic {
     Diagnostic::error("INVENTORY_EVIDENCE", message)
 }
@@ -540,12 +978,24 @@ fn text(value: &str) -> Result<(), Diagnostic> {
     Ok(())
 }
 fn scope_ok(scope: &Scope) -> Result<(), Diagnostic> {
-    if scope.repo.as_ref().is_none_or(|r| r.trim().is_empty()) || scope.event.is_some() {
+    if (scope.repo.is_none() && scope.type_.is_none())
+        || scope
+            .repo
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        || scope
+            .type_
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        || scope.event.is_some()
+    {
         return Err(fail(
-            "Inventory sources require repo and optional type, without an event selector.",
+            "Inventory sources require repo or type, without an event selector.",
         ));
     }
-    crate::language::plan::checked_text(scope.repo.as_deref().expect("repository checked"))?;
+    if let Some(repo) = &scope.repo {
+        crate::language::plan::checked_text(repo)?;
+    }
     if let Some(kind) = &scope.type_ {
         crate::language::plan::checked_text(kind)?;
     }
@@ -557,9 +1007,13 @@ impl InventoryState {
         environment::parse_time(now)?;
         Ok(Self {
             format: "cqlmatic-inventory-state".into(),
-            schema_version: 1,
+            schema_version: 2,
             created_at: now.into(),
             updated_at: now.into(),
+            discovery_mode: DiscoveryMode::Full,
+            quick_depth: QuickDepth::SourcesAndFields,
+            unverified_leads: vec![],
+            query_observations: vec![],
             scout_plan: None,
             scouting: vec![],
             target: None,
@@ -586,7 +1040,7 @@ impl InventoryState {
             .map_err(|_| fail("Cannot serialize inventory evidence."))
     }
     pub fn validate(&self) -> Result<(), Diagnostic> {
-        if self.format != "cqlmatic-inventory-state" || self.schema_version != 1 {
+        if self.format != "cqlmatic-inventory-state" || !matches!(self.schema_version, 1 | 2) {
             return Err(fail("Unsupported inventory state."));
         }
         environment::parse_time(&self.created_at)?;
@@ -636,6 +1090,34 @@ impl InventoryState {
                 return Err(fail("Scouting row count differs from saved evidence."));
             }
         }
+        if self.unverified_leads.len() > 1000 || self.query_observations.len() > 1000 {
+            return Err(fail(
+                "Inventory leads and query observations are limited to 1000 entries each.",
+            ));
+        }
+        let mut leads = BTreeSet::new();
+        for lead in &self.unverified_leads {
+            scope_ok(&lead.source)?;
+            crate::language::plan::checked_field(&lead.field)?;
+            if !leads.insert((discovery::source_id(&lead.source), &lead.field)) {
+                return Err(fail("Duplicate unverified field lead."));
+            }
+        }
+        let mut observations = BTreeSet::new();
+        for observation in &self.query_observations {
+            observation.validate()?;
+            if !observations.insert(&observation.id)
+                || !self.sources.iter().any(|s| s.id == observation.source_id)
+                || self
+                    .target
+                    .as_ref()
+                    .is_none_or(|t| t.environment != observation.environment)
+            {
+                return Err(fail(
+                    "Query observation must belong to its exact confirmed environment and saved source.",
+                ));
+            }
+        }
         let mut parsers = BTreeSet::new();
         for parser in &self.parsers {
             let parsed = parse_parser(&parser.id, parser.snapshot.clone())?;
@@ -662,6 +1144,20 @@ impl InventoryState {
         start: String,
         end: String,
     ) -> Result<ScoutPlan, Diagnostic> {
+        self.prepare_scout_with_budget(environment, start, end, None)
+    }
+    pub fn prepare_scout_with_budget(
+        &mut self,
+        environment: EnvironmentId,
+        start: String,
+        end: String,
+        max_seconds: Option<u64>,
+    ) -> Result<ScoutPlan, Diagnostic> {
+        if self.discovery_mode == DiscoveryMode::Quick && max_seconds.is_none() {
+            return Err(fail(
+                "Quick scouting requires an explicit host search budget of 1..600 seconds.",
+            ));
+        }
         if self
             .target
             .as_ref()
@@ -670,14 +1166,19 @@ impl InventoryState {
             return Err(fail("Start a new state for a different environment."));
         }
         let plan = ScoutPlan {
-            environment,
+            environment: environment.clone(),
             arguments: SearchArguments {
-                repository: "search-all".into(),
+                repository: if self.discovery_mode == DiscoveryMode::Quick {
+                    environment.view.clone()
+                } else {
+                    "search-all".into()
+                },
                 query_string: SCOUT_QUERY.into(),
                 start,
                 end,
             },
             query_sha256: sha256_hex(SCOUT_QUERY.as_bytes()),
+            max_seconds,
         };
         validate_scout_plan(&plan)?;
         self.scout_plan = Some(plan.clone());
@@ -693,6 +1194,11 @@ impl InventoryState {
             .scout_plan
             .as_ref()
             .ok_or_else(|| fail("Prepare scouting before importing its saved response."))?;
+        if self.discovery_mode == DiscoveryMode::Quick && plan.max_seconds.is_none() {
+            return Err(fail(
+                "Prepare Quick scouting with an explicit finite host budget before importing its response.",
+            ));
+        }
         if arguments != plan.arguments {
             return Err(fail(
                 "Saved tool arguments differ from the exact prepared census query/window.",
@@ -702,7 +1208,11 @@ impl InventoryState {
         let mut observations = BTreeMap::<String, (Scope, u64)>::new();
         for row in &result.rows {
             let selectors = Scope {
-                repo: row.get("#repo").and_then(Value::as_str).map(str::to_owned),
+                repo: row
+                    .get("#repo")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
                 type_: row
                     .get("#type")
                     .and_then(Value::as_str)
@@ -780,6 +1290,11 @@ impl InventoryState {
                 "Selected-source scope requires explicit expected sources.",
             ));
         }
+        if self.discovery_mode == DiscoveryMode::Quick && scope != TargetScope::SelectedSources {
+            return Err(fail(
+                "Quick discovery requires an explicitly selected-source target.",
+            ));
+        }
         for selectors in &expected {
             scope_ok(selectors)?;
         }
@@ -807,6 +1322,87 @@ impl InventoryState {
             context,
             confirmed_at: now.into(),
         });
+        Ok(())
+    }
+    pub fn register_pack_sources(&mut self, pack: &Pack) -> Result<(), Diagnostic> {
+        pack.validate()?;
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.environment != pack.environment)
+        {
+            return Err(fail(
+                "Imported selectors require the exact confirmed target environment.",
+            ));
+        }
+        let mut candidate = self.clone();
+        for record in &pack.data.sources {
+            let Some(selectors) = environment::source(record)?.selectors else {
+                continue;
+            };
+            let selectors = Scope {
+                repo: selectors.repo,
+                type_: selectors.type_,
+                event: None,
+            };
+            if selectors.repo.is_none() && selectors.type_.is_none() {
+                continue;
+            }
+            scope_ok(&selectors)?;
+            let id = discovery::source_id(&selectors);
+            if !candidate.sources.iter().any(|s| s.id == id) {
+                candidate.sources.push(InventorySource {
+                    id,
+                    selectors,
+                    scouted_events: None,
+                    expected: false,
+                    review: None,
+                    binding: None,
+                });
+            }
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+    pub fn add_unverified_leads(
+        &mut self,
+        leads: Vec<UnverifiedFieldLead>,
+    ) -> Result<(), Diagnostic> {
+        let mut candidate = self.clone();
+        for lead in leads {
+            if !candidate
+                .unverified_leads
+                .iter()
+                .any(|p| p.source == lead.source && p.field == lead.field)
+            {
+                candidate.unverified_leads.push(lead);
+            }
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+    pub fn record_query_observation(
+        &mut self,
+        observation: QueryObservation,
+    ) -> Result<(), Diagnostic> {
+        let mut candidate = self.clone();
+        if let Some(existing) = candidate
+            .query_observations
+            .iter()
+            .find(|p| p.id == observation.id)
+        {
+            if existing != &observation {
+                return Err(fail(
+                    "Query observation identity conflicts with retained evidence.",
+                ));
+            }
+            return Ok(());
+        }
+        candidate.query_observations.push(observation);
+        candidate.validate()?;
+        *self = candidate;
         Ok(())
     }
     pub fn source_mut(&mut self, id: &str) -> Result<&mut InventorySource, Diagnostic> {
@@ -908,6 +1504,13 @@ impl InventoryState {
             .target
             .as_ref()
             .ok_or_else(|| fail("Confirm CID, cloud, view and target scope before discovery."))?;
+        if self.discovery_mode == DiscoveryMode::Quick
+            && target.scope != TargetScope::SelectedSources
+        {
+            return Err(fail(
+                "Confirm a selected-source target before Quick discovery.",
+            ));
+        }
         let mut sources = vec![];
         let mut contracts = vec![];
         for source in self
@@ -921,6 +1524,8 @@ impl InventoryState {
                 parser_sha256,
                 ..
             }) = &source.binding
+                && !(self.discovery_mode == DiscoveryMode::Quick
+                    && self.quick_depth == QuickDepth::SourcesOnly)
             {
                 let parser = self.parser_version(parser_id, parser_sha256)?;
                 let declaration = &parser.declarations;
@@ -936,7 +1541,14 @@ impl InventoryState {
                 "Discovery requires known sources in the confirmed target scope.",
             ));
         }
-        let request: DiscoverRequest = serde_json::from_value(json!({"schema_version":1,"environment":target.environment,"start":start,"end":end,"sources":sources,"value_fields":values,"kind_fields":kinds,"population_fields":population_fields,"contracts":contracts,"max_queries":max_queries,"max_seconds":max_seconds})).map_err(|_| fail("Cannot build typed discovery request."))?;
+        let mut request: DiscoverRequest = serde_json::from_value(json!({"schema_version":1,"environment":target.environment,"start":start,"end":end,"sources":sources,"value_fields":values,"kind_fields":kinds,"population_fields":population_fields,"contracts":contracts,"max_queries":max_queries,"max_seconds":max_seconds})).map_err(|_| fail("Cannot build typed discovery request."))?;
+        if self.discovery_mode == DiscoveryMode::Quick {
+            if self.quick_depth == QuickDepth::SourcesOnly {
+                request.depth = discovery::DiscoveryDepth::SourcesOnly;
+            } else {
+                request.max_population_fields_per_source = Some(20);
+            }
+        }
         discovery::validate_request(&request)?;
         Ok(request)
     }
@@ -944,12 +1556,18 @@ impl InventoryState {
 
 fn validate_scout_plan(plan: &ScoutPlan) -> Result<(), Diagnostic> {
     environment::validate_identity(&plan.environment)?;
-    if plan.arguments.repository != "search-all"
+    if plan
+        .max_seconds
+        .is_some_and(|seconds| !(1..=600).contains(&seconds))
+    {
+        return Err(fail("Scout host budgets must be 1..600 seconds."));
+    }
+    if !["search-all", plan.environment.view.as_str()].contains(&plan.arguments.repository.as_str())
         || plan.arguments.query_string != SCOUT_QUERY
         || plan.query_sha256 != sha256_hex(plan.arguments.query_string.as_bytes())
     {
         return Err(fail(
-            "Scouting requires the exact built-in census query and search-all repository.",
+            "Scouting requires the exact built-in census query and its declared searchable target.",
         ));
     }
     let request: DiscoverRequest = serde_json::from_value(json!({"schema_version":1,"environment":plan.environment,"start":plan.arguments.start,"end":plan.arguments.end,"census":true})).map_err(|_| fail("Invalid scouting window."))?;
@@ -1231,11 +1849,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         }
     }
     let mut sources = Vec::new();
-    for source in state
-        .sources
-        .iter()
-        .filter(|s| s.expected || target.is_none())
-    {
+    for source in &state.sources {
         sources.push(assess_source(state, source, &verified_packs));
     }
     let reconciliation = if state
@@ -1259,26 +1873,40 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     } else {
         Progress::Pending
     };
-    let complete = target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
+    let expected_sources: Vec<_> = sources.iter().filter(|s| s.expected).collect();
+    let scoped_complete = !expected_sources.is_empty()
+        && expected_sources.iter().all(|s| s.status == Progress::Done)
+        && reconciliation == Progress::Done;
+    let complete = state.discovery_mode == DiscoveryMode::Full
+        && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
         && state.active_pack.is_some()
         && scout == Progress::Done
+        && state
+            .scouting
+            .iter()
+            .any(|s| s.plan.arguments.repository == "search-all")
         && catalog_complete
         && unclassified.is_empty()
-        && !sources.is_empty()
-        && sources.iter().all(|s| s.status == Progress::Done)
+        && sources.iter().all(|s| s.expected)
+        && scoped_complete
         && reconciliation == Progress::Done;
     let mut next_actions = Vec::new();
     if target.is_none() {
         next_actions.push("Confirm CID, cloud, searchable view, target scope and context.".into());
     }
-    if scout != Progress::Done {
+    if scout != Progress::Done && state.discovery_mode == DiscoveryMode::Full {
         next_actions.push("Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result.".into());
     }
-    if !catalog_complete {
+    if !catalog_complete && state.discovery_mode == DiscoveryMode::Full {
         next_actions.push("Complete the native parser catalog and retrieve each exact parser ID; API credentials stay in the supplied protected file.".into());
     }
     if !unclassified.is_empty() {
         next_actions.push("Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence.".into());
+    }
+    if target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
+        && sources.iter().any(|s| !s.expected)
+    {
+        next_actions.push("Confirm the known source selectors within the target scope before completing a full environment map.".into());
     }
     if target.is_some_and(|t| t.scope == TargetScope::SelectedSources) {
         next_actions
@@ -1297,7 +1925,23 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             && state.parsers.is_empty()
             && state.packs.is_empty(),
         full_map_complete: complete,
-        message: COMPLETION_MESSAGE.into(),
+        selected_scope_complete: state.discovery_mode == DiscoveryMode::Full
+            && target.is_some_and(|t| t.scope == TargetScope::SelectedSources)
+            && scoped_complete,
+        quick_scope_complete: state.discovery_mode == DiscoveryMode::Quick
+            && target.is_some_and(|t| t.scope == TargetScope::SelectedSources)
+            && scoped_complete,
+        discovery_mode: state.discovery_mode,
+        quick_depth: state.quick_depth,
+        unverified_lead_count: state.unverified_leads.len(),
+        query_observation_count: state.query_observations.len(),
+        unverified_leads: state.unverified_leads.clone(),
+        query_observations: state.query_observations.clone(),
+        message: if state.discovery_mode == DiscoveryMode::Quick {
+            "Quick discovery covers only the selected sources, window and depth. Parser review and a full environment map remain separate work.".into()
+        } else {
+            COMPLETION_MESSAGE.into()
+        },
         target: if target.is_some() {
             Progress::Done
         } else {
@@ -1479,8 +2123,15 @@ fn assess_source(
         .iter()
         .filter(|r| r.source_ids.contains(&source.id))
         .collect();
+    let quick_run = state.discovery_mode == DiscoveryMode::Quick
+        && runs.last().is_some_and(|r| {
+            r.mode == DiscoveryMode::Quick
+                && (r.quick_depth == QuickDepth::SourcesAndFields
+                    || state.quick_depth == QuickDepth::SourcesOnly)
+        });
     let measured = runs.last().is_some_and(|r| {
         r.status == "complete"
+            && (r.mode == DiscoveryMode::Full || quick_run)
             && state
                 .packs
                 .iter()
@@ -1517,10 +2168,12 @@ fn assess_source(
     } else {
         Progress::Review
     };
+    let quick = quick_run;
     let measured = measured
-        && fields
-            .values()
-            .all(|f| f.measured && (!f.values_requested || f.values == Progress::Done));
+        && (quick
+            || fields
+                .values()
+                .all(|f| f.measured && (!f.values_requested || f.values == Progress::Done)));
     let measurements = if measured {
         Progress::Done
     } else if runs.is_empty() {
@@ -1528,10 +2181,11 @@ fn assess_source(
     } else {
         Progress::Pending
     };
-    let status = if interpretation == Progress::Done
-        && matches!(parser_status, Progress::Done | Progress::NotApplicable)
-        && measurements == Progress::Done
+    let status = if measurements == Progress::Done
         && observed_source
+        && (quick
+            || interpretation == Progress::Done
+                && matches!(parser_status, Progress::Done | Progress::NotApplicable))
     {
         Progress::Done
     } else if parser_status == Progress::Review || interpretation == Progress::Review {
@@ -1541,13 +2195,17 @@ fn assess_source(
     };
     let mut next_actions = Vec::new();
     if interpretation != Progress::Done {
-        next_actions.push(
-            "Review source purpose and data-model interpretation using explicit evidence.".into(),
-        );
+        next_actions.push(if state.discovery_mode == DiscoveryMode::Quick {
+            "Full discovery: review source purpose and data-model interpretation using explicit evidence.".into()
+        } else { "Review source purpose and data-model interpretation using explicit evidence.".into() });
     }
     if !matches!(parser_status, Progress::Done | Progress::NotApplicable) {
-        next_actions
-            .push("Resolve the explicit parser binding and all pending parser semantics.".into());
+        next_actions.push(if state.discovery_mode == DiscoveryMode::Quick {
+            "Full discovery: resolve the explicit parser binding and all pending parser semantics."
+                .into()
+        } else {
+            "Resolve the explicit parser binding and all pending parser semantics.".into()
+        });
     }
     if !measured {
         next_actions.push("Complete a finite discovery run for this source; imported pack history alone is unknown.".into());
@@ -1560,6 +2218,7 @@ fn assess_source(
     }
     SourceStatus {
         source_id: source.id.clone(),
+        expected: source.expected,
         selectors: source.selectors.clone(),
         scouted_events: source.scouted_events,
         review: source.review.clone(),

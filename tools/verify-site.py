@@ -92,7 +92,7 @@ def check_site(files, source_sha, manifest_sha256):
     build = json_object(files["BUILD.json"])
     require(isinstance(build, dict) and set(build) == {"source_commit", "version", "documentation_pages", "hosts"} and
             build.get("source_commit") == source_sha and
-            build.get("version") == "0.1.2" and type(build.get("documentation_pages")) is int and
+            build.get("version") == "0.1.3" and type(build.get("documentation_pages")) is int and
             build["documentation_pages"] == 29 and build.get("hosts") == HOSTS,
             "The site build identity does not match.")
     return entries

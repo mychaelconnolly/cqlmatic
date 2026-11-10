@@ -1,12 +1,22 @@
 # MCP companion workflow
 
-Start with `cqlmatic setup`, then `cqlmatic env inventory`. [Setup](SETUP.md) guides CIMD or manual registration; [inventory](INVENTORY.md) tracks scouting, context, parser review, discovery, and reconciliation. Use `cqlmatic status --json` before choosing source/field evidence. Parser inventory needs a separate API client with NGSIEM Parsers: READ; credential-free MCP search discovery alone leaves that checklist item pending.
+Use `cqlmatic status --json --summary` first to see the selected inventory mode, coverage counts and next actions. Basic `generate` and `check` work offline without a pack, setup or completed discovery. [Setup](SETUP.md) prepares the supported MCP host when authorized execution is needed; [inventory](INVENTORY.md) adds source/field evidence. Full is the default, while persistent Quick mode supports a smaller selected-source workflow. Parser inventory uses a separate API client with NGSIEM Parsers: READ; Quick source/field work does not require completing that catalog.
 
-The model interprets analyst intent, source purpose, and parser transformations. The local engine constructs and checks typed CQL, records evidence, and reports gaps. Use the user's environment map and focused catalog entries. Keep parser declarations separate from observations, confirm exact source/parser bindings, retain quiet/access-unresolved sources, and select the generation pack explicitly. Refer to [the flow diagram](FLOW.md), [documentation index](README.md), and [analyst workflow](ANALYST-WORKFLOW.md). CQLmatic makes no model calls; copying agent instructions does not grant search authorization or change CLI behavior.
+The model interprets analyst intent, source purpose, and parser transformations. The local engine constructs and checks typed CQL, records evidence, and reports gaps. Use caller-provided identifiers, the user's available environment evidence and focused catalog entries. Keep parser declarations separate from observations, confirm exact source/parser bindings, retain quiet/access-unresolved sources, and select the generation pack explicitly. Refer to [the flow diagram](FLOW.md), [documentation index](README.md), and [analyst workflow](ANALYST-WORKFLOW.md). CQLmatic makes no model calls; copying agent instructions does not grant search authorization or change CLI behavior.
 
 CQLmatic can prepare and check CQL offline while an authorized agent uses the **read-only** Falcon MCP tool `falcon_search_ngsiem` for execution. The agent relays discovery responses and saved search results; CQLmatic does not need Falcon API keys in this mode. The [API discovery path](ENVIRONMENT.md#plan-then-execute-explicitly) remains available.
 
-## 1. Build an observed environment pack
+<a id="1-build-an-observed-environment-pack"></a>
+
+## 1. Choose the inventory depth
+
+Use Settings in `cqlmatic env inventory`, or the `set-discovery-mode` request, to choose persistent Quick mode with `sources-only` or `sources-and-fields` depth. Sources only checks presence; sources + fields caps population measurements at 20 fields per source and leaves wider coverage pending. Neither completes the Full parser/source map. Returning to Full retains existing evidence and opens its remaining review/measurement requirements.
+
+Quick scouting requires an explicit chosen view or `search-all`, an authorized UTC window of at most seven days, and `max_seconds: 1..600`. It emits one census query with a separate `search_budget`; configure the MCP host to enforce that deadline before relaying. CQLmatic does not enforce the host's scout elapsed time. `search-all` requires its own authorization and is never a fallback for a missing target. Confirm selected sources before the bounded discovery run and keep quiet/inaccessible expected sources visible. See [the mode and action reference](INVENTORY.md#full-and-quick-discovery).
+
+Start with compact status, then request full status or focused pack records only for the sources and fields needed by the task. Compact inventory actions omit probe bodies; use `discovery-step` with `answers: []` without `--summary` when exact pending arguments are needed. A relevant query can still be constructed without waiting for a complete map.
+
+### Relay a bounded discovery run
 
 Prepare a versioned discovery request with an explicitly confirmed environment, selected sources (or census), an authorized absolute UTC window, and finite budgets. The [discovery reference](ENVIRONMENT.md#discovery-request-reference) defines defaults, limits, stratification, `kind_fields`, `value_fields` and source-bound `population_fields`; [contracts](CONTRACTS.md) covers request and result shapes. `environment.view` is the confirmed MCP searchable target, separate from source `repo`/`type` selectors. Never substitute `search-all` for that target. Keep the request, state, pack, receipt, and raw MCP response files in protected, untracked local storage. Start the credential-free MCP step loop:
 
@@ -42,7 +52,7 @@ When a query needs a value the user did not give (an operation, status or catego
 
 ## 2. Construct and check the query
 
-Look up every identifier instead of guessing it. Field names, source IDs and record kinds come from the pack: `cqlmatic env inspect .local/pack.json --full` (narrow with `--source ID` or `--field NAME`). Use the [query reference](QUERY-REFERENCE.md) for typed construction and supported syntax. The plan contract is `cqlmatic --schema generate`; recipes are listed by `cqlmatic catalog --recipes`, and function semantics by `cqlmatic catalog --functions NAME --full`. Names from `cqlmatic catalog --standard` are standard-schema predictions, not tenant observations.
+Use supplied identifiers or inspect focused source evidence instead of inventing fields or values. Start with `cqlmatic env inspect .local/pack.json --summary`, then narrow with `--source ID` or `--field NAME`; reserve `--full` for a specific need. A missing pack leaves deployment field names unverified and does not prevent basic construction/checking. Use the [query reference](QUERY-REFERENCE.md) for typed construction and supported syntax. The plan contract is `cqlmatic --schema generate`; recipes are listed by `cqlmatic catalog --recipes`, and function semantics by `cqlmatic catalog --functions NAME --full`. Names from `cqlmatic catalog --standard` are standard-schema predictions, not tenant observations.
 
 The primary agent interface is a typed plan JSON file. Save this illustrative plan as `.local/plan.json`; its `source`/`filters`/`steps` and `group`/`sort` stage shapes follow [the checked-in plan example](../examples/process-count.plan.json). It uses the [synthetic MCP example](../examples/mcp/README.md)'s source, kind and field:
 
@@ -61,8 +71,19 @@ The primary agent interface is a typed plan JSON file. Save this illustrative pl
 ```
 
 ```sh
+cqlmatic generate --plan .local/plan.json --json
+cqlmatic check --file .local/query.cql --json
+```
+
+Once Quick mode has a confirmed target, these basic calls reuse its context and can save accepted source/input-field requirements as unverified leads. `CQL_QUICK_TARGET` reports a supplied target; `CQL_QUICK_LEADS` reports newly saved suggestions. Select a different protected Quick state with `--inventory-state FILE` on `generate` or `check`. A target mismatch is reported and leaves Quick evidence/leads unapplied. Leads alone cannot satisfy strict grounding or trigger discovery.
+
+Those basic calls apply static language checks without claiming deployment field evidence. When an applicable pack is available, select it explicitly and request strict observation evidence when the task requires it:
+
+```sh
 cqlmatic generate --plan .local/plan.json --pack .local/pack.json --require-observed --json
 ```
+
+A validated caller-attested saved-query ledger from the selected confirmed inventory can also support `--require-observed` without `--pack` for its exact positive fields/source/target. Fields without qualifying evidence still block, and later or unordered contradictory pack measurements and record-kind requirements remain in force. Quick mode can supply missing target context. Full mode requires an exactly matching explicit request `context.environment` or selected `--pack`, and never fills an absent target or captures leads. Switching to Full retains the ledger and these explicit-context uses. This does not turn the caller assertion into independent execution proof; see the [observation import](#record-positive-field-observations-explicitly) below.
 
 Recipes are an alternative when their documented semantics match; supply `--recipe` and `--params` with the same grounding flags. Inspect the returned interpretation, grounding, diagnostics, and `query`. `ready` reflects the supported static checks and chosen evidence policy, **not** an execution or correctness proof. Do not hand-edit emitted CQL.
 
@@ -95,5 +116,13 @@ cqlmatic assess --query-file .local/query.cql --result .local/mcp-result.json --
 ```
 
 Assess outcomes are `no-findings` (exit `0`), `advisory` and `inconclusive` (exit `1`), and `error` (exit `2`); findings include `RESULT_EMPTY`, `RESULT_CAP_REACHED`, `RESULT_INCOMPLETE`, `RESULT_NULL_FIELDS`, `RESULT_KEY_COVERAGE`, and `RESULT_COMPLETENESS_UNATTESTED`. Inspect the outcome and findings together. Cap findings depend on the function, explicit versus default sizing, and placement. An explicit requested final `sort`/`head`/`tail`/`table`/`top` size is informational when reached. A final `groupBy(..., limit=max)` reaching its ceiling remains inconclusive; an upstream `groupBy(..., limit=max)` receives an informational unverified-cap finding, not a completeness guarantee. Defaults, numeric `groupBy` caps, series limits, per-group `collect` values and `join` subquery limits have distinct checks; see [result assessment](RESULT-ASSESSMENT.md) for the full rules. `no-findings` means only that these checks found no issue; it does not prove correctness or completeness. A timeout, empty sample, or `inconclusive` result is **not** “no results”: narrow the request, obtain an authorized new window, or rerun and assess the new raw result. `assess` also accepts `--request`, `--jsonl` or `--json`; its contract is available with `cqlmatic --schema assess`.
+
+### Record positive field observations explicitly
+
+Assessment does not update inventory or prove which query, target or window produced a response. To retain direct positive field presence, explicitly submit the inventory `import-query-observations` action with protected exact `query_file` and complete `result_file`, the confirmed `environment` and expected `source`, absolute UTC `start`/`end`, `retrieved_at`, and `caller_assertion: "exact-query-result-target-window"`. The assertion is supplied by the caller; it is not independent query/result provenance.
+
+Only direct unchanged event fields qualify. Exact source selectors, direct data filters, unchanged projections and `head`/`tail`/`sort` row selection are supported; aliases, derived outputs, aggregates, joins, synthetic data and alternate source selectors are rejected. Empty, failed, incomplete, malformed and cap-sized responses cannot establish observations. Nonnull, nonempty values count positively, including `0` and `false`. Positive rows do not establish field rates, complete values, universal presence or intent correctness.
+
+The action writes a protected audit summary with original-file references, hashes, source/target/window, caller assertion and positive field counts. It copies no raw query/result bytes or literal value samples into state and does not rewrite the pack or complete discovery. Keep originals protected for later verification. In a selected confirmed inventory with matching target context, the validated ledger can support later strict checks for those exact positive fields without a pack; it cannot override later or unordered contradictory pack measurements or bypass record-kind safeguards. Full status exposes bounded observations and unverified source/field leads; summary status returns their counts. Leads remain suggestions until supported by observations or explicit bounded discovery. See [the action example and evidence limits](INVENTORY.md#saved-query-observations-and-unverified-leads).
 
 The analyst or agent must independently check the intended semantics, source and time scope, missing values, errors, caps, partial results, and row-level evidence. CQLmatic does **not** attest unrestricted-language intent, tenant schema, search-job completion through MCP, unobserved data, native compiler parity, or correctness of an analyst's answer. See the [analyst workflow](ANALYST-WORKFLOW.md) and [security policy](../SECURITY.md) for the remaining trust boundaries. Keep packs, receipts, and raw MCP results out of version control; on Windows, access restrictions are operator-managed.

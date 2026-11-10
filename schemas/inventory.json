@@ -104,6 +104,13 @@
         "result_file"
       ]
     },
+    "DiscoveryMode": {
+      "type": "string",
+      "enum": [
+        "full",
+        "quick"
+      ]
+    },
     "DiscoveryRun": {
       "type": "object",
       "properties": {
@@ -129,8 +136,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "mode": {
+          "$ref": "#/$defs/DiscoveryMode",
+          "default": "full"
+        },
         "pack_path": {
           "type": "string"
+        },
+        "quick_depth": {
+          "$ref": "#/$defs/QuickDepth",
+          "default": "sources-and-fields"
         },
         "receipt_path": {
           "type": "string"
@@ -193,6 +208,24 @@
         "view"
       ]
     },
+    "FieldObservation": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "positive_rows": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "positive_rows"
+      ]
+    },
     "FieldSelection": {
       "type": "object",
       "properties": {
@@ -230,6 +263,72 @@
         {
           "type": "object",
           "properties": {
+            "kind": {
+              "type": "string",
+              "const": "set-discovery-mode"
+            },
+            "mode": {
+              "$ref": "#/$defs/DiscoveryMode"
+            },
+            "quick_depth": {
+              "$ref": "#/$defs/QuickDepth",
+              "default": "sources-and-fields"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "mode"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "caller_assertion": {
+              "$ref": "#/$defs/QueryResultAssertion"
+            },
+            "end": {
+              "type": "string"
+            },
+            "environment": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "import-query-observations"
+            },
+            "query_file": {
+              "type": "string"
+            },
+            "result_file": {
+              "type": "string"
+            },
+            "retrieved_at": {
+              "type": "string"
+            },
+            "source": {
+              "$ref": "#/$defs/Scope"
+            },
+            "start": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "query_file",
+            "result_file",
+            "environment",
+            "source",
+            "start",
+            "end",
+            "retrieved_at",
+            "caller_assertion"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "end": {
               "type": "string"
             },
@@ -239,6 +338,15 @@
             "kind": {
               "type": "string",
               "const": "prepare-scout"
+            },
+            "max_seconds": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "maximum": 600,
+              "minimum": 1
             },
             "start": {
               "type": "string"
@@ -763,6 +871,10 @@
         "created_at": {
           "type": "string"
         },
+        "discovery_mode": {
+          "$ref": "#/$defs/DiscoveryMode",
+          "default": "full"
+        },
         "discovery_runs": {
           "type": "array",
           "items": {
@@ -807,6 +919,17 @@
           "items": {
             "$ref": "#/$defs/ParserSnapshot"
           }
+        },
+        "query_observations": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/QueryObservation"
+          }
+        },
+        "quick_depth": {
+          "$ref": "#/$defs/QuickDepth",
+          "default": "sources-and-fields"
         },
         "reconciled_at": {
           "type": [
@@ -856,6 +979,13 @@
               "type": "null"
             }
           ]
+        },
+        "unverified_leads": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UnverifiedFieldLead"
+          }
         },
         "updated_at": {
           "type": "string"
@@ -1183,6 +1313,74 @@
         "declarations"
       ]
     },
+    "QueryObservation": {
+      "type": "object",
+      "properties": {
+        "audit_path": {
+          "type": "string"
+        },
+        "caller_assertion": {
+          "$ref": "#/$defs/QueryResultAssertion"
+        },
+        "end": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FieldObservation"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "query_sha256": {
+          "type": "string"
+        },
+        "result_sha256": {
+          "type": "string"
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "source_id": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source_id",
+        "environment",
+        "query_sha256",
+        "result_sha256",
+        "audit_path",
+        "start",
+        "end",
+        "retrieved_at",
+        "caller_assertion",
+        "fields"
+      ]
+    },
+    "QueryResultAssertion": {
+      "type": "string",
+      "enum": [
+        "exact-query-result-target-window"
+      ]
+    },
+    "QuickDepth": {
+      "type": "string",
+      "enum": [
+        "sources-only",
+        "sources-and-fields"
+      ]
+    },
     "RawSnapshot": {
       "type": "object",
       "properties": {
@@ -1257,6 +1455,15 @@
         },
         "environment": {
           "$ref": "#/$defs/EnvironmentId"
+        },
+        "max_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "maximum": 600,
+          "minimum": 1
         },
         "query_sha256": {
           "type": "string"
@@ -1384,6 +1591,22 @@
       "enum": [
         "full-environment",
         "selected-sources"
+      ]
+    },
+    "UnverifiedFieldLead": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "field"
       ]
     }
   }

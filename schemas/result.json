@@ -514,6 +514,14 @@
             "null"
           ]
         },
+        "policy": {
+          "$ref": "#/$defs/GroundingPolicy",
+          "default": {
+            "accept_mixed_record_kinds": false,
+            "accept_partial_coverage": false,
+            "require_observed": false
+          }
+        },
         "stale": {
           "type": "array",
           "items": {
@@ -526,6 +534,26 @@
         "missing",
         "conflicting",
         "stale"
+      ]
+    },
+    "GroundingPolicy": {
+      "type": "object",
+      "properties": {
+        "accept_mixed_record_kinds": {
+          "type": "boolean"
+        },
+        "accept_partial_coverage": {
+          "type": "boolean"
+        },
+        "require_observed": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "require_observed",
+        "accept_mixed_record_kinds",
+        "accept_partial_coverage"
       ]
     },
     "Interpretation": {

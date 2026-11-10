@@ -12,7 +12,7 @@ Use Rust 1.99.1 and the checked-in lockfile. `./dev` resolves the pinned compile
 
 The build produces `cqlmatic`. Tests run locally without credentials or network access.
 
-The optional npm launcher uses Node.js 22+ built-ins and has no npm dependencies. Use a [supported, patched Node.js release](../README.md#try-v012); the package's engine field describes API compatibility, not security-patch status. Run its isolated native-fixture checks with `node --test npm/launcher.test.cjs`. Native executables are added only when producing the reviewed npm archive; they are not stored in the source tree. See [release preparation](RELEASING.md#npm-package) for packaging and platform requirements.
+The optional npm launcher uses Node.js 22+ built-ins and has no npm dependencies. Use a [supported, patched Node.js release](../README.md#try-v013); the package's engine field describes API compatibility, not security-patch status. Run its isolated native-fixture checks with `node --test npm/launcher.test.cjs`. Native executables are added only when producing the reviewed npm archive; they are not stored in the source tree. See [release preparation](RELEASING.md#npm-package) for packaging and platform requirements.
 
 `CQLMATIC_CARGO_HOME` overrides the wrapper's project-local Cargo cache; ordinary Cargo settings such as `CARGO_TARGET_DIR` can place build artifacts elsewhere. This does not change the pinned compiler requirement.
 

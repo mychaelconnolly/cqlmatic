@@ -644,6 +644,34 @@ fn external_handoff_keeps_optional_identity_and_exact_host_binding() {
     assert!(handoff.contains("client/host_id/server_name/endpoint/authenticated/tools"));
 }
 #[test]
+fn verified_setup_offers_persistent_inventory_choices_before_authorized_searches() {
+    let mut state = selected(ClientKind::VsCode);
+    state.configured = true;
+    verify_discovery(&mut state, &report(), sha256_hex(b"synthetic discovery")).unwrap();
+    let result = result(state, None);
+    let next_actions = result.next_actions.join(" ");
+    assert!(next_actions.contains("persistent Quick or Full"));
+    assert!(next_actions.contains("without discarding saved evidence"));
+    let handoff = result.handoff.unwrap();
+    for required in [
+        "persistent Quick or Full choice in Settings",
+        "chosen view (keeps its visibility boundary)",
+        "explicit search-all (widens the visible-source census)",
+        "sources-only (presence checks without field inventory)",
+        "sources + field samples (bounded field observations",
+        "absolute UTC window, finite query/time budgets and authorization before any search",
+        "never select or relay it automatically",
+        "Full scouting emits search-all regardless of the saved view",
+        "Settings can switch to Full later without discarding saved evidence",
+        "Quick evidence alone does not establish Full completion",
+    ] {
+        assert!(
+            handoff.contains(required),
+            "missing handoff boundary: {required}"
+        );
+    }
+}
+#[test]
 fn additional_available_tools_are_advisory_without_name_based_capability_claims() {
     let mut state = SetupState::default();
     state

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Quick inventory offers a persistent selected-source workflow with an explicit target, UTC window and finite scout budget. Switching to Full retains evidence without marking the full map complete.
+- Pack-free generation and checking can use a confirmed Quick target and save bounded source and input-field names as unverified leads. Explicit request or pack identity takes precedence.
+- Saved analyst query results can contribute field-specific, caller-attested observations when the query and response qualify; raw values and query text stay outside inventory state. Later negative or uncertain measurements and active-pack record-kind ambiguity still govern strict grounding.
+- Type-only sources work through inventory and measurement. Imported packs remain visible but unconfirmed, and compatible historical imports merge without using measurement refresh.
+- Optional summaries reduce status, inventory and pack-inspection output while retaining full JSON by default. Partial positive coverage requires explicit acceptance in strict mode; regex and wildcard use on unscoped raw text receives a cost warning.
+
 ## 0.1.2
 
 - Setup inspects executable paths with bounded streaming hashes and reports an individual client failure without hiding other detected clients.
@@ -21,7 +29,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v012).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v013).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

@@ -32,6 +32,12 @@ pub struct InventoryArgs {
     pub state: Option<PathBuf>,
     #[arg(long, help = "Emit structured inventory status and next actions")]
     pub json: bool,
+    #[arg(
+        long,
+        requires = "json",
+        help = "Emit compact counts, progress and next actions"
+    )]
+    pub summary: bool,
 }
 
 #[derive(Debug, Args)]
@@ -46,6 +52,12 @@ pub struct StatusArgs {
     pub state: Option<PathBuf>,
     #[arg(long, help = "Emit structured inventory status")]
     pub json: bool,
+    #[arg(
+        long,
+        requires = "json",
+        help = "Emit compact counts, progress and next actions"
+    )]
+    pub summary: bool,
 }
 
 fn fail(message: &str) -> Diagnostic {
@@ -177,6 +189,12 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         }
     )
     .map_err(|_| fail("Cannot emit inventory status."))?;
+    writeln!(
+        out,
+        "Discovery mode: {:?}; Quick depth: {:?}",
+        status.discovery_mode, status.quick_depth
+    )
+    .map_err(|_| fail("Cannot emit inventory status."))?;
     writeln!(out, "{}", status.message).map_err(|_| fail("Cannot emit inventory status."))?;
     if let Some(pack) = &status.active_pack {
         writeln!(
@@ -269,7 +287,11 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
     let state = load(&path)?;
     let report = inventory::assess(&state, &packs(&state)?)?;
     if args.json {
-        output(&report)?;
+        if args.summary {
+            output(&inventory::summary(&report))?;
+        } else {
+            output(&report)?;
+        }
     } else {
         render(&report)?;
     }
@@ -283,7 +305,11 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         let report = inventory::assess(&state, &packs(&state)?)?;
         if args.json || !io::stdin().is_terminal() {
             if args.json {
-                output(&report)?;
+                if args.summary {
+                    output(&inventory::summary(&report))?;
+                } else {
+                    output(&report)?;
+                }
             } else {
                 render(&report)?;
             }
@@ -300,6 +326,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     protect_state(&path)?;
     let mut state = load(&path)?;
     let now = discovery::timestamp();
+    state.schema_version = 2;
     let extra = apply(&path, &mut state, request.action, &now)?;
     state.updated_at = now;
     state.validate()?;
@@ -308,7 +335,13 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         serde_json::to_vec_pretty(&state).map_err(|_| fail("Cannot serialize inventory state."))?;
     writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
     if args.json {
-        output(&json!({"schema_version":1,"state":path,"status":report,"action":extra}))?;
+        if args.summary {
+            output(
+                &json!({"schema_version":1,"summary":true,"state":path,"status":inventory::summary(&report),"action":action_summary(&extra)}),
+            )?;
+        } else {
+            output(&json!({"schema_version":1,"state":path,"status":report,"action":extra}))?;
+        }
     } else {
         render(&report)?;
         if !extra.is_null() {
@@ -316,6 +349,164 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         }
     }
     Ok(0)
+}
+
+fn action_summary(action: &Value) -> Value {
+    if action.is_null() {
+        return Value::Null;
+    }
+    let mut compact = action.clone();
+    if let Some(relay) = compact.get_mut("relay").and_then(Value::as_object_mut) {
+        if let Some(probes) = relay.remove("probes") {
+            relay.insert(
+                "pending_probe_count".into(),
+                json!(probes.as_array().map_or(0, Vec::len)),
+            );
+        }
+        if relay.get("status").and_then(Value::as_str) == Some("needs-probes") {
+            compact["next_action"] = json!(
+                "Submit discovery-step with answers=[] and --json without --summary to obtain exact pending probe arguments."
+            );
+        } else if let Some(compact) = compact.as_object_mut() {
+            compact.remove("next_action");
+        }
+    }
+    compact
+}
+
+fn observation_input(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    crate::setup_cli::protect_directory(parent)?;
+    crate::setup_cli::verify_private_file(path)?;
+    fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if left.dev() != right.dev()
+                || left.ino() != right.ino()
+                || left.nlink() != right.nlink()
+            {
+                return false;
+            }
+        }
+        left.len() == right.len()
+            && left.modified().ok() == right.modified().ok()
+            && left.created().ok() == right.created().ok()
+            && left.permissions() == right.permissions()
+    }
+    let before =
+        std::fs::symlink_metadata(path).map_err(|_| fail("Cannot inspect observation input."))?;
+    let mut file = std::fs::File::open(path).map_err(|_| fail("Cannot open observation input."))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| fail("Cannot inspect opened observation input."))?;
+    if !same_file(&before, &opened) || opened.len() > mcp::MAX_RESULT_BYTES as u64 {
+        return Err(fail("Observation input changed or exceeds 8 MiB."));
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(mcp::MAX_RESULT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| fail("Cannot read observation input."))?;
+    let after = file
+        .metadata()
+        .map_err(|_| fail("Cannot reinspect observation input."))?;
+    let current = std::fs::symlink_metadata(path)
+        .map_err(|_| fail("Cannot reinspect observation input path."))?;
+    crate::setup_cli::protect_directory(parent)?;
+    crate::setup_cli::verify_private_file(path)?;
+    if !same_file(&opened, &after)
+        || !same_file(&after, &current)
+        || bytes.len() as u64 != opened.len()
+    {
+        return Err(fail("Observation input changed while it was being read."));
+    }
+    Ok(bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_query_observations(
+    path: &Path,
+    state: &mut InventoryState,
+    query_file: &str,
+    result_file: &str,
+    environment: cqlmatic::contracts::EnvironmentId,
+    source: cqlmatic::contracts::Scope,
+    start: String,
+    end: String,
+    retrieved_at: String,
+    caller_assertion: QueryResultAssertion,
+) -> Result<Value, Diagnostic> {
+    let query_file = Path::new(query_file);
+    let result_file = Path::new(result_file);
+    distinct_from_state(path, query_file)?;
+    distinct_from_state(path, result_file)?;
+    let query = observation_input(query_file)?;
+    let result = observation_input(result_file)?;
+    if state
+        .target
+        .as_ref()
+        .is_none_or(|t| t.environment != environment)
+    {
+        return Err(fail(
+            "Confirm the exact query target environment before importing observations.",
+        ));
+    }
+    let source_id = discovery::source_id(&source);
+    if !state
+        .sources
+        .iter()
+        .any(|s| s.id == source_id && s.expected && s.selectors == source)
+    {
+        return Err(fail(
+            "Query observations require an exact confirmed expected source.",
+        ));
+    }
+    let key = cqlmatic::sha256_hex(&serde_json::to_vec(&json!({
+        "query_sha256":cqlmatic::sha256_hex(&query),"result_sha256":cqlmatic::sha256_hex(&result),
+        "environment":environment,"source":source,"start":start,"end":end,"retrieved_at":retrieved_at,
+        "caller_assertion":caller_assertion
+    })).map_err(|_| fail("Cannot identify query observation audit."))?);
+    let parent = path
+        .parent()
+        .ok_or_else(|| fail("Inventory state requires a parent directory."))?;
+    let directory = parent.join("query-observations");
+    let audit_path = directory.join(format!("{key}.json"));
+    let observation = QueryObservation::from_result(
+        &query,
+        &result,
+        environment,
+        source,
+        start,
+        end,
+        retrieved_at,
+        caller_assertion,
+        absolute_path(&audit_path)?,
+    )?;
+    let audit = json!({"schema_version":1,"query_file":canonical(query_file)?,"result_file":canonical(result_file)?,"observation":observation});
+    state.record_query_observation(observation.clone())?;
+    crate::setup_cli::protect_directory(&directory)?;
+    if audit_path.exists() {
+        let existing: Value = serde_json::from_slice(&observation_input(&audit_path)?)
+            .map_err(|_| fail("Saved query observation audit is invalid."))?;
+        if existing != audit {
+            return Err(fail(
+                "Saved query observation audit differs from this exact import.",
+            ));
+        }
+    } else {
+        let bytes = serde_json::to_vec_pretty(&audit)
+            .map_err(|_| fail("Cannot serialize query observation audit."))?;
+        storage::Writer::acquire(&audit_path)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
+    }
+    Ok(
+        json!({"query_observation_id":observation.id,"audit_path":observation.audit_path,
+        "query_sha256":observation.query_sha256,"result_sha256":observation.result_sha256,
+        "field_count":observation.fields.len(),"pack_updated":false,"executes_searches":false}),
+    )
 }
 
 fn canonical(path: &Path) -> Result<String, Diagnostic> {
@@ -344,14 +535,41 @@ fn apply(
             }
             Ok(json!({"initialized":true,"executes_searches":false}))
         }
+        InventoryAction::SetDiscoveryMode { mode, quick_depth } => {
+            state.discovery_mode = mode;
+            state.quick_depth = quick_depth;
+            Ok(json!({"discovery_mode":mode,"quick_depth":quick_depth,"executes_searches":false}))
+        }
+        InventoryAction::ImportQueryObservations {
+            query_file,
+            result_file,
+            environment,
+            source,
+            start,
+            end,
+            retrieved_at,
+            caller_assertion,
+        } => import_query_observations(
+            path,
+            state,
+            &query_file,
+            &result_file,
+            environment,
+            source,
+            start,
+            end,
+            retrieved_at,
+            caller_assertion,
+        ),
         InventoryAction::PrepareScout {
             environment,
             start,
             end,
+            max_seconds,
         } => {
-            let plan = state.prepare_scout(environment, start, end)?;
+            let plan = state.prepare_scout_with_budget(environment, start, end, max_seconds)?;
             Ok(
-                json!({"mode":"agent-relayed-mcp","tool":"falcon_search_ngsiem","arguments":plan.arguments,"query_sha256":plan.query_sha256,"executes_searches":false,"next_action":"Run this exact query with these exact arguments through the existing authorized CrowdStrike MCP and save the entire unedited tool result. Submit import-scout with the saved path and arguments."}),
+                json!({"mode":"agent-relayed-mcp","tool":"falcon_search_ngsiem","arguments":plan.arguments,"query_sha256":plan.query_sha256,"search_budget":{"max_queries":1,"max_seconds":plan.max_seconds,"enforced_by":"mcp-host"},"authorization_required":true,"executes_searches":false,"next_action":"Obtain caller authorization for this exact target and UTC window. Configure the MCP host to enforce one query and an authorized finite time budget, using the displayed max_seconds when present, before running the exact arguments; CQLmatic cannot enforce host elapsed time. Save the entire unedited result and submit import-scout with its path and exact arguments."}),
             )
         }
         InventoryAction::ImportScout {
@@ -563,6 +781,8 @@ fn apply(
                 answered: output.answered,
                 elapsed_seconds: 0.0,
                 status: output.status.into(),
+                mode: state.discovery_mode,
+                quick_depth: state.quick_depth,
             });
             Ok(
                 json!({"warning":DISCOVERY_WARNING,"relay":output,"next_action":"Relay each emitted probe through the existing CrowdStrike MCP, save each entire result, then submit discovery-step with probe_id and result_file. The CLI does not implement MCP OAuth or internal model calls."}),
@@ -653,9 +873,19 @@ fn apply(
                 ));
             }
             let cumulative = match cumulative_pack(state)? {
-                Some(previous) => cqlmatic::environment::merge(&previous, &pack)?,
-                None => pack,
+                Some(previous) => cqlmatic::environment::import_history(&previous, &pack)?,
+                None => pack.clone(),
             };
+            state.register_pack_sources(&pack)?;
+            if state
+                .active_pack
+                .as_ref()
+                .is_some_and(|active| active.content_digest == cumulative.content_digest)
+            {
+                return Ok(
+                    json!({"history":"unknown","already_imported":true,"sources_registered":state.sources.len()}),
+                );
+            }
             let directory = snapshot_directory(path, "import", state.packs.len() + 1)?;
             let destination = directory.join("pack.json");
             let bytes = serde_json::to_vec_pretty(&cumulative)
@@ -884,14 +1114,20 @@ fn confirm_action(state: &InventoryState) -> Result<InventoryAction, Diagnostic>
             "Target was not confirmed; existing evidence is unchanged.",
         ));
     }
-    let scope =
+    let scope = if state.discovery_mode == DiscoveryMode::Quick {
+        notice(
+            "Quick discovery confirms selected sources only; it does not complete a full environment map.",
+        )?;
+        TargetScope::SelectedSources
+    } else {
         match prompt("Scope [full-environment / selected-sources; default full-environment]")?
             .as_str()
         {
             "" | "full-environment" => TargetScope::FullEnvironment,
             "selected-sources" => TargetScope::SelectedSources,
             _ => return Err(fail("Expected full-environment or selected-sources.")),
-        };
+        }
+    };
     let expected_sources = if scope == TargetScope::FullEnvironment {
         state.sources.iter().map(|s| s.selectors.clone()).collect()
     } else {
@@ -988,6 +1224,39 @@ fn bind_action(state: &InventoryState) -> Result<InventoryAction, Diagnostic> {
     })
 }
 fn discover_action(state: &InventoryState) -> Result<InventoryAction, Diagnostic> {
+    if state.discovery_mode == DiscoveryMode::Quick {
+        notice(match state.quick_depth {
+            QuickDepth::SourcesOnly => {
+                "Quick sources-only checks source presence. It does not inventory fields or review parsers."
+            }
+            QuickDepth::SourcesAndFields => {
+                "Quick sources + fields samples up to 20 population fields per source. Other fields and parser reviews remain pending."
+            }
+        })?;
+        for source in state.sources.iter().filter(|s| s.expected) {
+            notice(&format!("{}: {:?}", source.id, source.selectors))?;
+        }
+        return Ok(InventoryAction::PrepareDiscovery {
+            start: prompt("Window start (absolute UTC RFC3339)")?,
+            end: prompt("Window end (absolute UTC RFC3339)")?,
+            source_ids: csv(&prompt(
+                "Confirmed source IDs (comma separated; blank selects confirmed sources)",
+            )?),
+            value_fields: vec![],
+            kind_fields: vec![],
+            population_fields: vec![],
+            max_queries: u32::try_from(number(
+                "Maximum queries",
+                if state.quick_depth == QuickDepth::SourcesOnly {
+                    10
+                } else {
+                    40
+                },
+            )?)
+            .map_err(|_| fail("Query budget is out of range."))?,
+            max_seconds: number("Maximum elapsed seconds", 120)?,
+        });
+    }
     notice(DISCOVERY_WARNING)?;
     for source in state.sources.iter().filter(|s| s.expected) {
         notice(&format!("{}: {:?}", source.id, source.selectors))?;
@@ -1040,12 +1309,32 @@ fn interactive(
 ) -> Result<i32, Diagnostic> {
     render(&report)?;
     let choice = prompt(
-        "Action [scout / confirm / review / parsers / bind / discover / resume / reconcile / request / status]",
+        "Action [scout / confirm / review / parsers / bind / discover / resume / reconcile / settings / request / status]",
     )?;
     if choice.is_empty() || choice == "status" {
         return Ok(0);
     }
     let action = match choice.as_str() {
+        "settings" => {
+            notice(
+                "Full discovery examines source fields and parser inventory. Quick discovery limits work to selected sources, a finite window and chosen depth; incomplete coverage stays visible.",
+            )?;
+            let mode = match prompt("Discovery mode [full / quick]")?.as_str() {
+                "full" => DiscoveryMode::Full,
+                "quick" => DiscoveryMode::Quick,
+                _ => return Err(fail("Expected full or quick.")),
+            };
+            let quick_depth = if mode == DiscoveryMode::Quick {
+                match prompt("Quick depth [sources-only / sources-and-fields]")?.as_str() {
+                    "sources-only" => QuickDepth::SourcesOnly,
+                    "sources-and-fields" => QuickDepth::SourcesAndFields,
+                    _ => return Err(fail("Expected sources-only or sources-and-fields.")),
+                }
+            } else {
+                state.quick_depth
+            };
+            InventoryAction::SetDiscoveryMode { mode, quick_depth }
+        }
         "scout" => {
             let cloud = match prompt("Falcon cloud [us1/us2/eu1]")?.as_str() {
                 "us1" => cqlmatic::contracts::Cloud::Us1,
@@ -1054,19 +1343,56 @@ fn interactive(
                 _ => return Err(fail("Expected us1, us2 or eu1.")),
             };
             let tenant = prompt("Falcon CID")?;
-            let view = prompt("Searchable view [search-all]")?;
+            let view = if state.discovery_mode == DiscoveryMode::Quick {
+                notice(
+                    "The chosen view limits visibility and scan scope. Search-all widens the census and requires authorization for that target.",
+                )?;
+                match prompt("Quick search target [chosen-view / search-all; required]")?.as_str() {
+                    "chosen-view" => {
+                        let view = prompt("Exact searchable view (required)")?;
+                        if view.trim().is_empty() {
+                            return Err(fail(
+                                "Quick scouting requires an explicit searchable view.",
+                            ));
+                        }
+                        view
+                    }
+                    "search-all" => "search-all".into(),
+                    _ => return Err(fail("Expected chosen-view or search-all.")),
+                }
+            } else {
+                let view = prompt("Searchable view [search-all]")?;
+                if view.is_empty() {
+                    "search-all".into()
+                } else {
+                    view
+                }
+            };
+            let start = prompt("Window start (absolute UTC RFC3339)")?;
+            let end = prompt("Window end (absolute UTC RFC3339)")?;
+            let max_seconds = if state.discovery_mode == DiscoveryMode::Quick {
+                notice(
+                    "This prepares one census query. Obtain authorization for this exact target/window and configure the MCP host to enforce the finite budget before relaying it; CQLmatic does not enforce host elapsed time.",
+                )?;
+                Some(
+                    prompt("MCP host time budget seconds (required, 1..600)")?
+                        .parse()
+                        .map_err(|_| {
+                            fail("Supply an explicit integer host budget of 1..600 seconds.")
+                        })?,
+                )
+            } else {
+                None
+            };
             InventoryAction::PrepareScout {
                 environment: cqlmatic::contracts::EnvironmentId {
                     cloud,
                     tenant,
-                    view: if view.is_empty() {
-                        "search-all".into()
-                    } else {
-                        view
-                    },
+                    view,
                 },
-                start: prompt("Window start (absolute UTC RFC3339)")?,
-                end: prompt("Window end (absolute UTC RFC3339)")?,
+                start,
+                end,
+                max_seconds,
             }
         }
         "resume" => InventoryAction::DiscoveryStep { answers: vec![] },
@@ -1114,6 +1440,7 @@ fn interactive(
         state = load(path)?;
     }
     let now = discovery::timestamp();
+    state.schema_version = 2;
     let extra = apply(path, &mut state, action, &now)?;
     state.updated_at = now;
     state.validate()?;
@@ -1133,6 +1460,21 @@ fn interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_actions_count_pending_probes_without_changing_full_actions() {
+        let full = json!({"relay":{"status":"needs-probes","probes":[{"probe_id":"synthetic"}],"answered":0},"next_action":"original"});
+        let compact = action_summary(&full);
+        assert_eq!(compact["relay"]["pending_probe_count"], 1);
+        assert!(compact["relay"].get("probes").is_none());
+        assert_eq!(full["relay"]["probes"][0]["probe_id"], "synthetic");
+        assert!(
+            action_summary(
+                &json!({"relay":{"status":"complete","probes":[]},"next_action":"original"})
+            )
+            .get("next_action")
+            .is_none()
+        );
+    }
     struct Native {
         calls: Vec<String>,
     }

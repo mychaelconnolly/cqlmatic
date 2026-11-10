@@ -43,7 +43,7 @@
       <div class="hero-copy">
         <h1 id="hero-title">Map your environment.<br>Write CQL that fits your data.</h1>
         <p class="lead">A local CLI companion for analysts and AI assistants using CrowdStrike Next-Gen SIEM.</p>
-        <p>Your assistant interprets the question. CQLmatic supplies query mechanics, checks, and a reusable map of your sources and fields.</p>
+        <p>Your assistant interprets the question. CQLmatic supplies query mechanics and checks immediately, then builds a reusable map of your sources and fields as you inventory them.</p>
         <p><strong>CQLmatic is available for testing. Feedback is welcome.</strong></p>
         <div class="actions">
           <a class="button" href="https://github.com/mychaelconnolly/cqlmatic/releases/latest">Latest release</a>
@@ -72,7 +72,7 @@
         <div class="code-body">
           <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Over the past 90 days, which of our London and New York workstations ran PowerShell with ‘-enc’ and connected to at least five IPv4 addresses? Show me the busiest processes, their hosts, and the IPs they reached.”</p>
           <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Use <code>endpoints-prod</code>, with <code>ComputerName</code> matching <code>LON-WKS-*</code> or <code>NYC-WKS-*</code>. Set a 90-day range when executing. Join <code>ProcessRollup2</code> and <code>NetworkConnectIP4</code> by <code>aid</code> and process ID. Require five distinct destinations; rank by destinations, then connections. Return up to 20 rows with connections per IP and up to 20 destination IPs.</p>
-          <p class="code-label output-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.2/examples/powershell-network.plan.json">View agent input</a></p>
+          <p class="code-label output-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.3/examples/powershell-network.plan.json">View agent input</a></p>
           <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
   --plan examples/powershell-network.plan.json</code></pre>
           <p class="code-label output-label">Generated CQL</p>
@@ -138,14 +138,14 @@
           <p>Guided setup for CrowdStrike MCP. Complete the required consent and Falcon permissions with your administrator.</p>
         </li>
         <li>
-          <h3>Build the environment map</h3>
+          <h3>Choose inventory depth</h3>
           <code class="command">cqlmatic env inventory</code>
-          <p>Scout sources, review parser context, measure fields and reconcile gaps. Saved progress can be resumed.</p>
+          <p>Quick inventory scouts selected sources with an authorized target and budget. Full inventory adds parser review and broader measurement. Saved progress can be resumed.</p>
         </li>
         <li>
           <h3>Check context, then write</h3>
           <code class="command">cqlmatic status</code>
-          <p>Your assistant can retrieve the saved map with <code>cqlmatic env inspect PACK --full</code>, then select it explicitly with <code>--pack</code> when generating or checking CQL.</p>
+          <p>Basic <code>generate</code> and <code>check</code> work without a pack. Use <code>status --json --summary</code> to find relevant evidence, then inspect and select a pack when the task needs it.</p>
         </li>
         </ol>
       </div>
@@ -160,7 +160,7 @@
       <ul class="requirements-list">
         <li><strong>A local execution path.</strong> An assistant must be able to run the binary. A web chat with only a remote MCP connection cannot do that.</li>
         <li><strong>Authorized discovery access.</strong> MCP handles scouting and search. Parser inventory uses a separate Falcon API connection with <code>NGSIEM Parsers: READ</code>.</li>
-        <li><strong>Time for the first map.</strong> Discovery can run many searches and take substantial time. Agent-assisted work can also consume significant model tokens. Review scope and limits first.</li>
+        <li><strong>Time for deeper mapping.</strong> Basic query writing needs no discovery. Full inventory can run many searches and consume substantial time and model tokens. Review scope and limits first.</li>
         <li><strong>Live confirmation when it matters.</strong> A local <code>ready</code> result means construction and checking passed. It does not prove vendor compilation, execution, complete results or unrestricted-English accuracy.</li>
       </ul>
     </section>

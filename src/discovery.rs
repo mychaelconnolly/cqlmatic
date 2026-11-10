@@ -49,6 +49,20 @@ pub struct FieldSelection {
     pub source: Scope,
     pub fields: Vec<String>,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoveryDepth {
+    #[default]
+    Full,
+    SourcesOnly,
+}
+impl DiscoveryDepth {
+    fn is_full(&self) -> bool {
+        *self == Self::Full
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -59,6 +73,8 @@ pub struct DiscoverRequest {
     pub end: String,
     #[serde(default)]
     pub census: bool,
+    #[serde(default, skip_serializing_if = "DiscoveryDepth::is_full")]
+    pub depth: DiscoveryDepth,
     #[serde(default)]
     pub sources: Vec<Scope>,
     #[serde(default)]
@@ -194,6 +210,17 @@ pub fn validate_request(r: &DiscoverRequest) -> Result<(), Diagnostic> {
     {
         return Err(fail("Population field limits are 1..4000 per source."));
     }
+    if r.depth == DiscoveryDepth::SourcesOnly
+        && (!r.value_fields.is_empty()
+            || !r.kind_fields.is_empty()
+            || !r.population_fields.is_empty()
+            || !r.contracts.is_empty()
+            || r.max_population_fields_per_source.is_some())
+    {
+        return Err(fail(
+            "Sources-only discovery does not measure fields, values or parser declarations.",
+        ));
+    }
     if r.sources.is_empty() && !r.census {
         return Err(fail("Explicitly select sources or set census=true."));
     }
@@ -252,9 +279,15 @@ pub fn validate_request(r: &DiscoverRequest) -> Result<(), Diagnostic> {
     Ok(())
 }
 fn validate_scope(s: &Scope) -> Result<(), Diagnostic> {
-    if s.repo.as_ref().is_none_or(|r| r.trim().is_empty()) || s.event.is_some() {
+    if (s.repo.is_none() && s.type_.is_none())
+        || s.repo.as_ref().is_some_and(|value| value.trim().is_empty())
+        || s.type_
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        || s.event.is_some()
+    {
         return Err(fail(
-            "Discovery sources require a repository selector and optional type; event-specific sampling is not a source inventory.",
+            "Discovery sources require a repository or type selector, without an event selector.",
         ));
     }
     if let Some(r) = &s.repo {
@@ -320,6 +353,11 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
         probes.extend(base_probes(r, s)?);
     }
     let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census","population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
+    if r.depth == DiscoveryDepth::SourcesOnly {
+        result["depth"] = json!(r.depth);
+        result["deferred_stages"] =
+            json!(["source volume checks for sources found by explicit census"]);
+    }
     if let Some(limit) = r.max_population_fields_per_source {
         result["max_population_fields_per_source"] = json!(limit);
         result["deferred_stages"] = json!([
@@ -357,12 +395,12 @@ fn census_probe(r: &DiscoverRequest) -> Result<Probe, Diagnostic> {
 }
 fn census_sources(rows: &[Value], sources: &mut Vec<Scope>) -> Result<(), Diagnostic> {
     for row in rows {
-        let repo = row
-            .get("#repo")
-            .and_then(Value::as_str)
-            .ok_or_else(|| fail("Census row has no repository selector."))?;
         let s = Scope {
-            repo: Some(repo.into()),
+            repo: row
+                .get("#repo")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             type_: row
                 .get("#type")
                 .and_then(Value::as_str)
@@ -370,6 +408,7 @@ fn census_sources(rows: &[Value], sources: &mut Vec<Scope>) -> Result<(), Diagno
                 .map(str::to_string),
             event: None,
         };
+        validate_scope(&s)?;
         if !sources.contains(&s) {
             sources.push(s);
         }
@@ -876,6 +915,20 @@ pub fn frontier(
     for s in sources {
         validate_scope(&s)?;
         let base = base_probes(r, &s)?;
+        if r.depth == DiscoveryDepth::SourcesOnly {
+            for p in base {
+                if let Some(rows) = answered.get(&probe_id(&r.environment.view, &p)) {
+                    if count_row(rows)? == 0 {
+                        return Err(fail(
+                            "Quiet source measurements cannot establish observed presence.",
+                        ));
+                    }
+                } else {
+                    pending.push(p);
+                }
+            }
+            continue;
+        }
         if let Some(rows) = answered.get(&probe_id(&r.environment.view, &base[1])) {
             kind_facet(rows, "#event.dataset", None)?;
         }
@@ -953,6 +1006,17 @@ pub fn frontier(
     Ok(pending)
 }
 fn base_probes(r: &DiscoverRequest, s: &Scope) -> Result<Vec<Probe>, Diagnostic> {
+    if r.depth == DiscoveryDepth::SourcesOnly {
+        return Ok(vec![probe(
+            r,
+            s,
+            "volume",
+            "count(as=events)",
+            false,
+            vec![],
+            None,
+        )?]);
+    }
     Ok(vec![
         probe(r, s, "volume", "count(as=events)", false, vec![], None)?,
         probe(
@@ -1108,7 +1172,9 @@ impl<B: SearchBackend> Run<'_, B> {
                 }
                 answered.insert(id, rows);
             }
-            if counts.values().any(|n| *n == 0) || fields.is_empty() {
+            if counts.values().any(|n| *n == 0)
+                || fields.is_empty() && self.request.depth != DiscoveryDepth::SourcesOnly
+            {
                 return Err(fail(
                     "Quiet or empty measurement windows cannot replace an existing schema.",
                 ));
@@ -1122,7 +1188,11 @@ impl<B: SearchBackend> Run<'_, B> {
                 record_kinds,
                 full_fields,
                 kind_fields,
-            } = self.measure_source(&s, fields, answered)?;
+            } = if self.request.depth == DiscoveryDepth::SourcesOnly {
+                sampled_measurements(self.request, &s, vec![])
+            } else {
+                self.measure_source(&s, fields, answered)?
+            };
             let sid = source_id(&s);
             let pid = format!(
                 "{}{}:{}",
@@ -1158,7 +1228,10 @@ impl<B: SearchBackend> Run<'_, B> {
             {
                 data.provenance.push(json!({"id":cpid,"source_type":"manual-curation","canonical_source":"Explicit parser contract supplied by the operator","retrieved_at":c.retrieved_at,"source_hash":c.source_hash,"redaction_status":"none","coverage_status":"declared-only","notes":"Declaration evidence retains its original date; search observations do not re-review it."}));
             }
-            let mut source = json!({"id":sid,"kind":"repo","name":s.type_.as_ref().or(s.repo.as_ref()).unwrap(),"inventory_status":"observed-only","selectors":{"repo":s.repo,"type":s.type_},"relationship":{"datasets":datasets},"evidence":{"declared":contract.is_some(),"observed":true,"observation_window":full_window},"provenance_ids":[full_pid]});
+            let mut source = json!({"id":sid,"kind":if s.repo.is_some(){"repo"}else{"source"},"name":s.type_.as_ref().or(s.repo.as_ref()).unwrap(),"inventory_status":"observed-only","selectors":{"repo":s.repo,"type":s.type_},"relationship":{"datasets":datasets},"evidence":{"declared":contract.is_some(),"observed":true,"observation_window":full_window},"provenance_ids":[full_pid]});
+            if self.request.depth == DiscoveryDepth::SourcesOnly {
+                source["evidence"]["discovery_depth"] = json!("sources-only");
+            }
             if let Some(fields) = field_selection(self.request, &s) {
                 source["evidence"]["measured_fields"] = json!(fields);
             }
@@ -1365,6 +1438,7 @@ mod tests {
             start: "2026-01-01T00:00:00Z".into(),
             end: "2026-01-01T01:00:00Z".into(),
             census: false,
+            depth: DiscoveryDepth::Full,
             sources: vec![Scope {
                 repo: Some("literal*repo".into()),
                 ..Scope::default()
