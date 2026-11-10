@@ -272,6 +272,13 @@ fn complete_offline_relay_inventory_derives_completion_and_detects_pack_changes(
         &dir.0,
         json!({"kind":"confirm-target","environment":environment(),"scope":"full-environment","context":"Synthetic offline regression","expected_sources":[]}),
     );
+    let text_status = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--state"])
+        .arg(dir.0.join("workflow/state.json"))
+        .output()
+        .unwrap();
+    assert!(text_status.status.success());
+    assert!(String::from_utf8_lossy(&text_status.stdout).contains("[#repo=synthetic]"));
     let source = confirmed["status"]["sources"][0]["source_id"].clone();
     call(
         &dir.0,

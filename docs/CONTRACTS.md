@@ -1,6 +1,6 @@
 # Machine contracts and automation
 
-The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.1**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
+The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.2**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
 
 Use [USAGE](../USAGE.md) for flags, [setup](SETUP.md) and [inventory](INVENTORY.md) for actions, and [query construction](QUERY-REFERENCE.md) for nested plans. All examples are synthetic. Runtime operations require the caller's explicit authorization and environment.
 

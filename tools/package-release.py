@@ -13,11 +13,12 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import zipfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.1"
+VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 PREFIX = "cqlmatic-v" + VERSION + "/"
 TARGET = "x86_64-pc-windows-msvc"
 SYSTEM_DLLS = set("""advapi32 bcrypt bcryptprimitives cfgmgr32 combase crypt32 cryptbase
@@ -94,7 +95,32 @@ def committed_source(manifest):
     require(read_manifest(files["SOURCE-SHA256SUMS"]) ==
             {name: digest for name, digest in manifest.items() if name != "SOURCE-SHA256SUMS"},
             "SOURCE-SHA256SUMS does not cover the complete index")
+    release_metadata(files)
     return commit, files, staged
+
+
+def release_metadata(files):
+    cargo = tomllib.loads(files["Cargo.toml"].decode("utf-8"))
+    lock = tomllib.loads(files["Cargo.lock"].decode("utf-8"))
+    native = json.loads(files["npm/native-manifest.json"])
+    require(cargo["package"]["version"] == VERSION
+            and next(package["version"] for package in lock["package"] if package["name"] == "cqlmatic") == VERSION
+            and json.loads(files["package.json"])["version"] == VERSION
+            and native["version"] == VERSION, "Release metadata versions differ")
+
+
+def install_guides(files):
+    expected = VERSION.encode("ascii")
+    for name in ("README.md", "docs/SETUP.md"):
+        guide = files[name]
+        require(b"npx cqlmatic@" + expected + b" setup" in guide
+                and b"cqlmatic-v" + expected + b"-windows-x86_64.zip" in guide,
+                "Current install instructions missing in " + name)
+        for pattern in (rb"npx cqlmatic@([0-9]+\.[0-9]+\.[0-9]+)",
+                        rb"cqlmatic-v([0-9]+\.[0-9]+\.[0-9]+)-windows-x86_64\.zip",
+                        rb"releases/tag/v([0-9]+\.[0-9]+\.[0-9]+)"):
+            require(all(version == expected for version in re.findall(pattern, guide)),
+                    "Stale install instructions in " + name)
 
 
 def public_bytes(data, label):
@@ -283,16 +309,18 @@ def verify_zip(destination, files, modes):
     require(len(raw) >= 22 and raw[-22:-18] == b"PK\x05\x06" and raw[-2:] == b"\0\0", "Invalid ZIP trailer")
     with zipfile.ZipFile(destination) as archive:
         require(not archive.comment, "Unexpected ZIP comment")
-        seen = set()
+        seen, extracted = set(), {}
         for info in archive.infolist():
             name = info.filename.removeprefix(PREFIX)
             require(info.filename == PREFIX + name and name in files and name not in seen, "Unexpected ZIP member")
             require(not info.is_dir() and info.create_system == 3 and info.external_attr == (stat.S_IFREG | modes[name]) << 16
                     and info.date_time == (1980, 1, 1, 0, 0, 0) and not info.extra and not info.comment
                     and not info.flag_bits & 1 and info.compress_type == zipfile.ZIP_DEFLATED, "Unsafe ZIP metadata")
-            require(archive.read(info) == files[name], "ZIP member digest differs")
+            extracted[name] = archive.read(info)
+            require(extracted[name] == files[name], "ZIP member digest differs")
             seen.add(name)
         require(seen == files.keys(), "ZIP is incomplete")
+        install_guides(extracted)
 
 
 def write_tar(destination, files, modes):
@@ -313,22 +341,25 @@ def verify_tar(destination, files, modes):
     require(decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail, "Invalid gzip stream")
     with tarfile.open(fileobj=io.BytesIO(unpacked), mode="r:") as archive:
         require(not archive.pax_headers, "Unexpected tar metadata")
-        seen, end = set(), 0
+        seen, extracted, end = set(), {}, 0
         for info in archive:
             name = info.name.removeprefix(PREFIX)
             require(info.name == PREFIX + name and name in files and name not in seen, "Unexpected tar member")
             require(info.isfile() and not info.linkname and not info.pax_headers and info.uid == info.gid == 0
                     and not info.uname and not info.gname and info.mode == modes[name] and info.mtime == 0,
                     "Unsafe tar metadata")
-            require(archive.extractfile(info).read() == files[name], "Tar member digest differs")
+            extracted[name] = archive.extractfile(info).read()
+            require(extracted[name] == files[name], "Tar member digest differs")
             end = info.offset_data + (info.size + 511) // 512 * 512
             seen.add(name)
         require(seen == files.keys() and len(unpacked) - end >= 1024 and not any(unpacked[end:]), "Tar is incomplete")
+        install_guides(extracted)
 
 
 def build(args):
     manifest_raw = regular(args.manifest)
     commit, files, modes = committed_source(read_manifest(manifest_raw))
+    install_guides(files)
     linux, windows = regular(args.linux), regular(args.windows)
     require(linux[:6] == b"\x7fELF\x02\x01" and len(linux) >= 20 and struct.unpack_from("<H", linux, 18)[0] == 62,
             "Linux input must be an x86_64 ELF image")

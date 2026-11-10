@@ -607,6 +607,85 @@ fn host_managed_report_binds_surface_and_preserves_incomplete_discovery() {
     }
 }
 #[test]
+fn external_handoff_keeps_optional_identity_and_exact_host_binding() {
+    let mut state = SetupState::default();
+    state
+        .select(host_selection(ClientKind::External, Some("synthetic-host")))
+        .unwrap();
+    let report = HostToolDiscovery {
+        schema_version: SCHEMA_VERSION,
+        client: ClientKind::External,
+        host_id: Some("synthetic-host".into()),
+        server_name: "cs-mcp".into(),
+        endpoint: Cloud::Eu1.endpoint().into(),
+        authenticated: true,
+        effective_oauth_client_id: None,
+        effective_config_source: None,
+        tools: vec![DiscoveryTool {
+            name: SEARCH_TOOL.into(),
+            available: true,
+        }],
+    };
+    verify_discovery(
+        &mut state,
+        &report,
+        sha256_hex(b"synthetic external report"),
+    )
+    .unwrap();
+    let result = result(state, None);
+    assert!(
+        result
+            .next_actions
+            .iter()
+            .any(|action| action.contains("host_id: 'synthetic-host'"))
+    );
+    let handoff = result.handoff.unwrap();
+    assert!(handoff.contains("optional operator-supplied fields for external reports"));
+    assert!(handoff.contains("client/host_id/server_name/endpoint/authenticated/tools"));
+}
+#[test]
+fn additional_available_tools_are_advisory_without_name_based_capability_claims() {
+    let mut state = SetupState::default();
+    state
+        .select(host_selection(ClientKind::External, Some("synthetic-host")))
+        .unwrap();
+    let report = HostToolDiscovery {
+        schema_version: SCHEMA_VERSION,
+        client: ClientKind::External,
+        host_id: Some("synthetic-host".into()),
+        server_name: "cs-mcp".into(),
+        endpoint: Cloud::Eu1.endpoint().into(),
+        authenticated: true,
+        effective_oauth_client_id: None,
+        effective_config_source: None,
+        tools: vec![
+            DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: true,
+            },
+            DiscoveryTool {
+                name: "synthetic_read".into(),
+                available: true,
+            },
+            DiscoveryTool {
+                name: "synthetic_delete".into(),
+                available: true,
+            },
+            DiscoveryTool {
+                name: "synthetic_unavailable".into(),
+                available: false,
+            },
+        ],
+    };
+    verify_discovery(&mut state, &report, sha256_hex(b"synthetic tools report")).unwrap();
+    assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+    let notice = state.last_notice.unwrap();
+    assert!(notice.contains("2 additional available tools"));
+    assert!(notice.contains("Tool names do not establish read or write behavior"));
+    assert!(!notice.contains("synthetic_read"));
+    assert!(!notice.contains("synthetic_delete"));
+}
+#[test]
 fn named_hosts_use_native_registration_and_bound_session_identity() {
     for client in [
         ClientKind::ClaudeCode,

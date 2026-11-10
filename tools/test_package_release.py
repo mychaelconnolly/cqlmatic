@@ -50,10 +50,20 @@ class ReleaseTests(unittest.TestCase):
         self.repo.mkdir()
         self.old_root, RELEASE.ROOT = RELEASE.ROOT, self.repo
         self.git("init", "--quiet", "--initial-branch=main")
-        self.files = {"README.md": b"Synthetic release fixture.\n", "LICENSE": b"Apache License\nVersion 2.0\n",
+        version = RELEASE.VERSION
+        guide = (f"npx cqlmatic@{version} setup\n"
+                 f"cqlmatic-v{version}-windows-x86_64.zip\n"
+                 f"https://github.com/example/cqlmatic/releases/tag/v{version}\n").encode()
+        self.files = {"README.md": guide, "docs/SETUP.md": guide,
+                      "Cargo.toml": f'[package]\nname = "cqlmatic"\nversion = "{version}"\n'.encode(),
+                      "Cargo.lock": f'[[package]]\nname = "cqlmatic"\nversion = "{version}"\n'.encode(),
+                      "package.json": json.dumps({"name": "cqlmatic", "version": version}).encode(),
+                      "npm/native-manifest.json": json.dumps({"version": version}).encode(),
+                      "LICENSE": b"Apache License\nVersion 2.0\n",
                       "NOTICE": b"Synthetic fixture attribution.\n", "dev": b"#!/bin/sh\nexit 0\n"}
         self.files["SOURCE-SHA256SUMS"] = self.manifest(self.files)
         for name, data in self.files.items():
+            (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / name).write_bytes(data)
         (self.repo / "dev").chmod(0o755)
         self.git("add", "--", *self.files)
@@ -69,7 +79,7 @@ class ReleaseTests(unittest.TestCase):
         self.windows = self.base / "windows.exe"
         self.windows.write_bytes(pe_image(delayed="api-ms-win-core-synch-l1-2-0.dll"))
         self.metadata = self.base / "BUILD-WINDOWS.json"
-        self.meta = {"schema_version": 1, "product": "cqlmatic", "version": "0.1.1", "source_commit": self.commit,
+        self.meta = {"schema_version": 1, "product": "cqlmatic", "version": RELEASE.VERSION, "source_commit": self.commit,
                      "target": RELEASE.TARGET, "toolchain": "1.99.1",
                      "rustc": "rustc 1.99.1 (synthetic)\nhost: " + RELEASE.TARGET,
                      "runner": {"os": "Microsoft Windows Server", "version": "10.0.26100", "build": "26100",
@@ -106,7 +116,7 @@ class ReleaseTests(unittest.TestCase):
         self.build()
         self.assertEqual(first, {path.name: path.read_bytes() for path in self.args.out.iterdir()})
         for suffix, binary in (("source.zip", None), ("windows-x86_64.zip", "cqlmatic.exe")):
-            with zipfile.ZipFile(self.args.out / ("cqlmatic-v0.1.1-" + suffix)) as archive:
+            with zipfile.ZipFile(self.args.out / ("cqlmatic-v" + RELEASE.VERSION + "-" + suffix)) as archive:
                 expected = {RELEASE.PREFIX + name for name in self.files}
                 if binary:
                     expected.add(RELEASE.PREFIX + binary)
@@ -114,7 +124,7 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(set(archive.namelist()), expected)
                 for name, data in self.files.items():
                     self.assertEqual(archive.read(RELEASE.PREFIX + name), data)
-        with tarfile.open(self.args.out / "cqlmatic-v0.1.1-linux-x86_64.tar.gz") as archive:
+        with tarfile.open(self.args.out / ("cqlmatic-v" + RELEASE.VERSION + "-linux-x86_64.tar.gz")) as archive:
             native = archive.getmember(RELEASE.PREFIX + "cqlmatic-linux-x86_64")
             self.assertEqual(native.mode, 0o755)
             self.assertEqual(archive.extractfile(native).read(), self.linux.read_bytes())
@@ -144,6 +154,20 @@ class ReleaseTests(unittest.TestCase):
         self.manifest_path.write_bytes(self.manifest(self.files))
         with self.assertRaisesRegex(ValueError, "complete index"):
             self.build()
+
+    def test_extracted_archive_rejects_stale_install_guide_and_metadata(self):
+        files = dict(self.files)
+        old = b"0.0.1"
+        files["docs/SETUP.md"] = files["docs/SETUP.md"].replace(RELEASE.VERSION.encode(), old)
+        modes = {name: 0o755 if name == "dev" else 0o644 for name in files}
+        archive = self.base / "stale.zip"
+        RELEASE.write_zip(archive, files, modes)
+        with self.assertRaisesRegex(ValueError, "Current install instructions missing"):
+            RELEASE.verify_zip(archive, files, modes)
+        files = dict(self.files)
+        files["npm/native-manifest.json"] = b'{"version":"0.0.1"}'
+        with self.assertRaisesRegex(ValueError, "metadata versions differ"):
+            RELEASE.release_metadata(files)
 
     def test_changed_native_provenance_and_nonregular_inputs_are_rejected(self):
         self.windows.write_bytes(self.windows.read_bytes() + b"changed")
@@ -276,13 +300,13 @@ class ReleaseTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Unsafe"):
                 RELEASE.read_manifest(("0" * 64 + "  " + name + "\n").encode())
         self.build()
-        archive = self.args.out / "cqlmatic-v0.1.1-source.zip"
+        archive = self.args.out / ("cqlmatic-v" + RELEASE.VERSION + "-source.zip")
         modes = {name: 0o755 if name == "dev" else 0o644 for name in self.files}
         with zipfile.ZipFile(archive, "a") as output:
             output.writestr(RELEASE.PREFIX + "unexpected.txt", b"Unexpected")
         with self.assertRaisesRegex(ValueError, "Unexpected ZIP member"):
             RELEASE.verify_zip(archive, self.files, modes)
-        archive = self.args.out / "cqlmatic-v0.1.1-linux-x86_64.tar.gz"
+        archive = self.args.out / ("cqlmatic-v" + RELEASE.VERSION + "-linux-x86_64.tar.gz")
         archive.write_bytes(archive.read_bytes() + b"unexpected gzip tail")
         with self.assertRaisesRegex(ValueError, "Invalid gzip stream"):
             RELEASE.verify_tar(archive, {}, {})

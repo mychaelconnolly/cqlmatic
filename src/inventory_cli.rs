@@ -197,9 +197,25 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
     )
     .map_err(|_| fail("Cannot emit inventory status."))?;
     for source in &status.sources {
+        let selectors = [
+            source
+                .selectors
+                .repo
+                .as_ref()
+                .map(|repo| format!("#repo={repo}")),
+            source
+                .selectors
+                .type_
+                .as_ref()
+                .map(|type_| format!("#type={type_}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
         writeln!(
             out,
-            "{}: {}; parser {}; measurements {}; observed {} / {} fields",
+            "{} [{selectors}]: {}; parser {}; measurements {}; observed {} / {} fields",
             source.source_id,
             source.status,
             source.parser,

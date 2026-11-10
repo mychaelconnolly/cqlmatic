@@ -656,7 +656,16 @@ pub fn verify_discovery(
     } else {
         SetupPhase::Authenticated
     };
-    state.last_notice = Some(if has_search_tool { "Saved host tool-discovery report matches this client and endpoint; no live query was run. Saved reports are caller-supplied evidence, not independent transport or configuration attestation." } else { "Saved host report states authentication, but falcon_search_ngsiem is not available. Tool discovery remains unverified. Check the host's selected tools, Falcon roles, and consent; no live query was run." }.into());
+    let mut notice = if has_search_tool { "Saved host tool-discovery report matches this client and endpoint; no live query was run. Saved reports are caller-supplied evidence, not independent transport or configuration attestation." } else { "Saved host report states authentication, but falcon_search_ngsiem is not available. Tool discovery remains unverified. Check the host's selected tools, Falcon roles, and consent; no live query was run." }.to_owned();
+    let additional = report
+        .tools
+        .iter()
+        .filter(|tool| tool.available && tool.name != SEARCH_TOOL)
+        .count();
+    if additional > 0 {
+        notice.push_str(&format!(" The report lists {additional} additional available tools. Tool names do not establish read or write behavior; review their permissions in the host and restrict unneeded tools before use."));
+    }
+    state.last_notice = Some(notice);
     Ok(())
 }
 
@@ -945,8 +954,16 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
     if let Some(s) = selected {
         let host_name = s.host_id.as_deref().unwrap_or(s.client.label());
         let host_id_field = if s.host_id.is_some() { "/host_id" } else { "" };
+        if let Some(host_id) = &s.host_id {
+            next_actions.push(format!("Selected external host_id: '{host_id}'. Bind its report to this exact host ID, server '{}' and endpoint {}.", s.server_name, s.cloud.endpoint()));
+        }
+        let identity_guidance = if s.client == ClientKind::External {
+            "Inspect the effective server and confirm supported host-managed authentication. effective_oauth_client_id and effective_config_source are optional operator-supplied fields for external reports; include them only when known."
+        } else {
+            "Inspect the effective server and OAuth client ID in this host session. Claude/Copilot reports require effective_oauth_client_id and effective_config_source matching the selected session; those fields remain optional for legacy Codex/VS Code reports."
+        };
         handoff = Some(format!(
-            "Continue CQLmatic setup in {} using MCP server '{}' at {}. {} First inspect the effective server and OAuth client ID in this host session, then discover tools and save a v1 HostToolDiscovery report with client{}/server_name/endpoint/authenticated/effective_oauth_client_id/effective_config_source/tools for `cqlmatic setup` import; exact available falcon_search_ngsiem is required for verified discovery. Reports are caller-supplied evidence, not independent transport or identity attestation. Run `cqlmatic env inventory --help`, then guide me through bounded inventory with explicit cloud/tenant/time and protected local output paths. You perform model reasoning and authorized MCP calls; relay saved MCP results into CQLmatic's offline flow. The built-in inventory scout emits repository=search-all and needs separate explicit authorization for that target and window. Without it, leave scouting pending and use lower-level selected-source discovery on the confirmed view; later query execution must retain that view. Use absolute times, read-only tools, and bounded searches. Registration and browser consent remain my steps. Do not run a live query merely to mark setup complete.",
+            "Continue CQLmatic setup in {} using MCP server '{}' at {}. {} {} Discover tools and save a v1 HostToolDiscovery report with client{}/server_name/endpoint/authenticated/tools for `cqlmatic setup` import; exact available falcon_search_ngsiem is required for verified discovery. Additional reported tools are advisory and their names do not establish read or write behavior. Reports are caller-supplied evidence, not independent transport or identity attestation. Run `cqlmatic env inventory --help`, then guide me through bounded inventory with explicit cloud/tenant/time and protected local output paths. You perform model reasoning and authorized MCP calls; relay saved MCP results into CQLmatic's offline flow. The built-in inventory scout emits repository=search-all and needs separate explicit authorization for that target and window. Without it, leave scouting pending and use lower-level selected-source discovery on the confirmed view; later query execution must retain that view. Use absolute times, read-only tools, and bounded searches. Registration and browser consent remain my steps. Do not run a live query merely to mark setup complete.",
             host_name,
             s.server_name,
             s.cloud.endpoint(),
@@ -955,6 +972,7 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
             } else {
                 "Host configuration or authentication has not been independently attested."
             },
+            identity_guidance,
             host_id_field,
         ));
     }

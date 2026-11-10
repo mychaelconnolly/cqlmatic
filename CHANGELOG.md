@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2
+
+- Setup inspects executable paths with bounded streaming hashes and reports an individual client failure without hiding other detected clients.
+- Windows setup reports the path, SID, and missing ACL right, and checks existing directory ancestors before and after creation. Recoverable menu action errors return to the menu.
+- External-host setup treats host identity as operator-supplied, carries the chosen host ID into next actions, and identifies additional discovered tools without assuming their capabilities.
+- Inventory text status shows readable source selectors beside stable IDs. Mixed `#event.dataset` guidance explains why an exact event-name selector alone does not settle the record kind.
+- Release archives and the npm tarball verify extracted versioned install instructions against release metadata.
+
 ## 0.1.1
 
 - Native MCP setup for Claude Code and GitHub Copilot CLI, app and VS Code Copilot harness. Copilot CLI launch names share one adapter and configuration.
@@ -13,7 +21,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v011).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v012).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

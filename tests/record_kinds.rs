@@ -131,6 +131,27 @@ fn positive_leading_dataset_filter_satisfies_record_kind_requirement() {
 }
 
 #[test]
+fn exact_event_selector_explains_dataset_ambiguity() {
+    let pack = datasets(&["traffic", "event"]);
+    let result = check(
+        "#repo=fw_repo #event_simpleName=FirewallEvent | top(dst)",
+        Some(&pack),
+        false,
+    );
+    assert_eq!(
+        result.outcome,
+        Outcome::NeedsContext,
+        "{:?}",
+        result.diagnostics
+    );
+    let message = &ambiguity(&result).message;
+    assert!(message.contains("#event_simpleName selector does not establish #event.dataset"));
+    assert!(message.contains("exact #event.dataset filter"));
+    assert!(message.contains("group by #event.dataset"));
+    assert!(message.contains("accept_mixed_record_kinds"));
+}
+
+#[test]
 fn groupby_dataset_key_satisfies_record_kind_requirement() {
     let pack = datasets(&["traffic", "event"]);
     let result = check(

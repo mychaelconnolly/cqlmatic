@@ -16,6 +16,14 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def install_guide(data, version):
+    expected = version.encode("ascii")
+    require(b"npx cqlmatic@" + expected + b" setup" in data,
+            "Current npm install instructions missing from extracted README")
+    require(all(found == expected for found in re.findall(rb"npx cqlmatic@([0-9]+\.[0-9]+\.[0-9]+)", data)),
+            "Stale npm install instructions in extracted README")
+
+
 def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -70,7 +78,9 @@ def build(args):
     files, modes = staged_source(manifest)
     metadata = json.loads(files["package.json"])
     native = json.loads(files["npm/native-manifest.json"])
-    require(metadata["name"] == "cqlmatic" and metadata["version"] == native["version"] == "0.1.1",
+    version = metadata["version"]
+    require(metadata["name"] == "cqlmatic" and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+            and version == native["version"],
             "Unexpected npm package identity")
     require(metadata["bin"] == {"cqlmatic": "npm/cqlmatic.cjs"}, "Unexpected launcher")
     selected = {"package.json", "README.md", "LICENSE", "NOTICE"}
@@ -101,7 +111,7 @@ def build(args):
     output = args.out.resolve()
     require(output != ROOT and ROOT not in output.parents, "Output must be outside the source tree")
     output.mkdir(parents=True, exist_ok=True)
-    destination = output / "cqlmatic-0.1.1.tgz"
+    destination = output / f"cqlmatic-{version}.tgz"
     with tempfile.NamedTemporaryFile(dir=output, prefix=".cqlmatic-", delete=False) as temporary:
         pending = Path(temporary.name)
     try:
@@ -136,6 +146,7 @@ def build(args):
             extracted = {p.relative_to(scratch).as_posix(): sha256(p.read_bytes())
                          for p in Path(scratch).rglob("*") if p.is_file()}
             require(extracted == {name: sha256(data) for name, data in packed.items()}, "Extracted digests differ")
+            install_guide((Path(scratch) / "README.md").read_bytes(), version)
         os.replace(pending, destination)
     finally:
         pending.unlink(missing_ok=True)

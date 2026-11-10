@@ -1914,14 +1914,17 @@ fn record_kind_gaps(
             continue;
         }
         let visible = values.into_iter().collect::<Vec<_>>().join(", ");
+        let guidance = if field == "#event.dataset" && state.scope.event.is_some() {
+            "the exact #event_simpleName selector does not establish #event.dataset; add an exact #event.dataset filter, group by #event.dataset, or explicitly accept mixed record kinds with accept_mixed_record_kinds"
+        } else {
+            "constrain one, group by it, or set accept_mixed_record_kinds"
+        };
         let mut message = if truncated {
             format!(
-                "record-kind facet truncated ({field}: {visible}); other kinds may exist; constrain one, group by it, or set accept_mixed_record_kinds"
+                "record-kind facet truncated ({field}: {visible}); other kinds may exist; {guidance}"
             )
         } else {
-            format!(
-                "multiple record kinds observed ({field}: {visible}); constrain one, group by it, or set accept_mixed_record_kinds"
-            )
+            format!("multiple record kinds observed ({field}: {visible}); {guidance}")
         };
         if nested {
             let scope = [

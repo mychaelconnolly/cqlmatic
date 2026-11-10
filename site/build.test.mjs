@@ -30,7 +30,7 @@ function fixture(t) {
 }
 
 test('only exact source commits and approved, unique documentation routes are accepted', () => {
-  for (const invalid of [undefined, '', 'main', 'v0.1.1', 'a'.repeat(39), 'g'.repeat(40)]) assert.throws(() => requireCommit(invalid), /40-character/);
+  for (const invalid of [undefined, '', 'main', 'v0.1.2', 'a'.repeat(39), 'g'.repeat(40)]) assert.throws(() => requireCommit(invalid), /40-character/);
   assert.equal(requireCommit(COMMIT.toUpperCase()), COMMIT);
   assert.equal(requireCommit('0'.repeat(40)), '0'.repeat(40));
   assert.equal(DOCUMENTS.length, 29);
@@ -62,7 +62,7 @@ test('only agent-skill frontmatter is omitted, while source bytes are untouched'
 
 test('build rebases Markdown and raw HTML, binds GitHub links, and creates deterministic complete checksums', t => {
   const root = fixture(t);
-  write(root, 'README.md', `# Project\n\n<a id="project-background"></a>\n\n[Setup](docs/SETUP.md#setup) · [Explicit](#project-background) · [Example](examples/sample.json) · [Schemas](schemas/) · [License](LICENSE) · [Source](src/lib.rs#L1)\n\n<a href="docs/SETUP.md#setup">Raw guide</a>\n<p align="center"><picture><source srcset="site/public/assets/setup-discovery-query.png 1x, site/public/assets/setup-discovery-query.png 2x"><img src="site/public/assets/agentworks-expert-builder-2026.png" width="300" height="300" alt="Synthetic &quot;badge&quot;"></picture><br>Recognition for <strong>the agent</strong>.</p>\n\n[Tagged example](https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.1/examples/sample.json)\n\n| Column | Value |\n| --- | --- |\n| code | value |\n\n\`\`\`sh\necho synthetic\n\`\`\`\n`);
+  write(root, 'README.md', `# Project\n\n<a id="project-background"></a>\n\n[Setup](docs/SETUP.md#setup) · [Explicit](#project-background) · [Example](examples/sample.json) · [Schemas](schemas/) · [License](LICENSE) · [Source](src/lib.rs#L1)\n\n<a href="docs/SETUP.md#setup">Raw guide</a>\n<p align="center"><picture><source srcset="site/public/assets/setup-discovery-query.png 1x, site/public/assets/setup-discovery-query.png 2x"><img src="site/public/assets/agentworks-expert-builder-2026.png" width="300" height="300" alt="Synthetic &quot;badge&quot;"></picture><br>Recognition for <strong>the agent</strong>.</p>\n\n[Tagged example](https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.2/examples/sample.json)\n\n| Column | Value |\n| --- | --- |\n| code | value |\n\n\`\`\`sh\necho synthetic\n\`\`\`\n`);
   const protectedPaths = ['README.md', 'docs/ANALYST-WORKFLOW.md', 'src/lib.rs', 'schemas/sample.json', 'data/sample.json'];
   const before = protectedPaths.map(path => digest(readFileSync(join(root, path))));
   const first = buildSite({ root, commit: COMMIT });
@@ -89,7 +89,7 @@ test('build rebases Markdown and raw HTML, binds GitHub links, and creates deter
   assert.equal((project.match(/data-theme-icon=/g) || []).length, 3);
   assert.ok(project.indexOf('<script src="/assets/theme.js">') < project.indexOf('<link rel="stylesheet"'));
   assert.doesNotMatch(project, /site\/public\/assets|Not an input/);
-  assert.deepEqual(JSON.parse(readFileSync(join(dist, 'BUILD.json'))), { source_commit: COMMIT, version: '0.1.1', documentation_pages: 29, hosts: HOSTS });
+  assert.deepEqual(JSON.parse(readFileSync(join(dist, 'BUILD.json'))), { source_commit: COMMIT, version: '0.1.2', documentation_pages: 29, hosts: HOSTS });
   assert.deepEqual(readFileSync(join(dist, 'docs/_headers')), readFileSync(join(root, 'site/public/_headers')));
   assert.ok(existsSync(join(dist, 'landing/_redirects')));
   assert.equal(existsSync(join(dist, 'docs/_redirects')), false);

@@ -40,7 +40,7 @@ def site_files(source=SOURCE):
              "landing/404.html": b"<h1>Not found</h1>", "docs/404.html": b"<h1>Not found</h1>",
              "landing/_headers": b"/*\n  X-Content-Type-Options: nosniff\n",
              "docs/setup/index.html": b"<h1>Setup</h1>",
-             "BUILD.json": json.dumps({"source_commit": source, "version": "0.1.1", "documentation_pages": 29,
+             "BUILD.json": json.dumps({"source_commit": source, "version": "0.1.2", "documentation_pages": 29,
                                        "hosts": verify.HOSTS}, sort_keys=True).encode()}
     files["SITE-SHA256SUMS"] = "".join(hashlib.sha256(value).hexdigest() + "  " + name + "\n"
                                        for name, value in sorted(files.items())).encode()

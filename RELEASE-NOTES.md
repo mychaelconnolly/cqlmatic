@@ -1,16 +1,17 @@
-# CQLmatic v0.1.1
+# CQLmatic v0.1.2
 
-CQLmatic v0.1.1 extends setup to more local AI hosts. Testers and feedback are welcome.
+CQLmatic v0.1.2 improves setup reliability and makes inventory and query diagnostics clearer. Testers and feedback are welcome.
 
 CQLmatic helps your AI assistant map your CrowdStrike Next-Gen SIEM environment and write CQL tailored to your sources, fields, and parser behavior. The assistant interprets your request; the local Rust engine constructs and checks the query against explicit contracts and saved environment evidence.
 
 ## In this release
 
-- Guided native-client setup for Codex, VS Code Local, Claude Code, and GitHub Copilot CLI, app and VS Code Copilot harness, with reviewed configuration changes and separate authentication and tool-discovery steps. Other capable agents use a tracked guided path.
-- Resumable environment inventory, parser review, measured source/field discovery, and an offline status checklist.
-- Local query generation from typed plans, recipes, and bounded English, plus checking, linting, reference lookup, and saved-result assessment.
-- A compact CQLmatic wordmark in interactive setup. Structured and redirected output retain their existing formats.
-- On-demand setup through the `0.1.1` native executable on macOS Apple silicon, Linux x86_64 and Windows x64. The npm launcher and Windows ZIP are produced from separately reviewed native builds.
+- Bounded, stable-file inspection for detected client executables and independent failure reporting when one client cannot be inspected.
+- More precise Windows directory-protection errors and a menu that can recover from action errors without losing the setup session.
+- Clearer external-host handoff for optional identity details, selected host ID, and additional discovered tools.
+- Readable source selectors in inventory text status and specific guidance when an exact event-name selector leaves multiple dataset kinds possible.
+- Resumable environment inventory, local query generation and checking, and saved-result assessment remain available.
+- On-demand setup through the `0.1.2` native executable on macOS Apple silicon, Linux x86_64 and Windows x64. The npm launcher and Windows ZIP are produced from separately reviewed native builds.
 - Apache-2.0 licensing, synthetic examples, and setup, inventory, and companion-workflow guides.
 
 ## Before you try it

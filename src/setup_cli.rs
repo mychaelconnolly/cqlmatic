@@ -8,6 +8,7 @@ use cqlmatic::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     io::{self, IsTerminal, Read, Write},
@@ -18,10 +19,11 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 const PROBE_TIMEOUT: u32 = 10;
 const SETUP_WORDMARK: &str = r"   ______ ____    __                      __  _
   / ____// __ \  / /   ____ ___   ____ _  / /_(_)____
@@ -251,66 +253,14 @@ pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
         check_unix_ancestors(path, owner)?;
     }
     #[cfg(windows)]
-    {
-        // Fixed script, untrusted path is an environment value, never script text.
-        const CHECK: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=[IO.Directory]::GetAccessControl($p); if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value){exit 3}; $self=$false; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow'){if($r.IdentityReference.Value -ne $sid.Value -and $r.IdentityReference.Value -ne 'S-1-5-18'){exit 4}; if($r.IdentityReference.Value -eq $sid.Value){$self=$true}}}; if(-not $self){exit 5}"#;
-        // This overload applies the ACL while creating every missing directory.
-        const CREATE: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $prop=[Security.AccessControl.PropagationFlags]::None; $allow=[Security.AccessControl.AccessControlType]::Allow; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,$prop,$allow)); $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$inherit,$prop,$allow)); [IO.Directory]::CreateDirectory($p,$a) | Out-Null"#;
-        const ANCESTORS: &str = r#"
-$trusted=@($sid.Value,'S-1-5-18','S-1-5-32-544','S-1-3-0')
-try {$trusted+=([Security.Principal.NTAccount]::new('NT SERVICE','TrustedInstaller')).Translate([Security.Principal.SecurityIdentifier]).Value} catch {}
-$danger=[Security.AccessControl.FileSystemRights]'Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
-for($d=[IO.Directory]::GetParent($p); $null -ne $d; $d=$d.Parent){
-  $ac=$d.GetAccessControl()
-  if($trusted -notcontains ($ac.GetOwner([Security.Principal.SecurityIdentifier]).Value)){exit 6}
-  $rules=$ac.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
-  if(@($rules).Count -eq 0){exit 7}
-  foreach($r in $rules){
-    if($r.AccessControlType -eq 'Allow' -and ($r.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and $trusted -notcontains $r.IdentityReference.Value -and (($r.FileSystemRights -band $danger) -ne 0)){exit 8}
-  }
-}
-"#;
-        let script = if created {
-            format!("{CREATE}; {CHECK}; {ANCESTORS}")
+    check_windows_acl(
+        path,
+        if created {
+            "create-directory"
         } else {
-            format!("{CHECK}; {ANCESTORS}")
-        };
-        let mut command = powershell()?;
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                script.as_str(),
-            ])
-            .env("CQLMATIC_SETUP_DIRECTORY", path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command.spawn().map_err(|_| {
-            err(
-                "SETUP_PROTECTION",
-                "Cannot start the fixed Windows ACL helper.",
-            )
-        })?;
-        let until = Instant::now() + Duration::from_secs(20);
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => break,
-                Ok(Some(_)) => return Err(private_directory_error()),
-                Ok(None) if Instant::now() < until => thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(err(
-                        "SETUP_PROTECTION",
-                        "Private-directory ACL check timed out or failed.",
-                    ));
-                }
-            }
-        }
-    }
+            "directory"
+        },
+    )?;
     #[cfg(windows)]
     if !path.is_dir() {
         return Err(err(
@@ -321,11 +271,149 @@ for($d=[IO.Directory]::GetParent($p); $null -ne $d; $d=$d.Parent){
     reject_links(path)?;
     Ok(())
 }
+#[cfg(unix)]
 fn private_directory_error() -> Diagnostic {
     err(
         "SETUP_PROTECTION",
         "Setup storage or its parent path is accessible or replaceable by another user. Choose a fresh --state path under trusted private ancestry. Setup does not change permissions on existing arbitrary directories.",
     )
+}
+#[cfg(windows)]
+const WINDOWS_ACL_CHECK: &str = r#"
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$p=$env:CQLMATIC_SETUP_PATH
+$mode=$env:CQLMATIC_SETUP_ACL_MODE
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+function Fail($at,$who,$right,$reason){
+  @{path=[string]$at;sid=[string]$who;right=[string]$right;reason=[string]$reason} | ConvertTo-Json -Compress
+  exit 3
+}
+$trusted=@($sid.Value,'S-1-5-18','S-1-5-32-544','S-1-3-0')
+try {$trusted+=([Security.Principal.NTAccount]::new('NT SERVICE','TrustedInstaller')).Translate([Security.Principal.SecurityIdentifier]).Value} catch {}
+$danger=[Security.AccessControl.FileSystemRights]'Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
+function Check-Ancestors {
+  for($d=[IO.Directory]::GetParent($p); $null -ne $d; $d=$d.Parent){
+    try {$attributes=[IO.File]::GetAttributes($d.FullName)} catch {
+      $e=$_.Exception; while($null -ne $e.InnerException){$e=$e.InnerException}
+      if($e -is [IO.FileNotFoundException] -or $e -is [IO.DirectoryNotFoundException]){continue}
+      Fail $d.FullName 'unknown' 'AclInspection' 'inspect'
+    }
+    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Fail $d.FullName 'unknown' 'ReparsePoint' 'reparse-point'}
+    if(($attributes -band [IO.FileAttributes]::Directory) -eq 0){Fail $d.FullName 'unknown' 'Directory' 'not-directory'}
+    try {$ac=$d.GetAccessControl()} catch {Fail $d.FullName 'unknown' 'AclInspection' 'inspect'}
+    $owner=$ac.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if($trusted -notcontains $owner){Fail $d.FullName $owner 'Owner' 'owner'}
+    $rules=$ac.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
+    if(@($rules).Count -eq 0){Fail $d.FullName 'unknown' 'AccessRules' 'empty-acl'}
+    foreach($r in $rules){
+      $rights=[Security.AccessControl.FileSystemRights]($r.FileSystemRights -band $danger)
+      if($r.AccessControlType -eq 'Allow' -and ($r.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and $trusted -notcontains $r.IdentityReference.Value -and $rights -ne 0){Fail $d.FullName $r.IdentityReference.Value $rights.ToString() 'allow'}
+    }
+  }
+}
+function Check-Private {
+  try {
+    $attributes=[IO.File]::GetAttributes($p)
+    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Fail $p 'unknown' 'ReparsePoint' 'reparse-point'}
+    if($mode -eq 'file'){
+      if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){Fail $p 'unknown' 'RegularFile' 'not-file'}
+      $a=[IO.File]::GetAccessControl($p)
+    } else {
+      if(($attributes -band [IO.FileAttributes]::Directory) -eq 0){Fail $p 'unknown' 'Directory' 'not-directory'}
+      $a=[IO.Directory]::GetAccessControl($p)
+    }
+    $owner=$a.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if($owner -ne $sid.Value){Fail $p $owner 'Owner' 'owner'}
+    $self=$false
+    foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+      if($r.AccessControlType -eq 'Allow'){
+        if($r.IdentityReference.Value -ne $sid.Value -and $r.IdentityReference.Value -ne 'S-1-5-18'){Fail $p $r.IdentityReference.Value $r.FileSystemRights.ToString() 'allow'}
+        if($r.IdentityReference.Value -eq $sid.Value){$self=$true}
+      }
+    }
+    if(-not $self){Fail $p $sid.Value 'AccessRules' 'missing-self'}
+  } catch {Fail $p 'unknown' 'AclInspection' 'inspect'}
+}
+if($mode -ne 'file'){
+  Check-Ancestors
+  if($mode -eq 'create-directory'){
+    try {
+      $a=New-Object System.Security.AccessControl.DirectorySecurity
+      $a.SetOwner($sid)
+      $a.SetAccessRuleProtection($true,$false)
+      $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+      $prop=[Security.AccessControl.PropagationFlags]::None
+      $allow=[Security.AccessControl.AccessControlType]::Allow
+      $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,$prop,$allow))
+      $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$inherit,$prop,$allow))
+      [IO.Directory]::CreateDirectory($p,$a) | Out-Null
+    } catch {Fail $p 'unknown' 'CreateDirectory' 'create'}
+  }
+}
+Check-Private
+if($mode -ne 'file'){Check-Ancestors}
+"#;
+#[cfg(any(windows, test))]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowsAclFailure {
+    path: String,
+    sid: String,
+    right: String,
+    reason: String,
+}
+#[cfg(any(windows, test))]
+fn windows_acl_failure(output: &[u8]) -> Diagnostic {
+    let failure = serde_json::from_slice::<WindowsAclFailure>(output)
+        .ok()
+        .filter(|failure| {
+            !failure.path.is_empty()
+                && failure.path.len() <= 16 * 1024
+                && [&failure.sid, &failure.right, &failure.reason]
+                    .into_iter()
+                    .all(|value| {
+                        !value.is_empty()
+                            && value.len() <= 256
+                            && !value.chars().any(char::is_control)
+                    })
+        });
+    match failure {
+        Some(failure) => err(
+            "SETUP_PROTECTION",
+            format!(
+                "Unsafe Windows ACL at {:?}: principal {}; right {}; check {}. Choose a fresh --state path under trusted private ancestry. Setup does not change existing directory permissions.",
+                failure.path, failure.sid, failure.right, failure.reason
+            ),
+        ),
+        None => err(
+            "SETUP_PROTECTION",
+            "Windows ACL verification failed without a bounded diagnostic. Choose a fresh --state path under trusted private ancestry; no unsafe path is cleaned up automatically.",
+        ),
+    }
+}
+#[cfg(windows)]
+fn check_windows_acl(path: &Path, mode: &str) -> Result<(), Diagnostic> {
+    let mut command = powershell()?;
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINDOWS_ACL_CHECK,
+        ])
+        .env("CQLMATIC_SETUP_PATH", path)
+        .env("CQLMATIC_SETUP_ACL_MODE", mode);
+    let output = run_bounded_command(command, false, 20, 32 * 1024).map_err(|_| err(
+        "SETUP_PROTECTION",
+        "The fixed Windows ACL helper timed out, exceeded its output budget, or could not be read. No unsafe path is cleaned up automatically.",
+    ))?;
+    if output.success && output.stdout.is_empty() {
+        Ok(())
+    } else {
+        Err(windows_acl_failure(&output.stdout))
+    }
 }
 #[cfg(windows)]
 fn powershell() -> Result<Command, Diagnostic> {
@@ -452,13 +540,17 @@ fn read_request(path: &Path) -> Result<Vec<u8>, Diagnostic> {
     Ok(raw)
 }
 
+#[derive(Debug)]
 struct CommandOutput {
     success: bool,
     stdout: Vec<u8>,
 }
 trait Runner {
     fn run(&mut self, command: &NativeCommand) -> Result<CommandOutput, Diagnostic>;
-    fn detect(&mut self) -> Result<Vec<ClientObservation>, Diagnostic>;
+    fn detect(
+        &mut self,
+        selected: Option<ClientKind>,
+    ) -> Result<Vec<ClientObservation>, Diagnostic>;
     fn config_path(&self, client: ClientKind) -> Result<PathBuf, Diagnostic>;
 }
 struct NativeRunner;
@@ -466,8 +558,11 @@ impl Runner for NativeRunner {
     fn run(&mut self, command: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
         run_native(command)
     }
-    fn detect(&mut self) -> Result<Vec<ClientObservation>, Diagnostic> {
-        detect_clients(self)
+    fn detect(
+        &mut self,
+        selected: Option<ClientKind>,
+    ) -> Result<Vec<ClientObservation>, Diagnostic> {
+        detect_clients(self, selected, discover_executable)
     }
     fn config_path(&self, client: ClientKind) -> Result<PathBuf, Diagnostic> {
         client_config_path(client)
@@ -481,7 +576,7 @@ fn run_native(native: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
             "Native executable must be an absolute discovered path.",
         ));
     }
-    let mut command = if path
+    let command = if path
         .extension()
         .is_some_and(|s| s.eq_ignore_ascii_case("ps1"))
     {
@@ -568,12 +663,25 @@ fn run_native(native: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
         command.args(&native.args);
         command
     };
-    command.stdin(if native.interactive {
+    run_bounded_command(
+        command,
+        native.interactive,
+        native.timeout_seconds,
+        MAX_COMMAND_BYTES,
+    )
+}
+fn run_bounded_command(
+    mut command: Command,
+    interactive: bool,
+    timeout_seconds: u32,
+    max_output_bytes: usize,
+) -> Result<CommandOutput, Diagnostic> {
+    command.stdin(if interactive {
         Stdio::inherit()
     } else {
         Stdio::null()
     });
-    if native.interactive {
+    if interactive {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else {
         command.stdout(Stdio::piped()).stderr(Stdio::null());
@@ -583,12 +691,12 @@ fn run_native(native: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
         thread::spawn(move || {
             let mut bytes = Vec::new();
             let result = stdout
-                .take(MAX_COMMAND_BYTES as u64 + 1)
+                .take(max_output_bytes as u64 + 1)
                 .read_to_end(&mut bytes);
             (result.is_ok(), bytes)
         })
     });
-    let deadline = Instant::now() + Duration::from_secs(u64::from(native.timeout_seconds));
+    let deadline = Instant::now() + Duration::from_secs(u64::from(timeout_seconds));
     let status = loop {
         if network::CANCELLED.load(Ordering::Relaxed) || Instant::now() >= deadline {
             let _ = child.kill();
@@ -632,7 +740,7 @@ fn run_native(native: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
                 "Cannot capture bounded native output.",
             )
         })?;
-        if !ok || bytes.len() > MAX_COMMAND_BYTES {
+        if !ok || bytes.len() > max_output_bytes {
             return Err(err(
                 "SETUP_NATIVE_OUTPUT",
                 "Native output exceeded its byte budget or could not be read. No output was persisted.",
@@ -698,90 +806,282 @@ fn discover_executable(client: ClientKind) -> Option<PathBuf> {
     }
     None
 }
-fn detect_clients(runner: &mut impl Runner) -> Result<Vec<ClientObservation>, Diagnostic> {
+#[derive(Debug, PartialEq)]
+struct ExecutableFingerprint {
+    identity: (u64, u64),
+    len: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    changed: (i64, i64),
+    #[cfg(windows)]
+    attributes: u32,
+}
+fn executable_error() -> Diagnostic {
+    err(
+        "SETUP_EXECUTABLE_CHANGED",
+        "Discovered executable must remain the same regular file throughout capability detection and fingerprinting. Inspect the client and detect again.",
+    )
+}
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagnostic> {
+    use std::{ffi::c_void, os::windows::io::AsRawHandle};
+    #[repr(C)]
+    struct FileInformation {
+        attributes: u32,
+        creation_time: [u32; 2],
+        access_time: [u32; 2],
+        write_time: [u32; 2],
+        volume: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(handle: *mut c_void, info: *mut FileInformation) -> i32;
+    }
+    let mut info = std::mem::MaybeUninit::<FileInformation>::uninit();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
+        return Err(executable_error());
+    }
+    // The successful Windows call initialized the complete fixed-layout structure.
+    let info = unsafe { info.assume_init() };
+    Ok((
+        u64::from(info.volume),
+        (u64::from(info.index_high) << 32) | u64::from(info.index_low),
+    ))
+}
+fn executable_fingerprint(file: &fs::File) -> Result<ExecutableFingerprint, Diagnostic> {
+    let meta = file.metadata().map_err(|_| executable_error())?;
+    if !meta.is_file() {
+        return Err(executable_error());
+    }
+    if meta.len() > MAX_EXECUTABLE_BYTES {
+        return Err(err(
+            "SETUP_EXECUTABLE_SIZE",
+            "Discovered executable exceeds the 1 GiB fingerprint byte budget.",
+        ));
+    }
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::MetadataExt;
+    #[cfg(windows)]
+    if meta.file_attributes() & 0x400 != 0 {
+        return Err(executable_error());
+    }
+    Ok(ExecutableFingerprint {
+        #[cfg(unix)]
+        identity: (meta.dev(), meta.ino()),
+        #[cfg(windows)]
+        identity: windows_file_identity(file)?,
+        len: meta.len(),
+        modified: meta.modified().map_err(|_| executable_error())?,
+        #[cfg(unix)]
+        changed: (meta.ctime(), meta.ctime_nsec()),
+        #[cfg(windows)]
+        attributes: meta.file_attributes(),
+    })
+}
+fn open_executable(path: &Path) -> Result<(fs::File, ExecutableFingerprint), Diagnostic> {
+    let meta = fs::symlink_metadata(path).map_err(|_| executable_error())?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(executable_error());
+    }
+    if meta.len() > MAX_EXECUTABLE_BYTES {
+        return Err(err(
+            "SETUP_EXECUTABLE_SIZE",
+            "Discovered executable exceeds the 1 GiB fingerprint byte budget.",
+        ));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(executable_error());
+        }
+        options.share_mode(1).custom_flags(0x0020_0000); // Read sharing only; open reparse point itself.
+    }
+    let file = options.open(path).map_err(|_| executable_error())?;
+    let fingerprint = executable_fingerprint(&file)?;
+    if meta.len() != fingerprint.len || meta.modified().ok() != Some(fingerprint.modified) {
+        return Err(executable_error());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (meta.dev(), meta.ino()) != fingerprint.identity
+            || (meta.ctime(), meta.ctime_nsec()) != fingerprint.changed
+        {
+            return Err(executable_error());
+        }
+    }
+    Ok((file, fingerprint))
+}
+fn hash_executable_bytes(reader: &mut impl Read, limit: u64) -> Result<(String, u64), Diagnostic> {
+    let mut hash = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let available = buffer.len().min((limit - total + 1) as usize);
+        let read = match reader.read(&mut buffer[..available]) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(executable_error()),
+        };
+        total += read as u64;
+        if total > limit {
+            return Err(err(
+                "SETUP_EXECUTABLE_SIZE",
+                "Discovered executable grew beyond the 1 GiB fingerprint byte budget.",
+            ));
+        }
+        hash.update(&buffer[..read]);
+    }
+    Ok((
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        total,
+    ))
+}
+fn hash_executable(
+    path: &Path,
+    mut file: fs::File,
+    before: ExecutableFingerprint,
+) -> Result<String, Diagnostic> {
+    let (digest, count) = hash_executable_bytes(&mut file, MAX_EXECUTABLE_BYTES)?;
+    let (_, named) = open_executable(path)?;
+    if count != before.len || executable_fingerprint(&file)? != before || named != before {
+        return Err(executable_error());
+    }
+    Ok(digest)
+}
+fn detect_clients(
+    runner: &mut impl Runner,
+    selected: Option<ClientKind>,
+    mut discover: impl FnMut(ClientKind) -> Option<PathBuf>,
+) -> Result<Vec<ClientObservation>, Diagnostic> {
     let mut clients = Vec::new();
     for client in [
         ClientKind::Codex,
         ClientKind::VsCode,
         ClientKind::ClaudeCode,
     ] {
-        let Some(program) = discover_executable(client) else {
+        if selected.is_some_and(|selected| selected != client) {
+            continue;
+        }
+        let Some(program) = discover(client) else {
             continue;
         };
-        let Ok(version) = probe(runner, &program, &["--version"]) else {
-            continue;
-        };
-        let Ok(help) = probe(runner, &program, &["--help"]) else {
-            continue;
-        };
-        let mut capability = help;
-        let (supports_http, supports_cimd, supports_manual, supports_login) = match client {
-            ClientKind::Codex => {
-                let Ok(add) = probe(runner, &program, &["mcp", "add", "--help"]) else {
-                    continue;
-                };
-                let Ok(login) = probe(runner, &program, &["mcp", "login", "--help"]) else {
-                    continue;
-                };
-                let add_text = String::from_utf8_lossy(&add);
-                let login_text = String::from_utf8_lossy(&login);
-                let http = add_text.contains("--url");
-                let cimd = add_text.contains("--oauth-client-registration")
-                    && add_text.contains("cimd")
-                    && login_text.contains("--oauth-client-registration")
-                    && login_text.contains("cimd");
-                capability.extend(add);
-                capability.extend(login);
-                let manual = String::from_utf8_lossy(&capability).contains("--oauth-client-id");
-                (http, cimd, manual, true)
+        match detect_client(runner, client, &program) {
+            Ok(observation) => clients.push(observation),
+            Err(diagnostic) if selected == Some(client) => {
+                return Err(err(
+                    "SETUP_CLIENT_DETECT",
+                    format!(
+                        "Cannot verify selected {}: {} ({})",
+                        client.label(),
+                        diagnostic.message,
+                        diagnostic.code
+                    ),
+                ));
             }
-            ClientKind::VsCode => {
-                let http = String::from_utf8_lossy(&capability).contains("--add-mcp");
-                (
-                    http,
-                    http && setup::vscode_supports_cimd(&String::from_utf8_lossy(&version)),
-                    http,
-                    false,
-                )
-            }
-            ClientKind::ClaudeCode => {
-                let Ok(add) = probe(runner, &program, &["mcp", "add", "--help"]) else {
-                    continue;
-                };
-                let add_text = String::from_utf8_lossy(&add);
-                let http = add_text.contains("--transport")
-                    && add_text.contains("http")
-                    && add_text.contains("--scope");
-                let cimd = http && setup::claude_supports_cimd(&String::from_utf8_lossy(&version));
-                let manual = http && add_text.contains("--client-id");
-                capability.extend(add);
-                (http, cimd, manual, false)
-            }
-            _ => continue,
-        };
-        let version = String::from_utf8_lossy(&version)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(160)
-            .collect();
-        let executable = program.to_string_lossy().into_owned();
-        let executable_sha256 = sha256_hex(&storage::read_bytes(&program, 256 * 1024 * 1024)?);
-        clients.push(ClientObservation {
-            client,
-            executable,
-            executable_sha256,
-            version,
-            supports_http,
-            supports_cimd,
-            supports_manual,
-            supports_login,
-            capability_sha256: sha256_hex(&capability),
-        });
+            Err(_) => {}
+        }
     }
     Ok(clients)
+}
+fn detect_client(
+    runner: &mut impl Runner,
+    client: ClientKind,
+    program: &Path,
+) -> Result<ClientObservation, Diagnostic> {
+    let (file, fingerprint) = open_executable(program)?;
+    let version = probe(runner, program, &["--version"])?;
+    let help = probe(runner, program, &["--help"])?;
+    let mut capability = help;
+    let (supports_http, supports_cimd, supports_manual, supports_login) = match client {
+        ClientKind::Codex => {
+            let add = probe(runner, program, &["mcp", "add", "--help"])?;
+            let login = probe(runner, program, &["mcp", "login", "--help"])?;
+            let add_text = String::from_utf8_lossy(&add);
+            let login_text = String::from_utf8_lossy(&login);
+            let http = add_text.contains("--url");
+            let cimd = add_text.contains("--oauth-client-registration")
+                && add_text.contains("cimd")
+                && login_text.contains("--oauth-client-registration")
+                && login_text.contains("cimd");
+            capability.extend(add);
+            capability.extend(login);
+            let manual = String::from_utf8_lossy(&capability).contains("--oauth-client-id");
+            (http, cimd, manual, true)
+        }
+        ClientKind::VsCode => {
+            let http = String::from_utf8_lossy(&capability).contains("--add-mcp");
+            (
+                http,
+                http && setup::vscode_supports_cimd(&String::from_utf8_lossy(&version)),
+                http,
+                false,
+            )
+        }
+        ClientKind::ClaudeCode => {
+            let add = probe(runner, program, &["mcp", "add", "--help"])?;
+            let add_text = String::from_utf8_lossy(&add);
+            let http = add_text.contains("--transport")
+                && add_text.contains("http")
+                && add_text.contains("--scope");
+            let cimd = http && setup::claude_supports_cimd(&String::from_utf8_lossy(&version));
+            let manual = http && add_text.contains("--client-id");
+            capability.extend(add);
+            (http, cimd, manual, false)
+        }
+        _ => {
+            return Err(err(
+                "SETUP_EXECUTABLE",
+                "This host requires no executable detection.",
+            ));
+        }
+    };
+    let version = String::from_utf8_lossy(&version)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(160)
+        .collect();
+    let executable = program.to_string_lossy().into_owned();
+    let executable_sha256 = hash_executable(program, file, fingerprint)?;
+    Ok(ClientObservation {
+        client,
+        executable,
+        executable_sha256,
+        version,
+        supports_http,
+        supports_cimd,
+        supports_manual,
+        supports_login,
+        capability_sha256: sha256_hex(&capability),
+    })
 }
 fn client_config_path(client: ClientKind) -> Result<PathBuf, Diagnostic> {
     let home = || {
@@ -1555,8 +1855,14 @@ fn sync_directory(path: &Path) -> Result<(), Diagnostic> {
         )
     })
 }
-fn verify_private_file(path: &Path) -> Result<(), Diagnostic> {
+pub(crate) fn verify_private_file(path: &Path) -> Result<(), Diagnostic> {
     reject_links(path)?;
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return Err(err(
+            "SETUP_PROTECTION",
+            "Protected setup input must be a regular file.",
+        ));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1580,47 +1886,7 @@ fn verify_private_file(path: &Path) -> Result<(), Diagnostic> {
     }
     #[cfg(windows)]
     {
-        const CHECK: &str = "$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_FILE; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=[IO.File]::GetAccessControl($p); if($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value){exit 3}; foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){if($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -ne $sid.Value -and $r.IdentityReference.Value -ne 'S-1-5-18'){exit 4}}";
-        let mut command = powershell()?;
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                CHECK,
-            ])
-            .env("CQLMATIC_SETUP_FILE", path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut child = command.spawn().map_err(|_| {
-            err(
-                "SETUP_PROTECTION",
-                "Cannot inspect setup-file ACL protection.",
-            )
-        })?;
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(_)) => {
-                    return Err(err(
-                        "SETUP_PROTECTION",
-                        "Setup state or backup file is accessible to another principal. Protect that file before resuming; setup will not read it.",
-                    ));
-                }
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(err(
-                        "SETUP_PROTECTION",
-                        "Setup-file ACL verification did not complete.",
-                    ));
-                }
-            }
-        }
+        check_windows_acl(path, "file")
     }
     #[cfg(not(windows))]
     Ok(())
@@ -1640,7 +1906,7 @@ fn perform(
     match action {
         SetupAction::Status {} => Ok(()),
         SetupAction::Detect {} => {
-            let clients = runner.detect()?;
+            let clients = runner.detect(None)?;
             if state.phase == SetupPhase::CommandPending {
                 return Err(err(
                     "SETUP_PENDING",
@@ -1680,7 +1946,12 @@ fn perform(
                 .as_ref()
                 .is_some_and(|s| s.client.needs_executable())
             {
-                state.clients = runner.detect()?;
+                let selected = state.selection.as_ref().map(|selection| selection.client);
+                let clients = runner.detect(selected)?;
+                state
+                    .clients
+                    .retain(|client| Some(client.client) != selected);
+                state.clients.extend(clients);
             }
             state.invalidate_plan();
             let baseline = inspect_baseline(state, state_path, runner)?;
@@ -1750,7 +2021,7 @@ fn perform(
                 ));
             }
             if plan.selection.client.needs_executable() {
-                let current = runner.detect()?;
+                let current = runner.detect(Some(plan.selection.client))?;
                 if !current
                     .iter()
                     .any(|client| Some(client) == plan.client.as_ref())
@@ -1819,7 +2090,12 @@ fn perform(
             }
             state.phase = SetupPhase::CommandPending;
             state.last_notice = Some("Native configuration action is pending. If interrupted, inspect the client; no rollback or automatic retry is assumed.".into());
-            save_state(writer, state)?;
+            save_state(writer, state).map_err(|_| {
+                err(
+                    "SETUP_STATE_SAVE",
+                    "Cannot durably save pending setup state; no native action was started.",
+                )
+            })?;
             for command in &plan.commands {
                 match runner.run(command) {
                     Ok(output) if output.success => {}
@@ -2033,6 +2309,43 @@ fn write_setup_banner(output: &mut impl Write, color: bool) -> Result<(), Diagno
     .and_then(|()| writeln!(output, "CQLmatic v{}\n", env!("CARGO_PKG_VERSION")))
     .map_err(|_| err("SETUP_OUTPUT", "Cannot write setup banner."))
 }
+fn interactive_action(
+    state_path: &Path,
+    action: SetupAction,
+) -> Result<Option<SetupState>, Diagnostic> {
+    let mut action_error = None;
+    let state = with_state(state_path, |state, runner, writer| {
+        match perform(state, action, state_path, runner, writer, true) {
+            Err(diagnostic)
+                if !matches!(
+                    diagnostic.code.as_str(),
+                    "SETUP_STATE"
+                        | "SETUP_STATE_INTEGRITY"
+                        | "SETUP_STATE_SAVE"
+                        | "SETUP_SERIALIZATION"
+                        | "SETUP_OUTPUT"
+                        | "SETUP_INPUT"
+                ) =>
+            {
+                action_error = Some(diagnostic);
+                Ok(())
+            }
+            result => result,
+        }
+    })?;
+    if let Some(diagnostic) = action_error {
+        writeln!(
+            io::stderr().lock(),
+            "{}: {}",
+            diagnostic.code,
+            diagnostic.message
+        )
+        .map_err(|_| err("SETUP_OUTPUT", "Cannot write setup action error."))?;
+        Ok(None)
+    } else {
+        Ok(Some(state))
+    }
+}
 fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
     write_setup_banner(
         &mut io::stdout().lock(),
@@ -2053,12 +2366,16 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
         while read_rx.recv().is_ok() {
             line.clear();
             match io::stdin().read_line(&mut line) {
-                Ok(0) | Err(_) => {
-                    let _ = tx.send(None);
+                Ok(0) => {
+                    let _ = tx.send(Ok(None));
+                    break;
+                }
+                Err(_) => {
+                    let _ = tx.send(Err(err("SETUP_INPUT", "Cannot read terminal input.")));
                     break;
                 }
                 Ok(_) => {
-                    if tx.send(Some(line.trim().to_owned())).is_err() {
+                    if tx.send(Ok(Some(line.trim().to_owned()))).is_err() {
                         break;
                     }
                 }
@@ -2122,9 +2439,10 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                     }
                 };
                 if client.needs_executable() {
-                    let clients = with_state(state_path, |s, r, w| {
-                        perform(s, SetupAction::Detect {}, state_path, r, w, true)
-                    })?;
+                    let Some(clients) = interactive_action(state_path, SetupAction::Detect {})?
+                    else {
+                        continue;
+                    };
                     for detected in &clients.clients {
                         println!(
                             "{}: {} ({})",
@@ -2330,17 +2648,12 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                 continue;
             }
         };
-        match with_state(state_path, |s, r, w| {
-            perform(s, action, state_path, r, w, true)
-        }) {
-            Ok(_) => {}
-            Err(d) => eprintln!("{}: {}", d.code, d.message),
-        }
+        interactive_action(state_path, action)?;
     }
 }
 struct TerminalInput {
     requests: mpsc::Sender<()>,
-    lines: mpsc::Receiver<Option<String>>,
+    lines: mpsc::Receiver<Result<Option<String>, Diagnostic>>,
 }
 fn prompt(rx: &TerminalInput, label: &str) -> Result<Option<String>, Diagnostic> {
     print!("{label}");
@@ -2355,9 +2668,9 @@ fn prompt(rx: &TerminalInput, label: &str) -> Result<Option<String>, Diagnostic>
             return Ok(None);
         }
         match rx.lines.recv_timeout(Duration::from_millis(100)) {
-            Ok(line) => return Ok(line),
+            Ok(line) => return line,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(_) => return Ok(None),
+            Err(_) => return Err(err("SETUP_INPUT", "Terminal input ended unexpectedly.")),
         }
     }
 }
@@ -2452,6 +2765,228 @@ mod tests {
         }
     }
 
+    struct ProbeRunner {
+        failing_program: Option<PathBuf>,
+        calls: Vec<String>,
+    }
+    impl Runner for ProbeRunner {
+        fn run(&mut self, command: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
+            self.calls.push(command.program.clone());
+            if self.failing_program.as_deref() == Some(Path::new(&command.program)) {
+                return Err(err("SETUP_PROBE", "Synthetic capability probe failure."));
+            }
+            Ok(CommandOutput {
+                success: true,
+                stdout: if command.args == ["--version"] {
+                    b"2.2.0\n".to_vec()
+                } else {
+                    b"--url --add-mcp --transport http --scope --oauth-client-registration cimd --oauth-client-id".to_vec()
+                },
+            })
+        }
+        fn detect(&mut self, _: Option<ClientKind>) -> Result<Vec<ClientObservation>, Diagnostic> {
+            unreachable!("Probe tests supply synthetic executable paths directly")
+        }
+        fn config_path(&self, _: ClientKind) -> Result<PathBuf, Diagnostic> {
+            unreachable!("Capability detection must not inspect configuration")
+        }
+    }
+    #[test]
+    fn setup_detect_streams_executable_larger_than_256_mib() {
+        let temp = Temp::new();
+        let path = temp.0.join("synthetic-large-client");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(256 * 1024 * 1024 + 1)
+            .unwrap();
+        let mut runner = ProbeRunner {
+            failing_program: None,
+            calls: Vec::new(),
+        };
+        let client = detect_client(&mut runner, ClientKind::ClaudeCode, &path).unwrap();
+        assert_eq!(
+            client.executable_sha256,
+            "da6ce8755151acd05195db67ebce3ee0fb5f4012e71e821cc5750f3304eaf41e"
+        );
+        assert!(client.supports_cimd);
+    }
+    #[test]
+    fn setup_executable_byte_budget_checks_metadata_and_stream_growth() {
+        let temp = Temp::new();
+        let path = temp.0.join("oversized-client");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_EXECUTABLE_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            open_executable(&path).unwrap_err().code,
+            "SETUP_EXECUTABLE_SIZE"
+        );
+        let (digest, count) = hash_executable_bytes(&mut io::Cursor::new([0_u8; 32]), 32).unwrap();
+        assert_eq!(count, 32);
+        assert_eq!(digest, sha256_hex(&[0_u8; 32]));
+        assert_eq!(
+            hash_executable_bytes(&mut io::Cursor::new([0_u8; 33]), 32)
+                .unwrap_err()
+                .code,
+            "SETUP_EXECUTABLE_SIZE"
+        );
+        assert_eq!(
+            open_executable(&temp.0).unwrap_err().code,
+            "SETUP_EXECUTABLE_CHANGED"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn setup_executable_fingerprint_rejects_growth_replacement_and_links() {
+        use std::os::unix::fs::symlink;
+        let temp = Temp::new();
+        let path = temp.0.join("client");
+        fs::write(&path, b"original").unwrap();
+        let (file, before) = open_executable(&path).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"grew")
+            .unwrap();
+        assert_eq!(
+            hash_executable(&path, file, before).unwrap_err().code,
+            "SETUP_EXECUTABLE_CHANGED"
+        );
+        fs::write(&path, b"original").unwrap();
+        let (file, before) = open_executable(&path).unwrap();
+        let replacement = temp.0.join("replacement");
+        fs::write(&replacement, b"replaced").unwrap();
+        fs::File::open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(before.modified))
+            .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            hash_executable(&path, file, before).unwrap_err().code,
+            "SETUP_EXECUTABLE_CHANGED"
+        );
+        let linked = temp.0.join("linked");
+        symlink(&path, &linked).unwrap();
+        assert_eq!(
+            open_executable(&linked).unwrap_err().code,
+            "SETUP_EXECUTABLE_CHANGED"
+        );
+    }
+    #[test]
+    fn setup_detect_isolates_failing_clients_and_reports_selected_failure() {
+        let temp = Temp::new();
+        let codex = temp.0.join("codex");
+        let code = temp.0.join("code");
+        fs::write(&codex, b"synthetic codex").unwrap();
+        fs::File::create(&code)
+            .unwrap()
+            .set_len(MAX_EXECUTABLE_BYTES + 1)
+            .unwrap();
+        let paths = |client| match client {
+            ClientKind::Codex => Some(codex.clone()),
+            ClientKind::VsCode => Some(code.clone()),
+            _ => None,
+        };
+        let mut runner = ProbeRunner {
+            failing_program: None,
+            calls: Vec::new(),
+        };
+        let clients = detect_clients(&mut runner, None, paths).unwrap();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].client, ClientKind::Codex);
+        runner.calls.clear();
+        let diagnostic = detect_clients(&mut runner, Some(ClientKind::VsCode), paths).unwrap_err();
+        assert_eq!(diagnostic.code, "SETUP_CLIENT_DETECT");
+        assert!(diagnostic.message.contains(ClientKind::VsCode.label()));
+        assert!(diagnostic.message.contains("SETUP_EXECUTABLE_SIZE"));
+        assert!(runner.calls.is_empty());
+        fs::write(&code, b"synthetic code").unwrap();
+        runner.failing_program = Some(code.clone());
+        assert_eq!(detect_clients(&mut runner, None, paths).unwrap().len(), 1);
+        assert_eq!(
+            detect_clients(&mut runner, Some(ClientKind::Codex), paths)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            detect_clients(&mut runner, Some(ClientKind::VsCode), paths)
+                .unwrap_err()
+                .code,
+            "SETUP_CLIENT_DETECT"
+        );
+    }
+    #[test]
+    fn setup_windows_acl_failure_details_are_bounded_and_escape_path_controls() {
+        let detail = serde_json::to_vec(&json!({"path":"C:\\synthetic\npath", "sid":"S-1-1-0", "right":"Delete", "reason":"allow"})).unwrap();
+        let diagnostic = windows_acl_failure(&detail);
+        assert_eq!(diagnostic.code, "SETUP_PROTECTION");
+        assert!(diagnostic.message.contains("S-1-1-0"));
+        assert!(diagnostic.message.contains("Delete"));
+        assert!(diagnostic.message.contains("\\n"));
+        assert!(!diagnostic.message.contains('\n'));
+        for invalid in [b"not json".to_vec(), serde_json::to_vec(&json!({"path":"C:\\synthetic", "sid":"S".repeat(257), "right":"Delete", "reason":"allow"})).unwrap()] {
+            assert!(windows_acl_failure(&invalid).message.contains("without a bounded diagnostic"));
+        }
+    }
+    #[test]
+    fn setup_interactive_action_errors_resume_but_invalid_state_is_fatal() {
+        let temp = Temp::new();
+        let path = temp.0.join("private/state.json");
+        let selection = Selection {
+            client: ClientKind::External,
+            host_id: Some("invalid host".into()),
+            cloud: Cloud::Us1,
+            server_name: "cs-mcp".into(),
+            registration: RegistrationMode::HostManaged {},
+        };
+        assert!(
+            interactive_action(&path, SetupAction::Select { selection })
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            interactive_action(
+                &path,
+                SetupAction::ImportDiscovery {
+                    file: temp.0.join("absent-report").to_string_lossy().into_owned()
+                }
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            interactive_action(&path, SetupAction::Status {})
+                .unwrap()
+                .is_some()
+        );
+        let mut stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stored["state_sha256"] = json!("0".repeat(64));
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert_eq!(
+            interactive_action(&path, SetupAction::Status {})
+                .unwrap_err()
+                .code,
+            "SETUP_STATE_INTEGRITY"
+        );
+    }
+    #[test]
+    fn setup_terminal_read_error_propagates() {
+        let (requests, _reader) = mpsc::channel();
+        let (sender, lines) = mpsc::channel();
+        sender
+            .send(Err(err("SETUP_INPUT", "Synthetic terminal failure.")))
+            .unwrap();
+        assert_eq!(
+            prompt(&TerminalInput { requests, lines }, "")
+                .unwrap_err()
+                .code,
+            "SETUP_INPUT"
+        );
+    }
+
     struct FakeRunner {
         config: PathBuf,
         state_path: PathBuf,
@@ -2461,6 +2996,7 @@ mod tests {
         no_mutation: bool,
         saw_durable_pending: bool,
         commands: Vec<NativeCommand>,
+        detection_scopes: Vec<Option<ClientKind>>,
     }
     impl Runner for FakeRunner {
         fn run(&mut self, command: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
@@ -2546,8 +3082,17 @@ mod tests {
                 stdout: b"synthetic-sensitive-native-output-never-persist".to_vec(),
             })
         }
-        fn detect(&mut self) -> Result<Vec<ClientObservation>, Diagnostic> {
-            Ok(self.observations.clone())
+        fn detect(
+            &mut self,
+            selected: Option<ClientKind>,
+        ) -> Result<Vec<ClientObservation>, Diagnostic> {
+            self.detection_scopes.push(selected);
+            Ok(self
+                .observations
+                .iter()
+                .filter(|observation| selected.is_none_or(|client| observation.client == client))
+                .cloned()
+                .collect())
         }
         fn config_path(&self, client: ClientKind) -> Result<PathBuf, Diagnostic> {
             assert!(
@@ -2608,6 +3153,7 @@ mod tests {
                 no_mutation: false,
                 saw_durable_pending: false,
                 commands: Vec::new(),
+                detection_scopes: Vec::new(),
             };
             Self {
                 _temp: temp,
@@ -2967,6 +3513,19 @@ mod tests {
         h.apply(hash).unwrap();
         assert_eq!(h.runner.native_calls, 1);
         assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+    }
+    #[test]
+    fn setup_selected_preview_and_apply_preserve_other_clients_without_probing_them() {
+        let mut h = Harness::new();
+        let mut unrelated = h.state.clients[0].clone();
+        unrelated.client = ClientKind::Codex;
+        h.state.clients.push(unrelated.clone());
+        let hash = h.preview();
+        assert_eq!(h.state.clients.len(), 2);
+        assert!(h.state.clients.contains(&unrelated));
+        h.apply(hash).unwrap();
+        assert_eq!(h.runner.detection_scopes, vec![Some(ClientKind::VsCode); 2]);
+        assert!(h.state.clients.contains(&unrelated));
     }
     #[test]
     fn setup_stale_hash_changed_executable_and_modified_baseline_prevent_native_mutation() {
@@ -3387,13 +3946,17 @@ mod tests {
             .unwrap();
         assert!(status.success());
         let unsafe_state = temp.0.join("outer/inner/state.json");
-        assert_eq!(
-            with_state(&unsafe_state, |_, _, _| Ok(()))
-                .unwrap_err()
-                .code,
-            "SETUP_PROTECTION"
+        let diagnostic = with_state(&unsafe_state, |_, _, _| Ok(())).unwrap_err();
+        assert_eq!(diagnostic.code, "SETUP_PROTECTION");
+        assert!(
+            diagnostic
+                .message
+                .contains(&format!("{:?}", temp.0.to_string_lossy()))
         );
+        assert!(diagnostic.message.contains("S-1-1-0"));
+        assert!(diagnostic.message.contains("Delete"));
         assert!(!unsafe_state.exists());
+        assert!(!temp.0.join("outer").exists());
         let clean = Temp::new();
         let parent = clean.0.join("outer");
         let leaf = parent.join("inner");
@@ -3402,6 +3965,69 @@ mod tests {
         let candidate = leaf.join("candidate");
         fs::write(&candidate, b"synthetic").unwrap();
         verify_private_file(&candidate).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_executable_identity_and_read_sharing_are_stable() {
+        let temp = Temp::new();
+        let path = temp.0.join("client.exe");
+        let other = temp.0.join("other.exe");
+        fs::write(&path, b"synthetic executable").unwrap();
+        fs::write(&other, b"synthetic executable").unwrap();
+        let (file, fingerprint) = open_executable(&path).unwrap();
+        let (_, other_fingerprint) = open_executable(&other).unwrap();
+        assert_ne!(fingerprint.identity, other_fingerprint.identity);
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(fs::rename(&other, &path).is_err());
+        assert_eq!(
+            hash_executable(&path, file, fingerprint).unwrap(),
+            sha256_hex(b"synthetic executable")
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_acl_postcheck_preserves_a_newly_unsafe_directory() {
+        let temp = Temp::new();
+        let path = temp.0.join("private");
+        let script = WINDOWS_ACL_CHECK.replace(
+            "[IO.Directory]::CreateDirectory($p,$a) | Out-Null",
+            "[IO.Directory]::CreateDirectory($p,$a) | Out-Null; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'FullControl',$inherit,$prop,$allow)); [IO.Directory]::SetAccessControl($p,$a)",
+        );
+        let mut command = powershell().unwrap();
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ])
+            .env("CQLMATIC_SETUP_PATH", &path)
+            .env("CQLMATIC_SETUP_ACL_MODE", "create-directory");
+        let output = run_bounded_command(command, false, 20, 32 * 1024).unwrap();
+        assert!(!output.success);
+        let diagnostic = windows_acl_failure(&output.stdout);
+        assert!(diagnostic.message.contains("S-1-1-0"));
+        assert!(diagnostic.message.contains("FullControl"));
+        assert!(path.is_dir());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_helper_output_is_capped() {
+        let mut command = powershell().unwrap();
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Write(('x' * 65))",
+        ]);
+        assert_eq!(
+            run_bounded_command(command, false, 20, 64)
+                .unwrap_err()
+                .code,
+            "SETUP_NATIVE_OUTPUT"
+        );
     }
     #[cfg(windows)]
     #[test]

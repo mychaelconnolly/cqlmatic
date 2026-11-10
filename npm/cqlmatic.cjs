@@ -18,8 +18,8 @@ function main() {
   const root = path.resolve(__dirname, '..');
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, 'native-manifest.json'), 'utf8'));
-  if (pkg.version !== '0.1.1' || manifest.version !== pkg.version) {
-    throw new Error('Package and native manifest versions must both be 0.1.1.');
+  if (pkg.version !== '0.1.2' || manifest.version !== pkg.version) {
+    throw new Error('Package and native manifest versions must both be 0.1.2.');
   }
   const digest = manifest.binaries?.[tuple]?.sha256;
   if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) {
