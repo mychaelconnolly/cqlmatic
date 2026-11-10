@@ -2,6 +2,10 @@
 
 Release only with owner authorization for the intended actions. Prepare and validate privately before requesting public go-live approval. Approval identifies the exact source commit, annotated tag, package checksums and both website outputs. It does not authorize Falcon operations, real client configuration or paid services.
 
+## Release notes
+
+Start each release's `RELEASE-NOTES.md` with a short, plainly worded summary directly below its version title. Explain what changed for users in everyday terms. Put commands, evidence rules, platform requirements, compatibility, and other technical details below the summary under clear headings. Check this order before freezing the release, then publish the reviewed file with `--notes-file`; a pull request template or generated changelog does not replace it.
+
 ## Repository
 
 Use the reviewed release-candidate checkout and preserve existing history, branches, tags and published assets. Check authenticated ownership, repository identity, visibility and refs before every push.

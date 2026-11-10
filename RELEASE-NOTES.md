@@ -1,10 +1,10 @@
 # CQLmatic v0.1.3
 
-CQLmatic v0.1.3 adds Quick inventory and field-specific observations from saved analyst query results. Testers and feedback are welcome.
+## Summary
 
-CQLmatic helps your AI assistant map your CrowdStrike Next-Gen SIEM environment and write CQL tailored to your sources, fields, and parser behavior. The assistant interprets your request; the local Rust engine constructs and checks the query against explicit contracts and saved environment evidence.
+Quick inventory lets you start with a few chosen data sources before mapping your whole environment. You can write basic queries immediately, save source and field names as leads, and switch to the full workflow later without losing what you found. If you save a query and its complete result, you can import them to record which fields had values. CQLmatic cannot independently verify that the result came from that query.
 
-## In this release
+## Technical details
 
 - Quick inventory scopes an authorized scout to selected sources, with a chosen view or `search-all`, explicit UTC window, and finite query and time budgets. Settings can return to Full without discarding saved evidence.
 - Basic generation and checking work without a pack. With a confirmed Quick target, they can save source and input-field names as unverified leads; they do not store query text or literal values in inventory state.
