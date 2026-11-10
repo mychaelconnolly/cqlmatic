@@ -414,3 +414,111 @@ fn an_older_consistent_source_zero_does_not_backdate_the_current_negative() {
             .contains(&candidate.data.sources[0]["provenance_ids"][0])
     );
 }
+
+#[test]
+fn a_compatible_old_zero_cannot_remove_a_historical_boundary_before_a_second_refresh() {
+    for marker in ["not-reobserved", "stale", "unknown-window"] {
+        let mut old = pack(
+            "2026-01-02T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            "2026-06-01T00:00:00Z",
+            false,
+            None,
+        );
+        match marker {
+            "not-reobserved" => old.data.fields[0]["refresh_status"] = json!("not-reobserved"),
+            "stale" => old.data.provenance[0]["coverage_status"] = json!("stale"),
+            _ => old.data.fields[0]["observation_window"] = Value::Null,
+        }
+        old.content_digest = old.digest().unwrap();
+        let mut zero = pack(
+            "2026-03-02T00:00:00Z",
+            "2026-07-02T00:00:00Z",
+            "2026-07-03T00:00:00Z",
+            false,
+            None,
+        );
+        set_start(&mut zero, "2026-03-01T00:00:00Z");
+        let retained = environment::merge(&old, &zero).unwrap();
+        assert_eq!(field(&retained), field(&old));
+        assert!(
+            retained
+                .data
+                .provenance
+                .iter()
+                .any(|proof| proof["id"] == field(&zero)["provenance_ids"][0])
+        );
+        assert!(
+            !field(&retained)["provenance_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&field(&zero)["provenance_ids"][0])
+        );
+        let mut positive = pack(
+            "2026-05-02T00:00:00Z",
+            "2026-08-02T00:00:00Z",
+            "2026-08-03T00:00:00Z",
+            true,
+            None,
+        );
+        set_start(&mut positive, "2026-05-01T00:00:00Z");
+        assert!(environment::merge(&retained, &positive).is_err());
+        assert_eq!(field(&retained), field(&old));
+    }
+}
+
+#[test]
+fn opposite_unorderable_field_decisions_fail_in_both_directions() {
+    for (previous, incoming) in [(false, true), (true, false)] {
+        let mut old = pack(
+            "2026-01-02T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            "2026-06-01T00:00:00Z",
+            previous,
+            None,
+        );
+        let mut candidate = pack(
+            "2026-03-02T00:00:00Z",
+            "2026-07-02T00:00:00Z",
+            "2026-07-03T00:00:00Z",
+            incoming,
+            None,
+        );
+        for pack in [&mut old, &mut candidate] {
+            pack.data.fields[0]["observation_window"] = Value::Null;
+            pack.content_digest = pack.digest().unwrap();
+        }
+        assert!(
+            environment::merge(&old, &candidate)
+                .unwrap_err()
+                .message
+                .contains("ordering conflict")
+        );
+    }
+}
+
+#[test]
+fn qualified_post_snapshot_zero_and_positive_measurements_can_clear_historical_markers() {
+    let mut old = pack(
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        "2026-06-01T00:00:00Z",
+        false,
+        None,
+    );
+    old.data.fields[0]["refresh_status"] = json!("not-reobserved");
+    old.content_digest = old.digest().unwrap();
+    for observed in [false, true] {
+        let mut candidate = pack(
+            "2026-07-02T00:00:00Z",
+            "2026-07-02T00:00:00Z",
+            "2026-07-03T00:00:00Z",
+            observed,
+            None,
+        );
+        set_start(&mut candidate, "2026-07-01T00:00:00Z");
+        let merged = environment::merge(&old, &candidate).unwrap();
+        assert_eq!(field(&merged), field(&candidate));
+        assert!(field(&merged)["refresh_status"].is_null());
+    }
+}

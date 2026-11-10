@@ -2539,8 +2539,8 @@ fn query_observation_basis(
             if source_negative || !negative_fields.is_empty() || measured_absent {
                 contradicted = true;
                 if source_negative || measured_absent {
-                    snapshot_bound |=
-                        source.inventory_status == "stale" || source_evidence == Observation::Stale;
+                    snapshot_bound |= source.inventory_status == "stale"
+                        || environment::linked_stale(pack, &source.provenance_ids);
                     provenance_ids.extend(source.provenance_ids.iter().cloned());
                     windows.extend(
                         source
@@ -2551,7 +2551,7 @@ fn query_observation_basis(
                 }
                 for field in negative_fields {
                     snapshot_bound |= field.refresh_status.as_deref() == Some("not-reobserved")
-                        || observation(pack, &field.provenance_ids) == Observation::Stale;
+                        || environment::linked_stale(pack, &field.provenance_ids);
                     provenance_ids.extend(field.provenance_ids.iter().cloned());
                     windows.extend(field.observation_window.clone());
                 }

@@ -386,7 +386,7 @@ fn deployment_provenance(value: &Value) -> bool {
     )
 }
 
-fn linked_stale(pack: &Pack, ids: &[String]) -> bool {
+pub(crate) fn linked_stale(pack: &Pack, ids: &[String]) -> bool {
     pack.data.provenance.iter().any(|value| {
         deployment_provenance(value)
             && value["coverage_status"] == "stale"
@@ -1097,6 +1097,32 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     .as_ref()
                     .and_then(|coverage| coverage.observed)
                     == Some(false);
+            let after_undated_negative = retained_measurement.is_none()
+                && retained_negative
+                && incoming_measurement.is_some_and(|measurement| {
+                    parse_time(&old.created_at).is_ok_and(|created| measurement.start > created)
+                });
+            if retained_measurement.is_none() && retained_negative && !after_undated_negative {
+                let incoming_negative = fresh
+                    .coverage
+                    .as_ref()
+                    .and_then(|coverage| coverage.observed)
+                    == Some(false);
+                let compatible_rate = retained
+                    .coverage
+                    .as_ref()
+                    .and_then(|coverage| coverage.rate)
+                    .zip(fresh.coverage.as_ref().and_then(|coverage| coverage.rate))
+                    .is_none_or(|(previous, incoming)| previous == incoming);
+                if !incoming_negative || !compatible_rate {
+                    return Err(invalid(&format!(
+                        "Field measurement ordering conflict for source {} field {}: contradictory evidence has no orderable measurement after the retained negative snapshot boundary.",
+                        source_id, fresh.path
+                    )));
+                }
+                *f = prior.clone();
+                continue;
+            }
             let compatible = retained_measurement.zip(incoming_measurement).map_or_else(
                 || compatible_field_decisions(&retained, &fresh),
                 |(previous, incoming)| {
@@ -1105,11 +1131,6 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                 },
             ) && !(retained_negative
                 && incoming_measurement.is_some_and(|measurement| measurement.observed));
-            let after_undated_negative = retained_measurement.is_none()
-                && retained_negative
-                && incoming_measurement.is_some_and(|measurement| {
-                    parse_time(&old.created_at).is_ok_and(|created| measurement.start > created)
-                });
             match (retained_measurement, incoming_measurement) {
                 (Some(previous), Some(incoming)) if incoming.key() <= previous.key() => {
                     if !compatible {
@@ -1121,7 +1142,9 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     *f = prior.clone();
                     continue;
                 }
-                (Some(_), None) | (None, Some(_)) if !compatible && !after_undated_negative => {
+                (Some(_), None) | (None, Some(_)) | (None, None)
+                    if !compatible && !after_undated_negative =>
+                {
                     return Err(invalid(&format!(
                         "Field measurement ordering conflict for source {} field {}: contradictory evidence has no orderable current measurement.",
                         source_id, fresh.path

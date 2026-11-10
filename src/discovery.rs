@@ -415,13 +415,16 @@ fn census_sources(rows: &[Value], sources: &mut Vec<Scope>) -> Result<(), Diagno
     }
     Ok(())
 }
+fn fieldset_name(row: &Value) -> Option<&str> {
+    ["field", "fieldname", "name", "_field"]
+        .into_iter()
+        .find_map(|key| row.get(key).and_then(Value::as_str))
+}
+
 fn fieldset_fields(rows: &[Value]) -> Result<Vec<String>, Diagnostic> {
     let mut fields = Vec::new();
     for row in rows {
-        let name = ["field", "fieldname", "name", "_field"]
-            .iter()
-            .find_map(|k| row.get(*k).and_then(Value::as_str))
-            .ok_or_else(|| fail("Unrecognized fieldset result shape."))?;
+        let name = fieldset_name(row).ok_or_else(|| fail("Unrecognized fieldset result shape."))?;
         plan::checked_field(name)?;
         fields.push(name.to_string());
     }
@@ -1406,7 +1409,7 @@ impl<B: SearchBackend> Run<'_, B> {
                                     .receipt
                                     .events
                                     .iter()
-                                    .any(|row| row["field"].as_str() == Some(&original)))
+                                    .any(|row| fieldset_name(row) == Some(original.as_str())))
                             .then_some(index)
                         })
                 });

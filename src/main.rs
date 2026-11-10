@@ -503,7 +503,8 @@ fn select_inventory(
             Ok((None, false))
         };
     }
-    let state = match read_inventory_state(&path) {
+    let data = storage::read_bytes(&path, inventory::MAX_STATE_BYTES)?;
+    let state = match parse_inventory_state(&data) {
         Ok(state) => state,
         Err(d) if selected_path.is_none() && pack.is_some() => {
             return Err(Diagnostic::warning(
@@ -555,7 +556,11 @@ fn select_inventory(
 
 fn read_inventory_state(path: &Path) -> Result<InventoryState, Diagnostic> {
     let data = storage::read_bytes(path, inventory::MAX_STATE_BYTES)?;
-    let state: InventoryState = serde_json::from_slice(&data)
+    parse_inventory_state(&data)
+}
+
+fn parse_inventory_state(data: &[u8]) -> Result<InventoryState, Diagnostic> {
+    let state: InventoryState = serde_json::from_slice(data)
         .map_err(|_| input_error("Inventory state is invalid JSON."))?;
     state.validate()?;
     Ok(state)

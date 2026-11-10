@@ -2,10 +2,10 @@
   "version": "0.1.4",
   "binaries": {
     "darwin-arm64": {
-      "sha256": "b2843130e5bc8b3653dabb1c5af25c9bd3a9351a400c046c0403832255d44656"
+      "sha256": "41169029b877c5ebd3f865f3e718b6d63aec475ee03f64678de382ad6a8e46e2"
     },
     "linux-x64": {
-      "sha256": "d002fef57cab927b99aba2c6ffa355c318a560ea92394f149eaeb3dd8c0fccab"
+      "sha256": "7aea8177b03a64fb659cb064622ee95cfafe48ffe885b94bbf0edb90054fa23c"
     }
   }
 }

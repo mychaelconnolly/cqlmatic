@@ -928,3 +928,114 @@ fn tied_native_capture_presence_conflicts_prevent_pack_construction() {
             .any(|diagnostic| diagnostic.message.contains("Tied field measurements"))
     );
 }
+
+#[test]
+fn every_fieldset_alias_retains_unmeasured_sample_and_kind_capture_proof() {
+    for alias in ["field", "fieldname", "name", "_field"] {
+        for rare_kind in [false, true] {
+            let mut r = request(&["first"]);
+            r.contracts.clear();
+            r.max_population_fields_per_source = Some(1);
+            let scenario = Scenario {
+                counts: BTreeMap::from([("first".into(), 1)]),
+                ..Scenario::default()
+            };
+            let mut answers = BTreeMap::new();
+            let mut probes = Vec::new();
+            loop {
+                let pending = discovery::frontier(&r, &answers).unwrap();
+                if pending.is_empty() {
+                    break;
+                }
+                assert!(probes.len() < 100);
+                for probe in pending {
+                    let rows = match probe.kind.as_str() {
+                        "fieldset" => {
+                            let names = if rare_kind {
+                                vec!["recent", "event.kind"]
+                            } else {
+                                vec!["unmeasured"]
+                            };
+                            names.into_iter().map(|name| json!({alias:name})).collect()
+                        }
+                        "kind-fieldset" => vec![json!({alias:"unmeasured"})],
+                        "record-kind-facet"
+                            if rare_kind && probe.field.as_deref() == Some("event.kind") =>
+                        {
+                            vec![
+                                json!({"event.kind":"alpha","events":1}),
+                                json!({"event.kind":"beta","events":2}),
+                            ]
+                        }
+                        _ => scenario.rows(&probe),
+                    };
+                    answers.insert(discovery::probe_id(&r.environment.view, &probe), rows);
+                    probes.push(probe);
+                }
+            }
+            let retrievals = probes
+                .iter()
+                .enumerate()
+                .map(|(index, probe)| {
+                    (
+                        discovery::probe_id(&r.environment.view, probe),
+                        format!("2026-02-01T00:00:{index:02}Z"),
+                    )
+                })
+                .collect();
+            let mut backend = Backend {
+                answers,
+                emitted: vec![],
+                observed_at: "2026-02-01T00:00:00Z".into(),
+                retrievals,
+            };
+            let (pack, report) = discovery::execute(&r, &mut backend);
+            assert_eq!(
+                report.status, "complete",
+                "{alias}, rare={rare_kind}: {:?}",
+                report.diagnostics
+            );
+            let pack = pack.unwrap();
+            let unmeasured = field(&pack, "unmeasured", false);
+            assert_eq!(unmeasured["evidence_kind"], "documented");
+            assert!(unmeasured["coverage"]["observed"].is_null());
+            assert!(unmeasured["coverage"]["rate"].is_null());
+            assert_eq!(unmeasured["provenance_ids"].as_array().unwrap().len(), 1);
+            assert_eq!(
+                pack.data.sources[0]["evidence"]["measured_fields"],
+                json!(["first"])
+            );
+            let kind = if rare_kind {
+                "kind-fieldset"
+            } else {
+                "fieldset"
+            };
+            let capture =
+                report
+                    .captures
+                    .iter()
+                    .find(|capture| {
+                        capture.probe.kind == kind
+                            && capture.receipt.events.iter().any(|row| {
+                                row.get(alias).and_then(Value::as_str) == Some("unmeasured")
+                            })
+                    })
+                    .unwrap();
+            let proof = pack
+                .data
+                .provenance
+                .iter()
+                .find(|proof| proof["id"] == unmeasured["provenance_ids"][0])
+                .unwrap();
+            assert_eq!(proof["retrieved_at"], capture.retrieved_at);
+            assert_eq!(
+                proof["observation_window"],
+                format!("{}/{}", capture.probe.start, capture.probe.end)
+            );
+            assert_eq!(
+                proof["observation_window"],
+                unmeasured["observation_window"]
+            );
+        }
+    }
+}

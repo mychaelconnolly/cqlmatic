@@ -471,6 +471,95 @@ fn only_a_malformed_default_can_be_ignored_for_an_explicit_pack() {
     assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_default_inventory_blocks_explicit_pack_for_query_and_assessment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = Temp::new();
+    let pack_path = dir.0.join("snapshot/pack.json");
+    save_pack(&pack_path, &pack(true, "2026-01-02T00:00:00Z"));
+    let path = dir.default_state();
+    save_state(&path, &state(DiscoveryMode::Full));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(
+        fs::read(&path).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    for args in [
+        vec![
+            "check",
+            "count()",
+            "--pack",
+            pack_path.to_str().unwrap(),
+            "--json",
+        ],
+        vec![
+            "generate",
+            "--intent",
+            "count events",
+            "--repo",
+            "sample",
+            "--pack",
+            pack_path.to_str().unwrap(),
+            "--json",
+        ],
+    ] {
+        let (code, result) = dir.one(&args);
+        assert_eq!(code, 1, "{result}");
+        assert_eq!(result["outcome"], "needs-context");
+        assert!(result["query"].is_null());
+        assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
+        assert!(!diagnostic(
+            &result,
+            "CQL_QUICK_INVENTORY_IGNORED",
+            "warning"
+        ));
+    }
+
+    let request = json!({"schema_version":1,"query":"count()","result":{"result":[{"_count":1}]}});
+    let (code, rows) = dir.run(
+        &["assess", "--jsonl", "--pack", pack_path.to_str().unwrap()],
+        format!("{request}\n").as_bytes(),
+    );
+    assert_eq!(code, 2, "{rows:?}");
+    assert_eq!(rows[0]["outcome"], "error");
+    assert!(finding(&rows[0], "CQL_QUICK_INVENTORY"));
+    assert!(!finding(&rows[0], "CQL_QUICK_INVENTORY_IGNORED"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn oversized_default_inventory_cannot_be_ignored_for_an_explicit_pack() {
+    let dir = Temp::new();
+    let pack_path = dir.0.join("snapshot/pack.json");
+    save_pack(&pack_path, &pack(true, "2026-01-02T00:00:00Z"));
+    let path = dir.default_state();
+    save_state(&path, &state(DiscoveryMode::Full));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_STATE_BYTES + 1)
+        .unwrap();
+    let (code, result) = dir.one(&[
+        "check",
+        "count()",
+        "--pack",
+        pack_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 1, "{result}");
+    assert_eq!(result["outcome"], "needs-context");
+    assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
+    assert!(!diagnostic(
+        &result,
+        "CQL_QUICK_INVENTORY_IGNORED",
+        "warning"
+    ));
+}
+
 #[test]
 fn unconfirmed_preferences_are_benign_only_without_evidence() {
     let dir = Temp::new();

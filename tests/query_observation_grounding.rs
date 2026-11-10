@@ -430,6 +430,49 @@ fn undated_stale_markers_require_an_observation_window_after_the_snapshot() {
 }
 
 #[test]
+fn a_negative_with_qualified_and_stale_proof_keeps_the_snapshot_bound() {
+    for target in ["field", "source"] {
+        let mut d = data();
+        let mut stale = d.provenance[0].clone();
+        stale["id"] = json!("prov:stale");
+        stale["coverage_status"] = json!("stale");
+        d.provenance.push(stale);
+        if target == "field" {
+            d.fields[0]["coverage"]["observed"] = json!(false);
+            d.fields[0]["provenance_ids"] = json!(["prov:measurement", "prov:stale"]);
+        } else {
+            d.sources[0]["evidence"]["observed"] = json!(false);
+            d.sources[0]["provenance_ids"] = json!(["prov:measurement", "prov:stale"]);
+        }
+        let active = pack(d.clone(), "2026-06-01T00:00:00Z");
+        for (observed, expected) in [
+            (observation(), Outcome::NeedsContext),
+            (
+                observation_in_window(
+                    "2026-07-01T00:00:00Z",
+                    "2026-07-02T00:00:00Z",
+                    "2026-07-03T00:00:00Z",
+                ),
+                Outcome::Ready,
+            ),
+        ] {
+            let result = checked("#repo=synthetic | user=*", None, Some(&active), &[observed]);
+            assert_eq!(result.outcome, expected, "{target}: {:?}", result.grounding);
+        }
+        d.fields[0]["coverage"]["observed"] = json!(true);
+        d.sources[0]["evidence"]["observed"] = json!(true);
+        let positive = pack(d, "2026-06-01T00:00:00Z");
+        let result = checked("#repo=synthetic | user=*", Some(&positive), None, &[]);
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{target}: {:?}",
+            result.grounding
+        );
+    }
+}
+
+#[test]
 fn a_listed_unmeasured_namespace_does_not_contradict_a_saved_observation() {
     let observation = observation();
     let mut d = data();
