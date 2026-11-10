@@ -1,5 +1,6 @@
 use cqlmatic::{
-    contracts::{Cloud, EnvironmentId, Scope},
+    app,
+    contracts::{CheckRequest, Cloud, Context, EnvironmentId, Outcome, Scope},
     environment::{self, Pack, PackData},
     inventory::{self, InventoryState, PackReference, TargetScope},
 };
@@ -256,6 +257,199 @@ fn set_start(pack: &mut Pack, start: &str) {
         proof["observation_window"] = json!(window);
     }
     pack.content_digest = pack.digest().unwrap();
+}
+
+fn undated_source_negative() -> Pack {
+    let mut old = pack(
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        "2026-06-01T00:00:00Z",
+        false,
+        None,
+    );
+    old.data.sources[0]["evidence"] = json!({"observed":false});
+    old.content_digest = old.digest().unwrap();
+    old
+}
+
+#[test]
+fn an_undated_source_negative_requires_qualified_post_snapshot_measurement() {
+    let old = undated_source_negative();
+    let before = serde_json::to_vec(&old).unwrap();
+    for (start, end, proof) in [
+        ("2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", "qualified"),
+        ("2026-06-01T00:00:00Z", "2026-07-02T00:00:00Z", "qualified"),
+        ("2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z", "qualified"),
+        ("2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z", "partial"),
+        ("2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z", "mismatched"),
+    ] {
+        let mut candidate = pack(
+            end,
+            "2026-07-02T00:00:00Z",
+            "2026-07-03T00:00:00Z",
+            true,
+            None,
+        );
+        set_start(&mut candidate, start);
+        if proof != "qualified" {
+            candidate.data.sources[0]["evidence"]
+                .as_object_mut()
+                .unwrap()
+                .remove("measured_fields");
+            if proof == "partial" {
+                candidate.data.provenance[1]["coverage_status"] = json!("partial");
+            } else {
+                candidate.data.provenance[1]["observation_window"] =
+                    json!("2026-01-01T00:00:00Z/2026-01-02T00:00:00Z");
+            }
+            candidate.content_digest = candidate.digest().unwrap();
+        }
+        old.validate().unwrap();
+        candidate.validate().unwrap();
+        if start == "2026-07-01T00:00:00Z" && proof == "qualified" {
+            let merged = environment::merge(&old, &candidate).unwrap();
+            merged.validate().unwrap();
+            assert_eq!(merged.data.sources[0], candidate.data.sources[0]);
+            assert_eq!(field(&merged), field(&candidate));
+            let result = app::check(
+                CheckRequest {
+                    schema_version: 1,
+                    id: None,
+                    query: "#repo=events | key=* | count()".into(),
+                    context: Context {
+                        require_observed: true,
+                        ..Context::default()
+                    },
+                },
+                Some(&merged),
+            );
+            assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
+        } else {
+            let error = environment::merge(&old, &candidate).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .starts_with("Source measurement ordering conflict"),
+                "{start} {proof}: {}",
+                error.message
+            );
+        }
+        assert_eq!(serde_json::to_vec(&old).unwrap(), before);
+    }
+}
+
+#[test]
+fn an_unknown_source_observation_cannot_erase_a_negative() {
+    for undated in [false, true] {
+        let mut old = undated_source_negative();
+        if !undated {
+            old.data.sources[0]["evidence"]["observation_window"] =
+                json!("2026-01-01T00:00:00Z/2026-01-02T00:00:00Z");
+            old.content_digest = old.digest().unwrap();
+        }
+        let before = serde_json::to_vec(&old).unwrap();
+        for explicit_null in [false, true] {
+            let mut candidate = pack(
+                "2026-03-02T00:00:00Z",
+                "2026-07-02T00:00:00Z",
+                "2026-07-03T00:00:00Z",
+                true,
+                None,
+            );
+            set_start(&mut candidate, "2026-03-01T00:00:00Z");
+            let evidence = candidate.data.sources[0]["evidence"]
+                .as_object_mut()
+                .unwrap();
+            evidence.remove("measured_fields");
+            if explicit_null {
+                evidence.insert("observed".into(), Value::Null);
+            } else {
+                evidence.remove("observed");
+            }
+            candidate.content_digest = candidate.digest().unwrap();
+            old.validate().unwrap();
+            candidate.validate().unwrap();
+            let error = match environment::merge(&old, &candidate) {
+                Err(error) => error,
+                Ok(merged) => {
+                    let result = app::check(
+                        CheckRequest {
+                            schema_version: 1,
+                            id: None,
+                            query: "#repo=events | key=* | count()".into(),
+                            context: Context {
+                                require_observed: true,
+                                ..Context::default()
+                            },
+                        },
+                        Some(&merged),
+                    );
+                    panic!(
+                        "unknown source observation erased negative evidence (undated={undated}, null={explicit_null}); strict grounding returned {:?}",
+                        result.outcome
+                    );
+                }
+            };
+            assert!(
+                error
+                    .message
+                    .starts_with("Source measurement ordering conflict"),
+                "{}",
+                error.message
+            );
+            assert_eq!(serde_json::to_vec(&old).unwrap(), before);
+            let result = app::check(
+                CheckRequest {
+                    schema_version: 1,
+                    id: None,
+                    query: "#repo=events | key=* | count()".into(),
+                    context: Context {
+                        require_observed: true,
+                        ..Context::default()
+                    },
+                },
+                Some(&old),
+            );
+            assert_eq!(result.outcome, Outcome::NeedsContext);
+        }
+    }
+}
+
+#[test]
+fn a_backdated_consistent_zero_preserves_an_undated_source_negative() {
+    let old = undated_source_negative();
+    let mut candidate = pack(
+        "2026-03-02T00:00:00Z",
+        "2026-07-02T00:00:00Z",
+        "2026-07-03T00:00:00Z",
+        false,
+        None,
+    );
+    set_start(&mut candidate, "2026-03-01T00:00:00Z");
+    candidate.data.sources[0]["evidence"]["observed"] = json!(false);
+    candidate.data.sources[0]["evidence"]
+        .as_object_mut()
+        .unwrap()
+        .remove("measured_fields");
+    candidate.content_digest = candidate.digest().unwrap();
+    old.validate().unwrap();
+    candidate.validate().unwrap();
+    let merged = environment::merge(&old, &candidate).unwrap();
+    assert_eq!(merged.data.sources[0], old.data.sources[0]);
+    let retained_proof = &old.data.provenance[1];
+    assert!(merged.data.provenance.contains(retained_proof));
+    assert!(
+        merged
+            .data
+            .provenance
+            .contains(&candidate.data.provenance[1])
+    );
+    assert!(
+        !merged.data.sources[0]["provenance_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&candidate.data.provenance[1]["id"])
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use cqlmatic::{
     app,
     contracts::{Diagnostic, GenerateRequest, Outcome, Severity},
-    discovery::{self, DiscoverRequest, Probe},
+    discovery::{self, DiscoverRequest, DiscoveryDepth, Probe},
     environment::{Pack, PackData},
     mcp::{self, State, StepOutput},
     network::SearchBackend,
@@ -183,6 +183,72 @@ fn census_discovery_finishes_in_four_batches() {
     assert_eq!(rounds, 4);
     assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
     assert_eq!(storage::read_pack(&pack).unwrap().data.sources.len(), 1);
+}
+
+#[test]
+fn source_only_activation_recovers_an_undated_negative_only_after_its_snapshot() {
+    for (start, end, recover) in [
+        ("2026-03-01T00:00:00Z", "2026-03-02T00:00:00Z", false),
+        ("2026-07-01T00:00:00Z", "2026-07-02T00:00:00Z", true),
+    ] {
+        let dir = Temp::new();
+        let (state, pack, receipt) = paths(dir.path());
+        let mut r = request();
+        r.depth = DiscoveryDepth::SourcesOnly;
+        r.value_fields.clear();
+        r.start = start.into();
+        r.end = end.into();
+        let old = Pack::new(
+            r.environment.clone(),
+            "2026-06-01T00:00:00Z".into(),
+            PackData {
+                sources: vec![json!({
+                    "id":discovery::source_id(&r.sources[0]),"kind":"repo","name":"synthetic_repo",
+                    "inventory_status":"observed-only","selectors":{"repo":"synthetic_repo"},
+                    "evidence":{"observed":false},"provenance_ids":["prov:old-volume"]
+                })],
+                provenance: vec![json!({
+                    "id":"prov:old-volume","source_type":"mcp-observation",
+                    "canonical_source":"Synthetic measurement","retrieved_at":"2026-01-03T00:00:00Z",
+                    "observation_window":"2026-01-01T00:00:00Z/2026-01-02T00:00:00Z",
+                    "redaction_status":"none","coverage_status":"observed-only"
+                })],
+                ..PackData::default()
+            },
+        )
+        .unwrap();
+        old.validate().unwrap();
+        storage::Writer::acquire(&pack)
+            .unwrap()
+            .commit(&old)
+            .unwrap();
+        let before = fs::read(&pack).unwrap();
+        let initial = mcp::init(r, &state, &pack, &receipt).unwrap();
+        assert_eq!(initial.probes.len(), 1);
+        assert_eq!(initial.probes[0]["kind"], "volume");
+        let output = answer_batch(dir.path(), &state, &initial);
+        if recover {
+            assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
+            assert!(output.active_pack_updated);
+            let activated = storage::read_pack(&pack).unwrap();
+            assert_eq!(activated.data.sources[0]["evidence"]["observed"], true);
+            assert_eq!(
+                activated.data.sources[0]["evidence"]["observation_window"],
+                format!("{start}/{end}")
+            );
+            assert!(receipt.exists());
+        } else {
+            assert_eq!(output.status, "failed");
+            assert!(
+                output.diagnostics[0]
+                    .message
+                    .starts_with("Source measurement ordering conflict")
+            );
+            assert!(!output.active_pack_updated);
+            assert_eq!(fs::read(&pack).unwrap(), before);
+            assert!(!receipt.exists());
+        }
+    }
 }
 
 #[test]

@@ -919,13 +919,14 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     .as_ref()
                     .and_then(|evidence| evidence.observed)
                     == Some(false);
+            let retained_measurement = source_measurement(old, &retained);
             let incoming_source = source_measurement(candidate, &f);
-            let ordered_source = if stale {
+            let ordered_source = if stale || negative && retained_measurement.is_none() {
                 incoming_source.is_some_and(|(_, start, _)| {
                     parse_time(&old.created_at).is_ok_and(|created| start > created)
                 })
             } else {
-                source_measurement(old, &retained)
+                retained_measurement
                     .zip(incoming_source)
                     .is_some_and(|(previous, incoming)| incoming > previous)
             };
@@ -933,11 +934,11 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                 && f.evidence.as_ref().and_then(|evidence| evidence.observed) == Some(false)
                 && !ordered_source;
             if negative
-                && f.evidence.as_ref().and_then(|evidence| evidence.observed) == Some(true)
+                && f.evidence.as_ref().and_then(|evidence| evidence.observed) != Some(false)
                 && !ordered_source
             {
                 return Err(invalid(&format!(
-                    "Source measurement ordering conflict for source {}: an older or unorderable positive measurement cannot replace current negative evidence.",
+                    "Source measurement ordering conflict for source {}: positive or unknown source evidence cannot replace current negative evidence without a newer qualifying measurement.",
                     retained.id
                 )));
             }
