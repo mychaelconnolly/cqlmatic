@@ -17,7 +17,7 @@ Start with `cqlmatic status --json --summary` to find the confirmed target and a
 
 A documented CPS/ECS field name, parser declaration or hand-confirmed mapping is not an observed tenant field. Fieldset listing also does not establish populated-field coverage: inspect `coverage.observed`, the rate when measured, namespace and provenance window. Use source-bound [population batches](ENVIRONMENT.md#explicit-population-batches-and-targeted-refresh) to measure specific fields, and `kind_fields`/`value_fields` to sample missing discriminator/value evidence. A pack observation also does not guarantee presence on every event. Ask a precise question when the required source, meaning, matching behavior or environment evidence is missing. Do not repair uncertainty by inventing names or dropping constraints.
 
-Capped refreshes retain fields they did not measure and preserve original evidence dates. A listed field with null observation/rate is unmeasured; an actual zero remains current negative evidence and does not mark a parser review complete. Inspect each field's own measurement window and proof. A newer snapshot wrapper cannot repair backdated, tied or unorderable contradictions.
+Capped refreshes retain fields they did not measure and preserve original evidence dates. A listed field with null observation/rate is unmeasured; an actual zero remains current negative evidence and does not mark a parser review complete. Inspect each field's own measurement window and proof. A newer snapshot wrapper cannot repair backdated, tied or unorderable contradictory field measurements.
 
 ## Consult the reference and construct the query
 
