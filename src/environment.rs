@@ -429,7 +429,7 @@ fn measurement_key(
     Some((end, start, retrieved))
 }
 
-fn source_measurement(
+pub(crate) fn source_measurement(
     pack: &Pack,
     source: &LegacySource,
 ) -> Option<(

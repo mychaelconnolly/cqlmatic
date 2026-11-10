@@ -8,6 +8,7 @@
 - Discovery separates fieldset listings from actual field measurements. Exact population batches preserve untargeted records and dates; current auxiliary zero measurements can retain a null population rate. Current proof and retained history remain distinct in field/status evidence.
 - Refresh rejects contradictory backdated, tied or unorderable measurements while preserving the existing newer-snapshot requirement, exact source restrictions and atomic replacement. An empty optional value facet for an absent field no longer aborts other source measurements; malformed nonempty facets still fail.
 - Undated negative sources recover only from a qualified source measurement whose window starts after the retained snapshot. Null or missing source observations cannot erase retained negative or historical source evidence.
+- Saved-query grounding requires a window strictly after the snapshot for negative sources or fields without qualifying record-bound measurement proof. Qualified dated negatives retain their original ordering after repackaging; stale markers retain the snapshot boundary.
 - Existing request/schema versions, pack shape and executable profile remain unchanged. Legacy evidence and imported metadata retain their compatibility boundaries.
 
 ## 0.1.3

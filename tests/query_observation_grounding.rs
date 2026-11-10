@@ -402,6 +402,142 @@ fn repackaging_and_unrelated_source_captures_do_not_refresh_a_field_negative() {
     );
 }
 
+fn negative_record_query_observation_ordering(target: &str) {
+    let older = pack(data(), "2026-01-10T00:00:00Z");
+    let qualified_window = "2026-01-01T00:00:00Z/2026-01-08T00:00:00Z";
+    for window in [
+        None,
+        Some("2026-01-02T00:00:00Z/2026-01-07T00:00:00Z"),
+        Some(qualified_window),
+    ] {
+        let mut d = data();
+        let record = if target == "source" {
+            d.sources[0]["evidence"]["observed"] = json!(false);
+            &mut d.sources[0]["evidence"]
+        } else {
+            d.fields[0]["coverage"]["observed"] = json!(false);
+            &mut d.fields[0]
+        };
+        if let Some(window) = window {
+            record["observation_window"] = json!(window);
+        }
+        let negative = pack(d, "2026-06-01T00:00:00Z");
+        negative.validate().unwrap();
+        for (start, end, retrieved_at) in [
+            (
+                "2026-03-01T00:00:00Z",
+                "2026-03-02T00:00:00Z",
+                "2026-03-03T00:00:00Z",
+            ),
+            (
+                "2026-06-01T00:00:00Z",
+                "2026-06-02T00:00:00Z",
+                "2026-06-03T00:00:00Z",
+            ),
+            (
+                "2026-07-01T00:00:00Z",
+                "2026-07-02T00:00:00Z",
+                "2026-07-03T00:00:00Z",
+            ),
+        ] {
+            let observed = observation_in_window(start, end, retrieved_at);
+            observed.validate().unwrap();
+            let expected =
+                if window == Some(qualified_window) || start > negative.created_at.as_str() {
+                    Outcome::Ready
+                } else {
+                    Outcome::NeedsContext
+                };
+            for (explicit, active) in [
+                (Some(&negative), None),
+                (None, Some(&negative)),
+                (Some(&older), Some(&negative)),
+            ] {
+                let result = checked(
+                    "#repo=synthetic | user=*",
+                    explicit,
+                    active,
+                    std::slice::from_ref(&observed),
+                );
+                assert_eq!(
+                    result.outcome,
+                    expected,
+                    "{target}, window={window:?}, start={start}, explicit={}, active={}: {:?}",
+                    explicit.is_some(),
+                    active.is_some(),
+                    result.grounding
+                );
+                let basis = &result.grounding.basis["synthetic:*:user"];
+                if expected == Outcome::NeedsContext {
+                    assert!(
+                        basis.contains("pack measurement remains authoritative"),
+                        "{basis}"
+                    );
+                    assert!(
+                        result
+                            .grounding
+                            .missing
+                            .iter()
+                            .any(|field| field == "synthetic:*:user")
+                    );
+                    assert!(
+                        result
+                            .diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic.code == "CQL_CONTEXT_REQUIRED"
+                                && diagnostic.severity == Severity::Error)
+                    );
+                } else {
+                    assert!(
+                        basis.starts_with("caller-attested query observation;"),
+                        "{basis}"
+                    );
+                    assert!(result.grounding.missing.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn source_negatives_need_record_bound_proof_or_a_post_snapshot_query() {
+    negative_record_query_observation_ordering("source");
+}
+
+#[test]
+fn field_negatives_need_record_bound_proof_or_a_post_snapshot_query() {
+    negative_record_query_observation_ordering("field");
+}
+
+#[test]
+fn measured_absence_with_record_bound_proof_can_be_superseded_before_repackaging() {
+    let mut d = data();
+    d.fields.clear();
+    d.sources[0]["evidence"]["measured_fields"] = json!(["user"]);
+    d.sources[0]["evidence"]["observation_window"] = d.provenance[0]["observation_window"].clone();
+    let negative = pack(d, "2026-06-01T00:00:00Z");
+    negative.validate().unwrap();
+    let observed = observation_in_window(
+        "2026-03-01T00:00:00Z",
+        "2026-03-02T00:00:00Z",
+        "2026-03-03T00:00:00Z",
+    );
+    observed.validate().unwrap();
+    for (explicit, active) in [(Some(&negative), None), (None, Some(&negative))] {
+        let result = checked(
+            "#repo=synthetic | user=*",
+            explicit,
+            active,
+            std::slice::from_ref(&observed),
+        );
+        assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
+        assert!(
+            result.grounding.basis["synthetic:*:user"]
+                .starts_with("caller-attested query observation;")
+        );
+    }
+}
+
 #[test]
 fn undated_stale_markers_require_an_observation_window_after_the_snapshot() {
     for marker in ["source", "field", "provenance"] {
@@ -439,9 +575,12 @@ fn a_negative_with_qualified_and_stale_proof_keeps_the_snapshot_bound() {
         d.provenance.push(stale);
         if target == "field" {
             d.fields[0]["coverage"]["observed"] = json!(false);
+            d.fields[0]["observation_window"] = d.provenance[0]["observation_window"].clone();
             d.fields[0]["provenance_ids"] = json!(["prov:measurement", "prov:stale"]);
         } else {
             d.sources[0]["evidence"]["observed"] = json!(false);
+            d.sources[0]["evidence"]["observation_window"] =
+                d.provenance[0]["observation_window"].clone();
             d.sources[0]["provenance_ids"] = json!(["prov:measurement", "prov:stale"]);
         }
         let active = pack(d.clone(), "2026-06-01T00:00:00Z");
