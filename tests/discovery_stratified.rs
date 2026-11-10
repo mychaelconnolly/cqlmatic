@@ -297,7 +297,7 @@ fn selection_prioritizes_requested_then_new_fields_and_retains_pending_fields() 
     );
     for path in ["old.a", "old.z"] {
         let pending = field(&pack, path);
-        assert_eq!(pending["coverage"]["observed"], false);
+        assert!(pending["coverage"]["observed"].is_null());
         assert!(pending["coverage"]["rate"].is_null());
     }
     assert_eq!(
@@ -331,7 +331,7 @@ fn selection_prioritizes_requested_then_new_fields_and_retains_pending_fields() 
         ])
     );
     let pending = field(&pack, "new.z");
-    assert_eq!(pending["coverage"]["observed"], false);
+    assert!(pending["coverage"]["observed"].is_null());
     assert!(pending["coverage"]["rate"].is_null());
     let full_window = format!("{}/{}", r.start, r.end);
     assert_eq!(pending["observation_window"], full_window);
@@ -693,9 +693,16 @@ fn sampled_selection_is_lexical_and_direct_kind_metadata_does_not_consume_the_ca
         .flat_map(|p| p.fields.iter().map(String::as_str))
         .collect::<Vec<_>>();
     assert_eq!(selected, vec!["a", "b"]);
-    assert_eq!(pack.data.fields.len(), 4);
+    assert_eq!(
+        pack.data
+            .fields
+            .iter()
+            .filter(|field| field["is_tag"] == false)
+            .count(),
+        3
+    );
     let pending = field(&pack, "z");
-    assert_eq!(pending["coverage"]["observed"], false);
+    assert!(pending["coverage"]["observed"].is_null());
     assert!(pending["coverage"]["rate"].is_null());
     let dataset = pack
         .data
@@ -704,7 +711,7 @@ fn sampled_selection_is_lexical_and_direct_kind_metadata_does_not_consume_the_ca
         .find(|field| field["path"] == "event.dataset")
         .unwrap();
     assert_eq!(dataset["is_tag"], true);
-    assert_eq!(dataset["coverage"]["observed"], true);
+    assert_eq!(dataset["coverage"]["observed"], false);
     assert!(dataset["coverage"]["rate"].is_null());
 }
 

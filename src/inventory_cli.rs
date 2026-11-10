@@ -111,10 +111,7 @@ fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
     std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory state path."))
 }
 fn load(path: &Path) -> Result<InventoryState, Diagnostic> {
-    if !path
-        .try_exists()
-        .map_err(|_| fail("Cannot inspect inventory state."))?
-    {
+    if !crate::setup_cli::private_input_exists(path)? {
         return InventoryState::new(&discovery::timestamp());
     }
     let state: InventoryState = read_json(path)?;
@@ -125,7 +122,13 @@ fn packs(state: &InventoryState) -> Result<Vec<Pack>, Diagnostic> {
     state
         .packs
         .iter()
-        .map(|p| storage::read_pack(Path::new(&p.path)))
+        .map(|p| {
+            let path = Path::new(&p.path);
+            if !crate::setup_cli::private_input_exists(path)? {
+                return Err(fail("Retained inventory snapshot does not exist."));
+            }
+            storage::read_pack(path)
+        })
         .collect()
 }
 fn protect_state(path: &Path) -> Result<(), Diagnostic> {
@@ -379,7 +382,7 @@ fn observation_input(path: &Path) -> Result<Vec<u8>, Diagnostic> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    crate::setup_cli::protect_directory(parent)?;
+    crate::setup_cli::verify_directory(parent)?;
     crate::setup_cli::verify_private_file(path)?;
     fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
         #[cfg(unix)]
@@ -416,7 +419,7 @@ fn observation_input(path: &Path) -> Result<Vec<u8>, Diagnostic> {
         .map_err(|_| fail("Cannot reinspect observation input."))?;
     let current = std::fs::symlink_metadata(path)
         .map_err(|_| fail("Cannot reinspect observation input path."))?;
-    crate::setup_cli::protect_directory(parent)?;
+    crate::setup_cli::verify_directory(parent)?;
     crate::setup_cli::verify_private_file(path)?;
     if !same_file(&opened, &after)
         || !same_file(&after, &current)

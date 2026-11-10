@@ -1,6 +1,6 @@
 use cqlmatic::{
     app,
-    contracts::{Diagnostic, GenerateRequest, Outcome},
+    contracts::{Diagnostic, GenerateRequest, Outcome, Severity},
     discovery::{self, DiscoverRequest, Probe},
     environment::{Pack, PackData},
     mcp::{self, State, StepOutput},
@@ -356,19 +356,20 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
         "input":{"mode":"plan","plan":{"source":{"repo":"synthetic_repo"},"steps":[{"op":"count"}]}}
     }))
     .unwrap();
-    let result = app::generate(ambiguous, Some(&mcp_pack));
-    assert_eq!(
-        result.outcome,
-        Outcome::NeedsContext,
-        "{:?}",
-        result.diagnostics
-    );
+    let result = app::generate(ambiguous.clone(), Some(&mcp_pack));
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     assert!(
         result
             .diagnostics
             .iter()
-            .any(|d| d.code == "CQL_RECORD_KIND_AMBIGUOUS")
+            .any(|d| d.code == "CQL_RECORD_KIND_NOTICE" && d.severity == Severity::Info)
     );
+    assert!(result.query.is_some());
+    let mut strict = ambiguous;
+    strict.context.require_observed = true;
+    let strict = app::generate(strict, Some(&mcp_pack));
+    assert_eq!(strict.outcome, Outcome::NeedsContext);
+    assert!(strict.query.is_none());
     for (field, outcome) in [("user", Outcome::Ready), ("made_up", Outcome::NeedsContext)] {
         let request: GenerateRequest = serde_json::from_value(json!({
             "schema_version":1,

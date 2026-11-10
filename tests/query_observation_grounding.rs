@@ -23,14 +23,22 @@ fn source() -> Scope {
 }
 
 fn observation() -> QueryObservation {
+    observation_in_window(
+        "2026-02-01T00:00:00Z",
+        "2026-02-02T00:00:00Z",
+        "2026-02-03T00:00:00Z",
+    )
+}
+
+fn observation_in_window(start: &str, end: &str, retrieved_at: &str) -> QueryObservation {
     QueryObservation::from_result(
         br#"#repo="synthetic" | select([user]) | head(5)"#,
         br#"{"result":[{"user":"alice"}]}"#,
         environment(),
         source(),
-        "2026-02-01T00:00:00Z".into(),
-        "2026-02-02T00:00:00Z".into(),
-        "2026-02-03T00:00:00Z".into(),
+        start.into(),
+        end.into(),
+        retrieved_at.into(),
         QueryResultAssertion::ExactQueryResultTargetWindow,
         std::env::temp_dir()
             .join("synthetic-query-observation-audit.json")
@@ -367,14 +375,80 @@ fn broader_active_scopes_block_narrower_observations_and_kind_ambiguity() {
 }
 
 #[test]
+fn repackaging_and_unrelated_source_captures_do_not_refresh_a_field_negative() {
+    let observation = observation();
+    let mut d = data();
+    d.fields[0]["coverage"]["observed"] = json!(false);
+    d.fields[0]["observation_window"] = json!("2026-01-01T00:00:00Z/2026-01-08T00:00:00Z");
+    let mut later_source = d.provenance[0].clone();
+    later_source["id"] = json!("prov:later-source");
+    later_source["retrieved_at"] = json!("2026-03-05T00:00:00Z");
+    later_source["observation_window"] = json!("2026-03-01T00:00:00Z/2026-03-04T00:00:00Z");
+    d.provenance.push(later_source);
+    d.sources[0]["provenance_ids"] = json!(["prov:later-source"]);
+    d.sources[0]["evidence"]["observation_window"] =
+        json!("2026-03-01T00:00:00Z/2026-03-04T00:00:00Z");
+    let active = pack(d, "2026-03-06T00:00:00Z");
+    let result = checked(
+        "#repo=synthetic | user=*",
+        None,
+        Some(&active),
+        &[observation],
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
+    assert!(
+        result.grounding.basis["synthetic:*:user"]
+            .starts_with("caller-attested query observation;")
+    );
+}
+
+#[test]
+fn undated_stale_markers_require_an_observation_window_after_the_snapshot() {
+    for marker in ["source", "field", "provenance"] {
+        let mut d = data();
+        match marker {
+            "source" => d.sources[0]["inventory_status"] = json!("stale"),
+            "field" => d.fields[0]["refresh_status"] = json!("not-reobserved"),
+            _ => d.provenance[0]["coverage_status"] = json!("stale"),
+        }
+        let active = pack(d, "2026-03-06T00:00:00Z");
+        for (observed, expected) in [
+            (observation(), Outcome::NeedsContext),
+            (
+                observation_in_window(
+                    "2026-04-01T00:00:00Z",
+                    "2026-04-02T00:00:00Z",
+                    "2026-04-03T00:00:00Z",
+                ),
+                Outcome::Ready,
+            ),
+        ] {
+            let result = checked("#repo=synthetic | user=*", None, Some(&active), &[observed]);
+            assert_eq!(result.outcome, expected, "{marker}: {:?}", result.grounding);
+        }
+    }
+}
+
+#[test]
+fn a_listed_unmeasured_namespace_does_not_contradict_a_saved_observation() {
+    let observation = observation();
+    let mut d = data();
+    d.fields[0]["evidence_kind"] = json!("documented");
+    d.fields[0]["coverage"]["observed"] = Value::Null;
+    let active = pack(d, "2026-03-06T00:00:00Z");
+    let result = checked(
+        "#repo=synthetic | user=*",
+        None,
+        Some(&active),
+        &[observation],
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
+}
+
+#[test]
 fn unordered_or_overlapping_measurements_cannot_be_revived() {
     let observation = observation();
     for (created_at, retrieved_at, window) in [
-        (
-            "2026-02-01T12:00:00Z",
-            "2026-01-09T00:00:00Z",
-            "2026-01-01T00:00:00Z/2026-01-08T00:00:00Z",
-        ),
         (
             "2026-01-10T00:00:00Z",
             "2026-01-09",
@@ -389,6 +463,11 @@ fn unordered_or_overlapping_measurements_cannot_be_revived() {
             "2026-01-10T00:00:00Z",
             "2026-01-09T00:00:00Z",
             "2026-01-01T00:00:00Z/2026-02-02T00:00:00Z",
+        ),
+        (
+            "2026-03-06T00:00:00Z",
+            "2026-02-03T00:00:00Z",
+            "2026-01-01T00:00:00Z/2026-01-08T00:00:00Z",
         ),
     ] {
         let mut d = data();

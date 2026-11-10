@@ -72,7 +72,7 @@
         <div class="code-body">
           <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Over the past 90 days, which of our London and New York workstations ran PowerShell with ‘-enc’ and connected to at least five IPv4 addresses? Show me the busiest processes, their hosts, and the IPs they reached.”</p>
           <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Use <code>endpoints-prod</code>, with <code>ComputerName</code> matching <code>LON-WKS-*</code> or <code>NYC-WKS-*</code>. Set a 90-day range when executing. Join <code>ProcessRollup2</code> and <code>NetworkConnectIP4</code> by <code>aid</code> and process ID. Require five distinct destinations; rank by destinations, then connections. Return up to 20 rows with connections per IP and up to 20 destination IPs.</p>
-          <p class="code-label output-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.3/examples/powershell-network.plan.json">View agent input</a></p>
+          <p class="code-label output-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.4/examples/powershell-network.plan.json">View agent input</a></p>
           <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
   --plan examples/powershell-network.plan.json</code></pre>
           <p class="code-label output-label">Generated CQL</p>
@@ -145,7 +145,7 @@
         <li>
           <h3>Check context, then write</h3>
           <code class="command">cqlmatic status</code>
-          <p>Basic <code>generate</code> and <code>check</code> work without a pack. Use <code>status --json --summary</code> to find relevant evidence, then inspect and select a pack when the task needs it.</p>
+          <p>Basic <code>generate</code> and <code>check</code> work without discovery. Both inventory modes reuse their matching saved map automatically for writing and result assessment. Use <code>status --json --summary</code> to inspect the target and evidence.</p>
         </li>
         </ol>
       </div>

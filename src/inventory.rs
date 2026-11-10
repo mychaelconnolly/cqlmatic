@@ -2098,11 +2098,12 @@ fn assess_source(
                     .as_ref()
                     .is_some_and(|c| c.observed == Some(true))
                 && !dates.is_empty();
-            entry.measured = !dates.is_empty()
-                && (entry.observed
-                    || field.coverage.as_ref().is_some_and(|c| {
-                        c.rate.is_some() && (!entry.not_reobserved || c.rate == Some(0.0))
-                    }));
+            entry.measured = environment::field_measurement(pack, &field).is_some()
+                || !dates.is_empty()
+                    && (entry.observed
+                        || field.coverage.as_ref().is_some_and(|c| {
+                            c.rate.is_some() && (!entry.not_reobserved || c.rate == Some(0.0))
+                        }));
             entry.declared |= field
                 .coverage
                 .as_ref()
