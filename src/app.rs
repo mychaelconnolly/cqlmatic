@@ -2,7 +2,7 @@
 use crate::{
     contracts::*,
     environment::{self, Observation, Pack, observation},
-    inventory::{QueryObservation, UnverifiedFieldLead},
+    inventory::{FieldObservation, QueryObservation, UnverifiedFieldLead},
     language::{self, ast::*},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -152,7 +152,7 @@ pub fn check_with_evidence(
     }
 }
 
-pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnostic> {
+fn inventory_requirements(query: &str) -> Result<Vec<Requirement>, Diagnostic> {
     let pipeline = language::parser::parse(query).map_err(|error| error.diagnostic)?;
     let report = language::validate::validate(&pipeline, query);
     if let Some(error) = report
@@ -162,20 +162,22 @@ pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnos
     {
         return Err(error);
     }
-    let mut grounding = Grounding::default();
+    Ok(requirements(
+        &pipeline,
+        None,
+        &Context::default(),
+        &[],
+        &mut Grounding::default(),
+    ))
+}
+
+pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnostic> {
     let mut leads = BTreeMap::new();
-    for r in requirements(&pipeline, None, &Context::default(), &[], &mut grounding) {
-        if r.derived
-            || r.conditional
-            || r.unavailable
+    for r in inventory_requirements(query)? {
+        if !r.is_direct_deployment_input()
             || r.uncertain_source
-            || r.origin != Origin::Deployment
             || r.target.is_some()
             || (r.scope.repo.is_none() && r.scope.type_.is_none())
-            || matches!(
-                r.field.as_str(),
-                "#repo" | "#type" | "@timestamp" | "@rawstring" | "@timestamp.nanos"
-            )
         {
             continue;
         }
@@ -199,6 +201,35 @@ pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnos
         }
     }
     Ok(leads.into_values().collect())
+}
+
+pub fn uncredited_observation_fields(
+    query: &str,
+    fields: &[FieldObservation],
+) -> Result<Vec<String>, Diagnostic> {
+    let positive: BTreeSet<_> = fields
+        .iter()
+        .filter(|field| field.positive_rows > 0)
+        .map(|field| field.field.as_str())
+        .collect();
+    let missing: BTreeSet<_> = inventory_requirements(query)?
+        .into_iter()
+        .filter(|r| {
+            r.is_direct_deployment_input()
+                && !r.array
+                && r.target.is_none()
+                && !positive.contains(r.field.as_str())
+        })
+        .map(|r| r.field)
+        .collect();
+    Ok(missing.into_iter().collect())
+}
+
+fn is_builtin_field(field: &str) -> bool {
+    matches!(
+        field,
+        "#repo" | "#type" | "@timestamp" | "@rawstring" | "@timestamp.nanos"
+    )
 }
 
 fn finish(
@@ -303,6 +334,15 @@ struct Requirement {
     relaxed_type: bool,
     relaxed_event: bool,
     unavailable: bool,
+}
+impl Requirement {
+    fn is_direct_deployment_input(&self) -> bool {
+        self.origin == Origin::Deployment
+            && !self.derived
+            && !self.conditional
+            && !self.unavailable
+            && !is_builtin_field(&self.field)
+    }
 }
 struct GroundingScan<'a> {
     requirements: Vec<Requirement>,
@@ -2231,10 +2271,7 @@ fn ground(
             );
             continue;
         }
-        if matches!(
-            r.field.as_str(),
-            "#repo" | "#type" | "@timestamp" | "@rawstring" | "@timestamp.nanos"
-        ) {
+        if is_builtin_field(&r.field) {
             record_basis(&mut g, key, "language-built-in".into());
             continue;
         }
@@ -2701,6 +2738,40 @@ pub fn recipe_catalog() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncredited_fields_use_positive_exact_names_without_the_quick_lead_cap() {
+        let fields = [
+            FieldObservation {
+                field: "#action".into(),
+                positive_rows: 1,
+            },
+            FieldObservation {
+                field: "user".into(),
+                positive_rows: 0,
+            },
+        ];
+        let query =
+            "#repo=sample action=* | user=* | sort(user) | select([#action, user, @timestamp])";
+        assert_eq!(
+            uncredited_observation_fields(query, &fields).unwrap(),
+            ["action", "user"]
+        );
+
+        let names = (0..1001)
+            .map(|i| format!("field_{i:04}"))
+            .collect::<Vec<_>>();
+        let wide_query = format!("#repo=sample | select([{}])", names.join(", "));
+        assert_eq!(
+            unverified_leads(&wide_query).unwrap_err().code,
+            "CQL_LEAD_BUDGET"
+        );
+        assert_eq!(
+            uncredited_observation_fields(&wide_query, &[]).unwrap(),
+            names
+        );
+    }
+
     #[test]
     fn exact_asterisk_is_not_lowered_to_a_glob() {
         let r = GenerateRequest {

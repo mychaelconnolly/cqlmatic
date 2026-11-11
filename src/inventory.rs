@@ -329,7 +329,7 @@ impl RawSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ScoutPlan {
@@ -1158,25 +1158,15 @@ impl InventoryState {
                 "Quick scouting requires an explicit host search budget of 1..600 seconds.",
             ));
         }
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|t| t.environment != environment)
-        {
-            return Err(fail("Start a new state for a different environment."));
-        }
+        self.validate_scout_environment(&environment)?;
         let plan = ScoutPlan {
-            environment: environment.clone(),
             arguments: SearchArguments {
-                repository: if self.discovery_mode == DiscoveryMode::Quick {
-                    environment.view.clone()
-                } else {
-                    "search-all".into()
-                },
+                repository: self.scout_repository(&environment).into(),
                 query_string: SCOUT_QUERY.into(),
                 start,
                 end,
             },
+            environment,
             query_sha256: sha256_hex(SCOUT_QUERY.as_bytes()),
             max_seconds,
         };
@@ -1194,15 +1184,26 @@ impl InventoryState {
             .scout_plan
             .as_ref()
             .ok_or_else(|| fail("Prepare scouting before importing its saved response."))?;
+        self.validate_scout_environment(&plan.environment)?;
+        validate_scout_plan(plan)?;
         if self.discovery_mode == DiscoveryMode::Quick && plan.max_seconds.is_none() {
             return Err(fail(
                 "Prepare Quick scouting with an explicit finite host budget before importing its response.",
+            ));
+        }
+        if plan.arguments.repository != self.scout_repository(&plan.environment) {
+            return Err(fail(
+                "Scout repository differs from the current discovery mode. Prepare scouting again.",
             ));
         }
         if arguments != plan.arguments {
             return Err(fail(
                 "Saved tool arguments differ from the exact prepared census query/window.",
             ));
+        }
+        let retrieval_time = environment::parse_time(retrieved_at)?;
+        if retrieval_time < environment::parse_time(&plan.arguments.end)? {
+            return Err(fail("Scout retrieval time cannot precede its window end."));
         }
         let result = mcp::normalize(raw)?;
         let mut observations = BTreeMap::<String, (Scope, u64)>::new();
@@ -1238,6 +1239,14 @@ impl InventoryState {
             snapshot: RawSnapshot::new(raw, retrieved_at)?,
             rows: result.rows.len(),
         };
+        if self.scouting.iter().any(|scout| {
+            scout.plan == evidence.plan
+                && scout.snapshot.sha256 == evidence.snapshot.sha256
+                && environment::parse_time(&scout.snapshot.retrieved_at)
+                    .is_ok_and(|time| time == retrieval_time)
+        }) {
+            return Ok(());
+        }
         for source in &mut self.sources {
             source.scouted_events = None;
         }
@@ -1260,6 +1269,26 @@ impl InventoryState {
         }
         self.scouting.push(evidence);
         Ok(())
+    }
+    fn validate_scout_environment(&self, environment: &EnvironmentId) -> Result<(), Diagnostic> {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| &target.environment != environment)
+            || self
+                .scouting
+                .iter()
+                .any(|scout| &scout.plan.environment != environment)
+        {
+            return Err(fail("Start a new state for a different environment."));
+        }
+        Ok(())
+    }
+    fn scout_repository<'a>(&self, environment: &'a EnvironmentId) -> &'a str {
+        match self.discovery_mode {
+            DiscoveryMode::Full => "search-all",
+            DiscoveryMode::Quick => &environment.view,
+        }
     }
     pub fn confirm(
         &mut self,

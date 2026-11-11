@@ -1,5 +1,5 @@
-name: v0.1.1 tester feedback
-description: Share setup, discovery, status, or query-writing feedback from the first public release.
+name: v0.1.5 tester feedback
+description: Share setup, discovery, status, or query-writing feedback.
 body:
   - type: markdown
     attributes:

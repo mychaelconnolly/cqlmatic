@@ -1,6 +1,6 @@
 {
   "name": "cqlmatic",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Deterministic local CQL construction and environment discovery CLI",
   "license": "Apache-2.0",
   "homepage": "https://cqlmatic.dev",

@@ -89,7 +89,7 @@ test('build rebases Markdown and raw HTML, binds GitHub links, and creates deter
   assert.equal((project.match(/data-theme-icon=/g) || []).length, 3);
   assert.ok(project.indexOf('<script src="/assets/theme.js">') < project.indexOf('<link rel="stylesheet"'));
   assert.doesNotMatch(project, /site\/public\/assets|Not an input/);
-  assert.deepEqual(JSON.parse(readFileSync(join(dist, 'BUILD.json'))), { source_commit: COMMIT, version: '0.1.4', documentation_pages: 29, hosts: HOSTS });
+  assert.deepEqual(JSON.parse(readFileSync(join(dist, 'BUILD.json'))), { source_commit: COMMIT, version: '0.1.5', documentation_pages: 29, hosts: HOSTS });
   assert.deepEqual(readFileSync(join(dist, 'docs/_headers')), readFileSync(join(root, 'site/public/_headers')));
   assert.ok(existsSync(join(dist, 'landing/_redirects')));
   assert.equal(existsSync(join(dist, 'docs/_redirects')), false);

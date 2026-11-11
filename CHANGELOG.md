@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.5
+
+- Inventory rejects pack rollback and discovery activation from a stale inventory predecessor. Discovery artifacts remain bound to their prepared run, destination and pack bytes; failed activation preserves earlier evidence.
+- Replaying an unchanged import preserves current-version inventory bytes, timestamps and reconciliation. Exact saved-query replay validates the protected originals and retained audit, and can restore a missing audit safely.
+- Saved-query imports reject a changed retrieval time for the same capture. `uncredited_fields` and `next_action` identify direct query input fields without positive returned values. Strict grounding still evaluates the inventory, packs and source requirements.
+- Scout preparation and import validate the bound environment, discovery mode and capture ordering. Replaying the same accepted scout preserves state; changing the target or mode requires a new matching preparation.
+- Parser imports validate retrieval timestamps before saving captures. Automatic inventory target diagnostics identify the actual Full or Quick mode.
+
 ## 0.1.4
 
 - Generation, checking and saved-result assessment automatically reuse a matching confirmed Full or Quick inventory's active pack and otherwise unspecified target. Explicit packs remain primary; matching inventory guards still apply to generation/checking. Assessment adds `--inventory-state` without deriving population rates from the query ledger or saving leads.
@@ -40,7 +48,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v014).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v015).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

@@ -193,6 +193,32 @@ fn finding(result: &Value, code: &str) -> bool {
         .any(|d| d["code"] == code)
 }
 
+fn assert_inventory_target_message(result: &Value, key: &str, mode: DiscoveryMode) {
+    let diagnostic = result[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["code"] == "CQL_QUICK_TARGET")
+        .unwrap_or_else(|| panic!("{result}"));
+    assert_eq!(diagnostic["severity"], "info", "{result}");
+    if key == "findings" {
+        assert_eq!(
+            diagnostic["message"],
+            format!(
+                "Confirmed {mode:?} inventory supplied the otherwise unspecified assessment target."
+            )
+        );
+    } else {
+        assert!(
+            diagnostic["message"]
+                .as_str()
+                .unwrap()
+                .starts_with(&format!("Confirmed {mode:?} inventory target supplied: ")),
+            "{result}"
+        );
+    }
+}
+
 #[test]
 fn both_modes_reuse_default_and_explicit_active_packs_for_generate_and_check() {
     for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
@@ -233,7 +259,7 @@ fn both_modes_reuse_default_and_explicit_active_packs_for_generate_and_check() {
                     assert_eq!(code, 0, "{result}");
                     assert_eq!(result["outcome"], "ready", "{result}");
                     assert_eq!(result["grounding"]["pack_id"], pack.content_digest);
-                    assert!(diagnostic(&result, "CQL_QUICK_TARGET", "info"), "{result}");
+                    assert_inventory_target_message(&result, "diagnostics", mode);
                 }
             }
             if mode == DiscoveryMode::Full {
@@ -671,10 +697,12 @@ fn assessment_reuses_pack_in_all_input_modes_without_writing_leads() {
         let (code, result) = dir.one(&args);
         assert_eq!(code, 1, "{result}");
         assert!(finding(&result, "RESULT_KEY_COVERAGE"), "{result}");
+        assert_inventory_target_message(&result, "findings", DiscoveryMode::Quick);
     }
     let (code, rows) = dir.run(&["assess", "--jsonl"], format!("{request}\n").as_bytes());
     assert_eq!(code, 1, "{rows:?}");
     assert!(finding(&rows[0], "RESULT_KEY_COVERAGE"));
+    assert_inventory_target_message(&rows[0], "findings", DiscoveryMode::Quick);
     assert_eq!(fs::read(path).unwrap(), before);
 }
 
@@ -713,5 +741,6 @@ fn assessment_does_not_turn_the_query_ledger_into_population_rates() {
     let (code, rows) = dir.run(&["assess", "--jsonl"], format!("{request}\n").as_bytes());
     assert_eq!(code, 0, "{rows:?}");
     assert!(!finding(&rows[0], "RESULT_KEY_COVERAGE"));
+    assert_inventory_target_message(&rows[0], "findings", DiscoveryMode::Full);
     assert_eq!(fs::read(path).unwrap(), before);
 }

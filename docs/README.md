@@ -4,7 +4,7 @@ CQLmatic maps a CrowdStrike NG-SIEM environment into a reusable local snapshot a
 
 Read these guides at [docs.cqlmatic.dev](https://docs.cqlmatic.dev/), visit the [project page](https://cqlmatic.dev/), or use the Markdown files offline with a release archive.
 
-This manual describes **CQLmatic 0.1.4**, JSON contracts **v1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Use `cqlmatic catalog --profile` for the running binary's knowledge revision and limits. These identifiers do not attest to a tenant, execution, completeness, or unrestricted-English accuracy.
+This manual describes **CQLmatic 0.1.5**, JSON contracts **v1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Use `cqlmatic catalog --profile` for the running binary's knowledge revision and limits. These identifiers do not attest to a tenant, execution, completeness, or unrestricted-English accuracy.
 
 ## Start as an operator
 

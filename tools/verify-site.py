@@ -18,6 +18,8 @@ from pathlib import Path
 
 REPOSITORY = "mychaelconnolly/cqlmatic"
 HOSTS = {"landing": "https://cqlmatic.dev", "docs": "https://docs.cqlmatic.dev"}
+# Retained approved artifacts with this contract must remain usable for rollback.
+SITE_VERSIONS = ("0.1.4", "0.1.5")
 MAX_ARCHIVE = 100 * 1024 * 1024
 MAX_EXPANDED = 200 * 1024 * 1024
 MAX_FILE = 25 * 1024 * 1024
@@ -92,7 +94,7 @@ def check_site(files, source_sha, manifest_sha256):
     build = json_object(files["BUILD.json"])
     require(isinstance(build, dict) and set(build) == {"source_commit", "version", "documentation_pages", "hosts"} and
             build.get("source_commit") == source_sha and
-            build.get("version") == "0.1.4" and type(build.get("documentation_pages")) is int and
+            build.get("version") in SITE_VERSIONS and type(build.get("documentation_pages")) is int and
             build["documentation_pages"] == 29 and build.get("hosts") == HOSTS,
             "The site build identity does not match.")
     return entries

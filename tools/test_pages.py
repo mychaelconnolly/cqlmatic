@@ -35,12 +35,12 @@ OLD_IDS = {"cqlmatic-docs": "11111111-1111-1111-1111-111111111111", "cqlmatic": 
 NEW_IDS = {"cqlmatic-docs": "33333333-3333-3333-3333-333333333333", "cqlmatic": "44444444-4444-4444-4444-444444444444"}
 
 
-def site_files(source=SOURCE):
+def site_files(source=SOURCE, version="0.1.5"):
     files = {"landing/index.html": b"<h1>CQLmatic</h1>", "docs/index.html": b"<h1>Documentation</h1>",
              "landing/404.html": b"<h1>Not found</h1>", "docs/404.html": b"<h1>Not found</h1>",
              "landing/_headers": b"/*\n  X-Content-Type-Options: nosniff\n",
              "docs/setup/index.html": b"<h1>Setup</h1>",
-             "BUILD.json": json.dumps({"source_commit": source, "version": "0.1.4", "documentation_pages": 29,
+             "BUILD.json": json.dumps({"source_commit": source, "version": version, "documentation_pages": 29,
                                        "hosts": verify.HOSTS}, sort_keys=True).encode()}
     files["SITE-SHA256SUMS"] = "".join(hashlib.sha256(value).hexdigest() + "  " + name + "\n"
                                        for name, value in sorted(files.items())).encode()
@@ -91,6 +91,18 @@ class SiteArtifactTests(unittest.TestCase):
             out = Path(work) / "checked"
             verify.extract_archive(raw, out, SOURCE, digest)
             self.assertEqual(verify.check_directory(out / "site/dist", SOURCE, digest), files)
+
+    def test_previous_release_rollback_preserves_identity_checks(self):
+        files, digest = site_files(OLD_SOURCE, version="0.1.4")
+        raw = archive(files)
+        self.assertEqual(verify.read_archive(raw, OLD_SOURCE, digest), files)
+        with tempfile.TemporaryDirectory() as work:
+            out = Path(work) / "checked"
+            verify.extract_archive(raw, out, OLD_SOURCE, digest)
+            self.assertEqual(verify.check_directory(out / "site/dist", OLD_SOURCE, digest), files)
+        for source, approved in ((SOURCE, digest), (OLD_SOURCE, "0" * 64)):
+            with self.subTest(source=source, approved=approved), self.assertRaises(verify.InvalidSite):
+                verify.read_archive(raw, source, approved)
 
     def test_tamper_missing_extra_and_wrong_identity(self):
         files, digest = site_files()

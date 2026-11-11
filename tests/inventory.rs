@@ -88,10 +88,75 @@ fn scouting_retains_exact_saved_result_and_rejects_different_query() {
     assert!(state.sources[0].review.is_none());
     let mut args = state.scout_plan.as_ref().unwrap().arguments.clone();
     args.query_string.push(' ');
-    assert!(state.import_scout(args, br#"{"result":[]}"#, NOW).is_err());
+    assert!(
+        state
+            .import_scout(args.clone(), br#"{"result":[]}"#, NOW)
+            .is_err()
+    );
     let mut corrupt = state.scouting[0].snapshot.clone();
     corrupt.raw_hex.push_str("00");
     assert!(corrupt.bytes().is_err());
+
+    let plan = state.scout_plan.as_mut().unwrap();
+    plan.query_sha256 = sha256_hex(args.query_string.as_bytes());
+    plan.arguments = args.clone();
+    assert!(state.import_scout(args, br#"{"result":[]}"#, NOW).is_err());
+}
+
+#[test]
+fn scout_replay_preserves_current_counts_and_distinct_captures() {
+    let mut state = prepared();
+    let older = state.scouting[0].snapshot.bytes().unwrap();
+    let args = state.scout_plan.as_ref().unwrap().arguments.clone();
+    let newer = br##"{"result":[{"#repo":"synthetic","#type":"synthetic-type","events":20}]}"##;
+    state.import_scout(args.clone(), newer, NOW).unwrap();
+    let digest = state.evidence_digest().unwrap();
+
+    state
+        .import_scout(args.clone(), &older, "2026-01-01T19:00:00-05:00")
+        .unwrap();
+    assert_eq!(state.scouting.len(), 2);
+    assert_eq!(state.sources[0].scouted_events, Some(20));
+    assert_eq!(state.evidence_digest().unwrap(), digest);
+
+    state
+        .import_scout(args, &older, "2026-01-02T00:00:01Z")
+        .unwrap();
+    assert_eq!(state.scouting.len(), 3);
+    assert_eq!(state.sources[0].scouted_events, Some(10));
+}
+
+#[test]
+fn captured_scout_binds_the_environment_before_confirmation() {
+    let mut state = InventoryState::new(NOW).unwrap();
+    let first = state
+        .prepare_scout(environment(), START.into(), NOW.into())
+        .unwrap();
+    let mut other = environment();
+    other.cloud = Cloud::Us2;
+    let second = state
+        .prepare_scout(other.clone(), START.into(), NOW.into())
+        .unwrap();
+    state
+        .import_scout(second.arguments, br#"{"result":[]}"#, NOW)
+        .unwrap();
+    assert!(state.target.is_none());
+    assert!(
+        state
+            .prepare_scout(environment(), START.into(), NOW.into())
+            .is_err()
+    );
+
+    // A previous release could save a pending plan for another environment.
+    state.scout_plan = Some(first.clone());
+    state.validate().unwrap();
+    assert!(
+        state
+            .import_scout(first.arguments, br#"{"result":[]}"#, NOW)
+            .is_err()
+    );
+    assert_eq!(state.scouting.len(), 1);
+    assert_eq!(state.scouting[0].plan.environment, other);
 }
 
 #[test]
@@ -101,6 +166,11 @@ fn failed_or_capped_scouting_cannot_become_observation() {
         .prepare_scout(environment(), START.into(), NOW.into())
         .unwrap();
     let args = state.scout_plan.as_ref().unwrap().arguments.clone();
+    assert!(
+        state
+            .import_scout(args.clone(), br#"{"result":[]}"#, START)
+            .is_err()
+    );
     assert!(
         state
             .import_scout(args.clone(), br#"{"result":[],"error":"timeout"}"#, NOW)
@@ -876,6 +946,14 @@ fn quick_scout_requires_explicit_target_and_finite_host_budget_without_breaking_
     }
     let mut selected = environment();
     selected.view = "selected-view".into();
+    state.discovery_mode = DiscoveryMode::Full;
+    let wide = state
+        .prepare_scout_with_budget(selected.clone(), START.into(), NOW.into(), Some(120))
+        .unwrap();
+    state.discovery_mode = DiscoveryMode::Quick;
+    let raw = br##"{"result":[{"#type":"synthetic","events":1}]}"##;
+    assert!(state.import_scout(wide.arguments, raw, NOW).is_err());
+
     let plan = state
         .prepare_scout_with_budget(selected.clone(), START.into(), NOW.into(), Some(120))
         .unwrap();
@@ -897,4 +975,16 @@ fn quick_scout_requires_explicit_target_and_finite_host_budget_without_breaking_
             )
             .is_err()
     );
+
+    state.discovery_mode = DiscoveryMode::Full;
+    assert!(
+        state
+            .import_scout(plan.arguments.clone(), raw, NOW)
+            .is_err()
+    );
+    assert!(state.scouting.is_empty());
+    state.discovery_mode = DiscoveryMode::Quick;
+    state.import_scout(plan.arguments, raw, NOW).unwrap();
+    state.discovery_mode = DiscoveryMode::Full;
+    state.validate().unwrap();
 }

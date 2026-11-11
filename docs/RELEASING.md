@@ -16,13 +16,13 @@ Inspect the complete source, comments, reference data, workflows, metadata and h
 
 ## Freeze source and artifacts
 
-1. Align Cargo/npm metadata, README, changelog and notes at `0.1.4`; keep schema and capability versions independent. Inspect and stage explicit reviewed paths. Generated binaries and website outputs stay outside the source allowlist.
+1. Align Cargo/npm metadata, README, changelog and notes at `0.1.5`; keep schema and capability versions independent. Inspect and stage explicit reviewed paths. Generated binaries and website outputs stay outside the source allowlist.
 2. Run the pinned formatting, Clippy, tests and locked builds in [development](DEVELOPMENT.md), all nine schemas, runnable examples and synthetic setup/inventory/MCP workflows without credentials. Reuse approved binaries only when all runtime-input digests remain identical; otherwise rebuild and review affected binaries.
 3. Generate `SOURCE-SHA256SUMS` over every intended index path except itself. Require exact membership, regular files and index/worktree equality. Stage the checksum file, establish the final source commit and verify its tree against a separate full SHA-256 manifest outside the source tree.
 4. Run Windows CI and generate both websites for that exact commit. Record successful run/artifact IDs and native digests outside tracked source. Source changes require new checksums, a new reviewed commit and affected checks/artifacts again. Do not put generated artifact hashes or the final commit ID into tracked source checksums.
 5. Finish all archives, release notes, outer checksums and both website outputs before freezing review. Verify extracted exact membership and every file digest; reject missing, extra, stale, duplicate, linked or unsafe members and private metadata.
 6. Obtain independent Sol max and Astra max reviews of identical frozen source, website and outbound manifests. Keep bytes unchanged during first passes. Resolve blockers, rerun affected checks and obtain targeted re-review. An unavailable required check/reviewer leaves the gate pending.
-7. Create the annotated `v0.1.4` tag after these gates pass. Verify its annotation and peeled target against the reviewed commit. Record full commit/tag IDs and manifest hashes for approval. Never move the existing `v0.1.0` tag.
+7. Create the annotated `v0.1.5` tag after these gates pass. Verify its annotation and peeled target against the reviewed commit. Record full commit/tag IDs and manifest hashes for approval. Never move the existing `v0.1.0` tag.
 
 ## Native packages
 
@@ -41,17 +41,17 @@ python3 tools/package-release.py build --manifest /path/to/reviewed-source.sha25
 
 Release assets:
 
-- `cqlmatic-v0.1.4-source.zip`
-- `cqlmatic-v0.1.4-linux-x86_64.tar.gz`
-- `cqlmatic-v0.1.4-windows-x86_64.zip`
-- `cqlmatic-0.1.4.tgz`
+- `cqlmatic-v0.1.5-source.zip`
+- `cqlmatic-v0.1.5-linux-x86_64.tar.gz`
+- `cqlmatic-v0.1.5-windows-x86_64.zip`
+- `cqlmatic-0.1.5.tgz`
 - `SHA256SUMS`
 
-Source/native archives use a `cqlmatic-v0.1.4/` root containing reviewed source and licenses. Linux adds `cqlmatic-linux-x86_64`; Windows adds `cqlmatic.exe`. Compare every extracted member with its reviewed source/native digest, rather than checking only the archive checksum.
+Source/native archives use a `cqlmatic-v0.1.5/` root containing reviewed source and licenses. Linux adds `cqlmatic-linux-x86_64`; Windows adds `cqlmatic.exe`. Compare every extracted member with its reviewed source/native digest, rather than checking only the archive checksum.
 
 ## npm package
 
-The launcher bundles `darwin-arm64` and `linux-x64` executables. It uses supported Node.js built-ins without runtime dependencies, install scripts or additional binary downloads. Use a [supported, patched Node.js release](../README.md#try-v014). Unsupported combinations fail rather than selecting/downloading another binary; Windows uses its ZIP.
+The launcher bundles `darwin-arm64` and `linux-x64` executables. It uses supported Node.js built-ins without runtime dependencies, install scripts or additional binary downloads. Use a [supported, patched Node.js release](../README.md#try-v015). Unsupported combinations fail rather than selecting/downloading another binary; Windows uses its ZIP.
 
 Record approved native digests in `npm/native-manifest.json` before freezing source. From the frozen staged checkout:
 
@@ -75,13 +75,13 @@ Push only explicit reviewed objects to explicit destination refs after checking 
 
 ```sh
 release_commit=$(git rev-parse refs/heads/main)
-release_tag=$(git rev-parse refs/tags/v0.1.4)
-git rev-parse 'refs/tags/v0.1.4^{commit}'
+release_tag=$(git rev-parse refs/tags/v0.1.5)
+git rev-parse 'refs/tags/v0.1.5^{commit}'
 git status --porcelain
 git remote -v
 git ls-remote origin
-git push --dry-run origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.4"
-git push --atomic origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.4"
+git push --dry-run origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.5"
+git push --atomic origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.5"
 ```
 
 The peeled tag must equal the reviewed commit; the worktree must be clean and remote refs must match the inspected state. Never wildcard-push, force-push or move an existing release tag. Create the release with `--verify-tag`, reviewed notes through `--notes-file`, and explicitly selected assets/checksums. Verify public downloads, refs, registry integrity and CI. Correct a public executable with a new patch release rather than replacing immutable v0.1.3 assets.

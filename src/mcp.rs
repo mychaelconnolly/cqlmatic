@@ -405,6 +405,14 @@ pub struct State {
     activation: Option<ActivationIntent>,
 }
 
+#[derive(Debug)]
+pub struct VerifiedCompletion {
+    pub pack_path: PathBuf,
+    pub receipt_path: PathBuf,
+    pub pack_sha256: String,
+    pub predecessor_pack_sha256: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StepOutput {
     pub mode: &'static str,
@@ -414,6 +422,10 @@ pub struct StepOutput {
     pub probes: Vec<Value>,
     pub active_pack_updated: bool,
     pub diagnostics: Vec<Diagnostic>,
+    #[serde(skip)]
+    pub completion: Option<VerifiedCompletion>,
+    #[serde(skip)]
+    pub terminal_failure: bool,
 }
 impl StepOutput {
     pub fn exit_code(&self) -> i32 {
@@ -864,6 +876,19 @@ fn progress(
         probes: wire_probes(state, probes),
         active_pack_updated,
         diagnostics,
+        completion: (status == "complete").then(|| {
+            let intent = state
+                .activation
+                .as_ref()
+                .expect("completed state has a verified activation intent");
+            VerifiedCompletion {
+                pack_path: state.pack.clone(),
+                receipt_path: state.receipt.clone(),
+                pack_sha256: intent.pack_sha256.clone(),
+                predecessor_pack_sha256: intent.predecessor_pack_sha256.clone(),
+            }
+        }),
+        terminal_failure: status == "failed" && state.status == "failed",
     }
 }
 fn elapsed(state: &State, now: &str) -> Result<Duration, Diagnostic> {
@@ -1224,6 +1249,7 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
         return recover_activation(writer, state);
     }
     if state.status == "failed" {
+        writer.confirm_parent_durable()?;
         let diagnostic = state
             .failure
             .clone()
@@ -1457,6 +1483,21 @@ mod recovery_tests {
         let output = step(&run.state, &[]).unwrap();
         assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
         assert!(output.active_pack_updated);
+        assert!(!output.terminal_failure);
+        let wire = serde_json::to_value(&output).unwrap();
+        assert!(wire.get("completion").is_none());
+        assert!(wire.get("terminal_failure").is_none());
+        let completion = output.completion.unwrap();
+        assert_eq!(completion.pack_path, path_identity(&run.pack).unwrap());
+        assert_eq!(
+            completion.receipt_path,
+            path_identity(&run.receipt).unwrap()
+        );
+        assert_eq!(completion.pack_sha256, intent.pack_sha256);
+        assert_eq!(
+            completion.predecessor_pack_sha256,
+            intent.predecessor_pack_sha256
+        );
         assert_eq!(fs::read(&run.pack).unwrap(), intent.pack_bytes.as_bytes());
         assert_eq!(
             fs::read(&run.receipt).unwrap(),
@@ -1573,6 +1614,27 @@ mod recovery_tests {
     }
 
     #[test]
+    fn failed_relay_readback_reconfirms_directory_durability() {
+        let run = ready(false);
+        let mut state = read_state(&run.state).unwrap();
+        let writer = storage::Writer::acquire(&run.state).unwrap();
+        let failure = Diagnostic::error("DISCOVERY_EVIDENCE", "Synthetic terminal failure.");
+        storage::inject_snapshot_fault(&run.state, "directory-sync");
+        let error = fail_state(&writer, &mut state, failure.clone()).unwrap_err();
+        assert_eq!(error.code, "PACK_DURABILITY");
+        drop(writer);
+        let visible = fs::read(&run.state).unwrap();
+        assert_eq!(read_state(&run.state).unwrap().status, "failed");
+
+        storage::inject_snapshot_fault(&run.state, "directory-sync");
+        assert_eq!(step(&run.state, &[]).unwrap_err().code, "PACK_DURABILITY");
+        let recovered = step(&run.state, &[]).unwrap();
+        assert!(recovered.terminal_failure);
+        assert!(same_diagnostic(&recovered.diagnostics[0], &failure));
+        assert_eq!(fs::read(&run.state).unwrap(), visible);
+    }
+
+    #[test]
     fn recovery_refuses_unrelated_pack_and_receipt_replacements() {
         for target in ["pack", "receipt"] {
             let run = ready(true);
@@ -1588,6 +1650,8 @@ mod recovery_tests {
             let before_receipt = optional_bytes(&run.receipt).unwrap();
             let output = step(&run.state, &[]).unwrap();
             assert_eq!(output.status, "failed");
+            assert!(!output.terminal_failure);
+            assert!(output.completion.is_none());
             assert_eq!(output.diagnostics[0].code, "MCP_ACTIVATION_CONFLICT");
             assert_eq!(fs::read(&run.pack).unwrap(), before_pack);
             assert_eq!(optional_bytes(&run.receipt).unwrap(), before_receipt);

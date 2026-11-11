@@ -485,6 +485,15 @@ struct SavedInventory {
     active_pack: Option<Pack>,
 }
 
+impl SavedInventory {
+    fn mode_name(&self) -> &'static str {
+        match self.state.discovery_mode {
+            DiscoveryMode::Full => "Full",
+            DiscoveryMode::Quick => "Quick",
+        }
+    }
+}
+
 fn select_inventory(
     selected_path: Option<&Path>,
     context: &mut Context,
@@ -701,7 +710,8 @@ fn inventory_result(
         result.diagnostics.push(inventory_info(
             "CQL_QUICK_TARGET",
             format!(
-                "Confirmed inventory target supplied: {}.",
+                "Confirmed {} inventory target supplied: {}.",
+                quick.mode_name(),
                 serde_json::to_string(target).expect("environment identity serializes")
             ),
         ));
@@ -1082,10 +1092,13 @@ fn analyze_assess(
         };
     let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
     let mut result = assess::assess(request, primary);
-    if target_applied {
+    if target_applied && let Some(quick) = &quick {
         result.findings.push(inventory_info(
             "CQL_QUICK_TARGET",
-            "Confirmed inventory supplied the otherwise unspecified assessment target.",
+            format!(
+                "Confirmed {} inventory supplied the otherwise unspecified assessment target.",
+                quick.mode_name()
+            ),
         ));
     }
     if let Some(notice) = notice {

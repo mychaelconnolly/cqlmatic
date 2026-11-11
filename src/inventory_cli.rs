@@ -7,7 +7,7 @@ use cqlmatic::{
     inventory::{self, *},
     mcp, network, storage,
 };
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -110,13 +110,19 @@ fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
     let path = explicit.map_or_else(default_state_path, Ok)?;
     std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory state path."))
 }
-fn load(path: &Path) -> Result<InventoryState, Diagnostic> {
+fn load_existing(path: &Path) -> Result<Option<InventoryState>, Diagnostic> {
     if !crate::setup_cli::private_input_exists(path)? {
-        return InventoryState::new(&discovery::timestamp());
+        return Ok(None);
     }
     let state: InventoryState = read_json(path)?;
     state.validate()?;
-    Ok(state)
+    Ok(Some(state))
+}
+fn load(path: &Path) -> Result<InventoryState, Diagnostic> {
+    match load_existing(path)? {
+        Some(state) => Ok(state),
+        None => InventoryState::new(&discovery::timestamp()),
+    }
 }
 fn packs(state: &InventoryState) -> Result<Vec<Pack>, Diagnostic> {
     state
@@ -178,6 +184,80 @@ fn cumulative_pack(state: &InventoryState) -> Result<Option<Pack>, Diagnostic> {
     }
     Ok(cumulative)
 }
+
+fn cumulative_pack_bytes(pack: &Pack) -> Result<Vec<u8>, Diagnostic> {
+    serde_json::to_vec_pretty(pack)
+        .map_err(|_| fail("Cannot serialize the cumulative environment pack."))
+}
+
+fn promote_discovery(
+    state: &mut InventoryState,
+    completion: &mcp::VerifiedCompletion,
+    now: &str,
+) -> Result<(), Diagnostic> {
+    let run = state
+        .discovery_runs
+        .last()
+        .expect("Only a prepared discovery run can complete");
+    for (recorded, sealed) in [
+        (&run.pack_path, &completion.pack_path),
+        (&run.receipt_path, &completion.receipt_path),
+    ] {
+        let path = Path::new(recorded);
+        if !crate::setup_cli::private_input_exists(path)? || canonical(path)? != canonical(sealed)?
+        {
+            return Err(fail(
+                "Recorded discovery artifact paths differ from the verified relay.",
+            ));
+        }
+    }
+    let pack = {
+        let bytes = storage::read_bytes(
+            Path::new(&run.pack_path),
+            cqlmatic::environment::MAX_PACK_BYTES,
+        )?;
+        if cqlmatic::sha256_hex(&bytes) != completion.pack_sha256 {
+            return Err(fail("Discovery pack bytes differ from the verified relay."));
+        }
+        storage::decode_pack(&bytes)?
+    };
+    let mut registered = state.packs.iter().filter(|p| p.path == run.pack_path);
+    if let Some(reference) = registered.next() {
+        if reference.content_digest != pack.content_digest
+            || reference.discovery_run.as_deref() != Some(run.state_path.as_str())
+            || registered.next().is_some()
+        {
+            return Err(fail(
+                "Retained discovery pack reference differs from the verified relay.",
+            ));
+        }
+        return Ok(());
+    }
+    let predecessor = cumulative_pack(state)?
+        .as_ref()
+        .map(cumulative_pack_bytes)
+        .transpose()?
+        .map(|mut bytes| {
+            // create_new_bytes adds this newline when staging the predecessor.
+            bytes.push(b'\n');
+            cqlmatic::sha256_hex(&bytes)
+        });
+    if predecessor != completion.predecessor_pack_sha256 {
+        return Err(fail(
+            "Discovery completed against an earlier inventory. Prepare discovery again from the current inventory. The completed run's pack and receipt are retained.",
+        ));
+    }
+    let reference = PackReference {
+        path: run.pack_path.clone(),
+        content_digest: pack.content_digest,
+        imported_at: now.into(),
+        discovery_run: Some(run.state_path.clone()),
+    };
+    state.active_pack = Some(reference.clone());
+    state.packs.push(reference);
+    Ok(())
+}
+
 fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
     let mut out = io::stdout().lock();
     writeln!(
@@ -324,19 +404,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     if request.schema_version != 1 {
         return Err(fail("Unsupported inventory request version."));
     }
-    protect_state(&path)?;
-    let writer = storage::Writer::acquire(&path)?;
-    protect_state(&path)?;
-    let mut state = load(&path)?;
-    let now = discovery::timestamp();
-    state.schema_version = 2;
-    let extra = apply(&path, &mut state, request.action, &now)?;
-    state.updated_at = now;
-    state.validate()?;
-    let report = inventory::assess(&state, &packs(&state)?)?;
-    let bytes =
-        serde_json::to_vec_pretty(&state).map_err(|_| fail("Cannot serialize inventory state."))?;
-    writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
+    let (report, extra) = apply_and_store(&path, request.action)?;
     if args.json {
         if args.summary {
             output(
@@ -352,6 +420,43 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         }
     }
     Ok(0)
+}
+
+fn state_fingerprint(state: &InventoryState) -> Result<String, Diagnostic> {
+    serde_json::to_vec(state)
+        .map(|bytes| cqlmatic::sha256_hex(&bytes))
+        .map_err(|_| fail("Cannot serialize inventory state."))
+}
+
+fn apply_and_store(
+    path: &Path,
+    action: InventoryAction,
+) -> Result<(InventoryStatus, Value), Diagnostic> {
+    protect_state(path)?;
+    let writer = storage::Writer::acquire(path)?;
+    protect_state(path)?;
+    let stored = load_existing(path)?;
+    let before = stored.as_ref().map(state_fingerprint).transpose()?;
+    let now = discovery::timestamp();
+    let mut state = match stored {
+        Some(state) => state,
+        None => InventoryState::new(&now)?,
+    };
+    state.schema_version = 2;
+    let extra = apply(path, &mut state, action, &now)?;
+    state.validate()?;
+    let report = inventory::assess(&state, &packs(&state)?)?;
+    if let Some(before) = before
+        && before == state_fingerprint(&state)?
+    {
+        writer.confirm_parent_durable()?;
+    } else {
+        state.updated_at = now;
+        let bytes = serde_json::to_vec_pretty(&state)
+            .map_err(|_| fail("Cannot serialize inventory state."))?;
+        writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
+    }
+    Ok((report, extra))
 }
 
 fn action_summary(action: &Value) -> Value {
@@ -377,7 +482,9 @@ fn action_summary(action: &Value) -> Value {
     compact
 }
 
-fn observation_input(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+const OBSERVATION_FILE_BYTES: u64 = mcp::MAX_RESULT_BYTES as u64;
+
+fn observation_input(path: &Path, limit: u64) -> Result<Vec<u8>, Diagnostic> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -406,12 +513,19 @@ fn observation_input(path: &Path) -> Result<Vec<u8>, Diagnostic> {
     let opened = file
         .metadata()
         .map_err(|_| fail("Cannot inspect opened observation input."))?;
-    if !same_file(&before, &opened) || opened.len() > mcp::MAX_RESULT_BYTES as u64 {
-        return Err(fail("Observation input changed or exceeds 8 MiB."));
+    if !same_file(&before, &opened) {
+        return Err(fail("Observation input changed before it was read."));
+    }
+    if opened.len() > limit {
+        return Err(fail(if limit < OBSERVATION_FILE_BYTES {
+            "Retained observation audits exceed the total verification byte budget."
+        } else {
+            "Observation input exceeds 8 MiB."
+        }));
     }
     let mut bytes = Vec::new();
     (&mut file)
-        .take(mcp::MAX_RESULT_BYTES as u64 + 1)
+        .take(opened.len())
         .read_to_end(&mut bytes)
         .map_err(|_| fail("Cannot read observation input."))?;
     let after = file
@@ -428,6 +542,98 @@ fn observation_input(path: &Path) -> Result<Vec<u8>, Diagnostic> {
         return Err(fail("Observation input changed while it was being read."));
     }
     Ok(bytes)
+}
+
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ObservationAudit {
+    schema_version: u32,
+    query_file: String,
+    result_file: String,
+    observation: QueryObservation,
+}
+
+fn observation_audit_path(directory: &Path, key: &Value) -> Result<PathBuf, Diagnostic> {
+    let key =
+        serde_json::to_vec(key).map_err(|_| fail("Cannot identify query observation audit."))?;
+    Ok(directory.join(format!("{}.json", cqlmatic::sha256_hex(&key))))
+}
+
+fn read_observation_audit(
+    path: &Path,
+    remaining: &mut u64,
+) -> Result<ObservationAudit, Diagnostic> {
+    let bytes = observation_input(path, (*remaining).min(OBSERVATION_FILE_BYTES))?;
+    *remaining -= bytes.len() as u64;
+    serde_json::from_slice(&bytes).map_err(|_| fail("Saved query observation audit is invalid."))
+}
+
+fn observation_replay<'a>(
+    observations: &'a [QueryObservation],
+    directory: &Path,
+    mut key: Value,
+    audit: &ObservationAudit,
+    remaining: &mut u64,
+) -> Result<Option<&'a QueryObservation>, Diagnostic> {
+    use cqlmatic::environment::parse_time;
+
+    let imported = &audit.observation;
+    if observations.iter().any(|saved| saved.id == imported.id) {
+        // The exact replay path also restores a missing audit.
+        return Ok(None);
+    }
+    let (start, end, retrieved_at) = (
+        parse_time(&imported.start)?,
+        parse_time(&imported.end)?,
+        parse_time(&imported.retrieved_at)?,
+    );
+    let mut conflicting_time = false;
+    for saved in observations.iter().filter(|saved| {
+        saved.environment == imported.environment
+            && saved.source_id == imported.source_id
+            && saved.query_sha256 == imported.query_sha256
+            && saved.result_sha256 == imported.result_sha256
+            && saved.caller_assertion == imported.caller_assertion
+    }) {
+        if parse_time(&saved.start)? != start || parse_time(&saved.end)? != end {
+            continue;
+        }
+        key["start"] = json!(saved.start);
+        key["end"] = json!(saved.end);
+        key["retrieved_at"] = json!(saved.retrieved_at);
+        let path = observation_audit_path(directory, &key)?;
+        if absolute_path(&path)? != saved.audit_path {
+            return Err(fail(
+                "Retained query observation audit path differs from its attestation.",
+            ));
+        }
+        if !path
+            .try_exists()
+            .map_err(|_| fail("Cannot inspect retained query observation audit."))?
+        {
+            return Err(fail(
+                "Retained query observation audit is missing. Replay the exact original import to restore it.",
+            ));
+        }
+        let previous = read_observation_audit(&path, remaining)?;
+        if previous.schema_version != 1 || previous.observation != *saved {
+            return Err(fail(
+                "Retained query observation audit differs from the saved observation.",
+            ));
+        }
+        if previous.query_file == audit.query_file && previous.result_file == audit.result_file {
+            if parse_time(&saved.retrieved_at)? == retrieved_at {
+                return Ok(Some(saved));
+            }
+            conflicting_time = true;
+        }
+    }
+    if conflicting_time {
+        return Err(fail(
+            "The same saved query capture already has a different retrieval time. Retry with its recorded retrieval time.",
+        ));
+    }
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -447,8 +653,8 @@ fn import_query_observations(
     let result_file = Path::new(result_file);
     distinct_from_state(path, query_file)?;
     distinct_from_state(path, result_file)?;
-    let query = observation_input(query_file)?;
-    let result = observation_input(result_file)?;
+    let query = observation_input(query_file, OBSERVATION_FILE_BYTES)?;
+    let result = observation_input(result_file, OBSERVATION_FILE_BYTES)?;
     if state
         .target
         .as_ref()
@@ -468,16 +674,16 @@ fn import_query_observations(
             "Query observations require an exact confirmed expected source.",
         ));
     }
-    let key = cqlmatic::sha256_hex(&serde_json::to_vec(&json!({
+    let key = json!({
         "query_sha256":cqlmatic::sha256_hex(&query),"result_sha256":cqlmatic::sha256_hex(&result),
         "environment":environment,"source":source,"start":start,"end":end,"retrieved_at":retrieved_at,
         "caller_assertion":caller_assertion
-    })).map_err(|_| fail("Cannot identify query observation audit."))?);
+    });
     let parent = path
         .parent()
         .ok_or_else(|| fail("Inventory state requires a parent directory."))?;
     let directory = parent.join("query-observations");
-    let audit_path = directory.join(format!("{key}.json"));
+    let audit_path = observation_audit_path(&directory, &key)?;
     let observation = QueryObservation::from_result(
         &query,
         &result,
@@ -489,33 +695,57 @@ fn import_query_observations(
         caller_assertion,
         absolute_path(&audit_path)?,
     )?;
-    let audit = json!({"schema_version":1,"query_file":canonical(query_file)?,"result_file":canonical(result_file)?,"observation":observation});
-    state.record_query_observation(observation.clone())?;
-    crate::setup_cli::protect_directory(&directory)?;
-    if audit_path.exists() {
-        let existing: Value = serde_json::from_slice(&observation_input(&audit_path)?)
-            .map_err(|_| fail("Saved query observation audit is invalid."))?;
-        if existing != audit {
-            return Err(fail(
-                "Saved query observation audit differs from this exact import.",
-            ));
-        }
+    let query_text = std::str::from_utf8(&query).expect("Observation query was validated as UTF-8");
+    let uncredited_fields =
+        cqlmatic::app::uncredited_observation_fields(query_text, &observation.fields)?;
+    let audit = ObservationAudit {
+        schema_version: 1,
+        query_file: canonical(query_file)?.to_string_lossy().into_owned(),
+        result_file: canonical(result_file)?.to_string_lossy().into_owned(),
+        observation,
+    };
+    let mut remaining = MAX_STATE_BYTES;
+    let observation = if let Some(saved) = observation_replay(
+        &state.query_observations,
+        &directory,
+        key,
+        &audit,
+        &mut remaining,
+    )? {
+        saved.clone()
     } else {
-        let bytes = serde_json::to_vec_pretty(&audit)
-            .map_err(|_| fail("Cannot serialize query observation audit."))?;
-        storage::Writer::acquire(&audit_path)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
-    }
-    Ok(
-        json!({"query_observation_id":observation.id,"audit_path":observation.audit_path,
+        state.record_query_observation(audit.observation.clone())?;
+        crate::setup_cli::protect_directory(&directory)?;
+        if audit_path.exists() {
+            if read_observation_audit(&audit_path, &mut remaining)? != audit {
+                return Err(fail(
+                    "Saved query observation audit differs from this exact import.",
+                ));
+            }
+        } else {
+            let bytes = serde_json::to_value(&audit)
+                .and_then(|audit| serde_json::to_vec_pretty(&audit))
+                .map_err(|_| fail("Cannot serialize query observation audit."))?;
+            storage::Writer::acquire(&audit_path)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
+        }
+        audit.observation
+    };
+    let mut action = json!({
+        "query_observation_id":observation.id,"audit_path":observation.audit_path,
         "query_sha256":observation.query_sha256,"result_sha256":observation.result_sha256,
-        "field_count":observation.fields.len(),"pack_updated":false,"executes_searches":false}),
-    )
+        "field_count":observation.fields.len(),"pack_updated":false,"executes_searches":false,
+        "uncredited_fields":uncredited_fields,
+    });
+    if !uncredited_fields.is_empty() {
+        action["next_action"] = json!(
+            "Save a complete result returning these fields unchanged with nonempty values. Include fields omitted by select in its projection."
+        );
+    }
+    Ok(action)
 }
 
-fn canonical(path: &Path) -> Result<String, Diagnostic> {
-    std::fs::canonicalize(path)
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|_| fail("Cannot resolve evidence path."))
+fn canonical(path: &Path) -> Result<PathBuf, Diagnostic> {
+    std::fs::canonicalize(path).map_err(|_| fail("Cannot resolve evidence path."))
 }
 fn distinct_from_state(state: &Path, input: &Path) -> Result<(), Diagnostic> {
     if state.exists() && canonical(state)? == canonical(input)? {
@@ -614,6 +844,7 @@ fn apply(
             details,
             retrieved_at,
         } => {
+            cqlmatic::environment::parse_time(&retrieved_at)?;
             if pages.len() > 100 || details.len() > 10_000 {
                 return Err(fail(
                     "Saved parser import exceeds 100 pages / 10000 parser details.",
@@ -725,6 +956,18 @@ fn apply(
         } => {
             state.parser_version(&parser_id, &parser_sha256)?;
             if state.sources.iter().any(|s| matches!(&s.binding, Some(ParserBinding::Parser { parser_id: id, .. }) if id == &parser_id)) { return Err(fail("A bound parser cannot also be excluded.")); }
+            let mut exclusions = state
+                .parser_exclusions
+                .iter()
+                .filter(|e| e.parser_id == parser_id);
+            if exclusions.next().is_some_and(|e| {
+                e.parser_sha256 == parser_sha256
+                    && e.reviewed_at == reviewed_at
+                    && e.reason == reason
+            }) && exclusions.next().is_none()
+            {
+                return Ok(Value::Null);
+            }
             state.parser_exclusions.retain(|e| e.parser_id != parser_id);
             state.parser_exclusions.push(ParserExclusion {
                 parser_id,
@@ -760,8 +1003,7 @@ fn apply(
             let pack = run_dir.join("pack.json");
             let receipt = run_dir.join("receipt.json");
             if let Some(prior) = prior {
-                let bytes = serde_json::to_vec_pretty(&prior)
-                    .map_err(|_| fail("Cannot serialize the cumulative environment pack."))?;
+                let bytes = cumulative_pack_bytes(&prior)?;
                 storage::Writer::acquire(&pack)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
             }
             let selected: Vec<_> = state
@@ -805,9 +1047,34 @@ fn apply(
                 distinct_from_state(path, input)?;
             }
             let result = mcp::step(Path::new(&run.state_path), &answers);
-            if let Ok(relay) = read_json::<mcp::State>(Path::new(&run.state_path)) {
+            let relay = read_json::<mcp::State>(Path::new(&run.state_path)).ok();
+            let stored_failure = if run.status == "failed"
+                && let Ok(output) = &result
+                && output.terminal_failure
+                && let Some(relay) = &relay
+            {
+                let created_at = cqlmatic::environment::parse_time(&relay.created_at)?;
+                output.diagnostics.iter().all(|diagnostic| {
+                    state.failures.iter().rev().any(|failure| {
+                        failure.stage == "discovery"
+                            && failure.source_id.is_none()
+                            && failure.message == diagnostic.message
+                            && cqlmatic::environment::parse_time(&failure.recorded_at)
+                                .is_ok_and(|at| at >= created_at)
+                    })
+                })
+            } else {
+                false
+            };
+            if !stored_failure && let Some(relay) = relay {
                 run.answered = relay.answers.len();
-                run.status = relay.status;
+                // Finalize terminal status only from the verified relay output.
+                if matches!(
+                    relay.status.as_str(),
+                    "needs-probes" | "activation-blocked" | "activating"
+                ) {
+                    run.status = relay.status;
+                }
                 if !already_complete {
                     run.elapsed_seconds = (cqlmatic::environment::parse_time(now)?
                         - cqlmatic::environment::parse_time(&relay.created_at)?)
@@ -820,27 +1087,13 @@ fn apply(
                     run.status = output.status.into();
                     run.answered = output.answered;
                     if output.status == "complete" {
-                        let pack = storage::read_pack(Path::new(&run.pack_path))?;
-                        let reference = state
-                            .packs
-                            .iter()
-                            .find(|p| {
-                                p.path == run.pack_path
-                                    && p.content_digest == pack.content_digest
-                                    && p.discovery_run.as_ref() == Some(&run.state_path)
-                            })
-                            .cloned()
-                            .unwrap_or(PackReference {
-                                path: run.pack_path.clone(),
-                                content_digest: pack.content_digest,
-                                imported_at: now.into(),
-                                discovery_run: Some(run.state_path.clone()),
-                            });
-                        state.packs.retain(|p| p.path != run.pack_path);
-                        state.active_pack = Some(reference.clone());
-                        state.packs.push(reference);
+                        let completion = output
+                            .completion
+                            .as_ref()
+                            .ok_or_else(|| fail("Completed relay has no verified artifacts."))?;
+                        promote_discovery(state, completion, now)?;
                     }
-                    if matches!(output.status, "failed" | "activation-blocked") {
+                    if !stored_failure && matches!(output.status, "failed" | "activation-blocked") {
                         for diagnostic in &output.diagnostics {
                             state.failures.push(InventoryFailure {
                                 stage: "discovery".into(),
@@ -1307,7 +1560,7 @@ fn discover_action(state: &InventoryState) -> Result<InventoryAction, Diagnostic
 }
 fn interactive(
     path: &Path,
-    mut state: InventoryState,
+    state: InventoryState,
     report: InventoryStatus,
 ) -> Result<i32, Diagnostic> {
     render(&report)?;
@@ -1435,24 +1688,7 @@ fn interactive(
         }
         _ => return Err(fail("Select an action from the displayed inventory menu.")),
     };
-    protect_state(path)?;
-    let writer = storage::Writer::acquire(path)?;
-    protect_state(path)?;
-    // Re-read while holding the writer lock in case another process changed it during prompts.
-    if path.exists() {
-        state = load(path)?;
-    }
-    let now = discovery::timestamp();
-    state.schema_version = 2;
-    let extra = apply(path, &mut state, action, &now)?;
-    state.updated_at = now;
-    state.validate()?;
-    let report = inventory::assess(&state, &packs(&state)?)?;
-    writer.commit_bytes(
-        &serde_json::to_vec_pretty(&state)
-            .map_err(|_| fail("Cannot serialize inventory state."))?,
-        MAX_STATE_BYTES,
-    )?;
+    let (report, extra) = apply_and_store(path, action)?;
     render(&report)?;
     if !extra.is_null() {
         output(&extra)?;
@@ -1463,6 +1699,54 @@ fn interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn padded_observation_audits_consume_the_shared_read_budget() {
+        let directory =
+            std::env::temp_dir().join(format!("cqlmatic-audit-budget-{}", std::process::id()));
+        crate::setup_cli::protect_directory(&directory).unwrap();
+        let first = directory.join("first.json");
+        let second = directory.join("second.json");
+        let observation = QueryObservation::from_result(
+            b"#type=synthetic | select([value])",
+            br#"{"result":[{"value":1}]}"#,
+            serde_json::from_value(
+                json!({"cloud":"us1","tenant":"0".repeat(32),"view":"search-all"}),
+            )
+            .unwrap(),
+            serde_json::from_value(json!({"type":"synthetic"})).unwrap(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2026-01-02T00:00:00Z".into(),
+            QueryResultAssertion::ExactQueryResultTargetWindow,
+            absolute_path(&first).unwrap(),
+        )
+        .unwrap();
+        let audit = ObservationAudit {
+            schema_version: 1,
+            query_file: absolute_path(&directory.join("query.cql")).unwrap(),
+            result_file: absolute_path(&directory.join("result.json")).unwrap(),
+            observation,
+        };
+        let mut bytes = serde_json::to_vec(&audit).unwrap();
+        bytes.extend_from_slice(&[b' '; 512]);
+        for path in [&first, &second] {
+            storage::Writer::acquire(path)
+                .unwrap()
+                .create_new_bytes(&bytes, MAX_STATE_BYTES)
+                .unwrap();
+        }
+        let mut remaining = bytes.len() as u64 + 1 + 512;
+        let first = read_observation_audit(&first, &mut remaining).unwrap();
+        let second = read_observation_audit(&second, &mut remaining);
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(first == audit);
+        assert_eq!(remaining, 512);
+        assert!(
+            matches!(second, Err(error) if error.message.contains("total verification byte budget"))
+        );
+    }
+
     #[test]
     fn compact_actions_count_pending_probes_without_changing_full_actions() {
         let full = json!({"relay":{"status":"needs-probes","probes":[{"probe_id":"synthetic"}],"answered":0},"next_action":"original"});

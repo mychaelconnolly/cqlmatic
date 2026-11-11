@@ -654,11 +654,14 @@ fn later_failed_answer_ends_run_without_emitting_unanswered_probes_or_changing_p
         .unwrap();
         assert_eq!(output.status, "failed");
         assert_eq!(output.exit_code(), 2);
+        assert!(output.terminal_failure);
+        assert!(output.completion.is_none());
         assert_eq!(code(&output), expected);
         assert!(output.probes.is_empty());
         let again = mcp::step(&state, &[]).unwrap();
         assert_eq!(again.status, "failed");
         assert_eq!(again.exit_code(), 2);
+        assert!(again.terminal_failure);
         assert_eq!(code(&again), expected);
         assert!(again.probes.is_empty());
         let retried = mcp::step(
@@ -1079,9 +1082,10 @@ fn expired_partially_answered_run_does_not_advertise_probes() {
     )
     .unwrap();
     let mut saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
-    saved["created_at"] = json!("2020-01-01T00:00:00Z");
+    let started = saved["request"]["end"].clone();
+    saved["created_at"] = started.clone();
     let id = first.probes[0]["probe_id"].as_str().unwrap();
-    saved["answers"][id]["ingested_at"] = json!("2020-01-01T00:00:01Z");
+    saved["answers"][id]["ingested_at"] = started;
     fs::write(&state, serde_json::to_vec(&saved).unwrap()).unwrap();
     let output = mcp::step(&state, &[]).unwrap();
     assert_eq!(output.status, "failed");

@@ -29,26 +29,35 @@ impl Drop for Temp {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn call(dir: &Path, action: Value) -> Value {
+fn inventory_command(dir: &Path, action: Value) -> Command {
     let request = dir.join("request.json");
     fs::write(
         &request,
         serde_json::to_vec(&json!({"schema_version":1,"action":action})).unwrap(),
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
+    command
         .args(["env", "inventory", "--json", "--state"])
         .arg(dir.join("workflow/state.json"))
         .arg("--request")
-        .arg(&request)
-        .output()
-        .unwrap();
+        .arg(request);
+    command
+}
+fn call(dir: &Path, action: Value) -> Value {
+    let output = inventory_command(dir, action).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+fn assert_rejected(dir: &Path, action: Value, expected: &str) {
+    let output = inventory_command(dir, action).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains(expected), "{stderr}");
 }
 fn fixture(dir: &Path, name: &str, value: Value) -> String {
     let file = dir.join(name);
@@ -121,6 +130,180 @@ fn relay(
         progress = call(dir, json!({"kind":"discovery-step","answers":answers}));
     }
     panic!("Relay did not finish within its expected finite rounds");
+}
+
+fn confirm_quick_source(dir: &Path, source: &str) {
+    call(
+        dir,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    call(
+        dir,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":source}]}),
+    );
+}
+
+fn prepare_source_run(dir: &Path) -> Value {
+    call(
+        dir,
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_queries":4,"max_seconds":120}),
+    )
+}
+
+fn volume_answer(dir: &Path, prepared: &Value, response: Value) -> Value {
+    let probe = &prepared["action"]["relay"]["probes"][0];
+    assert_eq!(probe["kind"], "volume");
+    let input = fixture(dir, "volume.json", response);
+    json!({"kind":"discovery-step","answers":[{"probe_id":probe["probe_id"],"result_file":input}]})
+}
+
+#[test]
+fn completed_discovery_replay_keeps_newer_active_pack_and_validates_artifacts() {
+    let first = Temp::new();
+    let other = Temp::new();
+    confirm_quick_source(&first.0, "first-source");
+    confirm_quick_source(&other.0, "other-source");
+    let prepared = prepare_source_run(&first.0);
+    relay(&first.0, prepared.clone(), &[], &[], None);
+    let other_result = relay(&other.0, prepare_source_run(&other.0), &[], &[], None);
+    let imported = call(
+        &first.0,
+        json!({"kind":"import-pack","pack_file":other_result["status"]["active_pack"]["path"]}),
+    );
+    let state_path = first.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let resumed = call(&first.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(resumed["action"]["relay"]["status"], "complete");
+    assert_eq!(
+        resumed["status"]["active_pack"],
+        imported["status"]["active_pack"]
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+
+    let duplicate = call(
+        &first.0,
+        volume_answer(&first.0, &prepared, json!({"result":[{"events":10}]})),
+    );
+    assert_eq!(
+        duplicate["action"]["diagnostics"][0]["code"],
+        "MCP_ALREADY_ANSWERED"
+    );
+    assert_eq!(
+        duplicate["status"]["discovery_runs"][0]["status"],
+        "complete"
+    );
+    let after_duplicate = fs::read(&state_path).unwrap();
+    call(&first.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(fs::read(&state_path).unwrap(), after_duplicate);
+
+    let other_run = &other_result["status"]["discovery_runs"][0];
+    for field in ["pack_path", "receipt_path"] {
+        let mut inconsistent: Value = serde_json::from_slice(&before).unwrap();
+        inconsistent["discovery_runs"][0][field] = other_run[field].clone();
+        let saved = serde_json::to_vec(&inconsistent).unwrap();
+        fs::write(&state_path, &saved).unwrap();
+        assert_rejected(
+            &first.0,
+            json!({"kind":"discovery-step","answers":[]}),
+            "artifact paths differ from the verified relay",
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), saved);
+    }
+}
+
+#[test]
+fn first_promotion_requires_current_predecessor_and_recovers_after_interruption() {
+    let dir = Temp::new();
+    let other = Temp::new();
+    confirm_quick_source(&dir.0, "first-source");
+    confirm_quick_source(&other.0, "imported-source");
+    let prepared = prepare_source_run(&dir.0);
+    let external = relay(&other.0, prepare_source_run(&other.0), &[], &[], None);
+    let imported = call(
+        &dir.0,
+        json!({"kind":"import-pack","pack_file":external["status"]["active_pack"]["path"]}),
+    );
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    assert_rejected(
+        &dir.0,
+        volume_answer(&dir.0, &prepared, json!({"result":[{"events":10}]})),
+        "Prepare discovery again from the current inventory",
+    );
+    let stale = &prepared["status"]["discovery_runs"][0];
+    for field in ["pack_path", "receipt_path"] {
+        assert!(Path::new(stale[field].as_str().unwrap()).is_file());
+    }
+    assert_rejected(
+        &dir.0,
+        json!({"kind":"discovery-step","answers":[]}),
+        "Prepare discovery again from the current inventory",
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+
+    let prepared = prepare_source_run(&dir.0);
+    let before = fs::read(&state_path).unwrap();
+    let completed = relay(&dir.0, prepared, &[], &[], None);
+    let active = &completed["status"]["active_pack"];
+    let pack = cqlmatic::storage::read_pack(Path::new(active["path"].as_str().unwrap())).unwrap();
+    assert_eq!(pack.data.sources.len(), 2);
+
+    // Simulate interruption after the relay sealed its artifacts and before inventory committed.
+    fs::write(&state_path, before).unwrap();
+    let recovered = call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(recovered["status"]["active_pack"]["path"], active["path"]);
+    assert_eq!(
+        recovered["status"]["active_pack"]["content_digest"],
+        active["content_digest"]
+    );
+    let bytes = fs::read(&state_path).unwrap();
+    let saved: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(saved["packs"].as_array().unwrap().len(), 2);
+    assert_eq!(saved["packs"][0], imported["status"]["active_pack"]);
+    call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(fs::read(&state_path).unwrap(), bytes);
+}
+
+#[test]
+fn terminal_discovery_failure_poll_keeps_finalized_state() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let failed = call(
+        &dir.0,
+        volume_answer(
+            &dir.0,
+            &prepared,
+            json!({"result":[],"error":"synthetic failure"}),
+        ),
+    );
+    assert_eq!(failed["action"]["relay"]["status"], "failed");
+    assert_eq!(failed["status"]["failures"].as_array().unwrap().len(), 1);
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let polled = call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(polled["action"]["relay"], failed["action"]["relay"]);
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+
+    // Older inventory could copy the failed status after a visible rename and record only the sync error.
+    let mut interrupted: Value = serde_json::from_slice(&before).unwrap();
+    let mut earlier_failure = interrupted["failures"][0].clone();
+    earlier_failure["recorded_at"] = json!("2000-01-01T00:00:00Z");
+    interrupted["failures"][0]["message"] = json!("Synthetic durability failure");
+    interrupted["failures"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, earlier_failure);
+    fs::write(&state_path, serde_json::to_vec(&interrupted).unwrap()).unwrap();
+    let recovered = call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(recovered["status"]["failures"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        recovered["status"]["failures"][2]["message"],
+        failed["action"]["relay"]["diagnostics"][0]["message"]
+    );
+    let recovered_bytes = fs::read(&state_path).unwrap();
+    call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
+    assert_eq!(fs::read(&state_path).unwrap(), recovered_bytes);
 }
 
 #[test]
@@ -732,13 +915,14 @@ fn compact_inventory_and_status_are_opt_in_and_keep_default_reports() {
         legacy.as_object_mut().unwrap().remove(field);
     }
     fs::write(&state, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    call(
-        &dir.0,
-        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
-    );
-    let migrated: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    let full = json!({"kind":"set-discovery-mode","mode":"full"});
+    call(&dir.0, full.clone());
+    let migrated_bytes = fs::read(&state).unwrap();
+    let migrated: Value = serde_json::from_slice(&migrated_bytes).unwrap();
     assert_eq!(migrated["schema_version"], 2);
-    assert_eq!(migrated["discovery_mode"], "quick");
+    assert_eq!(migrated["discovery_mode"], "full");
+    call(&dir.0, full);
+    assert_eq!(fs::read(&state).unwrap(), migrated_bytes);
 }
 
 #[test]
@@ -860,13 +1044,31 @@ fn imported_pack_selectors_remain_visible_unconfirmed_and_duplicate_imports_are_
     assert_eq!(source["expected"], false);
     assert_eq!(source["scouted_events"], Value::Null);
     assert_eq!(source["fields"].as_array().unwrap().len(), 1);
+    let state_path = dir.0.join("workflow/state.json");
+    let before_replay = fs::read(&state_path).unwrap();
     let repeated = call(&dir.0, json!({"kind":"import-pack","pack_file":input}));
     assert_eq!(repeated["action"]["already_imported"], true);
     assert_eq!(
         repeated["status"]["active_pack"],
         imported["status"]["active_pack"]
     );
-    let state_path = dir.0.join("workflow/state.json");
+    assert_eq!(fs::read(&state_path).unwrap(), before_replay);
+
+    let mut missing_selector: Value = serde_json::from_slice(&before_replay).unwrap();
+    missing_selector["sources"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|source| source["id"] != sid);
+    fs::write(&state_path, serde_json::to_vec(&missing_selector).unwrap()).unwrap();
+    let restored = call(&dir.0, json!({"kind":"import-pack","pack_file":input}));
+    assert_eq!(restored["action"]["already_imported"], true);
+    assert!(
+        restored["status"]["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["source_id"] == sid)
+    );
     let before = fs::read(&state_path).unwrap();
     let saved: Value = serde_json::from_slice(&before).unwrap();
     assert_eq!(saved["packs"].as_array().unwrap().len(), 1);
@@ -898,23 +1100,17 @@ fn imported_pack_selectors_remain_visible_unconfirmed_and_duplicate_imports_are_
     assert_eq!(fs::read(state_path).unwrap(), before);
 }
 
-#[test]
-fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_summary() {
-    let dir = Temp::new();
+fn observation_action(dir: &Path, query_text: &str, result_data: Value) -> Value {
     call(
-        &dir.0,
+        dir,
         json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic saved query","expected_sources":[{"type":"synthetic"}]}),
     );
-    let query = dir.0.join("workflow/query.cql");
-    fs::write(
-        &query,
-        r##"#type="synthetic" | select([value, zero, flag, missing]) | head(10)"##,
-    )
-    .unwrap();
+    let query = dir.join("workflow/query.cql");
+    fs::write(&query, query_text).unwrap();
     let result = PathBuf::from(fixture(
-        &dir.0.join("workflow"),
+        &dir.join("workflow"),
         "query-result.json",
-        json!({"result":[{"value":"positive synthetic value","zero":0,"flag":false,"missing":null}]}),
+        result_data,
     ));
     #[cfg(unix)]
     {
@@ -922,14 +1118,23 @@ fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_s
         fs::set_permissions(&query, fs::Permissions::from_mode(0o600)).unwrap();
         fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
     }
-    let action = json!({"kind":"import-query-observations","query_file":query,"result_file":result,"environment":environment(),"source":{"type":"synthetic"},"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","retrieved_at":"2026-01-02T00:00:00Z","caller_assertion":"exact-query-result-target-window"});
+    json!({"kind":"import-query-observations","query_file":query,"result_file":result,"environment":environment(),"source":{"type":"synthetic"},"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","retrieved_at":"2026-01-02T00:00:00Z","caller_assertion":"exact-query-result-target-window"})
+}
+
+#[test]
+fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_summary() {
+    let dir = Temp::new();
+    let action = observation_action(
+        &dir.0,
+        r##"#type="synthetic" | select([value, zero, flag, missing]) | head(10)"##,
+        json!({"result":[{"value":"positive synthetic value","zero":0,"flag":false,"missing":null}]}),
+    );
     let imported = call(&dir.0, action.clone());
     assert_eq!(imported["action"]["field_count"], 3);
+    assert_eq!(imported["action"]["uncredited_fields"], json!(["missing"]));
     assert_eq!(imported["action"]["pack_updated"], false);
     assert_eq!(imported["status"]["query_observation_count"], 1);
     assert!(imported["status"]["active_pack"].is_null());
-    let repeated = call(&dir.0, action);
-    assert_eq!(repeated["status"]["query_observation_count"], 1);
     let state_path = dir.0.join("workflow/state.json");
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(!state.contains("positive synthetic value"));
@@ -949,17 +1154,190 @@ fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_s
                 & 0o077,
             0
         );
-        fs::set_permissions(&result, fs::Permissions::from_mode(0o644)).unwrap();
-        let request = dir.0.join("request.json");
+        fs::set_permissions(
+            action["result_file"].as_str().unwrap(),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         let before = fs::read(&state_path).unwrap();
-        let denied = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
-            .args(["env", "inventory", "--json", "--state"])
-            .arg(&state_path)
-            .arg("--request")
-            .arg(&request)
-            .output()
-            .unwrap();
-        assert!(!denied.status.success());
+        assert_rejected(&dir.0, action, "owner-only regular files");
         assert_eq!(fs::read(state_path).unwrap(), before);
     }
+}
+
+#[test]
+fn saved_query_replay_preserves_audit_and_rejects_conflicting_capture_time() {
+    let dir = Temp::new();
+    let action = observation_action(
+        &dir.0,
+        "#type=synthetic | select([value])",
+        json!({"result":[{"value":"positive"}]}),
+    );
+    let original = call(&dir.0, action.clone());
+    let audit_path = Path::new(original["action"]["audit_path"].as_str().unwrap());
+    let audit_bytes = fs::read(audit_path).unwrap();
+    let state_path = dir.0.join("workflow/state.json");
+    let state = fs::read(&state_path).unwrap();
+    let repeated = call(&dir.0, action.clone());
+    assert_eq!(repeated["action"], original["action"]);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+
+    let mut equivalent = action.clone();
+    equivalent["start"] = json!("2026-01-01T00:00:00.000Z");
+    equivalent["end"] = json!("2026-01-02T00:00:00.000Z");
+    equivalent["retrieved_at"] = json!("2026-01-02T00:00:00+00:00");
+    let replay = call(&dir.0, equivalent.clone());
+    assert_eq!(replay["action"], original["action"]);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+
+    fs::remove_file(audit_path).unwrap();
+    assert_rejected(
+        &dir.0,
+        equivalent.clone(),
+        "Replay the exact original import",
+    );
+    call(&dir.0, action.clone());
+    assert_eq!(fs::read(audit_path).unwrap(), audit_bytes);
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+
+    let mut corrupted: Value = serde_json::from_slice(&audit_bytes).unwrap();
+    corrupted["observation"]["fields"][0]["positive_rows"] = json!(2);
+    fs::write(audit_path, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+    assert_rejected(
+        &dir.0,
+        equivalent,
+        "audit differs from the saved observation",
+    );
+    assert_rejected(
+        &dir.0,
+        action.clone(),
+        "audit differs from this exact import",
+    );
+    fs::write(audit_path, &audit_bytes).unwrap();
+
+    let mut conflict = action.clone();
+    conflict["retrieved_at"] = json!("2026-01-02T00:01:00Z");
+    assert_rejected(
+        &dir.0,
+        conflict.clone(),
+        "already has a different retrieval time",
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    assert_eq!(fs::read(audit_path).unwrap(), audit_bytes);
+
+    let second_result = dir.0.join("workflow/second-result.json");
+    fs::copy(action["result_file"].as_str().unwrap(), &second_result).unwrap();
+    let mut same_key = action.clone();
+    same_key["result_file"] = json!(second_result);
+    assert_rejected(&dir.0, same_key, "audit differs from this exact import");
+    assert_eq!(fs::read(&state_path).unwrap(), state);
+    conflict["result_file"] = json!(second_result);
+    let distinct = call(&dir.0, conflict);
+    assert_eq!(distinct["status"]["query_observation_count"], 2);
+    assert_eq!(
+        distinct["action"]["result_sha256"],
+        original["action"]["result_sha256"]
+    );
+    assert_ne!(
+        distinct["action"]["query_observation_id"],
+        original["action"]["query_observation_id"]
+    );
+}
+
+#[test]
+fn filter_only_field_is_reported_and_projection_supplies_strict_evidence() {
+    for (projection, row, missing, exit) in [
+        (
+            "value",
+            json!({"value":"positive"}),
+            json!(["#event_simpleName"]),
+            1,
+        ),
+        (
+            "value, #event_simpleName",
+            json!({"value":"positive","#event_simpleName":"SyntheticEvent"}),
+            json!([]),
+            0,
+        ),
+    ] {
+        let dir = Temp::new();
+        let action = observation_action(
+            &dir.0,
+            &format!(
+                "#type=synthetic #event_simpleName=SyntheticEvent | select([{projection}]) | head(1)"
+            ),
+            json!({"result":[row]}),
+        );
+        let import = inventory_command(&dir.0, action.clone())
+            .arg("--summary")
+            .output()
+            .unwrap();
+        assert!(
+            import.status.success(),
+            "{}",
+            String::from_utf8_lossy(&import.stderr)
+        );
+        let import: Value = serde_json::from_slice(&import.stdout).unwrap();
+        assert_eq!(import["action"]["uncredited_fields"], missing);
+        assert_eq!(import["action"].get("next_action").is_some(), exit == 1);
+        let check = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["check", "--require-observed", "--file"])
+            .arg(action["query_file"].as_str().unwrap())
+            .arg("--inventory-state")
+            .arg(dir.0.join("workflow/state.json"))
+            .output()
+            .unwrap();
+        assert_eq!(check.status.code(), Some(exit), "{check:?}");
+    }
+}
+
+#[test]
+fn invalid_empty_parser_import_and_exclusion_replay_preserve_reconciliation() {
+    let dir = Temp::new();
+    let page = fixture(
+        &dir.0,
+        "catalog.json",
+        json!({"resources":[{"id":"first"},{"id":"second"}],"meta":{"pagination":{"offset":0,"total":2}}}),
+    );
+    let details: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|id| {
+            let file = fixture(
+                &dir.0,
+                &format!("{id}.json"),
+                json!({"resources":[{"id":id,"script":"value := 1"}]}),
+            );
+            json!({"parser_id":id,"result_file":file})
+        })
+        .collect();
+    let imported = call(
+        &dir.0,
+        json!({"kind":"import-parsers","pages":[{"offset":0,"limit":100,"result_file":page}],"details":details,"retrieved_at":"2026-01-02T00:00:00Z"}),
+    );
+    assert_eq!(imported["status"]["parser_count"], 2);
+    let exclusions: Vec<_> = imported["status"]["parsers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|parser| json!({"kind":"exclude-parser","parser_id":parser["id"],"parser_sha256":parser["sha256"],"reason":"Synthetic exclusion","reviewed_at":"2026-01-02T00:01:00Z"}))
+        .collect();
+    for exclusion in &exclusions {
+        call(&dir.0, exclusion.clone());
+    }
+    let reconciled = call(
+        &dir.0,
+        json!({"kind":"reconcile","reviewed_at":"2026-01-02T00:02:00Z"}),
+    );
+    assert_eq!(reconciled["status"]["reconciliation"], "done");
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    assert_rejected(
+        &dir.0,
+        json!({"kind":"import-parsers","pages":[],"details":[],"retrieved_at":"invalid-date"}),
+        "Expected an RFC3339 timestamp",
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    let repeated = call(&dir.0, exclusions[0].clone());
+    assert_eq!(repeated["status"]["reconciliation"], "done");
+    assert_eq!(fs::read(&state_path).unwrap(), before);
 }

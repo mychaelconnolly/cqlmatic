@@ -1,16 +1,22 @@
-# CQLmatic v0.1.4
+# CQLmatic v0.1.5
 
-CQLmatic now reuses your saved environment map when you write, check or assess a query, in both Full and Quick inventory modes. Ordinary query writing can continue with a notice when a source mixes different event types. Small refreshes keep earlier evidence for fields they did not measure and avoid treating a field listing as proof that the field contains data.
+CQLmatic keeps newer environment evidence active when you resume discovery and makes repeated imports easier to audit. Saved-query imports now identify query fields that still need directly returned values for strict checks.
 
 ## What changed
 
-- A matching confirmed inventory supplies its active pack and otherwise unspecified target automatically. `--inventory-state FILE` selects another protected inventory, including for `assess`. An explicit `--pack FILE` stays primary; matching active-pack and saved-query guards still apply to generation/checking.
-- Inventory identity is checked before opening its active snapshot, separately for each JSONL request. Foreign inventory is skipped with a notice. A missing default state leaves basic commands available and creates nothing. An explicitly selected missing state or broken matching snapshot blocks use even in ordinary mode or with an older explicit pack. A malformed default can be ignored with a notice for a valid explicit pack; unsafe protected paths still fail closed.
-- Normal mixed-kind queries report informational `CQL_RECORD_KIND_NOTICE`, including truncated kind facets and nested queries. With `--require-observed`, unresolved kinds still require context or explicit acceptance. Accepted strict ambiguity retains a warning and triggers `--fail-on-warning`.
-- Fieldset-only fields remain unmeasured with null observation/rate. Exact population batches preserve untargeted records and dates. Actual zero measurements stay current negative evidence; auxiliary checks need not have a population rate. Full source and parser review remains separate.
-- Refresh still requires a newer snapshot and now also rejects contradictory older, tied or unorderable field measurements. Undated negative sources and stale source markers can recover from a qualified source measurement whose window starts after the retained snapshot; null or missing observations cannot erase that source history. Rejected activation preserves the prior pack. Empty optional value facets for a field absent from a source do not abort other source measurements; malformed nonempty results still fail.
-- Saved-query observations must start after the snapshot to supersede negative source or field evidence without a qualifying record window and matching measurement provenance. Qualified dated negatives keep their original ordering when repackaged; stale markers retain the snapshot boundary.
-- Only Quick generation/checking saves unverified source/input-field leads. Assessment uses pack rates without converting the saved-query ledger into population evidence. Requests, schemas, pack shape and executable profile keep their existing versions.
+- Resuming a completed discovery preserves the active pack and retained history. First promotion verifies the relay's pack, receipt and predecessor. If another import changed the working inventory, prepare discovery again from the current pack.
+- Repeated inventory actions preserve current-version state bytes when the action makes no change. Exact audit recovery, interrupted promotion and directory durability checks still run. Polling a failed discovery records its terminal failure once.
+- Saved-query imports return `uncredited_fields` with guidance for fields absent from positive returned values. A filter field omitted by `select` appears in this feedback. Observation credit continues to require a directly returned value.
+- Replaying a saved capture reuses its recorded observation and audit. Equivalent timestamp spellings represent the same instant. A different retrieval time for the same protected originals is a conflict. Separate captures with identical bytes can be retained using their own protected result files and distinct retrieval times.
+- Scout imports validate the confirmed environment, current mode's repository and completed window. Replaying an older exact scout preserves the latest source counts. Every successful discovery capture, including Sources Only, must be retrieved at or after its probe window ends.
+- Parser imports validate the retrieval timestamp before replacing the catalog, including requests with empty capture lists. Replaying an identical parser exclusion preserves reconciliation.
+- Generation, checking and assessment name the actual Full or Quick inventory mode while retaining the informational `CQL_QUICK_TARGET` code.
+
+## Compatibility
+
+Existing inventory versions and saved observation IDs remain readable. A successful action migrates version-1 inventory as before. Record the actual UTC capture time when saving a result. Saved-query retrieval time is caller-attested.
+
+MCP discovery state binds the executable version. Start a new bounded run with new state and receipt paths after upgrading. Retained environment packs remain available for query writing.
 
 ## Before using it
 

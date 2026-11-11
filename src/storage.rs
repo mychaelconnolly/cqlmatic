@@ -62,10 +62,20 @@ pub fn read_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, Diagnostic> {
 }
 pub fn read_pack(path: &Path) -> Result<Pack, Diagnostic> {
     let data = read_bytes(path, MAX_PACK_BYTES)?;
-    let p: Pack = serde_json::from_slice(&data)
+    decode_pack(&data)
+}
+pub fn decode_pack(bytes: &[u8]) -> Result<Pack, Diagnostic> {
+    let p: Pack = serde_json::from_slice(bytes)
         .map_err(|e| Diagnostic::error("PACK_JSON", format!("Invalid pack JSON: {e}")))?;
     p.validate()?;
     Ok(p)
+}
+
+fn durability_error(error: std::io::Error) -> Diagnostic {
+    Diagnostic::error(
+        "PACK_DURABILITY",
+        format!("Snapshot is visible, but durability could not be confirmed: {error}"),
+    )
 }
 
 pub struct Writer {
@@ -222,12 +232,12 @@ impl Writer {
             .map_err(|e| io("Cannot open committed snapshot", e))?;
         file.sync_all()
             .and_then(|_| sync_directory(&self.parent))
-            .map_err(|e| {
-                Diagnostic::error(
-                    "PACK_DURABILITY",
-                    format!("Snapshot is visible, but durability could not be confirmed: {e}"),
-                )
-            })
+            .map_err(durability_error)
+    }
+    /// Reconfirm the directory entry of a snapshot synced before an atomic rename.
+    pub fn confirm_parent_durable(&self) -> Result<(), Diagnostic> {
+        snapshot_fault(&self.path, "directory-sync")?;
+        sync_directory(&self.parent).map_err(durability_error)
     }
     fn commit_bytes_with(
         &self,

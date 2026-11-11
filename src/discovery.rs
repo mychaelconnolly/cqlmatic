@@ -1177,15 +1177,7 @@ impl<B: SearchBackend> Run<'_, B> {
                 ..JobPolicy::default()
             },
         );
-        let result = if receipt.completion == "complete" && receipt.cleanup_complete() {
-            check_measurement(&probe, &receipt.events).map(|()| receipt.events.clone())
-        } else {
-            Err(receipt
-                .diagnostic
-                .clone()
-                .unwrap_or_else(|| fail("Incomplete search evidence or unconfirmed search cleanup; no further measurement or pack activation is allowed.")))
-        };
-        self.report.captures.push(Capture {
+        let capture = self.report.captures.push_mut(Capture {
             probe,
             retrieved_at: receipt
                 .job_id
@@ -1194,7 +1186,17 @@ impl<B: SearchBackend> Run<'_, B> {
                 .unwrap_or_else(timestamp),
             receipt,
         });
-        result
+        let receipt = &capture.receipt;
+        if receipt.completion == "complete" && receipt.cleanup_complete() {
+            check_measurement(&capture.probe, &receipt.events)?;
+            capture_key(capture)?;
+            Ok(receipt.events.clone())
+        } else {
+            Err(receipt
+                .diagnostic
+                .clone()
+                .unwrap_or_else(|| fail("Incomplete search evidence or unconfirmed search cleanup; no further measurement or pack activation is allowed.")))
+        }
     }
     fn measure_source(
         &mut self,

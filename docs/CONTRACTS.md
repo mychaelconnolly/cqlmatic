@@ -1,6 +1,6 @@
 # Machine contracts and automation
 
-The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.4**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
+The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.5**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
 
 Use [USAGE](../USAGE.md) for flags, [setup](SETUP.md) and [inventory](INVENTORY.md) for actions, and [query construction](QUERY-REFERENCE.md) for nested plans. All examples are synthetic. Runtime operations require the caller's explicit authorization and environment.
 
@@ -161,7 +161,7 @@ Each source status has `source_id`, `selectors`, optional `scouted_events`, `rev
 
 The inventory state contains `schema_version`, `format`, `created_at`, `updated_at`, `target`, `scout_plan`, `scouting`, `sources`, `parser_pages`, `parsers`, `parser_exclusions`, `discovery_runs`, `parser_runs`, `packs`, `active_pack`, `reconciled_evidence_sha256`, `reconciled_at`, and `failures`. These store cumulative evidence, snapshots, and fingerprints. They are sensitive producer-managed storage, not flags to edit to force completion. Status validates referenced packs; missing/changed snapshots can make status fail. See [refresh and recovery](INVENTORY.md).
 
-Built-in `prepare-scout` always emits MCP `repository:"search-all"`, independently of the saved `environment.view`. It requires separate authorization for that target. Lower-level discovery binds the supplied view; do not confuse the two paths or edit a scout's emitted arguments to simulate a narrower run. See [scouting boundaries](INVENTORY.md#action-inputs-and-evidence-boundaries).
+In Full mode, `prepare-scout` emits MCP `repository:"search-all"` and requires authorization for that target. In Quick mode, it emits the selected `environment.view` and a finite host budget. Relay the exact emitted arguments for the authorized target. See [scouting boundaries](INVENTORY.md#action-inputs-and-evidence-boundaries).
 
 ## Packs and discovery outputs
 

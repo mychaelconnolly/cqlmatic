@@ -717,6 +717,41 @@ fn type_only_population_batches_and_source_only_refresh_preserve_field_evidence(
 }
 
 #[test]
+fn source_only_discovery_requires_a_completed_window_and_retains_the_capture() {
+    let mut r = request(&[]);
+    r.depth = discovery::DiscoveryDepth::SourcesOnly;
+    r.population_fields.clear();
+    r.contracts.clear();
+    r.max_population_fields_per_source = None;
+    let (_, answers) = Scenario::default().graph(&r);
+
+    for (retrieved_at, complete) in [("2026-01-01T00:59:59Z", false), (r.end.as_str(), true)] {
+        let mut backend = Backend {
+            answers: answers.clone(),
+            emitted: vec![],
+            observed_at: retrieved_at.into(),
+            retrievals: BTreeMap::new(),
+        };
+        let (pack, report) = discovery::execute(&r, &mut backend);
+        assert_eq!(pack.is_some(), complete, "{:?}", report.diagnostics);
+        assert_eq!(report.captures.len(), 1);
+        let capture = &report.captures[0];
+        assert_eq!(capture.retrieved_at, retrieved_at);
+        assert_eq!(capture.receipt.completion, "complete");
+        assert_eq!(capture.receipt.cleanup, "confirmed");
+        assert_eq!(capture.receipt.events, [json!({"events":1000})]);
+        if let Some(pack) = pack {
+            assert_eq!(report.status, "complete");
+            assert_eq!(pack.data.sources[0]["evidence"]["observed"], true);
+        } else {
+            assert_eq!(report.status, "error");
+            assert!(!report.active_pack_updated);
+            assert_eq!(report.diagnostics[0].code, "DISCOVERY_EVIDENCE");
+        }
+    }
+}
+
+#[test]
 fn a_twenty_field_refresh_preserves_other_current_records_and_dates() {
     let names = (0..40)
         .map(|index| format!("f{index:02}"))
