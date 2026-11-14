@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -14,6 +15,9 @@ import tempfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("package_release", Path(__file__).with_name("package-release.py"))
+RELEASE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(RELEASE)
 
 
 def install_guide(data, version):
@@ -102,6 +106,7 @@ def build(args):
         data = binary.read_bytes()
         require(data.startswith(magic) and sha256(data) == native["binaries"][platform]["sha256"],
                 "Native binary differs from the reviewed manifest: " + platform)
+        RELEASE.public_bytes(data, "Native binary: " + platform)
         name = "native/" + platform + "/cqlmatic"
         packed[name], package_modes[name] = data, 0o755
     package_modes["npm/cqlmatic.cjs"] = 0o755

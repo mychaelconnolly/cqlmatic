@@ -1,6 +1,6 @@
 # Machine contracts and automation
 
-The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.5**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
+The supported integration surface is the executable, not a stable Rust SDK. This reference describes package **0.1.6**, JSON contract version **1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Package version, schema version, pack format, profile ID, and knowledge revision are separate identifiers. Inspect the running binary with `--version`, `--schema NAME`, and `catalog --profile`; a package version does not imply a different evidence policy.
 
 Use [USAGE](../USAGE.md) for flags, [setup](SETUP.md) and [inventory](INVENTORY.md) for actions, and [query construction](QUERY-REFERENCE.md) for nested plans. All examples are synthetic. Runtime operations require the caller's explicit authorization and environment.
 
@@ -111,6 +111,7 @@ Send `{schema_version:1, id?, action:{type:...}}`. The [setup action table](SETU
 | `selection` | Selected `client`, `cloud`, `server_name`, tagged registration choice, and `host_id` only for `external`, or null. |
 | `clients` | Observed client executables, versions, capability flags and fingerprints. |
 | `plan` | Optional reviewed native-command or Copilot file-write preview, baseline, changes, backup path, and confirmation hash. |
+| `recovery_origin` | Optional original acknowledged, uncertain Codex CIMD fresh-add plan retained for a same-entry recovery login. Omitted in legacy/no-recovery state; it is not proof of dispatch or success. |
 | `configured` | Native configuration completed or equivalent registration was found; not authentication proof. |
 | `authentication_evidence` | Distinguishes no evidence, user confirmation, and a bound saved host-discovery report. |
 | `configured_sha256`, `discovery_sha256` | Optional selected configuration-entry/legacy whole-file and saved-report bindings. |
@@ -118,15 +119,19 @@ Send `{schema_version:1, id?, action:{type:...}}`. The [setup action table](SETU
 
 Phases are `new`, `selected`, `installation-required`, `review-required`, `command-pending`, `authentication-required`, `authenticated`, `tool-discovery-verified`, `advanced-pending`, and `cancelled`. A phase is not an instruction to skip human consent or pending-command review.
 
+Preview operations are `configure`, `authenticate`, and eligible same-entry `recover`. Recovery preserves uncertainty until a freshly reviewed explicit native CIMD login succeeds against unchanged configuration; it does not adopt arbitrary preexisting or manual entries. A valid protected receipt can instead restore configuration provenance after an interrupted state save or authentication attempt. Login provenance is distinct from completed-add provenance; the saved host report remains required. See [setup recovery](SETUP.md#recover-a-partially-completed-codex-cimd-setup).
+
 The preview contains `schema_version`, `state_revision`, `operation`, `selection`, `baseline`, `commands`, `changes`, `backup_path`, and `confirmation_sha256`. `client` is present for command adapters; `config_write_sha256` is present for a planned new Copilot user file and covers its exact bytes, including the trailing newline. An existing Copilot file is never rewritten; add a missing entry through Copilot and preview again. Native commands contain exact `program`, `args`, `interactive`, and `timeout_seconds`. Baseline `path`, `sha256` (null for absence), and `server` distinguish absent, same, and colliding entries. Apply needs the exact lowercase confirmation digest and rechecks the baseline/executable when applicable. Never reconstruct a preview hash or infer rollback. Claude/Copilot saved reports additionally bind `effective_oauth_client_id` and `effective_config_source` from the chosen session; these are caller-supplied, not independent identity proof.
 
 The on-disk setup file wraps state with its schema version and `state_sha256`; this storage wrapper is not `SetupResult` or the bare state subschema. Do not hand-edit it. No-request `setup --json` reads saved status without detecting clients, reading native configuration, creating state, or prompting. A request action `status` uses the writer and can save state. Setup returns `0` only at `tool-discovery-verified`; intermediate results return `1`. A global error returns `2` without a `SetupResult`.
 
 ## Inventory requests and status
 
-Send `{schema_version:1, action:{kind:...}}`; there is **no caller ID**. Actions are `init`, `prepare-scout`, `import-scout`, `confirm-target`, `review-source`, `import-parsers`, `fetch-parsers`, `bind-parser`, `parser-not-applicable`, `exclude-parser`, `prepare-discovery`, `discovery-step`, `import-pack`, `reconcile`, and `record-failure`. See the [inventory action reference](INVENTORY.md) for complete required fields, exact selectors, review evidence, and budgets.
+Send `{schema_version:1, action:{kind:...}}`; there is **no caller ID**. Core actions are `init`, `set-discovery-mode`, `prepare-scout`, `import-scout`, `confirm-target`, `review-source`, `import-parsers`, `fetch-parsers`, `bind-parser`, `parser-not-applicable`, `exclude-parser`, `prepare-discovery`, `dispatch-discovery`, `discovery-step`, `pause-discovery`, `resume-discovery`, `import-pack`, `import-query-observations`, `reconcile`, and `record-failure`. See the [inventory action reference](INVENTORY.md) for complete required fields, exact selectors, review evidence, and budgets.
 
-A status request is `{schema_version:1, state?: STRING_OR_NULL}`. Do not select state both in that request and with `--state`.
+Continuing-inventory actions are `set-refresh-settings`, `prepare-refresh`, `dispatch-refresh`, `settle-refresh`, `import-refresh`, `acknowledge-refresh-reminder`, `record-inventory-hints`, `acknowledge-inventory-work`, `acknowledge-inventory-notice`, and `exclude-inventory-work`. Refresh is manual; `automatic_refresh_available` is false and new preferences default to `automatic: false` with `lookback: "24h"` (alternatives `7d`, `14d`, `30d`). Saved automatic preferences remain readable but cannot enable new automatic preparation or dispatch. Retained attempts still require safe settlement and may import completed evidence. Manual refresh requires protected, exact-session evidence of a verified provider-enforced lifetime of 1–600 seconds. An advertised default or client timeout is insufficient. Dispatch is reserved before one call, unresolved work blocks another attempt, and only exact completed settlement permits result import. Strict capability/settlement shapes and separate reminder/work-notice handling are in [continuing inventory](INVENTORY.md#continuing-inventory-and-settings).
+
+A status request is `{schema_version:1, state?: STRING_OR_NULL, session_id?: STRING_OR_NULL}`. The optional stable host session ID scopes brief refresh reporting; it does not attest capability or authentication. Do not select state both in that request and with `--state`.
 
 Output shapes differ:
 
@@ -136,12 +141,30 @@ Output shapes differ:
 
 Successful inventory/status commands exit `0` even if work is pending, an API fetch retained partial evidence, or discovery output is failed/incomplete. Inspect both `status` and `action`. A global failure returns `2`.
 
+### Bounded brief output
+
+`status --json --brief` and `env inventory --request FILE --json --brief` select a separate versioned agent projection. `--brief` requires `--json` and conflicts with `--summary`. Existing full and summary output remain unchanged; summary is not independent of inventory size.
+
+A complete brief response, including an action envelope and final newline, is at most 4,096 UTF-8 bytes. Valid brief requests also receive bounded fixed runtime-error diagnostics on stderr with exit 2. Argument-parser errors/help retain their ordinary CLI behavior. The brief uses fixed codes/messages, aggregate counts and at most five total opaque work/attempt references. It omits freeform target/session text, paths, selectors, next-action prose and all executable/result payloads. Omission counts make the limited view explicit; safety blockers take precedence over routine references.
+
+`notification_snapshot` is null when no unresolved, unacknowledged inventory work exists. Otherwise it contains `snapshot_sha256` and `count`, committing to the exact environment and complete sorted `(id, revision)` set. Submit `acknowledge-inventory-notice` with the unchanged `snapshot_sha256` only after the host has presented that aggregate notice; optional `defer` defaults false. The existing writer reloads and verifies the snapshot before reusing per-work acknowledgement. Stale or empty snapshots fail atomically. This digest identifies content, not authorization or a unique state instance; keep the explicit state selection unchanged. The bounded action response identifies the acknowledged digest/count separately from the remaining notification snapshot.
+
+`refresh_reminder` is separate from `notification_snapshot`. It carries only fixed flags, a cycle digest and dates. When `show_startup_notice` is true, the foreground host presents the due hint before `acknowledge-refresh-reminder` with exact `cycle_sha256` and optional `defer` (default false). Explicit `defer: true` postpones the reminder for 30 days. The writer rejects stale cycles atomically. Delivery acknowledgement does not complete a census or resolve pending work. Clock skew suppresses the timed hint. Status/JSON/brief/piped output does not acknowledge delivery; the interactive menu acknowledges only after successful foreground output and flush when both stdin and stdout are terminals.
+
+Background imports, status reads and generation/checking never acknowledge notification delivery. Acknowledgement/defer does not resolve inventory, promote grounding, authorize a search or suppress non-work safety flags. Retries can require a fresh brief after an acknowledgement or lost response; exactly-once user delivery is not guaranteed.
+
+Brief output is not an execution descriptor. A native owner needing exact MCP arguments consumes a protected full action capture locally; full results must not be reconstructed from references or dumped into model context. Apply bounded output to every routine response, including prepare/dispatch/settle/import and acknowledgement, rather than returning a full summary immediately after a brief.
+
 ### InventoryStatus field dictionary
 
 | Field(s) | Meaning |
 | --- | --- |
 | `schema_version`, `blank_canvas`, `message` | Contract version, absence of initialized evidence, and human summary. |
-| `full_map_complete` | All applicable requirements met for a confirmed full-environment target; never true merely for selected-source coverage. |
+| `full_map_complete`, `selected_scope_complete`, `quick_scope_complete` | Distinct full-environment, Full selected-source and Quick selected-depth completion flags. Selected work never establishes a full map. |
+| `discovery_mode`, `quick_depth` | Persistent Full/Quick preference and sources-only/sources-and-fields depth. |
+| `refresh_settings`, `automatic_refresh_available`, `refresh_attempts`, `refresh_blocked` | Lookback and retained automatic preference; automatic availability is false. Exact session/target/argument hashes, automatic flag, dispatch time, retained lifetime and known termination remain visible; reserved is not backend-running. Unresolved refresh blocks another attempt. |
+| `refresh_reminder` | Optional bounded `{due, show_startup_notice, cycle_sha256, last_successful_window_end, due_at, clock_skew}`. Timed status follows the later of first confirmation and the exact target's latest qualifying uncapped census window end. No raw target or result content. |
+| `pending_inventory`, `inventory_notification_count`, `settings_attention` | Bounded source/field/type work revisions, pending notices, and persistent Settings marker. Acknowledgement/defer is not completion. |
 | `target`, `environment`, `target_scope`, `context` | Target progress, exact identity, `full-environment`/`selected-sources`, and confirmed context. |
 | `scouting`, `parser_catalog`, `reconciliation` | Progress of the corresponding prerequisites. |
 | `parser_count`, `parser_page_count` | Retained parser definition/catalog page counts. |
@@ -153,13 +176,15 @@ Successful inventory/status commands exit `0` even if work is pending, an API fe
 | `failures` | Recorded history; not necessarily a current completion blocker if later evidence resolves it. |
 | `next_actions` | Human guidance to remaining work. |
 | `covered_queries_usable` | Currently always true in returned status; **not** proof a particular query has enough evidence. |
-| `active_pack` | Optional `path`, `content_digest`, `imported_at`, and associated `discovery_run`. Select this path explicitly for writing/checking. |
+| `active_pack` | Optional `path`, `content_digest`, `imported_at`, and associated `discovery_run`. Matching confirmed inventory is reused automatically; explicit `--pack` selects a primary snapshot. |
 
 JSON progress values are `done`, `pending`, `review`, `unknown`, and `n-a`; human summaries display `DONE`, `PENDING`, `REVIEW`, `UNKNOWN`, `N/A`.
 
 Each source status has `source_id`, `selectors`, optional `scouted_events`, `review`, `binding`, overall `status`, separate `interpretation`, `parser`, `measurements`, `observation`, `fields`, `record_kinds`, `unobserved_declared_fields`, and `next_actions`. Each field has `field`, booleans `declared`, `observed`, `measured`, progress `status` and `values`, `values_requested`, `evidence_dates`, and `not_reobserved`. Measured zero can complete a measurement while leaving a declaration unobserved and needing review.
 
-The inventory state contains `schema_version`, `format`, `created_at`, `updated_at`, `target`, `scout_plan`, `scouting`, `sources`, `parser_pages`, `parsers`, `parser_exclusions`, `discovery_runs`, `parser_runs`, `packs`, `active_pack`, `reconciled_evidence_sha256`, `reconciled_at`, and `failures`. These store cumulative evidence, snapshots, and fingerprints. They are sensitive producer-managed storage, not flags to edit to force completion. Status validates referenced packs; missing/changed snapshots can make status fail. See [refresh and recovery](INVENTORY.md).
+The inventory state contains `schema_version`, `format`, `created_at`, `updated_at`, `discovery_mode`, `quick_depth`, `unverified_leads`, `query_observations`, `refresh_settings`, optional `refresh_reminder`, `refresh_attempts`, `source_metadata`, `pending_inventory`, `target`, `scout_plan`, `scouting`, `sources`, `parser_pages`, `parsers`, `parser_exclusions`, `discovery_runs`, `parser_runs`, `packs`, `active_pack`, `reconciled_evidence_sha256`, `reconciled_at`, and `failures`. These store cumulative evidence, snapshots, and fingerprints. They are sensitive producer-managed storage, not flags to edit to force completion. Status validates referenced packs; missing/changed snapshots can make status fail. See [refresh and recovery](INVENTORY.md).
+
+Both Full and Quick generation/checking can queue bounded unverified source/input-field hints. Existing Quick leads remain; assessment writes neither hints nor leads. Pending work retains exact selector namespaces and revision identity. Refresh only adds scoped metadata/pending work; it does not ground fields, infer parser assignments or complete inventory.
 
 In Full mode, `prepare-scout` emits MCP `repository:"search-all"` and requires authorization for that target. In Quick mode, it emits the selected `environment.view` and a finite host budget. Relay the exact emitted arguments for the authorized target. See [scouting boundaries](INVENTORY.md#action-inputs-and-evidence-boundaries).
 
@@ -171,7 +196,9 @@ A native pack contains `format_version`, `producer_version`, `profile_id`, `know
 
 The offline discovery plan contains `schema_version`, `environment`, `is_live:false`, `executes_searches:false`, `initial_probes`, `deferred_stages`, `max_queries`, and `max_seconds`. Deferred stages depend on measurements; it is not a complete list of future queries.
 
-MCP step output contains `mode`, `status`, `answered`, `max_queries`, `probes`, `active_pack_updated`, and `diagnostics`. `answered` counts stored answers; it does not certify successful activation. Consume emitted `probe_id` and exact `mcp.tool`/`mcp.arguments` for each outstanding probe. Output status `complete` exits `0`; `needs-probes` and `activation-blocked` exit `3`; failures exit `2`. Persisted state statuses also include `activating` and `activated` and are not the same enum as step output. The state is producer-managed and stores sensitive raw captures/frozen outputs. See [MCP lifecycle](MCP-COMPANION.md).
+Durable discovery step output contains `mode` (`mcp` or `native`), `status`, `answered`, `max_queries`, `probes`, `active_pack_updated`, and `diagnostics`. `answered` counts accepted captures, not remote dispatch attempts or completed activation. In a new format-3 MCP run, reserve one exact `probe_id` with `--dispatch` before its host call; consume its exact `mcp.tool`/`mcp.arguments`, then submit the entire matching original result before another dispatch. Accepted captures replay locally without remote re-execution; cancelled retries consume another attempt. Rejected format-3 results retain their exact bytes/hash and diagnostic separately from accepted evidence, leaving the same attempt in `cleanup-pending`. An error or client timeout is not remote terminal proof. An acceptable original successful result or exact bound host cleanup settlement can resolve that attempt; rejected history and charges remain retained. Format 3 retains immutable request/target/window/path/starting-pack bindings, attempt charges, native known-job IDs and original active-time allowance; safe pauses exclude idle time without renewing budgets. Compatible format-2 checkpoints retain their legacy multi-answer, absolute-deadline and terminal-failure rules.
+
+Output status `complete` exits `0`; `needs-probes`, `paused`, `cancel-requested`, `cleanup-pending` and `activation-blocked` exit `3`; failures exit `2`. Persisted states also include `activating` and `activated`. Cancellation is separate from provider termination: use exact bound host settlement evidence for MCP, and real saved-job cleanup for native execution. The checkpoint is producer-managed sensitive storage, not an editable request. See [cancel/resume contracts](ENVIRONMENT.md#cancel-and-resume-discovery) and [MCP lifecycle](MCP-COMPANION.md) for flags, strict settlement fields and frozen activation recovery.
 
 ## Result assessment
 

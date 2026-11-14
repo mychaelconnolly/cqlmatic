@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 mod inventory_cli;
 mod setup_cli;
+mod terminal;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cqlmatic::{
     app,
@@ -9,7 +10,7 @@ use cqlmatic::{
     contracts::*,
     discovery,
     environment::{self, Pack},
-    inventory::{self, DiscoveryMode, InventoryState, UnverifiedFieldLead},
+    inventory::{self, DiscoveryMode, InventoryHint, InventoryState, UnverifiedFieldLead},
     mcp, network, sha256_hex, storage,
 };
 use serde_json::{Value, json};
@@ -282,6 +283,28 @@ enum EnvCommand {
             help = "Saved MCP tool result for an emitted probe; repeatable"
         )]
         answers: Vec<String>,
+        #[arg(
+            long,
+            help = "Cancel queued discovery work and retain a resumable checkpoint"
+        )]
+        cancel: bool,
+        #[arg(
+            long,
+            help = "Resume a safely paused discovery without resetting its budgets"
+        )]
+        resume: bool,
+        #[arg(
+            long,
+            value_name = "PROBE_ID",
+            help = "Durably reserve an MCP probe before its host call"
+        )]
+        dispatch: Option<String>,
+        #[arg(
+            long,
+            value_name = "PROBE_ID=FILE",
+            help = "Import bound host terminal cleanup evidence for a cancelled MCP attempt"
+        )]
+        settle_cancelled: Option<String>,
         #[arg(long)]
         pack: Option<PathBuf>,
         #[arg(long)]
@@ -436,12 +459,12 @@ fn emit_analysis(a: &Analysis, common: &Common, generated: bool) -> Result<i32, 
             ))?;
         }
         for d in &a.diagnostics {
-            writeln!(
-                io::stderr().lock(),
-                "{}: {}",
-                human(&d.code),
-                human(&d.message)
-            )
+            let text = format!("{}: {}", human(&d.code), human(&d.message));
+            (if d.severity == Severity::Warning {
+                terminal::warning_stderr(&text)
+            } else {
+                writeln!(io::stderr().lock(), "{text}")
+            })
             .map_err(|_| Diagnostic::error("OUTPUT_IO", "Cannot write diagnostics."))?;
         }
         for (label, fields) in [
@@ -544,6 +567,9 @@ fn select_inventory(
             || !state.discovery_runs.is_empty()
             || !state.parser_runs.is_empty()
             || !state.failures.is_empty()
+            || !state.pending_inventory.is_empty()
+            || !state.source_metadata.is_empty()
+            || !state.refresh_attempts.is_empty()
             || state.reconciled_evidence_sha256.is_some()
             || state.reconciled_at.is_some()
         {
@@ -605,13 +631,11 @@ fn load_active_pack(state: &InventoryState) -> Result<Option<Pack>, Diagnostic> 
         .transpose()
 }
 
-fn save_quick_leads(
+fn save_inventory_hints(
     quick: &SavedInventory,
     leads: Vec<UnverifiedFieldLead>,
-) -> Result<usize, Diagnostic> {
-    if leads.is_empty() {
-        return Ok(0);
-    }
+    mut hints: Vec<InventoryHint>,
+) -> Result<(usize, usize), Diagnostic> {
     let parent = quick
         .path
         .parent()
@@ -624,7 +648,7 @@ fn save_quick_leads(
         ));
     }
     let mut current = read_inventory_state(&quick.path)?;
-    if current.discovery_mode != DiscoveryMode::Quick {
+    if current.discovery_mode != quick.state.discovery_mode {
         return Err(input_error(
             "Quick inventory mode changed before leads could be saved.",
         ));
@@ -640,14 +664,62 @@ fn save_quick_leads(
             "Quick inventory target changed before leads could be saved.",
         ));
     }
-    load_active_pack(&current)?;
+    let active = load_active_pack(&current)?;
     let before = current.unverified_leads.len();
-    current.add_unverified_leads(leads)?;
-    let added = current.unverified_leads.len() - before;
-    if added == 0 {
-        return Ok(0);
+    if current.discovery_mode == DiscoveryMode::Quick {
+        current.add_unverified_leads(leads)?;
     }
-    current.schema_version = 2;
+    let added = current.unverified_leads.len() - before;
+    let target = current
+        .target
+        .as_ref()
+        .expect("confirmed inventory")
+        .environment
+        .clone();
+    for hint in &mut hints {
+        hint.fields.retain(|name| {
+            !active.as_ref().is_some_and(|pack| {
+                pack.data
+                    .fields
+                    .iter()
+                    .filter_map(|v| environment::field(v).ok())
+                    .any(|field| {
+                        let field_name = match field.is_tag {
+                            Some(true) => format!("#{}", field.path),
+                            Some(false) => field.path.clone(),
+                            None => return false,
+                        };
+                        field_name == *name
+                            && pack
+                                .data
+                                .sources
+                                .iter()
+                                .filter_map(|v| environment::source(v).ok())
+                                .any(|source| {
+                                    source.id == field.source_id
+                                        && source.selectors.as_ref().is_some_and(|selectors| {
+                                            selectors.repo == hint.source.repo
+                                                && selectors.type_ == hint.source.type_
+                                        })
+                                })
+                    })
+            }) && !current.query_observations.iter().any(|observation| {
+                observation.environment == target
+                    && observation.source_id == discovery::source_id(&hint.source)
+                    && observation
+                        .fields
+                        .iter()
+                        .any(|field| field.field == *name && field.positive_rows > 0)
+            })
+        });
+    }
+    let (boundary, _checkpoint_guard) = inventory_cli::inventory_capture_boundary(&current);
+    let changed = current.record_inventory_hints_with_boundary(&target, hints, boundary)?;
+    let notifications = current.inventory_notifications();
+    if added == 0 && changed == 0 {
+        return Ok((0, notifications.len()));
+    }
+    current.schema_version = inventory::STATE_VERSION;
     current.updated_at = discovery::timestamp();
     current.validate()?;
     setup_cli::protect_directory(parent)?;
@@ -656,7 +728,7 @@ fn save_quick_leads(
             .map_err(|_| input_error("Cannot serialize Quick inventory state."))?,
         inventory::MAX_STATE_BYTES,
     )?;
-    Ok(added)
+    Ok((added, notifications.len()))
 }
 
 fn inventory_info(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -728,7 +800,7 @@ fn inventory_result(
         result.diagnostics.push(notice);
         return result;
     }
-    let Some(quick) = quick.filter(|_| capture_leads) else {
+    let Some(quick) = quick else {
         return result;
     };
     if result.validation.status != Acceptance::Accepted {
@@ -737,12 +809,26 @@ fn inventory_result(
     let Some(query) = query else {
         return result;
     };
-    match app::unverified_leads(&query).and_then(|leads| save_quick_leads(quick, leads)) {
-        Ok(0) => {}
-        Ok(added) => result.diagnostics.push(inventory_info(
-            "CQL_QUICK_LEADS",
-            format!("Saved {added} unverified source/field lead(s) in Quick inventory."),
-        )),
+    let hints = app::inventory_hints(&query).and_then(|hints| {
+        let leads = if capture_leads {
+            app::unverified_leads(&query)?
+        } else {
+            Vec::new()
+        };
+        save_inventory_hints(quick, leads, hints)
+    });
+    match hints {
+        Ok((added, notifications)) => {
+            if added > 0 {
+                result.diagnostics.push(inventory_info(
+                    "CQL_QUICK_LEADS",
+                    format!("Saved {added} unverified source/field lead(s) in Quick inventory."),
+                ));
+            }
+            if notifications > 0 {
+                result.diagnostics.push(inventory_info("CQL_INVENTORY_PENDING", format!("Inventory work awaits acknowledgement for {notifications} source(s). Inventory now or defer through Settings; Settings * remains until the work is resolved.")));
+            }
+        }
         Err(d) => result.diagnostics.push(Diagnostic::warning(
             "CQL_QUICK_LEAD_SAVE",
             format!("Quick inventory could not save query leads: {}", d.message),
@@ -1021,7 +1107,7 @@ fn emit_assessment(result: &AssessResult, json: bool) -> Result<i32, Diagnostic>
         output(result, false)?;
     } else {
         for finding in &result.findings {
-            line(&format!(
+            let text = format!(
                 "{} ({}): {}",
                 human(&finding.code),
                 match finding.severity {
@@ -1030,7 +1116,14 @@ fn emit_assessment(result: &AssessResult, json: bool) -> Result<i32, Diagnostic>
                     Severity::Info => "info",
                 },
                 human(&finding.message)
-            ))?;
+            );
+            if finding.severity == Severity::Warning {
+                terminal::warning_stdout(&text).map_err(|_| {
+                    Diagnostic::error("OUTPUT_IO", "Cannot write assessment warning.")
+                })?;
+            } else {
+                line(&text)?;
+            }
         }
         line(&format!(
             "{}: {} row(s), {} finding(s)",
@@ -1437,10 +1530,71 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             mcp: mcp_mode,
             state,
             answers,
+            cancel,
+            resume,
+            dispatch,
+            settle_cancelled,
             pack,
             credentials_file,
             receipt,
         } => {
+            let controls = usize::from(cancel)
+                + usize::from(resume)
+                + usize::from(dispatch.is_some())
+                + usize::from(settle_cancelled.is_some());
+            if controls > 1
+                || (controls > 0
+                    && (request.is_some()
+                        || !answers.is_empty()
+                        || pack.is_some()
+                        || receipt.is_some()))
+            {
+                return Err(input_error(
+                    "Use one discovery control with an existing --state, without initialization or answers.",
+                ));
+            }
+            if cancel || dispatch.is_some() || settle_cancelled.is_some() || (resume && mcp_mode) {
+                if mcp_mode == execute || (mcp_mode && credentials_file.is_some()) {
+                    return Err(input_error(
+                        "Choose --mcp or --execute for the saved discovery control.",
+                    ));
+                }
+                let path = state
+                    .as_deref()
+                    .ok_or_else(|| input_error("Discovery controls require --state PATH."))?;
+                let result = if cancel {
+                    mcp::pause(path).map_err(|mut diagnostic| {
+                        if diagnostic.code == "PACK_BUSY" {
+                            diagnostic.message = "Discovery is owned by another process. Use Ctrl-C in its terminal; this action did not signal it.".into();
+                        }
+                        diagnostic
+                    })?
+                } else if resume {
+                    mcp::resume(path)?
+                } else if let Some(id) = dispatch {
+                    if !mcp_mode {
+                        return Err(input_error(
+                            "--dispatch is owned by the MCP host; native execution reserves its own attempts.",
+                        ));
+                    }
+                    mcp::dispatch(path, &id)?
+                } else {
+                    if !mcp_mode {
+                        return Err(input_error(
+                            "Native cleanup recovery requires --execute --resume.",
+                        ));
+                    }
+                    let pair = settle_cancelled.expect("control checked");
+                    let (id, file) = pair
+                        .split_once('=')
+                        .filter(|(id, file)| id.starts_with("p-") && !file.is_empty())
+                        .ok_or_else(|| input_error("Use --settle-cancelled PROBE_ID=FILE."))?;
+                    mcp::settle_cancelled(path, id, Path::new(file))?
+                };
+                let code = result.exit_code();
+                output(&result, false)?;
+                return Ok(code);
+            }
             if mcp_mode {
                 if execute || credentials_file.is_some() {
                     return Err(input_error(
@@ -1459,7 +1613,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                     let receipt = receipt
                         .ok_or_else(|| input_error("--mcp init requires --receipt PATH."))?;
                     let request: discovery::DiscoverRequest = json_file(&request)?;
-                    mcp::init(request, &state, &pack, &receipt)?
+                    mcp::init_resumable(request, &state, &pack, &receipt, mcp::Transport::Mcp)?
                 } else {
                     if pack.is_some() || receipt.is_some() {
                         return Err(input_error(
@@ -1484,7 +1638,61 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 output(&result, false)?;
                 return Ok(code);
             }
-            if state.is_some() || !answers.is_empty() {
+            if let Some(state) = state {
+                if !execute || !answers.is_empty() {
+                    return Err(input_error(
+                        "Native resumable discovery requires --execute --state; MCP answers require --mcp.",
+                    ));
+                }
+                let request = if let Some(request) = request {
+                    let request: discovery::DiscoverRequest = json_file(&request)?;
+                    let pack = pack.ok_or_else(|| {
+                        input_error("Native discovery initialization requires --pack PATH.")
+                    })?;
+                    let receipt = receipt.ok_or_else(|| {
+                        input_error("Native discovery initialization requires --receipt PATH.")
+                    })?;
+                    mcp::init_resumable(
+                        request.clone(),
+                        &state,
+                        &pack,
+                        &receipt,
+                        mcp::Transport::Native,
+                    )?;
+                    request
+                } else {
+                    if pack.is_some() || receipt.is_some() {
+                        return Err(input_error(
+                            "--pack and --receipt are only accepted at initialization.",
+                        ));
+                    }
+                    mcp::resumable_request(&state)?
+                };
+                let info = mcp::resumable_info(&state)?;
+                if info["transport"] != "native" {
+                    return Err(input_error(
+                        "This discovery belongs to the MCP host; use --mcp.",
+                    ));
+                }
+                install_cancel()?;
+                let credentials =
+                    network::Credentials::load(credentials_file.as_deref(), &request.environment)?;
+                let mut client = network::FalconClient::new(&request.environment, credentials)?;
+                if resume {
+                    if info["in_flight"] == true {
+                        mcp::recover_native_cleanup(&state, &mut client)?;
+                    }
+                    mcp::resume(&state)?;
+                }
+                let result = mcp::run_native(&state, &mut client)?;
+                let code = result.exit_code();
+                output(&result, false)?;
+                return Ok(code);
+            }
+            if resume {
+                return Err(input_error("--resume requires --state PATH."));
+            }
+            if !answers.is_empty() {
                 return Err(input_error("--state and --answer require --mcp."));
             }
             let request =
@@ -1601,6 +1809,15 @@ fn install_cancel() -> Result<(), Diagnostic> {
 }
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let brief = matches!(
+        &cli.command,
+        Some(Command::Status(inventory_cli::StatusArgs {
+            brief: true,
+            ..
+        })) | Some(Command::Env {
+            command: EnvCommand::Inventory(inventory_cli::InventoryArgs { brief: true, .. })
+        })
+    );
     let result = if cli.schema.is_some() && cli.command.is_some() {
         Err(input_error("--schema cannot be combined with a command."))
     } else if let Some(schema) = cli.schema {
@@ -1633,6 +1850,11 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => ExitCode::from(code as u8),
         Err(d) => {
+            let d = if brief {
+                inventory_cli::brief_failure()
+            } else {
+                d
+            };
             let _ = writeln!(
                 io::stderr().lock(),
                 "{}",
@@ -1661,6 +1883,26 @@ mod tests {
 
     fn exit_code(result: &Result<i32, Diagnostic>) -> i32 {
         result.as_ref().copied().unwrap_or(2)
+    }
+
+    fn parsed_mcp_control(
+        state: &Path,
+        control: &str,
+        value: Option<&str>,
+    ) -> Result<i32, Diagnostic> {
+        let mut args = vec![
+            "cqlmatic".into(),
+            "env".into(),
+            "discover".into(),
+            "--mcp".into(),
+            "--state".into(),
+            state.as_os_str().to_owned(),
+            control.into(),
+        ];
+        if let Some(value) = value {
+            args.push(value.into());
+        }
+        parsed_discovery(args)
     }
 
     fn test_directory() -> PathBuf {
@@ -1747,6 +1989,10 @@ mod tests {
             mcp: true,
             state: Some(state.clone()),
             answers: vec![],
+            cancel: false,
+            resume: false,
+            dispatch: None,
+            settle_cancelled: None,
             pack: Some(pack.clone()),
             credentials_file: None,
             receipt: Some(receipt.clone()),
@@ -1762,6 +2008,10 @@ mod tests {
             mcp: true,
             state: Some(state),
             answers: vec![],
+            cancel: false,
+            resume: false,
+            dispatch: None,
+            settle_cancelled: None,
             pack: None,
             credentials_file: None,
             receipt: None,
@@ -1849,6 +2099,10 @@ mod tests {
                 answer
             };
             let pair = format!("{}={}", p["probe_id"].as_str().unwrap(), path.display());
+            assert_eq!(
+                parsed_mcp_control(&state, "--dispatch", p["probe_id"].as_str()).unwrap(),
+                3
+            );
             assert_eq!(run_step(&pair).unwrap(), 3);
         }
         assert_eq!(mcp::step(&state, &[]).unwrap().answered, 2);
@@ -1857,7 +2111,7 @@ mod tests {
     }
 
     #[test]
-    fn parsed_mcp_cli_later_failure_exits_two_and_preserves_existing_pack() {
+    fn parsed_mcp_cli_rejected_result_preserves_pack_and_unresolved_attempt() {
         let dir = test_directory();
         let request = dir.join("request.json");
         std::fs::write(
@@ -1907,6 +2161,10 @@ mod tests {
             .to_string();
         let answer = dir.join("error.json");
         std::fs::write(&answer, r#"{"result":[],"error":"synthetic tool error"}"#).unwrap();
+        assert_eq!(
+            parsed_mcp_control(&state, "--dispatch", Some(&id)).unwrap(),
+            3
+        );
         let result = parsed_discovery(vec![
             "cqlmatic".into(),
             "env".into(),
@@ -1917,10 +2175,114 @@ mod tests {
             "--answer".into(),
             format!("{}={}", id, answer.display()).into(),
         ]);
-        assert_eq!(exit_code(&result), 2);
-        assert_eq!(mcp::step(&state, &[]).unwrap().status, "failed");
+        assert_eq!(exit_code(&result), 3);
+        assert_eq!(mcp::step(&state, &[]).unwrap().status, "cleanup-pending");
+        assert_eq!(mcp::resumable_info(&state).unwrap()["in_flight"], true);
+        assert_eq!(
+            parsed_mcp_control(&state, "--resume", None)
+                .unwrap_err()
+                .code,
+            "DISCOVERY_CLEANUP_PENDING"
+        );
         assert_eq!(std::fs::read(&pack).unwrap(), before);
         assert!(!receipt.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parsed_mcp_cancel_waits_for_the_current_result_and_resumes_without_replaying_it() {
+        let dir = test_directory();
+        let state = dir.join("state.json");
+        let pack = dir.join("pack.json");
+        let receipt = dir.join("receipt.json");
+        let request: discovery::DiscoverRequest =
+            serde_json::from_str(include_str!("../examples/mcp/discover.request.json")).unwrap();
+        mcp::init_resumable(request, &state, &pack, &receipt, mcp::Transport::Mcp).unwrap();
+        assert_eq!(parsed_mcp_control(&state, "--cancel", None).unwrap(), 3);
+        assert_eq!(mcp::resumable_info(&state).unwrap()["status"], "paused");
+        assert_eq!(parsed_mcp_control(&state, "--resume", None).unwrap(), 3);
+        let output = mcp::step(&state, &[]).unwrap();
+        let id = output.probes[0]["probe_id"].as_str().unwrap();
+        assert_eq!(
+            parsed_mcp_control(&state, "--dispatch", Some(id)).unwrap(),
+            3
+        );
+        assert_eq!(parsed_mcp_control(&state, "--cancel", None).unwrap(), 3);
+        assert_eq!(
+            mcp::resumable_info(&state).unwrap()["status"],
+            "cancel-requested"
+        );
+        assert_eq!(
+            parsed_mcp_control(&state, "--resume", None)
+                .unwrap_err()
+                .code,
+            "DISCOVERY_CLEANUP_PENDING"
+        );
+        let result = dir.join("result.json");
+        std::fs::write(&result, include_str!("../examples/mcp/count.json")).unwrap();
+        assert_eq!(
+            parsed_mcp_control(
+                &state,
+                "--answer",
+                Some(&format!("{id}={}", result.display()))
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(mcp::resumable_info(&state).unwrap()["status"], "paused");
+        assert!(!pack.exists());
+        assert!(!receipt.exists());
+        assert_eq!(parsed_mcp_control(&state, "--resume", None).unwrap(), 3);
+        let output = mcp::step(&state, &[]).unwrap();
+        assert_eq!(output.answered, 1);
+        assert!(!output.probes.iter().any(|probe| probe["probe_id"] == id));
+        assert_eq!(mcp::resumable_info(&state).unwrap()["attempts"], 1);
+        let before = std::fs::read(&state).unwrap();
+        let incompatible = parsed_discovery(vec![
+            "cqlmatic".into(),
+            "env".into(),
+            "discover".into(),
+            "--mcp".into(),
+            "--state".into(),
+            state.into_os_string(),
+            "--cancel".into(),
+            "--resume".into(),
+        ]);
+        assert_eq!(incompatible.unwrap_err().code, "CLI_INPUT");
+        assert_eq!(std::fs::read(dir.join("state.json")).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parsed_native_cancel_does_not_signal_a_locked_owner() {
+        let dir = test_directory();
+        let state = dir.join("state.json");
+        let request: discovery::DiscoverRequest =
+            serde_json::from_str(include_str!("../examples/mcp/discover.request.json")).unwrap();
+        mcp::init_resumable(
+            request,
+            &state,
+            &dir.join("pack.json"),
+            &dir.join("receipt.json"),
+            mcp::Transport::Native,
+        )
+        .unwrap();
+        let before = std::fs::read(&state).unwrap();
+        let owner = storage::Writer::acquire(&state).unwrap();
+        let result = parsed_discovery(vec![
+            "cqlmatic".into(),
+            "env".into(),
+            "discover".into(),
+            "--execute".into(),
+            "--state".into(),
+            state.clone().into_os_string(),
+            "--cancel".into(),
+        ]);
+        let diagnostic = result.unwrap_err();
+        assert_eq!(diagnostic.code, "PACK_BUSY");
+        assert!(diagnostic.message.contains("Ctrl-C"));
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+        drop(owner);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1934,5 +2296,108 @@ mod tests {
         assert_eq!(report["active_pack_updated"], true);
         assert_eq!(report["durability_confirmed"], false);
         assert_eq!(report["diagnostics"][0]["code"], "PACK_DURABILITY");
+    }
+
+    #[test]
+    fn hint_save_merges_a_refresh_import_after_an_earlier_inventory_read() {
+        let dir = test_directory();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        setup_cli::protect_directory(&dir).unwrap();
+        let path = dir.join("inventory.json");
+        let now = discovery::timestamp();
+        let target = EnvironmentId {
+            cloud: Cloud::Us1,
+            tenant: "0".repeat(32),
+            view: "search-all".into(),
+        };
+        let mut initial = InventoryState::new(&now).unwrap();
+        initial
+            .confirm(
+                target.clone(),
+                inventory::TargetScope::SelectedSources,
+                "Synthetic target".into(),
+                vec![Scope {
+                    repo: Some("sample".into()),
+                    ..Scope::default()
+                }],
+                &now,
+            )
+            .unwrap();
+        let earlier = SavedInventory {
+            path: path.clone(),
+            state: initial.clone(),
+            active_pack: None,
+        };
+        let mut imported = initial;
+        let host = serde_json::to_vec(&json!({"schema_version":1,"environment":target,
+            "session_id":"synthetic-session","verified_at":now,"mechanism":"provider-enforced-search-lifetime",
+            "max_search_seconds":300,"capability_reference":"Synthetic provider capability",
+            "verification_evidence":"Synthetic session verification of provider search lifetime"})).unwrap();
+        let id = imported
+            .prepare_refresh("synthetic-session".into(), &host, false, &now)
+            .unwrap();
+        let arguments = imported
+            .dispatch_refresh(&id, "synthetic-session", &now)
+            .unwrap();
+        let result = br##"{"result":[{"#repo":"imported","events":1}]}"##;
+        let settlement = serde_json::to_vec(&json!({"schema_version":1,"attempt_id":id,
+            "environment":target,"session_id":"synthetic-session","arguments":arguments,
+            "termination":"completed","recorded_at":now,"result_sha256":sha256_hex(result),
+            "evidence":"Synthetic exact-attempt completion evidence"}))
+        .unwrap();
+        imported.settle_refresh(&id, &settlement, &now).unwrap();
+        imported.import_refresh(&id, result, &now).unwrap();
+        storage::Writer::acquire(&path)
+            .unwrap()
+            .commit_bytes(
+                &serde_json::to_vec(&imported).unwrap(),
+                inventory::MAX_STATE_BYTES,
+            )
+            .unwrap();
+
+        let (added, notifications) = save_inventory_hints(
+            &earlier,
+            vec![],
+            vec![InventoryHint {
+                source: Scope {
+                    repo: Some("query-hint".into()),
+                    ..Scope::default()
+                },
+                fields: vec!["user".into()],
+            }],
+        )
+        .unwrap();
+        assert_eq!((added, notifications), (0, 2));
+        let saved = read_inventory_state(&path).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved.refresh_attempts).unwrap(),
+            serde_json::to_value(&imported.refresh_attempts).unwrap()
+        );
+        assert_eq!(saved.pending_inventory.len(), 2);
+        assert!(
+            saved
+                .pending_inventory
+                .iter()
+                .all(|work| work.notified_revision == 0)
+        );
+        for repo in ["imported", "query-hint"] {
+            assert!(
+                saved
+                    .pending_inventory
+                    .iter()
+                    .any(|work| work.source.repo.as_deref() == Some(repo))
+            );
+        }
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            save_inventory_hints(&earlier, vec![], vec![]).unwrap(),
+            (0, 2)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

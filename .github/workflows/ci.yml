@@ -53,6 +53,7 @@ jobs:
       - name: Replay synthetic MCP discovery and assess offline
         run: |
           set -euo pipefail
+          umask 077
           work=.local/ci-mcp-replay
           mkdir -p "$work"
           trap 'rm -rf "$work"' EXIT
@@ -76,13 +77,20 @@ jobs:
               return {"census": "census", "volume": "count", "dataset-facet": "dataset", "fieldset": "fieldset", "population": "population", "value-facet": "value"}[kind]
           print("\n".join(p["probe_id"] + "=examples/mcp/" + name(p) + ".json" for p in json.load(open(sys.argv[1]))["probes"]))' "$work/step.json")"
             test -n "$answers"
-            args=()
-            while IFS= read -r answer; do args+=(--answer "$answer"); done <<< "$answers"
-            set +e
-            ./target/release/cqlmatic env discover --mcp --state "$work/state.json" "${args[@]}" > "$work/step.json"
-            code=$?
-            set -e
-            if [ "$code" -ne 3 ]; then test "$code" -eq 0; fi
+            while IFS= read -r answer; do
+              probe_id="${answer%%=*}"
+              set +e
+              ./target/release/cqlmatic env discover --mcp --state "$work/state.json" --dispatch "$probe_id" > "$work/dispatched.json"
+              code=$?
+              set -e
+              test "$code" -eq 3
+              set +e
+              ./target/release/cqlmatic env discover --mcp --state "$work/state.json" --answer "$answer" > "$work/step.json"
+              code=$?
+              set -e
+              if [ "$code" -eq 0 ]; then break; fi
+              test "$code" -eq 3
+            done <<< "$answers"
           done
           test "$code" -eq 0
           test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/step.json")" = complete

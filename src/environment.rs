@@ -919,6 +919,7 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     .as_ref()
                     .and_then(|evidence| evidence.observed)
                     == Some(false);
+            let incoming_observed = f.evidence.as_ref().and_then(|evidence| evidence.observed);
             let retained_measurement = source_measurement(old, &retained);
             let incoming_source = source_measurement(candidate, &f);
             let ordered_source = if stale || negative && retained_measurement.is_none() {
@@ -930,18 +931,24 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     .zip(incoming_source)
                     .is_some_and(|(previous, incoming)| incoming > previous)
             };
-            let preserve_source_negative = negative
-                && f.evidence.as_ref().and_then(|evidence| evidence.observed) == Some(false)
-                && !ordered_source;
-            if negative
-                && f.evidence.as_ref().and_then(|evidence| evidence.observed) != Some(false)
-                && !ordered_source
-            {
+            let conflicting_source = if negative {
+                incoming_observed != Some(false)
+            } else {
+                retained
+                    .evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.observed)
+                    .zip(incoming_observed)
+                    .is_some_and(|(previous, incoming)| previous != incoming)
+            };
+            if conflicting_source && !ordered_source {
                 return Err(invalid(&format!(
-                    "Source measurement ordering conflict for source {}: positive or unknown source evidence cannot replace current negative evidence without a newer qualifying measurement.",
+                    "Source measurement ordering conflict for source {}: contradictory source evidence cannot replace current evidence without a newer qualifying measurement.",
                     retained.id
                 )));
             }
+            let preserve_source = !ordered_source
+                && (negative || incoming_observed.is_none() || retained_measurement.is_some());
             let old_id = id(&prior).to_string();
             let new_id = f.id.clone();
             replaced.insert(old_id.clone(), new_id.clone());
@@ -1034,7 +1041,9 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                     }
                 }
             }
-            if preserve_source_negative {
+            if preserve_source {
+                // Retained source proof cannot date a new historical marker for omitted fields.
+                field_batches.insert(old_id, BTreeSet::new());
                 for key in ["evidence", "inventory_status", "provenance_ids"] {
                     merged[key] = prior[key].clone();
                 }
@@ -1054,6 +1063,20 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
             .map(|(old, _)| old.clone())
             .unwrap_or(fresh.source_id.clone());
         f["source_id"] = Value::String(source_id.clone());
+        if data.fields.iter().any(|prior| {
+            id(prior) == fresh.id
+                && (prior["source_id"] != source_id
+                    || prior["path"] != fresh.path
+                    || prior
+                        .get("is_tag")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        != fresh.is_tag.unwrap_or(false))
+        }) {
+            return Err(invalid(
+                "A field ID cannot be reused for a different source, path or namespace.",
+            ));
+        }
         if let Some(prior) = data.fields.iter().find(|p| {
             p["source_id"] == source_id
                 && p["path"] == fresh.path

@@ -680,7 +680,7 @@ pub static FUNCTIONS: &[Function] = &[
     function!("lower", Transform, ["field"], ["field"], ["field":"f","as":"s","locale":"s","type":"s"]),
     function!("upper", Transform, ["field"], ["field"], ["field":"f","as":"s","locale":"s"]),
     function!("length", Transform, ["field"], ["field"], ["field":"f","as":"s"]),
-    function!("concat", Transform, ["field"], ["field"], ["field":"A","as":"s","separator":"s"]),
+    function!("concat", Transform, ["field"], ["field"], ["field":"F","as":"s"]),
     function!("split", Transform, ["field"], [], ["field":"f","strip":"b"]),
     function!("replace", Transform, ["regex"], ["regex"], ["regex":"r","with":"s","field":"f","as":"s","flags":"s"]),
     function!("format", Transform, ["format"], ["format","field"], ["format":"s","field":"F","as":"s","timezone":"s"]),

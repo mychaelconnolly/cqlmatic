@@ -607,12 +607,8 @@ fn synthetic_mcp_replay_generates_observed_query_and_assesses_saved_answer() {
     let mut activated = false;
     for _ in 0..4 {
         assert_eq!(step["status"], "needs-probes");
-        let probes = step["probes"].as_array().unwrap();
+        let probes = step["probes"].as_array().unwrap().clone();
         assert!(!probes.is_empty());
-        let mut command = binary();
-        command
-            .args(["env", "discover", "--mcp", "--state"])
-            .arg(&state);
         for probe in probes {
             // Same probe-to-answer mapping as tests/mcp_discovery.rs fixture().
             let field = probe["field"].as_str();
@@ -629,19 +625,34 @@ fn synthetic_mcp_replay_generates_observed_query_and_assesses_saved_answer() {
                 "record-kind-facet" if field == Some("#event_simpleName") => "simple-name.json",
                 other => panic!("unexpected probe kind: {other} {field:?}"),
             };
-            command.arg("--answer").arg(format!(
-                "{}={}",
-                probe["probe_id"].as_str().unwrap(),
-                fixture(file).display()
-            ));
+            let mut dispatch = binary();
+            dispatch
+                .args(["env", "discover", "--mcp", "--state"])
+                .arg(&state)
+                .arg("--dispatch")
+                .arg(probe["probe_id"].as_str().unwrap());
+            assert_eq!(result(&run(dispatch, b""), 3)["status"], "needs-probes");
+            let mut command = binary();
+            command
+                .args(["env", "discover", "--mcp", "--state"])
+                .arg(&state)
+                .arg("--answer")
+                .arg(format!(
+                    "{}={}",
+                    probe["probe_id"].as_str().unwrap(),
+                    fixture(file).display()
+                ));
+            let out = run(command, b"");
+            if out.status.code() == Some(0) {
+                step = result(&out, 0);
+                activated = true;
+                break;
+            }
+            step = result(&out, 3);
         }
-        let out = run(command, b"");
-        if out.status.code() == Some(0) {
-            step = result(&out, 0);
-            activated = true;
+        if activated {
             break;
         }
-        step = result(&out, 3);
     }
     assert!(activated, "{step}");
     assert_eq!(step["status"], "complete");

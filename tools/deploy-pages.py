@@ -249,7 +249,23 @@ def restore(client, projects, previous, attempted, changed, source_sha, marker):
 
 
 def write_summary(proof):
-    raw = json.dumps(proof, sort_keys=True, indent=2)
+    public = {"source_commit": verifier.commit(proof.get("source_commit")),
+              "site_manifest_sha256": proof.get("site_manifest_sha256"),
+              "status": "verified" if proof.get("status") == "verified" else "failed", "restoration": {}}
+    require(isinstance(public["site_manifest_sha256"], str) and
+            verifier.DIGEST.fullmatch(public["site_manifest_sha256"]), "A full site manifest SHA-256 is required.")
+    restoration = proof.get("restoration", {})
+    require(isinstance(restoration, dict), "The Pages restoration result is invalid.")
+    for name, _, _ in PROJECTS:
+        if name not in restoration:
+            continue
+        status = restoration[name]
+        if isinstance(status, str) and status.startswith("restored-") and DEPLOYMENT_ID.fullmatch(status.removeprefix("restored-")):
+            status = "restored"
+        public["restoration"][name] = status if status in (
+            "restored", "no-upload-found", "prior-production-unchanged", "blocked-newer-production",
+            "unavailable-first-deployment", "restoration-incomplete") else "restoration-incomplete"
+    raw = json.dumps(public, sort_keys=True, indent=2)
     print(raw, flush=True)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:

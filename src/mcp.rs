@@ -351,6 +351,14 @@ use crate::{
 const STATE_SCHEMA_VERSION: u32 = 2;
 const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 
+#[path = "discovery_session.rs"]
+mod session;
+pub use session::{
+    Transport, dispatch, has_in_flight, init_resumable, is_resumable, pause,
+    recover_native_cleanup, resumable_info, resumable_request, resume, run_native,
+    settle_cancelled, step_resumable,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ActivationIntent {
@@ -403,6 +411,8 @@ pub struct State {
     pub answers: BTreeMap<String, Answer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation: Option<ActivationIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<session::Session>,
 }
 
 #[derive(Debug)]
@@ -431,7 +441,8 @@ impl StepOutput {
     pub fn exit_code(&self) -> i32 {
         match self.status {
             "complete" => 0,
-            "needs-probes" | "activation-blocked" => 3,
+            "needs-probes" | "activation-blocked" | "paused" | "cancel-requested"
+            | "cleanup-pending" => 3,
             _ => 2,
         }
     }
@@ -685,16 +696,35 @@ fn validate_intent(state: &State, intent: &ActivationIntent) -> Result<(), Diagn
         || report.environment != state.request.environment
         || report.status != "complete"
         || !report.active_pack_updated
-        || receipt["mode"] != "mcp"
+        || receipt["mode"]
+            != if state
+                .session
+                .as_ref()
+                .is_some_and(|s| s.transport == Transport::Native)
+            {
+                "native"
+            } else {
+                "mcp"
+            }
         || receipt["request_sha256"] != state.request_sha256
         || receipt["run_id"] != intent.run_id
-        || report.captures.len() != state.answers.len()
+        || report.captures.len()
+            != state.answers.len() + state.session.as_ref().map_or(0, |s| s.captures.len())
     {
         return Err(tampered());
     }
     let mut seen = BTreeSet::new();
     for capture in report.captures {
         let id = discovery::probe_id(&state.request.environment.view, &capture.probe);
+        if let Some(session) = &state.session
+            && session.transport == Transport::Native
+        {
+            let saved = session.captures.get(&id).ok_or_else(tampered)?;
+            if !seen.insert(id) || frozen_json(&capture)? != frozen_json(saved)? {
+                return Err(tampered());
+            }
+            continue;
+        }
         let answer = state.answers.get(&id).ok_or_else(tampered)?;
         if !seen.insert(id)
             || answer.outcome != "complete"
@@ -728,12 +758,25 @@ fn optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, Diagnostic> {
     }
 }
 fn read_state(path: &Path) -> Result<State, Diagnostic> {
+    let state = inspect_state(path)?;
+    if state.producer_version != env!("CARGO_PKG_VERSION") {
+        return Err(tampered());
+    }
+    Ok(state)
+}
+
+/// Verify protected lifecycle history without granting execution or resume compatibility.
+pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
     let bytes = storage::read_bytes(path, MAX_PACK_BYTES)?;
     let header: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
     if header.get("format").and_then(Value::as_str) == Some("cqlmatic-mcp-state")
-        && (header.get("schema_version").and_then(Value::as_u64)
-            != Some(STATE_SCHEMA_VERSION as u64)
+        && ((header.get("schema_version").and_then(Value::as_u64) == Some(3)
+            && header.get("session").is_none())
+            || header
+                .get("schema_version")
+                .and_then(Value::as_u64)
+                .is_none_or(|version| ![STATE_SCHEMA_VERSION as u64, 3].contains(&version))
             || header.get("discovery_algorithm").and_then(Value::as_str)
                 != Some(DISCOVERY_ALGORITHM))
     {
@@ -745,12 +788,28 @@ fn read_state(path: &Path) -> Result<State, Diagnostic> {
     let state: State = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
     if state.format != "cqlmatic-mcp-state"
-        || state.schema_version != STATE_SCHEMA_VERSION
+        || ![STATE_SCHEMA_VERSION, 3].contains(&state.schema_version)
+        || (state.schema_version == 3) != state.session.is_some()
         || state.discovery_algorithm != DISCOVERY_ALGORITHM
-        || state.producer_version != env!("CARGO_PKG_VERSION")
+        || (state.producer_version != env!("CARGO_PKG_VERSION")
+            && !(state.schema_version == STATE_SCHEMA_VERSION
+                && state.session.is_none()
+                && state.status == "activated"
+                // These released producers share the format-2 activation contract.
+                && matches!(
+                    state.producer_version.as_str(),
+                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5"
+                )))
         || !matches!(
             state.status.as_str(),
-            "needs-probes" | "activation-blocked" | "activating" | "activated" | "failed"
+            "needs-probes"
+                | "activation-blocked"
+                | "activating"
+                | "activated"
+                | "failed"
+                | "paused"
+                | "cancel-requested"
+                | "cleanup-pending"
         )
         || state.request_sha256 != digest(&state.request)
         || discovery::validate_request(&state.request).is_err()
@@ -758,6 +817,7 @@ fn read_state(path: &Path) -> Result<State, Diagnostic> {
     {
         return Err(tampered());
     }
+    session::validate(&state)?;
     if !state.pack.is_absolute() || !state.receipt.is_absolute() {
         return Err(tampered());
     }
@@ -827,6 +887,21 @@ fn read_state(path: &Path) -> Result<State, Diagnostic> {
     }
     Ok(state)
 }
+
+/// Read an activated run and its verified frozen report without enabling resume.
+pub fn inspect_completed_report(path: &Path) -> Result<(State, DiscoverReport), Diagnostic> {
+    let state = inspect_state(path)?;
+    if state.status != "activated" {
+        return Err(Diagnostic::error(
+            "DISCOVERY_PHASE",
+            "Only an activated discovery run supplies a completed report.",
+        ));
+    }
+    let intent = state.activation.as_ref().ok_or_else(tampered)?;
+    let report = serde_json::from_str(&intent.receipt_bytes).map_err(|_| tampered())?;
+    Ok((state, report))
+}
+
 fn successes(state: &State) -> Result<BTreeMap<String, Vec<Value>>, Diagnostic> {
     state
         .answers
@@ -844,14 +919,27 @@ fn successes(state: &State) -> Result<BTreeMap<String, Vec<Value>>, Diagnostic> 
         .collect()
 }
 fn pending(state: &State) -> Result<Vec<Probe>, Diagnostic> {
-    let remaining = state
-        .request
-        .max_queries
-        .saturating_sub(state.answers.len() as u32);
-    Ok(discovery::frontier(&state.request, &successes(state)?)?
-        .into_iter()
-        .take(remaining as usize)
-        .collect())
+    let sparse_fieldset_fallback = state
+        .session
+        .as_ref()
+        .is_some_and(|session| session.sparse_fieldset_fallback);
+    let rows = if sparse_fieldset_fallback {
+        session::accepted_rows(state)?
+    } else {
+        successes(state)?
+    };
+    let remaining = state.request.max_queries.saturating_sub(
+        state
+            .session
+            .as_ref()
+            .map_or(state.answers.len(), |session| session.attempts_len()) as u32,
+    );
+    Ok(
+        discovery::frontier_with_policy(&state.request, &rows, sparse_fieldset_fallback)?
+            .into_iter()
+            .take(remaining as usize)
+            .collect(),
+    )
 }
 fn wire_probes(state: &State, probes: Vec<Probe>) -> Vec<Value> {
     probes
@@ -869,9 +957,17 @@ fn progress(
     diagnostics: Vec<Diagnostic>,
 ) -> StepOutput {
     StepOutput {
-        mode: "mcp",
+        mode: if state
+            .session
+            .as_ref()
+            .is_some_and(|s| s.transport == Transport::Native)
+        {
+            "native"
+        } else {
+            "mcp"
+        },
         status,
-        answered: state.answers.len(),
+        answered: state.answers.len() + state.session.as_ref().map_or(0, |s| s.captures.len()),
         max_queries: state.request.max_queries,
         probes: wire_probes(state, probes),
         active_pack_updated,
@@ -892,6 +988,9 @@ fn progress(
     }
 }
 fn elapsed(state: &State, now: &str) -> Result<Duration, Diagnostic> {
+    if let Some(session) = &state.session {
+        return session.remaining(state, now);
+    }
     let created = environment::parse_time(&state.created_at).map_err(|_| tampered())?;
     let now = environment::parse_time(now).map_err(|_| tampered())?;
     if now < created {
@@ -961,6 +1060,7 @@ pub fn init(
         failure: None,
         answers: BTreeMap::new(),
         activation: None,
+        session: None,
     };
     let probes = pending(&state)?;
     if probes.is_empty() {
@@ -990,6 +1090,10 @@ fn activate(
     candidate: Pack,
     mut report: DiscoverReport,
 ) -> Result<StepOutput, Diagnostic> {
+    if let Some(session) = state.session.as_mut() {
+        session.pause_clock(&discovery::timestamp())?;
+        store(writer, state)?;
+    }
     let pack_writer = match storage::Writer::acquire(&state.pack) {
         Ok(writer) => writer,
         Err(d) if d.code == "PACK_BUSY" => {
@@ -1009,6 +1113,11 @@ fn activate(
         Ok(old) => old,
         Err(d) => return fail_state(writer, state, d),
     };
+    if state.session.is_some()
+        && let Err(d) = session::ensure_predecessor(state)
+    {
+        return fail_state(writer, state, d);
+    }
     if old
         .as_ref()
         .is_some_and(|p| p.environment != state.request.environment)
@@ -1053,7 +1162,15 @@ fn activate(
     report.active_pack_updated = true;
     let mut receipt = serde_json::to_value(&report)
         .map_err(|_| Diagnostic::error("LOCAL_SERIALIZATION", "Cannot serialize MCP receipt."))?;
-    receipt["mode"] = json!("mcp");
+    receipt["mode"] = json!(if state
+        .session
+        .as_ref()
+        .is_some_and(|s| s.transport == Transport::Native)
+    {
+        "native"
+    } else {
+        "mcp"
+    });
     receipt["request_sha256"] = json!(state.request_sha256);
     receipt["run_id"] = json!(run_id(state));
     let pack_bytes = frozen_json(&merged)?;
@@ -1270,8 +1387,16 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
         }
     };
     let mut replay = ReplayBackend::new(&state.answers);
-    let (candidate, report) =
-        discovery::execute_with_origin(&state.request, &mut replay, Origin::Mcp, remaining);
+    let (candidate, report) = discovery::execute_with_policy(
+        &state.request,
+        &mut replay,
+        Origin::Mcp,
+        remaining,
+        state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.sparse_fieldset_fallback),
+    );
     if let Some(candidate) = candidate {
         return activate(writer, state, candidate, report);
     }
@@ -1305,6 +1430,10 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
 pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutput, Diagnostic> {
     let writer = storage::Writer::acquire(state_path)?;
     let mut state = read_state(state_path)?;
+    if state.session.is_some() {
+        drop(writer);
+        return step_resumable(state_path, answers);
+    }
     if state.status == "failed" {
         return advance(&writer, &mut state);
     }
@@ -1342,7 +1471,7 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
             ));
         }
     }
-    let probes = discovery::frontier(&state.request, &successes(&state)?)?;
+    let probes = discovery::frontier_with_policy(&state.request, &successes(&state)?, false)?;
     for (id, path) in answers {
         let probe = probes
             .iter()
@@ -1426,6 +1555,9 @@ mod recovery_tests {
         }
     }
     fn ready(predecessor: bool) -> Run {
+        ready_kind(predecessor, false)
+    }
+    fn ready_kind(predecessor: bool, resumable: bool) -> Run {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
             "cqlmatic-recovery-{}-{}",
@@ -1453,19 +1585,28 @@ mod recovery_tests {
                 .commit(&pack)
                 .unwrap();
         }
-        let mut output = init(request, &run.state, &run.pack, &run.receipt).unwrap();
+        let mut output = if resumable {
+            init_resumable(request, &run.state, &run.pack, &run.receipt, Transport::Mcp)
+        } else {
+            init(request, &run.state, &run.pack, &run.receipt)
+        }
+        .unwrap();
         let held = storage::Writer::acquire(&run.pack).unwrap();
         while output.status == "needs-probes" {
             let answers = output
                 .probes
                 .iter()
+                .take(if resumable { 1 } else { usize::MAX })
                 .enumerate()
                 .map(|(i, probe)| {
                     let path = run.directory.join(format!("answer-{i}.json"));
                     fs::write(&path, fixture(probe)).unwrap();
-                    (probe["probe_id"].as_str().unwrap().into(), path)
+                    (probe["probe_id"].as_str().unwrap().to_string(), path)
                 })
                 .collect::<Vec<_>>();
+            if resumable {
+                dispatch(&run.state, &answers[0].0).unwrap();
+            }
             output = step(&run.state, &answers).unwrap();
         }
         assert_eq!(output.status, "activation-blocked");
@@ -1511,6 +1652,88 @@ mod recovery_tests {
             sha256_hex(&fs::read(&run.receipt).unwrap()),
             intent.receipt_sha256
         );
+    }
+
+    #[test]
+    fn supported_legacy_completion_is_history_only_for_every_released_producer() {
+        struct NoSearch;
+        impl SearchBackend for NoSearch {
+            fn start(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Instant,
+            ) -> Result<String, Diagnostic> {
+                panic!("Historical inspection must not start a search")
+            }
+            fn poll(&mut self, _: &str, _: &str, _: Instant) -> Result<Value, Diagnostic> {
+                panic!("Historical inspection must not poll a search")
+            }
+            fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
+                panic!("Historical inspection must not stop a search")
+            }
+        }
+        let run = ready(false);
+        assert_eq!(
+            inspect_completed_report(&run.state).unwrap_err().code,
+            "DISCOVERY_PHASE"
+        );
+        assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        let mut checkpoint: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
+        for producer in ["0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.5"] {
+            checkpoint["producer_version"] = json!(producer);
+            fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+            assert_eq!(inspect_state(&run.state).unwrap().status, "activated");
+            let (history, report) = inspect_completed_report(&run.state).unwrap();
+            assert_eq!(history.producer_version, producer);
+            assert_eq!(report.status, "complete");
+            assert_eq!(report.captures.len(), history.answers.len());
+            let before = fs::read(&run.state).unwrap();
+            for result in [
+                step(&run.state, &[]),
+                step_resumable(&run.state, &[]),
+                dispatch(&run.state, "unused"),
+                pause(&run.state),
+                resume(&run.state),
+                settle_cancelled(&run.state, "unused", &run.receipt),
+                run_native(&run.state, &mut NoSearch),
+                recover_native_cleanup(&run.state, &mut NoSearch),
+            ] {
+                assert_eq!(result.unwrap_err().code, "MCP_STATE_TAMPERED");
+                assert_eq!(fs::read(&run.state).unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn older_producer_cannot_claim_a_completed_resumable_checkpoint() {
+        let run = ready_kind(false, true);
+        assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        let mut checkpoint: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
+        checkpoint["producer_version"] = json!("0.1.5");
+        fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        assert_eq!(
+            inspect_state(&run.state).unwrap_err().code,
+            "MCP_STATE_TAMPERED"
+        );
+    }
+
+    #[test]
+    fn resumable_activation_recovers_the_same_frozen_bytes() {
+        for stage in [
+            "after-intent",
+            "after-pack",
+            "after-receipt",
+            "after-activated",
+        ] {
+            let run = ready_kind(false, true);
+            interrupt(&run, stage);
+            let intent = frozen(&run);
+            assert_complete(&run, &intent);
+            assert!(read_state(&run.state).unwrap().session.is_some());
+        }
     }
 
     #[test]
@@ -1772,6 +1995,91 @@ mod recovery_tests {
         fs::write(&run.state, state_bytes(&state).unwrap()).unwrap();
         let output = step(&run.state, &[]).unwrap();
         assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
+    }
+
+    #[test]
+    fn native_interruption_before_intent_replays_without_a_live_backend() {
+        struct Native {
+            starts: usize,
+            polls: usize,
+            stops: usize,
+        }
+        impl SearchBackend for Native {
+            fn start(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Instant,
+            ) -> Result<String, Diagnostic> {
+                self.starts += 1;
+                Ok(format!("synthetic-job-{}", self.starts))
+            }
+            fn poll(&mut self, _: &str, _: &str, _: Instant) -> Result<Value, Diagnostic> {
+                self.polls += 1;
+                Ok(json!({"done":true,"cancelled":false,"metaData":{},"events":[{"events":"10"}]}))
+            }
+            fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
+                self.stops += 1;
+                Ok(())
+            }
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "cqlmatic-native-before-intent-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let run = Run {
+            state: directory.join("state.json"),
+            pack: directory.join("pack.json"),
+            receipt: directory.join("receipt.json"),
+            directory,
+        };
+        let request: DiscoverRequest = serde_json::from_value(json!({
+            "schema_version":1,"environment":{"cloud":"us1","tenant":"00000000000000000000000000000000","view":"synthetic_view"},
+            "start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z",
+            "sources":[{"repo":"synthetic"}],"depth":"sources-only","max_queries":1,"max_seconds":120
+        })).unwrap();
+        init_resumable(
+            request,
+            &run.state,
+            &run.pack,
+            &run.receipt,
+            Transport::Native,
+        )
+        .unwrap();
+        let mut native = Native {
+            starts: 0,
+            polls: 0,
+            stops: 0,
+        };
+        ACTIVATION_FAULT.with(|fault| fault.set(Some("before-intent")));
+        assert_eq!(
+            run_native(&run.state, &mut native).unwrap_err().code,
+            "TEST_INTERRUPTED"
+        );
+        let before = read_state(&run.state).unwrap();
+        assert_eq!(before.status, "needs-probes");
+        assert!(before.activation.is_none());
+        let captures = frozen_json(&before.session.as_ref().unwrap().captures).unwrap();
+        assert_eq!(
+            run_native(&run.state, &mut native).unwrap().status,
+            "complete"
+        );
+        assert_eq!((native.starts, native.polls, native.stops), (1, 1, 1));
+        assert_eq!(
+            frozen_json(
+                &read_state(&run.state)
+                    .unwrap()
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .captures
+            )
+            .unwrap(),
+            captures
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ CQLMATIC SETUP
   Both: matching caller-supplied tool-discovery report
         |
         v
-OPTIONAL ENVIRONMENT INVENTORY  <------------- status --json --summary
+OPTIONAL ENVIRONMENT INVENTORY  <------------- status --json --brief
   |
   +-> Persistent mode: Full (default) or Quick
   |     Accepted queries -> bounded unverified source/input-field leads
@@ -63,7 +63,7 @@ USER REQUEST -> AI INTERPRETS -> CQLMATIC CONSTRUCTS + CHECKS -> CQL
 
 The model reasons; the Rust engine applies typed contracts and deterministic rules. CQLmatic does not run its own LLM or replace your MCP client. The selected host owns OAuth, tool selection, and search execution. Codex, VS Code Local, Claude Code and Copilot surfaces have native setup adapters; other capable agents use tracked external setup. A saved host report is caller-supplied evidence, not independent authentication or configuration attestation. CQLmatic also supports explicit native Falcon API discovery for operators who use that path.
 
-Use [setup](SETUP.md) for the search host and [inventory](INVENTORY.md) when source evidence is needed; use [contracts](CONTRACTS.md) for machine requests. Start with `status --json --summary`, then retrieve relevant full status or focused pack records. Status is an offline checklist and does not refresh authentication or execute searches. `full_map_complete` is derived from the confirmed full target, applicable source/parser reviews and measurements, an active pack, and current reconciliation. Quick's `quick_scope_complete` and Full selected-source `selected_scope_complete` remain distinct from `full_map_complete`. Sources-only Quick work records source presence; sources + fields adds a capped field sample. Parser review and wider source/field coverage stay pending. The saved mode is reused, and switching to Full preserves collected evidence.
+Use [setup](SETUP.md) for the search host and [inventory](INVENTORY.md) when source evidence is needed; use [contracts](CONTRACTS.md) for machine requests. Start with `status --json --brief`, then retrieve relevant full status or focused pack records. Status is an offline checklist and does not refresh authentication or execute searches. `full_map_complete` is derived from the confirmed full target, applicable source/parser reviews and measurements, an active pack, and current reconciliation. Quick's `quick_scope_complete` and Full selected-source `selected_scope_complete` remain distinct from `full_map_complete`. Sources-only Quick work records source presence; sources + fields adds a capped field sample. Parser review and wider source/field coverage stay pending. The saved mode is reused, and switching to Full preserves collected evidence.
 
 State and packs are local snapshots, dated and scoped to their measurements. Parser declarations describe possible output; telemetry records what was measured. Neither source names nor parser names establish a binding. A changed parser, missing source, or incomplete run produces work on the checklist rather than an invented observation.
 

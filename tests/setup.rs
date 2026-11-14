@@ -664,6 +664,13 @@ fn verified_setup_offers_persistent_inventory_choices_before_authorized_searches
         "Full scouting emits search-all regardless of the saved view",
         "Settings can switch to Full later without discarding saved evidence",
         "Quick evidence alone does not establish Full completion",
+        "Automatic startup refresh is unavailable; do not prepare, dispatch or scout at session entry",
+        "Manual Refresh in `cqlmatic env inventory` or Settings prepares an action without executing MCP calls",
+        "30-day due hint with Run or Remind me in 30 days",
+        "acknowledge-refresh-reminder with its exact cycle_sha256 and defer:false",
+        "Use defer:true only after the user chooses the 30-day deferral",
+        "Acknowledgement records delivery, not completed refresh",
+        "Status, brief reads and background imports do not acknowledge delivery",
     ] {
         assert!(
             handoff.contains(required),
@@ -851,5 +858,100 @@ fn pending_native_action_blocks_reselection_and_survives_cancel() {
         .unwrap_err()
         .code,
         "SETUP_PENDING"
+    );
+}
+#[test]
+fn legacy_setup_state_and_plan_hashes_survive_absent_recovery_fields() {
+    let legacy = br#"{"schema_version":1,"revision":0,"phase":"new","selection":null,"clients":[],"plan":null,"configured":false,"authentication_evidence":"none","configured_sha256":null,"discovery_sha256":null,"last_notice":null}"#;
+    let state: SetupState = serde_json::from_slice(legacy).unwrap();
+    state.validate().unwrap();
+    assert!(state.recovery_origin.is_none());
+    assert_eq!(serde_json::to_vec(&state).unwrap(), legacy);
+    assert_eq!(
+        sha256_hex(legacy),
+        "a32037b16f284553d7a4b76ca89352f2ea9529d2183a1bd5bb694f08aca7b4d3"
+    );
+    let legacy_plan = br#"{"schema_version":1,"state_revision":1,"operation":"configure","selection":{"client":"codex","cloud":"us1","server_name":"cs-mcp","registration":{"mode":"cimd","metadata_url":"https://chatgpt.com/oauth/codex/synthetic/client.json","allowlist_confirmed":true}},"baseline":{"path":"/synthetic/config.toml","sha256":null,"server":"absent"},"commands":[],"changes":["synthetic reviewed plan"],"backup_path":null,"confirmation_sha256":""}"#;
+    let mut plan: SetupPlan = serde_json::from_slice(legacy_plan).unwrap();
+    assert_eq!(serde_json::to_vec(&plan).unwrap(), legacy_plan);
+    assert_eq!(
+        plan.digest().unwrap(),
+        "9d7f163dd13331a8c21ddd3956d3e89dfb327ffda238dc86b691ac0388e33fc9"
+    );
+    plan.confirmation_sha256 = plan.digest().unwrap();
+    plan.validate().unwrap();
+}
+#[test]
+fn recovery_origin_validates_its_original_selection_command_and_acknowledged_revision() {
+    let mut state = selected(ClientKind::Codex);
+    let origin = build_plan(
+        &state,
+        PlanOperation::Configure,
+        baseline(ExistingServer::Absent),
+        None,
+    )
+    .unwrap();
+    origin.validate_recovery_origin().unwrap();
+    state.invalidate_plan();
+    state.recovery_origin = Some(origin.clone());
+    state.validate().unwrap();
+    for change in [
+        "operation",
+        "baseline",
+        "command",
+        "client",
+        "selection",
+        "revision",
+        "configured",
+    ] {
+        let mut changed = state.clone();
+        let original = changed.recovery_origin.as_mut().unwrap();
+        match change {
+            "operation" => original.operation = PlanOperation::Recover,
+            "baseline" => original.baseline.server = ExistingServer::Same,
+            "command" => original.commands[0].args[2] = "unreviewed-name".into(),
+            "client" => original.client.as_mut().unwrap().executable_sha256 = "invalid".into(),
+            "selection" => original.selection.cloud = Cloud::Eu1,
+            "revision" => original.state_revision = changed.revision,
+            "configured" => changed.configured = true,
+            _ => unreachable!(),
+        }
+        original.confirmation_sha256 = original.digest().unwrap();
+        assert!(changed.validate().is_err(), "{change}");
+    }
+    let mut current = baseline(ExistingServer::Same);
+    current.sha256 = Some(sha256_hex(b"current HTTP entry"));
+    let recovery = build_plan(&state, PlanOperation::Recover, current.clone(), None).unwrap();
+    assert_eq!(
+        recovery.commands[0].args,
+        [
+            "mcp",
+            "login",
+            "cs-mcp",
+            "--oauth-client-registration",
+            "cimd"
+        ]
+    );
+    current.path = std::env::temp_dir()
+        .join("other-config.json")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        build_plan(&state, PlanOperation::Recover, current, None)
+            .unwrap_err()
+            .code,
+        "SETUP_RECOVERY_BASELINE"
+    );
+    state.recovery_origin = None;
+    assert_eq!(
+        build_plan(
+            &state,
+            PlanOperation::Recover,
+            baseline(ExistingServer::Same),
+            None
+        )
+        .unwrap_err()
+        .code,
+        "SETUP_RECOVERY_ORIGIN"
     );
 }

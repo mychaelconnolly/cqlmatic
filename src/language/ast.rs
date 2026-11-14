@@ -137,8 +137,18 @@ pub fn bare_field(s: &str) -> bool {
     }
     true
 }
+pub(super) fn reserved_field_prefix(s: &str) -> bool {
+    let prefix = s.split(['.', '[']).next().unwrap_or(s);
+    ["not", "and", "or"]
+        .iter()
+        .any(|keyword| prefix.eq_ignore_ascii_case(keyword))
+}
 pub fn field(s: &str) -> String {
-    if bare_field(s) { s.into() } else { quote(s) }
+    if bare_field(s) && !reserved_field_prefix(s) {
+        s.into()
+    } else {
+        quote(s)
+    }
 }
 
 impl Value {

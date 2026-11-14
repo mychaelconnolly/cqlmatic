@@ -255,7 +255,7 @@ function shell({ title, description, route, content, navigation: nav = '', foote
     ${nav ? `<aside class="docs-sidebar">${nav}</aside>` : ''}
     <main id="main" class="docs-main" tabindex="-1">${content}${footer}</main>
   </div>
-  <footer class="site-footer wrap"><p>CQLmatic <span>v0.1.5 documentation</span></p><p><a href="${HOSTS.landing}/">Project home</a> · <a href="${REPOSITORY}">GitHub</a></p></footer>
+  <footer class="site-footer wrap"><p>CQLmatic <span>v0.1.6 documentation</span></p><p><a href="${HOSTS.landing}/">Project home</a> · <a href="${REPOSITORY}">GitHub</a></p></footer>
 </body>
 </html>
 `;
@@ -280,7 +280,7 @@ export function buildSite({ root = ROOT, commit } = {}) {
     for (const document of documents) {
       const content = rewriteHtml(document.html, (href, kind) => resolveLink(root, registry, landing, commit, document, href, kind, assets));
       const html = host === 'landing' ? content : shell({
-        title: document.title, description: `${document.label} for CQLmatic 0.1.5.`, route: document.route,
+        title: document.title, description: `${document.label} for CQLmatic 0.1.6.`, route: document.route,
         navigation: navigation(document.source), content: `<article class="docs-article">${content}</article>`,
         footer: `<p class="docs-source"><a href="${github(commit, document.source)}">View Markdown source</a> · <a href="${github(commit, '', true)}">Source ${commit.slice(0, 12)}</a></p>`,
       });
@@ -291,7 +291,7 @@ export function buildSite({ root = ROOT, commit } = {}) {
   }
   output.set('landing/_redirects', read(root, 'site/public/_redirects'));
   output.set('docs/404.html', Buffer.from(stamp(shell({ title: 'Page not found', description: 'This documentation page could not be found. Return to the CQLmatic documentation index.', route: '/404.html', notFound: true, content: '<article class="docs-article docs-not-found"><h1>That page isn’t here.</h1><p>The address may have changed or the page may not exist.</p><p><a href="/">Return to the documentation index</a></p></article>' }))));
-  output.set('BUILD.json', Buffer.from(`${JSON.stringify({ source_commit: commit, version: '0.1.5', documentation_pages: DOCUMENTS.length, hosts: HOSTS }, null, 2)}\n`));
+  output.set('BUILD.json', Buffer.from(`${JSON.stringify({ source_commit: commit, version: '0.1.6', documentation_pages: DOCUMENTS.length, hosts: HOSTS }, null, 2)}\n`));
   const sums = [...output.keys()].sort().map(path => `${sha256(output.get(path))}  ${path}\n`).join('');
   output.set('SITE-SHA256SUMS', Buffer.from(sums));
   const dist = join(root, 'site/dist');

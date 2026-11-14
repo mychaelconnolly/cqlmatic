@@ -188,6 +188,17 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regular file"):
             self.build()
 
+    def test_private_linux_paths_with_reviewed_hashes_are_rejected_before_archiving(self):
+        clean = self.linux.read_bytes()
+        for encoding in ("utf-8", "utf-16-le"):
+            with self.subTest(encoding=encoding):
+                self.linux.write_bytes(clean + "/home/synthetic/build/main.rs".encode(encoding))
+                self.args.linux_sha256 = RELEASE.sha256(self.linux.read_bytes())
+                self.args.out = self.base / ("out-" + encoding)
+                with self.assertRaisesRegex(ValueError, "workstation path"):
+                    self.build()
+                self.assertFalse(self.args.out.exists())
+
     def test_import_delay_codeview_and_path_gates_reject_unsafe_images(self):
         self.assertEqual(RELEASE.pe_imports(pe_image(delayed="ucrtbase.dll")), [["kernel32.dll"], ["ucrtbase.dll"]])
         for data, message in ((pe_image("vcruntime140.dll"), "Non-system"),

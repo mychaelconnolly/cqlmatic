@@ -1,8 +1,8 @@
 # CQLmatic command reference
 
-This reference describes CQLmatic **0.1.5**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
+This reference describes CQLmatic **0.1.6**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
 
-Commands below use `cqlmatic` as shorthand for your executable path or `npx cqlmatic@0.1.5` (a [supported, patched Node.js release](README.md#try-v015), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the [release ZIP](docs/SETUP.md#install-on-windows) after verifying its checksum. From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
+Commands below use `cqlmatic` as shorthand for your executable path or `npx cqlmatic@0.1.6` (a [supported, patched Node.js release](README.md#try-v016), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the [release ZIP](docs/SETUP.md#install-on-windows) after verifying its checksum. From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
 
 ## Help, version, and schemas
 
@@ -36,8 +36,8 @@ The native framing and exit rules below describe the executable itself. npm can 
 | Command | Options | Result and effects |
 | --- | --- | --- |
 | `setup` | `--request FILE`, `--state FILE`, `--json` | Terminal wizard without a request; strict setup action with one; no-request JSON/nonterminal invocation reads saved status. Native Codex, VS Code Local, Claude Code and Copilot adapters preview and apply reviewed configuration; other hosts use tracked external selection and saved report import. |
-| `env inventory` | `--request FILE`, `--state FILE`, `--json` | Terminal guided inventory; actions save workflow evidence and may fetch parser metadata or prepare/resume MCP discovery. No-request JSON/nonterminal invocation reports status. |
-| `status` | `--request FILE`, `--state FILE`, `--json` | Offline checklist. The request may select `state`; do not also select it with `--state`. |
+| `env inventory` | `--request FILE`, `--state FILE`, `--json`, `--brief` or `--summary` | Terminal guided inventory; actions save workflow evidence and may fetch parser metadata or prepare/resume MCP discovery. No-request JSON/nonterminal invocation reports status. |
+| `status` | `--request FILE`, `--state FILE`, `--json`, `--brief` or `--summary` | Offline checklist. The request may select `state`; do not also select it with `--state`. |
 
 Use a dedicated private state directory. Default OS-specific locations and every action are described in [setup](docs/SETUP.md) and [inventory](docs/INVENTORY.md). Setup actions use `action.type`; inventory actions use `action.kind`. Inventory has no caller `id` field.
 
@@ -47,13 +47,17 @@ cqlmatic env inventory --json
 cqlmatic status --json
 ```
 
+For agent communication, use `cqlmatic status --json --brief` and `env inventory --request FILE --json --brief`. Brief mode bounds the entire response to 4,096 bytes and excludes operational payloads. It conflicts with `--summary`; full and summary output can grow with inventory size. Obtain only focused detail when needed. See [bounded handoff](docs/INVENTORY.md#bounded-agent-handoff) for aggregate notices, explicit snapshot acknowledgement, and protected local handling of exact execution descriptors.
+
 These no-request invocations do not start native setup or a search. A setup request with action `status` passes through the state writer; it is different from no-request `setup --json`. Setup exits `1` until saved tool-discovery evidence qualifies. Inventory/status exit `0` when their command succeeds even if `full_map_complete` is false or an action records incomplete/failed work. Inspect the returned fields.
 
 Native setup apply needs the exact reviewed confirmation hash. Interactive consent cannot run through unattended JSON apply: `SETUP_INTERACTIVE_REQUIRED` is a global error, exit `2`. Successful native configuration is not authentication or tool availability. Parser API reads use a separate protected credential file and explicit budgets; MCP search uses the selected host client's OAuth. The lower-level `--execute` search switch does not gate every network-capable setup/inventory action.
 
 For native setup, select `claude-code` with allowlisted `cimd`, or `copilot-cli`, `copilot-app`, `copilot-vscode`, `codex`, or `vs-code` with a registered manual client ID. Preview and apply the reviewed host action, then import a bound report. Claude/Copilot reports must include the effective OAuth client ID and configuration source from the selected session. `external` alone uses `registration.mode: "host-managed"` and a matching `host_id`; native actions are unavailable for it. A bound authenticated report without exact available `falcon_search_ngsiem` remains incomplete with exit `1`. See [native host setup](docs/SETUP.md#native-hosts-and-effective-configuration).
 
-Inventory's built-in scout always emits MCP `repository:"search-all"`, even when its saved environment view differs. Relay it only with explicit authorization for that target/window. Otherwise leave scouting pending and use confirmed selected sources with lower-level discovery on the authorized view. Scout import does not automatically reject an unflagged empty or cap-sized census; `scouting:done` is not a completeness attestation. See [scouting boundaries](docs/INVENTORY.md#action-inputs-and-evidence-boundaries).
+Full-mode inventory scouting emits MCP `repository:"search-all"`, even when its saved environment view differs. Quick scouting uses the explicitly chosen view. Relay it only with explicit authorization for that target/window. Otherwise leave scouting pending and use confirmed selected sources with lower-level discovery on the authorized view. Scout import does not automatically reject an unflagged empty or cap-sized census; `scouting:done` is not a completeness attestation. See [scouting boundaries](docs/INVENTORY.md#action-inputs-and-evidence-boundaries).
+
+At the start of an authorized environment session, inspect `status --json --brief` once for pending attempts, `refresh_reminder` and work notices. Automatic startup refresh is unavailable. Manual **Refresh** in `cqlmatic env inventory` and Settings prepares an action without executing MCP calls. A due 30-day reminder offers **Run** or **Remind me in 30 days**; agents present its hint before acknowledging the exact cycle, and status reads never acknowledge it. Manual refresh requires protected proof of a provider-enforced lifetime of 1–600 seconds for the exact session, target and authorized window. An advertised default or client wait timeout is insufficient. Reserve, save, settle and import the exact single call; unresolved attempts block another refresh. The 24h/7d/14d/30d census lookback is separate from the fixed reminder interval. New work can be reviewed now or deferred with **Settings \*** retained. See [session entry](docs/MCP-COMPANION.md#when-an-environment-session-begins) for authorization, exact-target and separate reminder/work-notice handling.
 
 ## Generate
 
@@ -84,7 +88,7 @@ cqlmatic generate --jsonl < examples/requests.jsonl
 | `--json` | Human output | Compact newline-terminated `Analysis`. |
 | `--jsonl` | Off | Read versioned requests from stdin; continue after record errors. |
 | `--pack FILE` | Matching inventory's active pack, when available | Select and validate a primary snapshot explicitly; a matching inventory's active pack and query ledger still supply safeguards. Never triggers discovery. |
-| `--inventory-state FILE` | Local inventory state | Reuse a protected inventory's confirmed target, active pack and query-observation ledger in Full or Quick mode. Only Quick can save accepted query source/input-field names as unverified leads. |
+| `--inventory-state FILE` | Local inventory state | Reuse a protected inventory's confirmed target, active pack and query-observation ledger in Full or Quick mode. Both modes can queue bounded unverified source/input-field hints; existing Quick leads are retained. |
 | `--require-observed` | False | Require qualifying current pack or saved-query field evidence for referenced deployment fields; without either, strict grounding needs context. |
 | `--accept-partial-coverage` | False | In strict mode, accept current positive partial source/field observations with a warning. Stale, absent and ambiguous evidence still blocks. |
 | `--fail-on-warning` | False | Return `1` on warning diagnostics even when `outcome` remains `ready`; informational diagnostics do not trigger it. |
@@ -189,11 +193,15 @@ Required flags are `--from FILE_OR_DIRECTORY` and `--out FILE`. Native files mus
 | Mode | Required options | Additional options / constraints |
 | --- | --- | --- |
 | Plan only | `--request FILE` | No credentials or search; prints initial probes, deferred stages, budgets. This is the default. Pack/receipt/credential flags do not make it execute. |
-| Native API execution | `--request FILE --execute --pack FILE --receipt NEW_FILE` | Optional `--credentials-file FILE`; otherwise Falcon environment variables. New receipt path, exact environment binding, explicit finite budgets. |
+| Native API execution | `--request FILE --execute --pack FILE --receipt NEW_FILE` | Add a new `--state FILE` for durable checkpoints; optional protected credentials file, otherwise Falcon environment variables. |
+| Native saved run | `--execute --state FILE --resume` | Original target/request and remaining budgets; exact known-job cleanup first when needed. Optional protected credentials file. |
 | MCP initialization | `--mcp --request FILE --state NEW_FILE --pack FILE --receipt NEW_FILE` | No `--execute`, credentials flag, or answers. Creates local relay state and emits probes. |
-| MCP resume | `--mcp --state FILE` | Repeatable `--answer PROBE_ID=FILE`; omit answers for an activation/status retry. No request, pack, or receipt options. |
+| MCP dispatch | `--mcp --state FILE --dispatch PROBE_ID` | Reserve one exact outstanding probe before its host call. |
+| MCP answer/status | `--mcp --state FILE` | Format 3 accepts one matching `--answer PROBE_ID=FILE`; omit answers to poll or recover activation. |
+| MCP cancel/resume | `--mcp --state FILE --cancel` or `--resume` | Retain accepted captures; settle any in-flight call before resuming. |
+| MCP cancellation settlement | `--mcp --state FILE --settle-cancelled PROBE_ID=FILE` | Protected exact caller-attested terminal cleanup report; does not itself stop a hosted job. |
 
-`--state` and `--answer` require `--mcp`. Answer files are entire saved MCP tool results, not edited rows. `needs-probes` and `activation-blocked` exit `3`; neither means complete. API execution and MCP relay have different lock, receipt, cleanup and recovery semantics. See [environment discovery](docs/ENVIRONMENT.md), [MCP workflow](docs/MCP-COMPANION.md), and [failure recovery](docs/TROUBLESHOOTING.md).
+New MCP initialization uses durable format 3. Dispatch exactly one emitted probe before the host call, then submit its entire original result with the matching ID. Accepted captures replay locally; retries consume attempts and safely paused time does not renew the original allowance. `--cancel`, `--resume`, `--dispatch` and `--settle-cancelled` are separate saved-state controls: do not combine them with initialization or answers. Format-2 checkpoints retain their legacy behavior. See [cancellation and settlement](docs/ENVIRONMENT.md#cancel-and-resume-discovery) for strict host evidence, native Ctrl-C/owner limits and cleanup-pending recovery. Native execution without `--state` keeps its final-receipt workflow.
 
 ```sh
 cqlmatic env discover --request examples/discover.request.json
@@ -216,7 +224,7 @@ Without `--id`, offset defaults to `0` (maximum `9999`) and limit to `50` (range
 | `setup` | Tool discovery verified | Setup remains pending | Input/native/storage/global error | — |
 | `status`, `env inventory` | Command succeeded, possibly incomplete | — | Global error | — |
 | `env discover` API | Complete and pack activated | — | Failure, including late activation/report failures | — |
-| `env discover --mcp` | Complete activation | — | Failed/error | Needs probes or activation blocked |
+| `env discover --mcp`, native saved run | Complete activation | — | Failed/error | Needs probes, paused, cancel/cleanup pending or activation blocked |
 | Other commands | Successful operation | — | Application error | — |
 
 Argument-parser errors also return `2`; help/version return `0`. JSONL returns the highest record exit, unless a global failure ends the stream. Always inspect returned evidence and diagnostics: an exit alone does not establish inventory completion, unchanged files, or correct/complete search results.

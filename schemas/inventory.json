@@ -284,6 +284,237 @@
         {
           "type": "object",
           "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "kind": {
+              "type": "string",
+              "const": "set-refresh-settings"
+            },
+            "lookback": {
+              "$ref": "#/$defs/RefreshLookback"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "automatic",
+            "lookback"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean",
+              "default": false
+            },
+            "host_evidence_file": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prepare-refresh"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "session_id",
+            "host_evidence_file"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "dispatch-refresh"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "attempt_id",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "evidence_file": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "settle-refresh"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "attempt_id",
+            "evidence_file"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "import-refresh"
+            },
+            "result_file": {
+              "type": "string"
+            },
+            "retrieved_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "attempt_id",
+            "result_file",
+            "retrieved_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "environment": {
+              "$ref": "#/$defs/EnvironmentId"
+            },
+            "hints": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InventoryHint"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "record-inventory-hints"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "environment",
+            "hints"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "defer": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "acknowledge-inventory-work"
+            },
+            "work": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/WorkRevision"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "work"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "defer": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "acknowledge-inventory-notice"
+            },
+            "snapshot_sha256": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "snapshot_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cycle_sha256": {
+              "type": "string"
+            },
+            "defer": {
+              "type": "boolean",
+              "default": false
+            },
+            "kind": {
+              "type": "string",
+              "const": "acknowledge-refresh-reminder"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "cycle_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "exclude-inventory-work"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "work": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/WorkRevision"
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "work",
+            "reason",
+            "reviewed_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "caller_assertion": {
               "$ref": "#/$defs/QueryResultAssertion"
             },
@@ -700,6 +931,49 @@
           "properties": {
             "kind": {
               "type": "string",
+              "const": "dispatch-discovery"
+            },
+            "probe_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "probe_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pause-discovery"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resume-discovery"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
               "const": "import-pack"
             },
             "pack_file": {
@@ -762,6 +1036,29 @@
         }
       ]
     },
+    "InventoryCaptureBoundary": {
+      "type": "object",
+      "properties": {
+        "accepted_probe_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "request_sha256": {
+          "type": "string"
+        },
+        "run": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "request_sha256",
+        "accepted_probe_ids"
+      ]
+    },
     "InventoryFailure": {
       "type": "object",
       "properties": {
@@ -786,6 +1083,25 @@
         "stage",
         "message",
         "recorded_at"
+      ]
+    },
+    "InventoryHint": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source"
       ]
     },
     "InventoryRequest": {
@@ -920,6 +1236,13 @@
             "$ref": "#/$defs/ParserSnapshot"
           }
         },
+        "pending_inventory": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PendingInventoryWork"
+          }
+        },
         "query_observations": {
           "type": "array",
           "default": [],
@@ -943,6 +1266,30 @@
             "null"
           ]
         },
+        "refresh_attempts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RefreshAttempt"
+          }
+        },
+        "refresh_reminder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefreshReminder"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refresh_settings": {
+          "$ref": "#/$defs/RefreshSettings",
+          "default": {
+            "automatic": false,
+            "lookback": "24h"
+          }
+        },
         "schema_version": {
           "type": "integer",
           "format": "uint32",
@@ -962,6 +1309,13 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ScoutEvidence"
+          }
+        },
+        "source_metadata": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SourceMetadata"
           }
         },
         "sources": {
@@ -1006,6 +1360,35 @@
         "discovery_runs",
         "parser_runs",
         "failures"
+      ]
+    },
+    "InventoryWorkRunProof": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "request_sha256": {
+          "type": "string"
+        },
+        "run": {
+          "type": "string"
+        },
+        "source_probe_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "request_sha256",
+        "fields"
       ]
     },
     "NativeSourceReason": {
@@ -1313,6 +1696,82 @@
         "declarations"
       ]
     },
+    "PendingInventoryWork": {
+      "type": "object",
+      "properties": {
+        "after_run": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "capture_boundary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InventoryCaptureBoundary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deferred": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "new_source": {
+          "type": "boolean"
+        },
+        "notified_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        },
+        "source_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source",
+        "fields",
+        "source_types",
+        "new_source",
+        "revision",
+        "notified_revision",
+        "deferred",
+        "after_run"
+      ]
+    },
     "QueryObservation": {
       "type": "object",
       "properties": {
@@ -1399,6 +1858,142 @@
         "sha256",
         "retrieved_at",
         "raw_hex"
+      ]
+    },
+    "RefreshAttempt": {
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/SearchArguments"
+        },
+        "automatic": {
+          "type": "boolean"
+        },
+        "dispatched_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "host_evidence": {
+          "$ref": "#/$defs/RawSnapshot"
+        },
+        "id": {
+          "type": "string"
+        },
+        "phase": {
+          "$ref": "#/$defs/RefreshPhase"
+        },
+        "prepared_at": {
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "settlement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settlement_history": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RawSnapshot"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "environment",
+        "session_id",
+        "arguments",
+        "automatic",
+        "host_evidence",
+        "prepared_at",
+        "phase"
+      ]
+    },
+    "RefreshLookback": {
+      "type": "string",
+      "enum": [
+        "24h",
+        "7d",
+        "14d",
+        "30d"
+      ]
+    },
+    "RefreshPhase": {
+      "type": "string",
+      "enum": [
+        "prepared",
+        "dispatched",
+        "unresolved",
+        "settled",
+        "imported"
+      ]
+    },
+    "RefreshReminder": {
+      "type": "object",
+      "properties": {
+        "baseline_at": {
+          "type": "string"
+        },
+        "defer_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "notified_cycle_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "environment",
+        "baseline_at"
+      ]
+    },
+    "RefreshSettings": {
+      "type": "object",
+      "properties": {
+        "automatic": {
+          "type": "boolean"
+        },
+        "lookback": {
+          "$ref": "#/$defs/RefreshLookback"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "automatic",
+        "lookback"
       ]
     },
     "Scope": {
@@ -1531,6 +2126,25 @@
         "info"
       ]
     },
+    "SourceMetadata": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/Scope"
+        },
+        "source_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "source_types"
+      ]
+    },
     "SourceReview": {
       "type": "object",
       "properties": {
@@ -1607,6 +2221,72 @@
       "required": [
         "source",
         "field"
+      ]
+    },
+    "WorkResolution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InventoryWorkRunProof"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "inventoried"
+            },
+            "run": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "run"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "excluded"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason",
+            "reviewed_at"
+          ]
+        }
+      ]
+    },
+    "WorkRevision": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision"
       ]
     }
   }

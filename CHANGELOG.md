@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.6
+
+- Manual refresh prepares a shallow source census for the confirmed view, with a finite provider search lifetime and protected dispatch, settlement and import steps. A 30-day reminder offers refresh or deferral; startup does not run searches automatically.
+- Both Full and Quick query writing can queue bounded unverified source and input-field hints. Pending work remains visible in Settings until applicable inventory or an explicit exclusion resolves it.
+- Eligible partially completed Codex CIMD setup can recover through inspection, a fresh confirmation preview and native login without replacing or duplicating the existing entry. Authentication and tool discovery still need a matching host report.
+- New discovery checkpoints support pause, cancellation settlement and resume while retaining accepted captures and remaining attempt/active-time budgets. Uncertain searches block further inventory searches until safely settled; hosted cancellation remains the host's responsibility.
+- Valid late MCP responses can settle their exact attempt without becoming discovery evidence. Complete native captures can finish local activation after the search budget expires. Pending hints resolve only from applicable subsequent measurements, including separate completed batches; terminal EOF does not defer notices.
+- Large valid discovery packs can save inventory completion without being counted twice against pending-work analysis. Reaching that analysis budget preserves completed discovery and leaves unproven notices pending.
+- Sparse sources with positive whole-window volume and an empty recent fieldset receive one source-bound whole-window fallback within the original budgets. Fieldset names remain schema hints unless qualifying measurements supply population evidence.
+- `status` and inventory actions add `--json --brief`, a projection capped at 4,096 UTF-8 bytes. It reports readiness, counts, reminders and opaque pending-work references without returning the full map.
+- Query parsing and rendering preserve quoted Boolean-keyword field names, including dotted and indexed names. The supported `concat` signature uses a field list without a separator parameter.
+
 ## 0.1.5
 
 - Inventory rejects pack rollback and discovery activation from a stale inventory predecessor. Discovery artifacts remain bound to their prepared run, destination and pack bytes; failed activation preserves earlier evidence.
@@ -48,7 +60,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v015).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v016).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

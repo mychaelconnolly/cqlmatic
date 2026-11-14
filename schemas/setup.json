@@ -197,7 +197,8 @@
       "type": "string",
       "enum": [
         "configure",
-        "authenticate"
+        "authenticate",
+        "recover"
       ]
     },
     "RegistrationMode": {
@@ -647,6 +648,17 @@
           "$ref": "#/$defs/SetupPhase"
         },
         "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SetupPlan"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery_origin": {
+          "description": "Original acknowledged fresh Codex CIMD add; eligibility is not dispatch proof.",
           "anyOf": [
             {
               "$ref": "#/$defs/SetupPlan"

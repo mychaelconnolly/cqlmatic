@@ -1,6 +1,6 @@
 # Setup and authentication
 
-With a [supported, patched Node.js release](../README.md#try-v015) on macOS Apple silicon or Linux x86_64, use `npx cqlmatic@0.1.5 setup` from outside a CQLmatic source checkout. Use your source-built executable inside that checkout: npm can select the local package, which has no bundled executable. The npm package runs the native executable on demand without installing a global command. The guides use `cqlmatic` as shorthand for that pinned command or your standalone executable. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`. Windows x64 uses the [release ZIP](#install-on-windows); other architectures use a [source build](DEVELOPMENT.md).
+With a [supported, patched Node.js release](../README.md#try-v016) on macOS Apple silicon or Linux x86_64, use `npx cqlmatic@0.1.6 setup` from outside a CQLmatic source checkout. Use your source-built executable inside that checkout: npm can select the local package, which has no bundled executable. The npm package runs the native executable on demand without installing a global command. The guides use `cqlmatic` as shorthand for that pinned command or your standalone executable. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`. Windows x64 uses the [release ZIP](#install-on-windows); other architectures use a [source build](DEVELOPMENT.md).
 
 Run `npx` in a foreground terminal. For unattended process supervision, use the native executable directly: npm can add stderr notices, and cancellation directed only at its parent PID may not reach the command. See [input and output rules](../USAGE.md#input-and-output-rules).
 
@@ -12,14 +12,14 @@ Native setup covers **Codex CLI**, **VS Code Local**, **Claude Code**, **GitHub 
 
 ## Install on Windows
 
-Download `cqlmatic-v0.1.5-windows-x86_64.zip` and `SHA256SUMS` from the official [v0.1.5 release](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.5). Use the x64 ZIP only on an x64 Windows system. The prebuilt executable needs neither Rust nor C++ build tools. Source builds require the toolchain described in [development](DEVELOPMENT.md#native-windows).
+Download `cqlmatic-v0.1.6-windows-x86_64.zip` and `SHA256SUMS` from the official [v0.1.6 release](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.6). Use the x64 ZIP only on an x64 Windows system. The prebuilt executable needs neither Rust nor C++ build tools. Source builds require the toolchain described in [development](DEVELOPMENT.md#native-windows).
 
-Before extraction, compare `Get-FileHash -Algorithm SHA256` for the ZIP with the exact filename's entry in `SHA256SUMS`. Stop if the entry is missing, duplicated or different. Extract into a new version-specific directory under your user profile, such as `%LOCALAPPDATA%\Programs\CQLmatic\v0.1.5`; do not overwrite an existing installation. The archive's `cqlmatic-v0.1.5` directory contains `cqlmatic.exe`, guides, examples and licenses.
+Before extraction, compare `Get-FileHash -Algorithm SHA256` for the ZIP with the exact filename's entry in `SHA256SUMS`. Stop if the entry is missing, duplicated or different. Extract into a new version-specific directory under your user profile, such as `%LOCALAPPDATA%\Programs\CQLmatic\v0.1.6`; do not overwrite an existing installation. The archive's `cqlmatic-v0.1.6` directory contains `cqlmatic.exe`, guides, examples and licenses.
 
 Run the extracted executable directly:
 
 ```powershell
-$Cqlmatic = Join-Path $env:LOCALAPPDATA 'Programs/CQLmatic/v0.1.5/cqlmatic-v0.1.5/cqlmatic.exe'
+$Cqlmatic = Join-Path $env:LOCALAPPDATA 'Programs/CQLmatic/v0.1.6/cqlmatic-v0.1.6/cqlmatic.exe'
 & $Cqlmatic --version
 & $Cqlmatic --help
 & $Cqlmatic setup
@@ -83,11 +83,11 @@ Each strict v1 request contains `schema_version: 1`, optional `id`, and `action.
 | `status` | No action fields. Reports saved state through the request path. Unlike no-request `setup --json`, a status **request** uses the protected writer path and can create/save state. |
 | `detect` | No action fields. Probes Codex CLI, VS Code Local and Claude Code and records executable/capability fingerprints. A failed client probe or fingerprint does not discard other detected clients. Copilot configuration needs no executable probe. Installs nothing and does not demote `external`. |
 | `select` | `selection` contains `client` (`codex`, `vs-code`, `claude-code`, `copilot-cli`, `copilot-app`, `copilot-vscode`, or `external`), `cloud` (`us1`, `us2`, `eu1`), `server_name`, and `registration`. `external` alone requires `host_id` (1–64 ASCII identifier). Clears the prior plan, configuration assertion, and authentication/discovery evidence. |
-| `preview` | Named native adapters only. `operation` is `configure` or `authenticate`. Inspects the current baseline and derives the command or new Copilot file creation, backup, and confirmation hash without connecting. An existing Copilot file without the selected entry returns `SETUP_EXISTING_CONFIG` for host-side addition. |
+| `preview` | Named native adapters only. `operation` is `configure`, `authenticate`, or the narrowly scoped `recover` flow below. Inspects the current baseline and derives the command or new Copilot file creation, backup, and confirmation hash without connecting. An existing Copilot file without the selected entry returns `SETUP_EXISTING_CONFIG` for host-side addition. |
 | `apply` | Named native adapters only. `confirmation_sha256` must match the reviewed preview. Rechecks executable/capabilities where needed and configuration before the command or atomic write. |
 | `confirm-authentication` | Named native adapters only. Requires configured state; records user confirmation and remains `authentication-required`. |
 | `import-discovery` | `file` points to a saved strict host report. Named native adapters recheck the selected entry; `external` binds the report without local configuration inspection. |
-| `acknowledge-pending` | `confirmation_sha256` identifies the pending plan inspected by the operator. Clears configuration/authentication assertions and requires a fresh preview. |
+| `acknowledge-pending` | `confirmation_sha256` identifies the pending plan inspected by the operator. Rechecks protected success provenance, or preserves eligible uncertain CIMD addition context for a fresh recovery preview. Does not run add or login. |
 | `cancel` | No action fields. Saves progress and invalidates an ordinary preview; an unresolved `command-pending` phase remains pending. |
 
 Registration input is one of:
@@ -112,6 +112,16 @@ Executable fingerprints stream SHA-256 through a fixed buffer with a 1 GiB byte 
 Configure backs up an existing configuration before a native change. Before a command or file write, setup durably records `command-pending`. A failure, timeout, interruption, or failed postcondition can leave partial changes. Inspect the host and protected backup, then submit `acknowledge-pending` with that pending plan's hash. Preview the inspected current baseline before another apply. Setup does not retry, force an overwrite, restore a backup, or claim rollback. Cancellation does not clear this inspection requirement.
 
 A successful native command or Copilot file write is followed by a configuration postcondition check. It establishes local configured state only; even an authentication command's exit status does not attest authentication. An already matching server can skip an add/write, subject to Codex's registration-provenance check. Its receipt binds a reviewed addition to unchanged local configuration; it does not inspect hidden OAuth identity.
+
+## Recover a partially completed Codex CIMD setup
+
+A native add can create the selected HTTP entry before authentication finishes. If it times out, a matching URL or a later external login does not establish the missing registration provenance. Keep the pending state and inspect the native entry and protected backup first.
+
+Submit `acknowledge-pending` with the pending plan's exact confirmation hash. It performs inspection, not another add or login. An unchanged entry with valid protected success provenance can restore its configuration binding, including when a receipt was saved before a state-save interruption or a later authentication attempt failed. Authentication and tool discovery still require the matching saved host report.
+
+When the acknowledged original plan was an eligible Codex CIMD addition to an absent entry, setup retains that uncertain context. Preview `operation: "recover"`, review the freshly detected executable, exact existing entry and configuration hash, then apply the new confirmation in an interactive terminal. Recovery invokes an explicit native CIMD login; it does not overwrite or duplicate the server. A changed configuration or executable requires a new preview. An arbitrary preexisting entry or manual-registration state cannot use this path.
+
+Successful recovery records completed native CIMD login provenance, rather than claiming the old addition completed or independently attesting OAuth identity. Its postcondition requires unchanged configuration. Setup then waits for the saved host discovery report. Failed or interrupted recovery preserves the original uncertain context and requires inspection and another reviewed preview. Never manufacture a receipt or edit saved state to advance a phase.
 
 ## Saved host tool-discovery report
 
