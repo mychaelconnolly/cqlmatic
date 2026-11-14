@@ -251,6 +251,7 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
             "dispatched"
                 | "started"
                 | "complete"
+                | "completed"
                 | "cancelled"
                 | "failed"
                 | "cleanup-pending"
@@ -282,15 +283,37 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
         {
             return Err(tampered());
         }
+        if attempt.outcome == "completed"
+            && (session.transport != Transport::Mcp
+                || attempt.terminal.is_none()
+                || index + 1 != session.attempts.len()
+                || state.status != "failed"
+                || state
+                    .failure
+                    .as_ref()
+                    .is_none_or(|d| d.code != "MCP_DEADLINE")
+                || session
+                    .periods
+                    .last()
+                    .and_then(|period| period.end.as_deref())
+                    .is_none_or(|end| session.remaining(state, end).is_ok()))
+        {
+            return Err(tampered());
+        }
         if attempt.rejected_results.len() > 16 {
             return Err(tampered());
         }
-        for evidence in attempt.terminal.iter().chain(
-            attempt
-                .rejected_results
-                .iter()
-                .map(|rejected| &rejected.evidence),
-        ) {
+        for (terminal, evidence) in attempt
+            .terminal
+            .iter()
+            .map(|evidence| (true, evidence))
+            .chain(
+                attempt
+                    .rejected_results
+                    .iter()
+                    .map(|rejected| (false, &rejected.evidence)),
+            )
+        {
             if evidence.raw_hex.len() > MAX_CAPTURE_BYTES * 2
                 || !evidence.raw_hex.len().is_multiple_of(2)
             {
@@ -311,6 +334,9 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
                 .collect::<Result<Vec<_>, _>>()?;
             if sha256_hex(&raw) != evidence.raw_sha256 {
                 return Err(tampered());
+            }
+            if terminal && attempt.outcome == "completed" {
+                complete_result(&raw, &attempt.probe).map_err(|_| tampered())?;
             }
         }
     }
@@ -602,6 +628,12 @@ pub fn resume(path: &Path) -> Result<StepOutput, Diagnostic> {
         ));
     }
     if state.status == "paused" {
+        if state.session.as_ref().expect("session checked").transport == Transport::Native {
+            let (candidate, report) = replay_native(&state);
+            if let Some(candidate) = candidate {
+                return activate(&writer, &mut state, candidate, report);
+            }
+        }
         let now = discovery::timestamp();
         elapsed(&state, &now)?;
         let session = state.session.as_mut().expect("session checked");
@@ -628,6 +660,24 @@ pub fn resume(path: &Path) -> Result<StepOutput, Diagnostic> {
     } else {
         current_output(&state)
     }
+}
+
+fn complete_result(raw: &[u8], probe: &Probe) -> Result<Normalized, Diagnostic> {
+    let normalized = normalize(raw)?;
+    if normalized.rows.len() >= 10000 {
+        return Err(error(
+            "SEARCH_ROW_LIMIT",
+            "Result exceeds the evidence row budget.",
+        ));
+    }
+    let rows = normalized
+        .rows
+        .iter()
+        .cloned()
+        .map(Value::Object)
+        .collect::<Vec<_>>();
+    discovery::check_measurement(probe, &rows)?;
+    Ok(normalized)
 }
 
 pub fn step_resumable(
@@ -689,24 +739,7 @@ pub fn step_resumable(
         }
         let raw = storage::read_bytes(file, MAX_CAPTURE_BYTES as u64)?;
         let now = discovery::timestamp();
-        let normalized = elapsed(&state, &now)
-            .and_then(|_| normalize(&raw))
-            .and_then(|normalized| {
-                if normalized.rows.len() >= 10000 {
-                    return Err(error(
-                        "SEARCH_ROW_LIMIT",
-                        "Result exceeds the evidence row budget.",
-                    ));
-                }
-                let rows = normalized
-                    .rows
-                    .iter()
-                    .cloned()
-                    .map(Value::Object)
-                    .collect::<Vec<_>>();
-                discovery::check_measurement(&attempt.probe, &rows)?;
-                Ok(normalized)
-            });
+        let normalized = complete_result(&raw, &attempt.probe);
         let result = match normalized {
             Ok(result) => result,
             Err(d) => {
@@ -739,6 +772,21 @@ pub fn step_resumable(
                 return Ok(output);
             }
         };
+        if let Err(d) = elapsed(&state, &now) {
+            if d.code != "MCP_DEADLINE" {
+                return Err(d);
+            }
+            let session = state.session.as_mut().expect("session checked");
+            let attempt = session.attempts.last_mut().expect("attempt checked");
+            attempt.outcome = "completed".into();
+            attempt.terminal = Some(TerminalEvidence {
+                file: path_identity(file)?,
+                raw_hex: raw_hex(&raw),
+                raw_sha256: sha256_hex(&raw),
+            });
+            session.pause_clock(&now)?;
+            return fail_state(&writer, &mut state, d);
+        }
         let probe = state
             .session
             .as_ref()
@@ -880,6 +928,63 @@ struct NativeBackend<'a, B> {
     state: &'a mut State,
     backend: &'a mut B,
     replay: Option<String>,
+}
+
+struct CapturedBackend<'a>(&'a BTreeMap<String, discovery::Capture>);
+
+impl SearchBackend for CapturedBackend<'_> {
+    fn start(
+        &mut self,
+        view: &str,
+        query: &str,
+        start: &str,
+        end: &str,
+        _: Instant,
+    ) -> Result<String, Diagnostic> {
+        let id = discovery::probe_id_for(view, query, start, end);
+        if !self.0.contains_key(&id) {
+            return Err(error(
+                "DISCOVERY_CAPTURE_REQUIRED",
+                "The next native measurement has no accepted capture.",
+            ));
+        }
+        Ok(id)
+    }
+    fn poll(&mut self, _: &str, id: &str, _: Instant) -> Result<Value, Diagnostic> {
+        let capture = self.0.get(id).ok_or_else(tampered)?;
+        Ok(
+            json!({"done":true,"cancelled":false,"events":capture.receipt.events,
+            "metaData":capture.receipt.metadata.clone().unwrap_or_else(||json!({}))}),
+        )
+    }
+    fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
+        Ok(())
+    }
+    fn observed_at(&self, id: &str) -> Option<String> {
+        self.0.get(id).map(|capture| capture.retrieved_at.clone())
+    }
+}
+
+fn replay_native(state: &State) -> (Option<Pack>, DiscoverReport) {
+    let session = state.session.as_ref().expect("native session checked");
+    let (candidate, mut report) = discovery::execute_with_policy(
+        &state.request,
+        &mut CapturedBackend(&session.captures),
+        Origin::Api,
+        Duration::from_secs(state.request.max_seconds),
+        session.sparse_fieldset_fallback,
+    );
+    if candidate.is_some() {
+        for capture in &mut report.captures {
+            let id = discovery::probe_id(&state.request.environment.view, &capture.probe);
+            *capture = session
+                .captures
+                .get(&id)
+                .expect("capture-only replay uses accepted probes")
+                .clone();
+        }
+    }
+    (candidate, report)
 }
 
 impl<B: SearchBackend> SearchBackend for NativeBackend<'_, B> {
@@ -1185,10 +1290,6 @@ pub fn run_native(path: &Path, backend: &mut impl SearchBackend) -> Result<StepO
     if matches!(state.status.as_str(), "activated" | "activating" | "failed") {
         return advance(&writer, &mut state);
     }
-    if state.status == "activation-blocked" {
-        state.status = "needs-probes".into();
-        store(&writer, &state)?;
-    }
     if has_in_flight(&state) {
         state.status = "cleanup-pending".into();
         store(&writer, &state)?;
@@ -1196,6 +1297,19 @@ pub fn run_native(path: &Path, backend: &mut impl SearchBackend) -> Result<StepO
     }
     if state.status == "paused" {
         return current_output(&state);
+    }
+    let (candidate, report) = replay_native(&state);
+    if let Some(candidate) = candidate {
+        return activate(&writer, &mut state, candidate, report);
+    }
+    if state.status == "activation-blocked" {
+        return Ok(progress(
+            &state,
+            "activation-blocked",
+            vec![],
+            false,
+            report.diagnostics,
+        ));
     }
     let remaining = elapsed(&state, &discovery::timestamp())?;
     let request = state.request.clone();

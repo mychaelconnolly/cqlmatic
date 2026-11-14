@@ -888,6 +888,20 @@ pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
     Ok(state)
 }
 
+/// Read an activated run and its verified frozen report without enabling resume.
+pub fn inspect_completed_report(path: &Path) -> Result<(State, DiscoverReport), Diagnostic> {
+    let state = inspect_state(path)?;
+    if state.status != "activated" {
+        return Err(Diagnostic::error(
+            "DISCOVERY_PHASE",
+            "Only an activated discovery run supplies a completed report.",
+        ));
+    }
+    let intent = state.activation.as_ref().ok_or_else(tampered)?;
+    let report = serde_json::from_str(&intent.receipt_bytes).map_err(|_| tampered())?;
+    Ok((state, report))
+}
+
 fn successes(state: &State) -> Result<BTreeMap<String, Vec<Value>>, Diagnostic> {
     state
         .answers
@@ -1662,12 +1676,20 @@ mod recovery_tests {
             }
         }
         let run = ready(false);
+        assert_eq!(
+            inspect_completed_report(&run.state).unwrap_err().code,
+            "DISCOVERY_PHASE"
+        );
         assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
         let mut checkpoint: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
         for producer in ["0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.5"] {
             checkpoint["producer_version"] = json!(producer);
             fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
             assert_eq!(inspect_state(&run.state).unwrap().status, "activated");
+            let (history, report) = inspect_completed_report(&run.state).unwrap();
+            assert_eq!(history.producer_version, producer);
+            assert_eq!(report.status, "complete");
+            assert_eq!(report.captures.len(), history.answers.len());
             let before = fs::read(&run.state).unwrap();
             for result in [
                 step(&run.state, &[]),
@@ -1973,6 +1995,91 @@ mod recovery_tests {
         fs::write(&run.state, state_bytes(&state).unwrap()).unwrap();
         let output = step(&run.state, &[]).unwrap();
         assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
+    }
+
+    #[test]
+    fn native_interruption_before_intent_replays_without_a_live_backend() {
+        struct Native {
+            starts: usize,
+            polls: usize,
+            stops: usize,
+        }
+        impl SearchBackend for Native {
+            fn start(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Instant,
+            ) -> Result<String, Diagnostic> {
+                self.starts += 1;
+                Ok(format!("synthetic-job-{}", self.starts))
+            }
+            fn poll(&mut self, _: &str, _: &str, _: Instant) -> Result<Value, Diagnostic> {
+                self.polls += 1;
+                Ok(json!({"done":true,"cancelled":false,"metaData":{},"events":[{"events":"10"}]}))
+            }
+            fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
+                self.stops += 1;
+                Ok(())
+            }
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "cqlmatic-native-before-intent-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let run = Run {
+            state: directory.join("state.json"),
+            pack: directory.join("pack.json"),
+            receipt: directory.join("receipt.json"),
+            directory,
+        };
+        let request: DiscoverRequest = serde_json::from_value(json!({
+            "schema_version":1,"environment":{"cloud":"us1","tenant":"00000000000000000000000000000000","view":"synthetic_view"},
+            "start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z",
+            "sources":[{"repo":"synthetic"}],"depth":"sources-only","max_queries":1,"max_seconds":120
+        })).unwrap();
+        init_resumable(
+            request,
+            &run.state,
+            &run.pack,
+            &run.receipt,
+            Transport::Native,
+        )
+        .unwrap();
+        let mut native = Native {
+            starts: 0,
+            polls: 0,
+            stops: 0,
+        };
+        ACTIVATION_FAULT.with(|fault| fault.set(Some("before-intent")));
+        assert_eq!(
+            run_native(&run.state, &mut native).unwrap_err().code,
+            "TEST_INTERRUPTED"
+        );
+        let before = read_state(&run.state).unwrap();
+        assert_eq!(before.status, "needs-probes");
+        assert!(before.activation.is_none());
+        let captures = frozen_json(&before.session.as_ref().unwrap().captures).unwrap();
+        assert_eq!(
+            run_native(&run.state, &mut native).unwrap().status,
+            "complete"
+        );
+        assert_eq!((native.starts, native.polls, native.stops), (1, 1, 1));
+        assert_eq!(
+            frozen_json(
+                &read_state(&run.state)
+                    .unwrap()
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .captures
+            )
+            .unwrap(),
+            captures
+        );
     }
 
     #[test]

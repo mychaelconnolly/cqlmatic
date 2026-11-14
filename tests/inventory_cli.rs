@@ -780,6 +780,9 @@ fn relay(
                     json!([row])
                 }
                 "tag-detect" => json!([{"events":0}]),
+                "value-facet" => {
+                    json!([{probe["field"].as_str().unwrap():"synthetic","events":10}])
+                }
                 kind => panic!("unexpected probe {kind}"),
             };
             let file = fixture(
@@ -813,6 +816,139 @@ fn confirm_quick_source(dir: &Path, source: &str) {
 
 fn prepare_source_run(dir: &Path) -> Value {
     call(dir, source_run_request(4))
+}
+
+#[test]
+fn prepared_run_resolves_only_field_measurements_accepted_after_its_hint() {
+    for zero in [false, true] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        call(
+            &dir.0,
+            json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
+        );
+        let prepared = call(&dir.0, source_run_request(40));
+        call(
+            &dir.0,
+            json!({"kind":"record-inventory-hints","environment":environment(),"hints":[{"source":{"type":"synthetic"},"fields":["hinted_field"]}]}),
+        );
+        let state_path = dir.0.join("workflow/state.json");
+        let saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            saved["pending_inventory"][0]["capture_boundary"]["accepted_probe_ids"],
+            json!([])
+        );
+        let completed = relay(
+            &dir.0,
+            prepared,
+            &["hinted_field"],
+            if zero { &["hinted_field"] } else { &[] },
+            None,
+        );
+        assert_eq!(
+            completed["status"]["settings_attention"], false,
+            "{completed}"
+        );
+        let field = completed["status"]["sources"][0]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["field"] == "hinted_field")
+            .unwrap();
+        assert_eq!(field["measured"], true);
+        assert_eq!(field["observed"], !zero);
+        let saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            saved["pending_inventory"][0]["resolution"]["kind"],
+            "inventoried"
+        );
+        assert!(
+            saved["pending_inventory"][0]["resolution"]["evidence"][0]["fields"]["hinted_field"]
+                .is_string()
+        );
+    }
+}
+
+#[test]
+fn hint_boundary_does_not_credit_earlier_fields_or_unavailable_checkpoints() {
+    for unavailable in [false, true] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        call(
+            &dir.0,
+            json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
+        );
+        let mut request = source_run_request(40);
+        request["value_fields"] = json!(["unrelated_field"]);
+        let mut progress = call(&dir.0, request);
+        for _ in 0..8 {
+            let probes = progress["action"]["relay"]["probes"]
+                .as_array()
+                .unwrap()
+                .clone();
+            if probes.iter().all(|probe| probe["kind"] == "value-facet") {
+                break;
+            }
+            for probe in probes {
+                let rows = match probe["kind"].as_str().unwrap() {
+                    "volume" => json!([{"events":10}]),
+                    "fieldset" => json!([{"field":"hinted_field"},{"field":"unrelated_field"}]),
+                    "dataset-facet" => json!([]),
+                    "tag-detect" => json!([{"events":0}]),
+                    "population" => json!([{"total":10,"c0":10,"c1":10}]),
+                    kind => panic!("Unexpected probe {kind}"),
+                };
+                call(
+                    &dir.0,
+                    json!({"kind":"dispatch-discovery","probe_id":probe["probe_id"]}),
+                );
+                let input = fixture(&dir.0, "before-hint.json", json!({"result":rows}));
+                progress = call(
+                    &dir.0,
+                    json!({"kind":"discovery-step","answers":[{"probe_id":probe["probe_id"],"result_file":input}]}),
+                );
+            }
+        }
+        assert_eq!(
+            progress["action"]["relay"]["probes"][0]["kind"],
+            "value-facet"
+        );
+        let relay_path = Path::new(
+            progress["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let guard = unavailable.then(|| cqlmatic::storage::Writer::acquire(relay_path).unwrap());
+        call(
+            &dir.0,
+            json!({"kind":"record-inventory-hints","environment":environment(),"hints":[{"source":{"type":"synthetic"},"fields":["hinted_field"]}]}),
+        );
+        drop(guard);
+        let state: Value =
+            serde_json::from_slice(&fs::read(dir.0.join("workflow/state.json")).unwrap()).unwrap();
+        assert_eq!(
+            state["pending_inventory"][0]["capture_boundary"].is_null(),
+            unavailable
+        );
+        let completed = relay(
+            &dir.0,
+            progress,
+            &["hinted_field", "unrelated_field"],
+            &[],
+            None,
+        );
+        assert_eq!(completed["status"]["settings_attention"], true);
+        assert!(completed["status"]["pending_inventory"][0]["resolution"].is_null());
+        let next = call(&dir.0, source_run_request(40));
+        let completed = relay(
+            &dir.0,
+            next,
+            &["hinted_field", "unrelated_field"],
+            &[],
+            None,
+        );
+        assert_eq!(completed["status"]["settings_attention"], false);
+    }
 }
 fn source_run_request(max_queries: u32) -> Value {
     json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_queries":max_queries,"max_seconds":120})
@@ -1706,6 +1842,96 @@ fn rejected_host_response_keeps_cleanup_pending_and_cannot_renew_discovery_budge
         source_run_request(4),
         "identical discovery request is safely paused",
     );
+}
+
+#[test]
+fn late_original_settles_retained_search_before_an_identical_new_run() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let probe = &prepared["action"]["relay"]["probes"][0];
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","probe_id":probe["probe_id"]}),
+    );
+    let timeout = fixture(
+        &dir.0,
+        "timeout.json",
+        json!({"result":[],"error":"synthetic timeout"}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"discovery-step","answers":[{"probe_id":probe["probe_id"],"result_file":timeout}]}),
+    );
+    let brief = brief_value(
+        Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--json", "--brief", "--state"])
+            .arg(dir.0.join("workflow/state.json"))
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(brief["refresh_blocked"], false);
+    assert_eq!(
+        brief["refresh"]["blocker"],
+        "recorded-discovery-recovery-required"
+    );
+    assert_eq!(brief["counts"]["discovery_recovery"], 1);
+    assert!(
+        brief["references"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("discovery:")
+    );
+    assert_rejected(
+        &dir.0,
+        source_run_request(4),
+        "unresolved termination or cleanup",
+    );
+
+    let relay_path = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let mut saved: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    saved["created_at"] = json!("2026-01-02T00:00:00Z");
+    saved["session"]["periods"] = json!([{"start":"2026-01-02T00:00:00Z","end":null}]);
+    saved["session"]["attempts"][0]["dispatched_at"] = json!("2026-01-02T00:00:01Z");
+    let mut binding = serde_json::to_vec(&(
+        &saved["request_sha256"],
+        &saved["created_at"],
+        &saved["pack"],
+        &saved["receipt"],
+        &saved["session"]["transport"],
+        &saved["session"]["predecessor_sha256"],
+    ))
+    .unwrap();
+    if saved["session"]["sparse_fieldset_fallback"] == true {
+        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    saved["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
+    fs::write(relay_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let original = fixture(
+        &dir.0,
+        "late-original.json",
+        json!({"result":[{"events":10}]}),
+    );
+    let settled = call(
+        &dir.0,
+        json!({"kind":"discovery-step","answers":[{"probe_id":probe["probe_id"],"result_file":original}]}),
+    );
+    assert_eq!(settled["action"]["relay"]["status"], "failed");
+    assert_eq!(settled["action"]["relay"]["answered"], 0);
+    assert!(settled["status"]["active_pack"].is_null());
+    let retained = fs::read(relay_path).unwrap();
+    let resumed = call(&dir.0, json!({"kind":"resume-discovery"}));
+    assert_eq!(resumed["action"]["relay"]["status"], "failed");
+    let next = prepare_source_run(&dir.0);
+    assert_eq!(
+        next["status"]["discovery_runs"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(fs::read(relay_path).unwrap(), retained);
 }
 
 #[test]

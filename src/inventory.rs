@@ -437,8 +437,85 @@ pub struct InventoryNoticeSnapshot {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum WorkResolution {
-    Inventoried { run: String },
-    Excluded { reason: String, reviewed_at: String },
+    Inventoried {
+        run: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evidence: Vec<InventoryWorkRunProof>,
+    },
+    Excluded {
+        reason: String,
+        reviewed_at: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InventoryCaptureBoundary {
+    pub run: String,
+    pub request_sha256: String,
+    pub accepted_probe_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InventoryWorkRunProof {
+    pub run: String,
+    pub request_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_probe_id: Option<String>,
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InventoryRunEvidence {
+    pub run: String,
+    pub request_sha256: String,
+    pub captures: Vec<discovery::Capture>,
+}
+
+impl InventoryCaptureBoundary {
+    /// The I/O boundary verifies and locks the exact checkpoint before calling this pure helper.
+    pub fn from_checkpoint(run: &str, relay: &mcp::State) -> Result<Self, Diagnostic> {
+        text(run)?;
+        discovery::validate_request(&relay.request)?;
+        let request_sha256 = serde_json::to_vec(&relay.request)
+            .map(|bytes| sha256_hex(&bytes))
+            .map_err(|_| fail("Cannot fingerprint discovery request."))?;
+        if relay.request_sha256 != request_sha256 {
+            return Err(fail(
+                "Discovery capture boundary requires its exact request.",
+            ));
+        }
+        let mut accepted: BTreeSet<_> = relay
+            .answers
+            .iter()
+            .filter(|(_, answer)| answer.outcome == "complete")
+            .map(|(id, _)| id.clone())
+            .collect();
+        if let Some(session) = &relay.session {
+            accepted.extend(session.captures.keys().cloned());
+        }
+        let boundary = Self {
+            run: run.into(),
+            request_sha256,
+            accepted_probe_ids: accepted.into_iter().collect(),
+        };
+        boundary.validate(relay.request.max_queries)?;
+        Ok(boundary)
+    }
+
+    fn validate(&self, max_queries: u32) -> Result<(), Diagnostic> {
+        text(&self.run)?;
+        if !sha256_valid(&self.request_sha256)
+            || self.accepted_probe_ids.len() > max_queries.min(1000) as usize
+            || self.accepted_probe_ids.iter().any(|id| !probe_id_valid(id))
+        {
+            return Err(fail("Invalid discovery capture boundary."));
+        }
+        distinct_text(&self.accepted_probe_ids)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -454,6 +531,8 @@ pub struct PendingInventoryWork {
     pub notified_revision: u64,
     pub deferred: bool,
     pub after_run: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_boundary: Option<InventoryCaptureBoundary>,
     pub resolution: Option<WorkResolution>,
 }
 
@@ -1314,6 +1393,21 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     });
     let prepared_for_current_session = reserved
         .is_some_and(|attempt| attempt.phase == RefreshPhase::Prepared && current_session_match);
+    let mut discovery_work: Vec<_> = status
+        .discovery_runs
+        .iter()
+        .filter(|run| !matches!(run.status.as_str(), "complete" | "paused"))
+        .collect();
+    discovery_work.sort_by_key(|run| {
+        (
+            !matches!(run.status.as_str(), "cancel-requested" | "cleanup-pending"),
+            sha256_hex(run.state_path.as_bytes()),
+        )
+    });
+    let discovery_recovery = discovery_work
+        .iter()
+        .filter(|run| matches!(run.status.as_str(), "cancel-requested" | "cleanup-pending"))
+        .count();
     let blocker = match reserved {
         Some(attempt) if attempt.phase == RefreshPhase::Unresolved => "termination-unresolved",
         Some(attempt) if attempt.phase == RefreshPhase::Dispatched => "awaiting-host-settlement",
@@ -1323,6 +1417,8 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         Some(_) if prepared_for_current_session => "reserved-for-current-session",
         Some(_) => "reserved-for-other-or-unidentified-session",
         None if status.environment.is_none() => "target-required",
+        None if discovery_recovery > 0 => "recorded-discovery-recovery-required",
+        None if !discovery_work.is_empty() => "recorded-discovery-unfinished",
         None => "manual-refresh-available",
     };
     let mut notices = Vec::new();
@@ -1342,6 +1438,13 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     if blocker == "target-required" {
         notices.push(json!({"code":"INVENTORY_TARGET_REQUIRED","severity":"info",
             "message":"Confirm the exact target before inventory refresh."}));
+    }
+    if discovery_recovery > 0 {
+        notices.push(json!({"code":"DISCOVERY_RECOVERY_RECORDED","severity":"warning",
+            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the exact saved attempt before another search. Recorded state does not establish current backend execution."}));
+    } else if !discovery_work.is_empty() {
+        notices.push(json!({"code":"DISCOVERY_UNFINISHED_RECORDED","severity":"info",
+            "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
     }
     if reminder.is_some_and(|reminder| reminder.show_startup_notice) {
         notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info",
@@ -1367,6 +1470,21 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         && safe_id(&attempt.attempt_id, "refresh:", 64)
     {
         references.push(json!({"kind":"refresh","id":attempt.attempt_id,"phase":attempt.phase}));
+    }
+    for run in &discovery_work {
+        if references.len() == 5 {
+            break;
+        }
+        let phase = match run.status.as_str() {
+            "needs-probes" => "needs-probes",
+            "activation-blocked" => "activation-blocked",
+            "activating" => "activating",
+            "failed" => "failed",
+            "cancel-requested" => "cancel-requested",
+            "cleanup-pending" => "cleanup-pending",
+            _ => "unverified",
+        };
+        references.push(json!({"kind":"discovery","id":format!("discovery:{}",sha256_hex(run.state_path.as_bytes())),"phase":phase}));
     }
     for entry in &work {
         if references.len() == 5 {
@@ -1407,12 +1525,13 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|source| source.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
+            "discovery_recovery":discovery_recovery,"discovery_unfinished":discovery_work.len(),
             "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,
             "pending_inventory":status.pending_inventory.iter().filter(|work| work.resolution.is_none()).count(),
             "inventory_notifications":status.inventory_notification_count,
             "refresh_attempts":status.refresh_attempts.len()},
         "notification_snapshot":inventory_notice_snapshot(status.environment.as_ref(), &status.pending_inventory).ok().flatten(),
-        "notices":notices,"omitted_references":work.len() + status.refresh_attempts.len() - references.len(),"references":references
+        "notices":notices,"omitted_references":work.len() + status.refresh_attempts.len() + discovery_work.len() - references.len(),"references":references
     })
 }
 
@@ -1450,6 +1569,99 @@ fn text(value: &str) -> Result<(), Diagnostic> {
             .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
         return Err(fail("Supply nonempty bounded review text."));
+    }
+    Ok(())
+}
+
+fn sha256_valid(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn probe_id_valid(value: &str) -> bool {
+    value.strip_prefix("p-").is_some_and(|suffix| {
+        suffix.len() == 16 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn inventory_work_run(
+    runs: &[DiscoveryRun],
+    work: &PendingInventoryWork,
+    path: &str,
+    request_sha256: Option<&str>,
+) -> Option<usize> {
+    runs.iter().enumerate().find_map(|(index, run)| {
+        (run.state_path == path && inventory_work_run_eligible(index, run, work, request_sha256))
+            .then_some(index)
+    })
+}
+
+fn inventory_work_run_eligible(
+    index: usize,
+    run: &DiscoveryRun,
+    work: &PendingInventoryWork,
+    request_sha256: Option<&str>,
+) -> bool {
+    run.status == "complete"
+        && run.source_ids.contains(&work.id)
+        && (index >= work.after_run
+            || index + 1 == work.after_run
+                && work.capture_boundary.as_ref().is_some_and(|boundary| {
+                    boundary.run == run.state_path
+                        && request_sha256 == Some(boundary.request_sha256.as_str())
+                }))
+}
+
+fn validate_inventory_work_proof(
+    runs: &[DiscoveryRun],
+    work: &PendingInventoryWork,
+    run: &str,
+    evidence: &[InventoryWorkRunProof],
+) -> Result<(), Diagnostic> {
+    if evidence.is_empty() {
+        return inventory_work_run(runs, work, run, None)
+            .map(|_| ())
+            .ok_or_else(|| {
+                fail("Inventory work resolution requires its exact completed source run.")
+            });
+    }
+    let mut proof_runs = BTreeSet::new();
+    let mut fields = BTreeSet::new();
+    let mut source_measured = false;
+    for proof in evidence {
+        let index = inventory_work_run(runs, work, &proof.run, Some(&proof.request_sha256))
+            .ok_or_else(|| fail("Inventory work proof requires its exact eligible source run."))?;
+        if !sha256_valid(&proof.request_sha256)
+            || !proof_runs.insert(proof.run.as_str())
+            || proof.fields.is_empty() && proof.source_probe_id.is_none()
+            || proof
+                .fields
+                .keys()
+                .any(|field| !work.fields.contains(field) || !fields.insert(field.as_str()))
+        {
+            return Err(fail("Invalid inventory work capture proof."));
+        }
+        for id in proof.fields.values().chain(proof.source_probe_id.iter()) {
+            if !probe_id_valid(id)
+                || index < work.after_run
+                    && work
+                        .capture_boundary
+                        .as_ref()
+                        .is_some_and(|boundary| boundary.accepted_probe_ids.contains(id))
+            {
+                return Err(fail(
+                    "Inventory work proof must follow its capture boundary.",
+                ));
+            }
+        }
+        source_measured |= proof.source_probe_id.is_some();
+    }
+    if !proof_runs.contains(run)
+        || fields.len() != work.fields.len()
+        || work.fields.is_empty() && !source_measured
+    {
+        return Err(fail(
+            "Inventory work proof must cover its exact requested measurements.",
+        ));
     }
     Ok(())
 }
@@ -1546,6 +1758,19 @@ impl InventoryState {
             for field in &work.fields {
                 crate::language::plan::checked_field(field)?;
             }
+            if let Some(boundary) = &work.capture_boundary {
+                let run = work
+                    .after_run
+                    .checked_sub(1)
+                    .and_then(|index| self.discovery_runs.get(index))
+                    .filter(|run| {
+                        run.state_path == boundary.run && run.source_ids.contains(&work.id)
+                    })
+                    .ok_or_else(|| {
+                        fail("Inventory capture boundary requires its exact source run.")
+                    })?;
+                boundary.validate(run.max_queries)?;
+            }
             match &work.resolution {
                 Some(WorkResolution::Excluded {
                     reason,
@@ -1554,17 +1779,8 @@ impl InventoryState {
                     text(reason)?;
                     environment::parse_time(reviewed_at)?;
                 }
-                Some(WorkResolution::Inventoried { run })
-                    if !self.discovery_runs.iter().enumerate().any(|(index, r)| {
-                        &r.state_path == run
-                            && index >= work.after_run
-                            && r.status == "complete"
-                            && r.source_ids.contains(&work.id)
-                    }) =>
-                {
-                    return Err(fail(
-                        "Inventory work resolution requires its exact completed source run.",
-                    ));
+                Some(WorkResolution::Inventoried { run, evidence }) => {
+                    validate_inventory_work_proof(&self.discovery_runs, work, run, evidence)?;
                 }
                 _ => {}
             }
@@ -1881,6 +2097,15 @@ impl InventoryState {
         environment: &EnvironmentId,
         hints: Vec<InventoryHint>,
     ) -> Result<usize, Diagnostic> {
+        self.record_inventory_hints_with_boundary(environment, hints, None)
+    }
+
+    pub fn record_inventory_hints_with_boundary(
+        &mut self,
+        environment: &EnvironmentId,
+        hints: Vec<InventoryHint>,
+        boundary: Option<InventoryCaptureBoundary>,
+    ) -> Result<usize, Diagnostic> {
         if self
             .target
             .as_ref()
@@ -1890,6 +2115,16 @@ impl InventoryState {
                 "Inventory hints require the exact confirmed environment.",
             ));
         }
+        if let Some(boundary) = &boundary {
+            let run = self
+                .discovery_runs
+                .last()
+                .filter(|run| run.state_path == boundary.run && run.status != "complete")
+                .ok_or_else(|| {
+                    fail("Inventory hints require the exact unfinished discovery run.")
+                })?;
+            boundary.validate(run.max_queries)?;
+        }
         let mut candidate = self.clone();
         let mut changed = 0;
         for hint in hints {
@@ -1898,12 +2133,24 @@ impl InventoryState {
                 crate::language::plan::checked_field(field)?;
             }
             let new_source = !candidate.sources.iter().any(|s| s.selectors == hint.source);
-            changed += usize::from(candidate.queue_inventory_work(
-                hint.source,
-                hint.fields,
-                vec![],
-                new_source,
-            )?);
+            let id = discovery::source_id(&hint.source);
+            let queued =
+                candidate.queue_inventory_work(hint.source, hint.fields, vec![], new_source)?;
+            if queued {
+                let boundary = boundary.as_ref().filter(|_| {
+                    candidate
+                        .discovery_runs
+                        .last()
+                        .is_some_and(|run| run.source_ids.contains(&id))
+                });
+                candidate
+                    .pending_inventory
+                    .iter_mut()
+                    .find(|work| work.id == id)
+                    .expect("Queued exact work identity")
+                    .capture_boundary = boundary.cloned();
+            }
+            changed += usize::from(queued);
         }
         candidate.validate()?;
         *self = candidate;
@@ -1939,6 +2186,7 @@ impl InventoryState {
                 notified_revision: 0,
                 deferred: false,
                 after_run: self.discovery_runs.len(),
+                capture_boundary: None,
                 resolution: None,
             });
             self.pending_inventory
@@ -1967,6 +2215,7 @@ impl InventoryState {
             work.deferred = false;
             work.resolution = None;
             work.after_run = self.discovery_runs.len();
+            work.capture_boundary = None;
         }
         Ok(changed)
     }
@@ -2015,10 +2264,83 @@ impl InventoryState {
     }
 
     pub fn resolve_inventoried_work(&mut self, status: &InventoryStatus) -> Result<(), Diagnostic> {
-        for work in self
+        self.resolve_inventoried_work_with_evidence(status, &[])
+    }
+
+    pub fn resolve_inventoried_work_with_evidence(
+        &mut self,
+        status: &InventoryStatus,
+        evidence: &[InventoryRunEvidence],
+    ) -> Result<(), Diagnostic> {
+        self.validate()?;
+        if status.environment.as_ref() != self.target.as_ref().map(|target| &target.environment) {
+            return Err(fail(
+                "Inventory work status requires its exact confirmed environment.",
+            ));
+        }
+        let Some(environment) = status.environment.as_ref() else {
+            return if evidence.is_empty() {
+                Ok(())
+            } else {
+                Err(fail("Inventory run evidence requires a confirmed target."))
+            };
+        };
+        let mut reports = BTreeMap::new();
+        for report in evidence {
+            let run = self
+                .discovery_runs
+                .iter()
+                .find(|run| run.state_path == report.run && run.status == "complete")
+                .ok_or_else(|| {
+                    fail("Inventory work evidence requires a completed discovery run.")
+                })?;
+            if !sha256_valid(&report.request_sha256)
+                || reports.insert(report.run.as_str(), report).is_some()
+                || report.captures.len() > run.max_queries.min(1000) as usize
+            {
+                return Err(fail("Invalid or duplicate inventory run evidence."));
+            }
+            let start = environment::parse_time(&run.start)?;
+            let end = environment::parse_time(&run.end)?;
+            let mut ids = BTreeSet::new();
+            for capture in &report.captures {
+                let probe = &capture.probe;
+                scope_ok(&probe.source)?;
+                for field in probe.fields.iter().chain(probe.field.iter()) {
+                    crate::language::plan::checked_field(field)?;
+                }
+                let capture_start = environment::parse_time(&probe.start)?;
+                let capture_end = environment::parse_time(&probe.end)?;
+                if !run
+                    .source_ids
+                    .contains(&discovery::source_id(&probe.source))
+                    || capture_start < start
+                    || capture_end > end
+                    || capture_start >= capture_end
+                    || environment::parse_time(&capture.retrieved_at)? < capture_end
+                    || capture.receipt.completion != "complete"
+                    || !capture.receipt.cleanup_complete()
+                    || capture.receipt.diagnostic.is_some()
+                    || capture.receipt.query != probe.query
+                    || capture.receipt.start != probe.start
+                    || capture.receipt.end != probe.end
+                    || matches!(probe.kind.as_str(), "tag-detect" | "record-kind-facet")
+                        && probe.field.is_none()
+                    || !ids.insert(discovery::probe_id(&environment.view, probe))
+                {
+                    return Err(fail(
+                        "Inventory work requires exact completed measurement captures.",
+                    ));
+                }
+                discovery::check_measurement(probe, &capture.receipt.events)?;
+            }
+        }
+        let mut resolutions = Vec::new();
+        for (work_index, work) in self
             .pending_inventory
-            .iter_mut()
-            .filter(|w| w.resolution.is_none())
+            .iter()
+            .enumerate()
+            .filter(|(_, work)| work.resolution.is_none())
         {
             let Some(source) = status
                 .sources
@@ -2027,32 +2349,105 @@ impl InventoryState {
             else {
                 continue;
             };
-            let Some(run) = self
-                .discovery_runs
-                .iter()
-                .skip(work.after_run)
-                .rev()
-                .find(|r| r.status == "complete" && r.source_ids.contains(&work.id))
-            else {
-                continue;
-            };
-            if !work.fields.is_empty()
-                && run.mode == DiscoveryMode::Quick
-                && run.quick_depth == QuickDepth::SourcesOnly
-            {
-                continue;
-            }
-            if work
+            if !work
                 .fields
                 .iter()
                 .all(|name| source.fields.iter().any(|f| &f.field == name && f.measured))
             {
-                work.resolution = Some(WorkResolution::Inventoried {
-                    run: run.state_path.clone(),
-                });
-                work.deferred = false;
-                work.notified_revision = work.revision;
+                continue;
             }
+            let mut captures = Vec::new();
+            let mut capture_runs = Vec::new();
+            for (run_index, run) in self.discovery_runs.iter().enumerate() {
+                let Some(report) = reports.get(run.state_path.as_str()) else {
+                    continue;
+                };
+                if !inventory_work_run_eligible(run_index, run, work, Some(&report.request_sha256))
+                    || !work.fields.is_empty()
+                        && run.mode == DiscoveryMode::Quick
+                        && run.quick_depth == QuickDepth::SourcesOnly
+                {
+                    continue;
+                }
+                for capture in &report.captures {
+                    if capture.probe.source != work.source {
+                        continue;
+                    }
+                    let id = discovery::probe_id(&environment.view, &capture.probe);
+                    if run_index < work.after_run
+                        && work
+                            .capture_boundary
+                            .as_ref()
+                            .is_some_and(|boundary| boundary.accepted_probe_ids.contains(&id))
+                    {
+                        continue;
+                    }
+                    captures.push(capture.clone());
+                    capture_runs.push((run_index, id));
+                }
+            }
+            let mut proofs = BTreeMap::new();
+            if work.fields.is_empty() {
+                let Some(index) = captures.iter().rposition(|capture| {
+                    capture.probe.kind == "volume"
+                        && capture.receipt.events.first().is_some_and(|row| {
+                            row.get("events")
+                                .or_else(|| row.get("_count"))
+                                .and_then(|value| {
+                                    value.as_u64().or_else(|| value.as_str()?.parse().ok())
+                                })
+                                .is_some_and(|count| count > 0)
+                        })
+                }) else {
+                    continue;
+                };
+                let (run_index, id) = &capture_runs[index];
+                let run = &self.discovery_runs[*run_index];
+                proofs.insert(
+                    *run_index,
+                    InventoryWorkRunProof {
+                        run: run.state_path.clone(),
+                        request_sha256: reports[run.state_path.as_str()].request_sha256.clone(),
+                        source_probe_id: Some(id.clone()),
+                        fields: BTreeMap::new(),
+                    },
+                );
+            } else {
+                let measured = discovery::field_captures(&captures, &work.source)?;
+                if !work.fields.iter().all(|field| measured.contains_key(field)) {
+                    continue;
+                }
+                for field in &work.fields {
+                    let (capture_index, _, _) = measured[field];
+                    let (run_index, id) = &capture_runs[capture_index];
+                    let run = &self.discovery_runs[*run_index];
+                    proofs
+                        .entry(*run_index)
+                        .or_insert_with(|| InventoryWorkRunProof {
+                            run: run.state_path.clone(),
+                            request_sha256: reports[run.state_path.as_str()].request_sha256.clone(),
+                            source_probe_id: None,
+                            fields: BTreeMap::new(),
+                        })
+                        .fields
+                        .insert(field.clone(), id.clone());
+                }
+            }
+            let run = proofs
+                .last_key_value()
+                .expect("Exact work has capture proofs")
+                .1
+                .run
+                .clone();
+            let evidence: Vec<_> = proofs.into_values().collect();
+            validate_inventory_work_proof(&self.discovery_runs, work, &run, &evidence)?;
+            resolutions.push((work_index, WorkResolution::Inventoried { run, evidence }));
+        }
+        for (index, resolution) in resolutions {
+            let work = &mut self.pending_inventory[index];
+            work.resolution = Some(resolution);
+            work.deferred = false;
+            work.notified_revision = work.revision;
         }
         self.validate()
     }

@@ -168,6 +168,10 @@ When the host can attest that the exact attempt was cancelled and cleanup comple
 
 `paused`, `cancel-requested`, `cleanup-pending`, `needs-probes` and `activation-blocked` return exit `3`; inspect the status and diagnostic before continuing. Exhausted budgets remain failures; a rejected hosted result leaves its dispatched attempt unresolved in `cleanup-pending`. Legacy checkpoint formats retain their existing deadline/failure behavior and cannot acquire pause/resume allowances. API execution without `--state` keeps its existing final-receipt workflow.
 
+A valid, complete original MCP response received after the active-time budget expires closes that exact attempt while the run remains failed with `MCP_DEADLINE`. Its bytes are retained for lifecycle evidence; they do not become accepted discovery measurements. Once every attempt is safely terminal, an explicit new bounded run may be prepared. Error, partial, capped or malformed responses still require cleanup reconciliation.
+
+Native activation can replay a complete set of accepted captures locally after the search budget expires, including after an explicit resume. This performs no new searches and renews no allowance. Missing captures still require the original remaining budget; changed activation artifacts or inventory predecessors remain blocked.
+
 Completed format-2 checkpoints from versions `0.1.0` through `0.1.5` can remain as inventory history after an upgrade when their target, saved captures, activation intent, pack and receipt still validate. Unfinished or incompatible history blocks new inventory searches. Executing or resuming any checkpoint still requires its producing executable version.
 
 ## Declarations and observations

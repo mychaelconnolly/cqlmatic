@@ -81,6 +81,7 @@ impl Drop for Run {
 struct Fake {
     state: PathBuf,
     starts: Vec<String>,
+    polls: usize,
     stops: usize,
     cancel_after: Option<usize>,
     cancel_poll: bool,
@@ -140,6 +141,7 @@ impl SearchBackend for Fake {
         ))
     }
     fn poll(&mut self, _: &str, job: &str, _: Instant) -> Result<Value, Diagnostic> {
+        self.polls += 1;
         let saved: Value = serde_json::from_slice(&fs::read(&self.state).unwrap()).unwrap();
         let attempt = saved["session"]["attempts"]
             .as_array()
@@ -817,6 +819,310 @@ fn interrupted_legacy_failed_start_without_receipt_cannot_issue_another_start() 
         assert_eq!(backend.stops, 0);
         assert_eq!(mcp::resumable_info(&run.state).unwrap()["attempts"], 1);
         assert!(!run.pack.exists());
+        assert!(!run.receipt.exists());
+    }
+}
+
+fn age_checkpoint(run: &Run, closed_seconds: Option<i64>) {
+    let mut saved = run.saved();
+    let base = cqlmatic::environment::parse_time("2026-01-02T00:00:00Z").unwrap();
+    let at = |seconds| {
+        (base + time::Duration::seconds(seconds))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    saved["created_at"] = json!(at(0));
+    saved["session"]["periods"] = json!([{"start":at(0),"end":closed_seconds.map(at)}]);
+    for (index, attempt) in saved["session"]["attempts"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        attempt["dispatched_at"] = json!(at(index as i64 + 1));
+    }
+    let mut binding = serde_json::to_vec(&(
+        &saved["request_sha256"],
+        &saved["created_at"],
+        &saved["pack"],
+        &saved["receipt"],
+        &saved["session"]["transport"],
+        &saved["session"]["predecessor_sha256"],
+    ))
+    .unwrap();
+    if saved["session"]["sparse_fieldset_fallback"] == true {
+        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    saved["session"]["binding_sha256"] = json!(sha256_hex(&binding));
+    run.save(&saved);
+    mcp::inspect_state(&run.state).unwrap();
+}
+
+#[test]
+fn late_complete_original_closes_lifecycle_without_accepting_evidence() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for phase in ["dispatched", "cancel-requested", "cleanup-pending"] {
+        let run = Run::new(Transport::Mcp, 3);
+        let id = run.probe();
+        mcp::dispatch(&run.state, &id).unwrap();
+        if phase == "cancel-requested" {
+            mcp::pause(&run.state).unwrap();
+        } else if phase == "cleanup-pending" {
+            let timeout = run.directory.join("timeout.json");
+            fs::write(&timeout, br#"{"result":[],"error":"client timeout"}"#).unwrap();
+            assert_eq!(
+                mcp::step_resumable(&run.state, &[(id.clone(), timeout)])
+                    .unwrap()
+                    .status,
+                "cleanup-pending"
+            );
+        }
+        age_checkpoint(&run, None);
+        let original = run.directory.join("original.json");
+        let raw = br#"{"result":[{"events":"10"}]}"#;
+        fs::write(&original, raw).unwrap();
+        let before = fs::read(&run.state).unwrap();
+        assert_eq!(
+            mcp::step_resumable(&run.state, &[("p-foreign".into(), original.clone())])
+                .unwrap_err()
+                .code,
+            "MCP_UNKNOWN_PROBE"
+        );
+        assert_eq!(fs::read(&run.state).unwrap(), before);
+        let output = mcp::step_resumable(&run.state, &[(id.clone(), original.clone())]).unwrap();
+        assert_eq!(output.status, "failed", "{phase}");
+        assert!(output.terminal_failure);
+        assert_eq!(output.diagnostics[0].code, "MCP_DEADLINE");
+        assert_eq!(output.answered, 0);
+        let saved = run.saved();
+        let attempt = &saved["session"]["attempts"][0];
+        assert_eq!(attempt["outcome"], "completed");
+        assert_eq!(attempt["terminal"]["raw_sha256"], sha256_hex(raw));
+        assert!(!attempt["terminal"]["raw_hex"].as_str().unwrap().is_empty());
+        assert!(saved["session"]["periods"][0]["end"].is_string());
+        assert_eq!(saved["answers"], json!({}));
+        assert_eq!(saved["session"]["captures"], json!({}));
+        assert_eq!(saved["session"]["attempts"].as_array().unwrap().len(), 1);
+        fs::remove_file(&original).unwrap();
+        assert!(!mcp::has_in_flight(
+            &mcp::inspect_state(&run.state).unwrap()
+        ));
+        assert_eq!(mcp::resume(&run.state).unwrap().status, "failed");
+        assert!(mcp::dispatch(&run.state, &id).is_err());
+        assert!(!run.pack.exists() && !run.receipt.exists());
+        assert_eq!(run.saved(), saved);
+        let mut altered = saved.clone();
+        altered["session"]["attempts"][0]["terminal"]["raw_sha256"] = json!("0".repeat(64));
+        run.save(&altered);
+        assert_eq!(
+            mcp::inspect_state(&run.state).unwrap_err().code,
+            "MCP_STATE_TAMPERED"
+        );
+        let mut altered = saved.clone();
+        altered["status"] = json!("needs-probes");
+        altered.as_object_mut().unwrap().remove("failure");
+        run.save(&altered);
+        assert_eq!(
+            mcp::inspect_state(&run.state).unwrap_err().code,
+            "MCP_STATE_TAMPERED"
+        );
+    }
+}
+
+#[test]
+fn late_rejected_originals_still_need_exact_cleanup() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let capped = serde_json::to_vec(&json!({"result":vec![json!({"events":"10"});10000]})).unwrap();
+    for raw in [
+        br#"{"result":[],"error":"client timeout"}"#.as_slice(),
+        br#"{"result":[],"error":"synthetic tool error"}"#.as_slice(),
+        br#"{"unexpected":"synthetic"}"#.as_slice(),
+        br#"{"result":[{"events":"10"}],"partial":true}"#.as_slice(),
+        br#"{"result":[]}"#.as_slice(),
+        capped.as_slice(),
+    ] {
+        let run = Run::new(Transport::Mcp, 3);
+        let id = run.probe();
+        mcp::dispatch(&run.state, &id).unwrap();
+        age_checkpoint(&run, None);
+        let file = run.directory.join("rejected.json");
+        fs::write(&file, raw).unwrap();
+        let output = mcp::step_resumable(&run.state, &[(id.clone(), file)]).unwrap();
+        assert_eq!(output.status, "cleanup-pending");
+        assert!(!output.terminal_failure);
+        assert_eq!(output.answered, 0);
+        assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+        assert!(mcp::resume(&run.state).is_err());
+        assert!(mcp::dispatch(&run.state, &id).is_err());
+        assert_eq!(
+            run.saved()["session"]["attempts"][0]["outcome"],
+            "cleanup-pending"
+        );
+        assert!(!run.pack.exists() && !run.receipt.exists());
+    }
+}
+
+#[test]
+fn complete_native_capture_graph_can_activate_after_budget_without_remote_calls() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for status in ["activation-blocked", "needs-probes"] {
+        for seconds in [119, 120, 121] {
+            let run = Run::new(Transport::Native, 2);
+            let mut backend = Fake::for_run(&run);
+            let held = storage::Writer::acquire(&run.pack).unwrap();
+            assert_eq!(
+                mcp::run_native(&run.state, &mut backend).unwrap().status,
+                "activation-blocked"
+            );
+            drop(held);
+            let mut saved = run.saved();
+            saved["status"] = json!(status);
+            run.save(&saved);
+            age_checkpoint(&run, Some(seconds));
+            let captures = run.saved()["session"]["captures"].clone();
+            let attempts = run.saved()["session"]["attempts"].clone();
+            let calls = (backend.starts.len(), backend.polls, backend.stops);
+            let output = mcp::run_native(&run.state, &mut backend).unwrap();
+            assert_eq!(output.status, "complete", "{status} {seconds}");
+            assert_eq!(output.answered, 2);
+            assert_eq!((backend.starts.len(), backend.polls, backend.stops), calls);
+            assert_eq!(run.saved()["session"]["captures"], captures);
+            assert_eq!(run.saved()["session"]["attempts"], attempts);
+            let receipt: Value = serde_json::from_slice(&fs::read(&run.receipt).unwrap()).unwrap();
+            for capture in receipt["captures"].as_array().unwrap() {
+                let id = discovery::probe_id_for(
+                    "synthetic_view",
+                    capture["probe"]["query"].as_str().unwrap(),
+                    capture["probe"]["start"].as_str().unwrap(),
+                    capture["probe"]["end"].as_str().unwrap(),
+                );
+                assert_eq!(*capture, captures[&id]);
+            }
+            let pack: Value = serde_json::from_slice(&fs::read(&run.pack).unwrap()).unwrap();
+            assert!(pack.to_string().contains("ngsiem-api"));
+            assert!(!pack.to_string().contains("mcp-observation"));
+        }
+    }
+}
+
+#[test]
+fn incomplete_native_graph_never_starts_or_reserves_on_activation_retry() {
+    let _lock = SIGNAL.lock().unwrap();
+    for (status, seconds) in [
+        ("needs-probes", 120),
+        ("activation-blocked", 119),
+        ("activation-blocked", 120),
+    ] {
+        network::CANCELLED.store(false, Ordering::Relaxed);
+        let run = Run::new(Transport::Native, 3);
+        let mut backend = Fake::for_run(&run);
+        backend.cancel_after = Some(1);
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "paused"
+        );
+        network::CANCELLED.store(false, Ordering::Relaxed);
+        let mut saved = run.saved();
+        saved["status"] = json!(status);
+        run.save(&saved);
+        age_checkpoint(&run, Some(seconds));
+        let before = fs::read(&run.state).unwrap();
+        let calls = (backend.starts.len(), backend.polls, backend.stops);
+        let output = mcp::run_native(&run.state, &mut backend);
+        if status == "needs-probes" {
+            assert_eq!(output.unwrap_err().code, "MCP_DEADLINE");
+        } else {
+            let output = output.unwrap();
+            assert_eq!(output.status, "activation-blocked");
+            assert_eq!(output.diagnostics[0].code, "DISCOVERY_CAPTURE_REQUIRED");
+        }
+        assert_eq!(fs::read(&run.state).unwrap(), before);
+        assert_eq!((backend.starts.len(), backend.polls, backend.stops), calls);
+        assert!(!run.pack.exists() && !run.receipt.exists());
+    }
+}
+
+#[test]
+fn explicit_native_resume_can_activate_complete_paused_graph_after_budget() {
+    let _lock = SIGNAL.lock().unwrap();
+    for completed in [1, 2] {
+        network::CANCELLED.store(false, Ordering::Relaxed);
+        let run = Run::new(Transport::Native, 3);
+        let mut backend = Fake::for_run(&run);
+        backend.cancel_after = Some(completed);
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "paused"
+        );
+        network::CANCELLED.store(false, Ordering::Relaxed);
+        age_checkpoint(&run, Some(120));
+        let saved = run.saved();
+        let calls = (backend.starts.len(), backend.polls, backend.stops);
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "paused"
+        );
+        assert_eq!(run.saved(), saved);
+        let output = mcp::resume(&run.state);
+        if completed == 2 {
+            assert_eq!(output.unwrap().status, "complete");
+            assert_eq!(
+                run.saved()["session"]["periods"],
+                saved["session"]["periods"]
+            );
+            assert_eq!(
+                run.saved()["session"]["captures"],
+                saved["session"]["captures"]
+            );
+            assert_eq!(
+                run.saved()["session"]["attempts"],
+                saved["session"]["attempts"]
+            );
+            assert!(run.pack.exists() && run.receipt.exists());
+        } else {
+            assert_eq!(output.unwrap_err().code, "MCP_DEADLINE");
+            assert_eq!(run.saved(), saved);
+            assert!(!run.pack.exists() && !run.receipt.exists());
+        }
+        assert_eq!((backend.starts.len(), backend.polls, backend.stops), calls);
+    }
+}
+
+#[test]
+fn cached_native_activation_keeps_predecessor_binding() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for status in ["activation-blocked", "needs-probes", "paused"] {
+        let run = Run::new(Transport::Native, 2);
+        let mut backend = Fake::for_run(&run);
+        let held = storage::Writer::acquire(&run.pack).unwrap();
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "activation-blocked"
+        );
+        drop(held);
+        let mut saved = run.saved();
+        saved["status"] = json!(status);
+        run.save(&saved);
+        age_checkpoint(&run, Some(120));
+        replace_starting_pack(&run);
+        let pack = fs::read(&run.pack).unwrap();
+        let state = fs::read(&run.state).unwrap();
+        let calls = (backend.starts.len(), backend.polls, backend.stops);
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap_err().code,
+            "MCP_ACTIVATION_CONFLICT"
+        );
+        assert_eq!(
+            mcp::resume(&run.state).unwrap_err().code,
+            "MCP_ACTIVATION_CONFLICT"
+        );
+        assert_eq!(fs::read(&run.pack).unwrap(), pack);
+        assert_eq!(fs::read(&run.state).unwrap(), state);
+        assert_eq!((backend.starts.len(), backend.polls, backend.stops), calls);
         assert!(!run.receipt.exists());
     }
 }

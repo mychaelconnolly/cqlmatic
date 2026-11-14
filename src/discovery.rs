@@ -733,7 +733,10 @@ fn capture_key(
 
 type FieldCaptures = BTreeMap<String, (usize, bool, Option<f64>)>;
 
-fn field_captures(captures: &[Capture], source: &Scope) -> Result<FieldCaptures, Diagnostic> {
+pub(crate) fn field_captures(
+    captures: &[Capture],
+    source: &Scope,
+) -> Result<FieldCaptures, Diagnostic> {
     let mut result = FieldCaptures::new();
     for (index, capture) in captures
         .iter()

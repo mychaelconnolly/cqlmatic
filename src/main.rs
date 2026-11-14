@@ -713,7 +713,8 @@ fn save_inventory_hints(
             })
         });
     }
-    let changed = current.record_inventory_hints(&target, hints)?;
+    let (boundary, _checkpoint_guard) = inventory_cli::inventory_capture_boundary(&current);
+    let changed = current.record_inventory_hints_with_boundary(&target, hints, boundary)?;
     let notifications = current.inventory_notifications();
     if added == 0 && changed == 0 {
         return Ok((0, notifications.len()));

@@ -1036,6 +1036,29 @@
         }
       ]
     },
+    "InventoryCaptureBoundary": {
+      "type": "object",
+      "properties": {
+        "accepted_probe_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "request_sha256": {
+          "type": "string"
+        },
+        "run": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "request_sha256",
+        "accepted_probe_ids"
+      ]
+    },
     "InventoryFailure": {
       "type": "object",
       "properties": {
@@ -1337,6 +1360,35 @@
         "discovery_runs",
         "parser_runs",
         "failures"
+      ]
+    },
+    "InventoryWorkRunProof": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "request_sha256": {
+          "type": "string"
+        },
+        "run": {
+          "type": "string"
+        },
+        "source_probe_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run",
+        "request_sha256",
+        "fields"
       ]
     },
     "NativeSourceReason": {
@@ -1651,6 +1703,16 @@
           "type": "integer",
           "format": "uint",
           "minimum": 0
+        },
+        "capture_boundary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InventoryCaptureBoundary"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "deferred": {
           "type": "boolean"
@@ -2166,6 +2228,12 @@
         {
           "type": "object",
           "properties": {
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/InventoryWorkRunProof"
+              }
+            },
             "kind": {
               "type": "string",
               "const": "inventoried"

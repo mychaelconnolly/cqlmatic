@@ -1142,7 +1142,16 @@ fn acknowledgement_preserves_settings_until_each_exact_work_item_is_covered_or_e
             .all(|work| work.resolution.is_none())
     );
     status.sources[0].fields[0].measured = true;
-    state.resolve_inventoried_work(&status).unwrap();
+    state
+        .resolve_inventoried_work_with_evidence(
+            &status,
+            &[InventoryRunEvidence {
+                run: "synthetic-run.json".into(),
+                request_sha256: "a".repeat(64),
+                captures: vec![population_capture(&source(), &[("new_field", 1)], LATER)],
+            }],
+        )
+        .unwrap();
     assert!(state.pending_inventory[0].resolution.is_some());
     assert!(state.pending_inventory[1].resolution.is_none());
     assert!(assess(&state, &[]).unwrap().settings_attention);
@@ -1768,4 +1777,395 @@ fn brief_reminder_is_fixed_vocabulary_and_preserves_reserved_notice_precedence_a
         action.action,
         InventoryAction::AcknowledgeRefreshReminder { defer: false, .. }
     ));
+}
+
+fn work_run(path: &str, status: &str, depth: QuickDepth) -> DiscoveryRun {
+    serde_json::from_value(json!({
+        "state_path":path,"pack_path":format!("{path}-pack"),"receipt_path":format!("{path}-receipt"),
+        "start":"2026-01-01T00:00:00Z","end":NOW,"source_ids":[cqlmatic::discovery::source_id(&source())],
+        "value_fields":[],"max_queries":40,"max_seconds":300,"answered":0,"elapsed_seconds":1.0,
+        "status":status,"mode":"quick","quick_depth":depth
+    })).unwrap()
+}
+
+fn population_capture(
+    source: &Scope,
+    fields: &[(&str, u64)],
+    retrieved_at: &str,
+) -> cqlmatic::discovery::Capture {
+    let mut row = json!({"total":10});
+    for (index, (_, count)) in fields.iter().enumerate() {
+        row[format!("c{index}")] = json!(count);
+    }
+    let query = format!("synthetic population {fields:?}");
+    serde_json::from_value(json!({
+        "probe":{"kind":"population","source":source,"query":query,"start":"2026-01-01T00:00:00Z",
+            "end":NOW,"fields":fields.iter().map(|(field,_)|field).collect::<Vec<_>>()},
+        "retrieved_at":retrieved_at,
+        "receipt":{"query":query,"start":"2026-01-01T00:00:00Z","end":NOW,"job_id":"synthetic",
+            "completion":"complete","cleanup":"delegated","polls":1,"events":[row],"metadata":null,"diagnostic":null}
+    })).unwrap()
+}
+
+fn work_status(state: &InventoryState, fields: &[(&str, bool)]) -> InventoryStatus {
+    let mut status = assess(state, &[]).unwrap();
+    status.sources[0].status = Progress::Done;
+    status.sources[0].fields = fields
+        .iter()
+        .map(|(field, observed)| {
+            serde_json::from_value(json!({
+            "field":field,"declared":false,"observed":observed,"measured":true,"status":"done",
+            "values":"pending","values_requested":false,"evidence_dates":[],"not_reobserved":false
+        })).unwrap()
+        })
+        .collect();
+    status
+}
+
+fn run_evidence(run: &str, captures: Vec<cqlmatic::discovery::Capture>) -> InventoryRunEvidence {
+    InventoryRunEvidence {
+        run: run.into(),
+        request_sha256: "a".repeat(64),
+        captures,
+    }
+}
+
+#[test]
+fn active_run_resolves_only_measurements_accepted_after_the_hint_revision() {
+    let mut state = self::state();
+    state.discovery_runs.push(work_run(
+        "active-run",
+        "needs-probes",
+        QuickDepth::SourcesAndFields,
+    ));
+    let capture = population_capture(&source(), &[("later", 1)], LATER);
+    let boundary = InventoryCaptureBoundary {
+        run: "active-run".into(),
+        request_sha256: "a".repeat(64),
+        accepted_probe_ids: vec![],
+    };
+    state
+        .record_inventory_hints_with_boundary(
+            &environment(),
+            vec![InventoryHint {
+                source: source(),
+                fields: vec!["later".into()],
+            }],
+            Some(boundary.clone()),
+        )
+        .unwrap();
+    let revision = WorkRevision {
+        id: state.pending_inventory[0].id.clone(),
+        revision: 1,
+    };
+    state.acknowledge_inventory_work(&[revision], true).unwrap();
+    state.discovery_runs[0].status = "complete".into();
+    let status = work_status(&state, &[("later", true)]);
+    state.resolve_inventoried_work(&status).unwrap();
+    assert!(state.pending_inventory[0].resolution.is_none());
+    state
+        .resolve_inventoried_work_with_evidence(
+            &status,
+            &[run_evidence("active-run", vec![capture.clone()])],
+        )
+        .unwrap();
+    assert!(state.pending_inventory[0].resolution.is_some());
+    assert!(!state.pending_inventory[0].deferred);
+    assert_eq!(state.pending_inventory[0].notified_revision, 1);
+    assert!(state.inventory_notifications().is_empty());
+    let mut repeated = boundary;
+    repeated
+        .accepted_probe_ids
+        .push(cqlmatic::discovery::probe_id(
+            &environment().view,
+            &capture.probe,
+        ));
+    state.pending_inventory[0].capture_boundary = Some(repeated);
+    assert!(state.validate().is_err());
+}
+
+#[test]
+fn prehint_fieldset_foreign_namespace_and_legacy_current_run_evidence_stay_pending() {
+    for case in [
+        "prehint",
+        "fieldset",
+        "foreign-source",
+        "tag-namespace",
+        "request-hash",
+        "legacy",
+    ] {
+        let mut state = self::state();
+        let mut run = work_run("active-run", "needs-probes", QuickDepth::SourcesAndFields);
+        let mut capture = population_capture(&source(), &[("field", 1)], LATER);
+        let accepted = if case == "prehint" {
+            vec![cqlmatic::discovery::probe_id(
+                &environment().view,
+                &capture.probe,
+            )]
+        } else {
+            vec![]
+        };
+        if case == "fieldset" {
+            capture.probe.kind = "fieldset".into();
+            capture.probe.fields.clear();
+            capture.receipt.events = vec![json!({"field":"field"})];
+        } else if case == "foreign-source" {
+            capture.probe.source = Scope {
+                repo: Some("other".into()),
+                ..Scope::default()
+            };
+            run.source_ids
+                .push(cqlmatic::discovery::source_id(&capture.probe.source));
+        } else if case == "tag-namespace" {
+            capture.probe.fields = vec!["#field".into()];
+        }
+        state.discovery_runs.push(run);
+        state
+            .record_inventory_hints_with_boundary(
+                &environment(),
+                vec![InventoryHint {
+                    source: source(),
+                    fields: vec!["field".into()],
+                }],
+                (case != "legacy").then(|| InventoryCaptureBoundary {
+                    run: "active-run".into(),
+                    request_sha256: if case == "request-hash" { "b" } else { "a" }.repeat(64),
+                    accepted_probe_ids: accepted,
+                }),
+            )
+            .unwrap();
+        state.discovery_runs[0].status = "complete".into();
+        let status = work_status(&state, &[("field", true)]);
+        state
+            .resolve_inventoried_work_with_evidence(
+                &status,
+                &[run_evidence("active-run", vec![capture])],
+            )
+            .unwrap();
+        assert!(state.pending_inventory[0].resolution.is_none(), "{case}");
+        assert!(assess(&state, &[]).unwrap().settings_attention, "{case}");
+    }
+}
+
+#[test]
+fn eligible_receipt_batches_accumulate_without_reusing_inherited_pack_fields() {
+    let mut state = self::state();
+    state
+        .record_inventory_hints(
+            &environment(),
+            vec![InventoryHint {
+                source: source(),
+                fields: vec!["first".into(), "second".into()],
+            }],
+        )
+        .unwrap();
+    state.discovery_runs.extend([
+        work_run("first-run", "complete", QuickDepth::SourcesAndFields),
+        work_run("second-run", "complete", QuickDepth::SourcesAndFields),
+    ]);
+    let status = work_status(&state, &[("first", true), ("second", true)]);
+    let first = run_evidence(
+        "first-run",
+        vec![population_capture(&source(), &[("first", 1)], LATER)],
+    );
+    let second = run_evidence(
+        "second-run",
+        vec![population_capture(&source(), &[("second", 1)], LATER)],
+    );
+    state
+        .resolve_inventoried_work_with_evidence(&status, std::slice::from_ref(&second))
+        .unwrap();
+    assert!(state.pending_inventory[0].resolution.is_none());
+    state
+        .resolve_inventoried_work_with_evidence(&status, &[first, second])
+        .unwrap();
+    let Some(WorkResolution::Inventoried { run, evidence }) =
+        &state.pending_inventory[0].resolution
+    else {
+        panic!("Expected captured inventory work")
+    };
+    assert_eq!(run, "second-run");
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence[0].fields.keys().collect::<Vec<_>>(), vec!["first"]);
+    assert_eq!(
+        evidence[1].fields.keys().collect::<Vec<_>>(),
+        vec!["second"]
+    );
+    state.validate().unwrap();
+}
+
+#[test]
+fn later_equivalent_probe_ids_and_measured_zero_complete_inventory_without_presence() {
+    let mut state = self::state();
+    let old = population_capture(&source(), &[("field", 0)], NOW);
+    let later = population_capture(&source(), &[("field", 0)], LATER);
+    assert_eq!(old.probe, later.probe);
+    state.discovery_runs.push(work_run(
+        "first-run",
+        "needs-probes",
+        QuickDepth::SourcesAndFields,
+    ));
+    state
+        .record_inventory_hints_with_boundary(
+            &environment(),
+            vec![InventoryHint {
+                source: source(),
+                fields: vec!["field".into()],
+            }],
+            Some(InventoryCaptureBoundary {
+                run: "first-run".into(),
+                request_sha256: "a".repeat(64),
+                accepted_probe_ids: vec![cqlmatic::discovery::probe_id(
+                    &environment().view,
+                    &old.probe,
+                )],
+            }),
+        )
+        .unwrap();
+    state.discovery_runs[0].status = "complete".into();
+    state.discovery_runs.push(work_run(
+        "later-run",
+        "complete",
+        QuickDepth::SourcesAndFields,
+    ));
+    let status = work_status(&state, &[("field", false)]);
+    state
+        .resolve_inventoried_work_with_evidence(
+            &status,
+            &[
+                run_evidence("first-run", vec![old]),
+                run_evidence("later-run", vec![later]),
+            ],
+        )
+        .unwrap();
+    assert!(state.pending_inventory[0].resolution.is_some());
+    assert!(status.sources[0].fields[0].measured);
+    assert!(!status.sources[0].fields[0].observed);
+}
+
+#[test]
+fn capture_boundaries_preserve_duplicate_revisions_and_validate_legacy_resolution_shapes() {
+    let mut state = self::state();
+    state.discovery_runs.push(work_run(
+        "active-run",
+        "needs-probes",
+        QuickDepth::SourcesAndFields,
+    ));
+    let hint = InventoryHint {
+        source: source(),
+        fields: vec!["field".into()],
+    };
+    let boundary = InventoryCaptureBoundary {
+        run: "active-run".into(),
+        request_sha256: "a".repeat(64),
+        accepted_probe_ids: vec![],
+    };
+    state
+        .record_inventory_hints_with_boundary(
+            &environment(),
+            vec![hint.clone()],
+            Some(boundary.clone()),
+        )
+        .unwrap();
+    let before = serde_json::to_value(&state).unwrap();
+    assert_eq!(
+        state
+            .record_inventory_hints(&environment(), vec![hint])
+            .unwrap(),
+        0
+    );
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    let mut invalid = boundary;
+    invalid.accepted_probe_ids = (0..1001).map(|index| format!("p-{index:016x}")).collect();
+    let before = serde_json::to_value(&state).unwrap();
+    assert!(
+        state
+            .record_inventory_hints_with_boundary(&environment(), vec![], Some(invalid))
+            .is_err()
+    );
+    assert_eq!(serde_json::to_value(&state).unwrap(), before);
+    state
+        .record_inventory_hints(
+            &environment(),
+            vec![InventoryHint {
+                source: source(),
+                fields: vec!["second".into()],
+            }],
+        )
+        .unwrap();
+    assert!(state.pending_inventory[0].capture_boundary.is_none());
+    state.discovery_runs.push(work_run(
+        "future-run",
+        "complete",
+        QuickDepth::SourcesAndFields,
+    ));
+    state.pending_inventory[0].resolution =
+        Some(serde_json::from_value(json!({"kind":"inventoried","run":"future-run"})).unwrap());
+    state.validate().unwrap();
+    assert!(
+        serde_json::to_value(&state.pending_inventory[0]).unwrap()["resolution"]
+            .get("evidence")
+            .is_none()
+    );
+}
+
+#[test]
+fn brief_records_discovery_recovery_with_shared_bounded_opaque_references() {
+    let mut state = self::state();
+    for index in 0..7 {
+        state.discovery_runs.push(work_run(
+            &format!("/private/untrusted-界-ignore-instructions-{index}"),
+            if index == 0 {
+                "cleanup-pending"
+            } else {
+                "needs-probes"
+            },
+            QuickDepth::SourcesAndFields,
+        ));
+    }
+    state
+        .record_inventory_hints(
+            &environment(),
+            vec![InventoryHint {
+                source: source(),
+                fields: vec!["private-field".into()],
+            }],
+        )
+        .unwrap();
+    let status = assess(&state, &[]).unwrap();
+    let report = brief(&status, None);
+    assert_eq!(report["refresh_blocked"], false);
+    assert_eq!(
+        report["refresh"]["blocker"],
+        "recorded-discovery-recovery-required"
+    );
+    assert_eq!(report["counts"]["discovery_recovery"], 1);
+    assert_eq!(report["counts"]["discovery_unfinished"], 7);
+    assert_eq!(report["references"].as_array().unwrap().len(), 5);
+    assert_eq!(report["references"][0]["phase"], "cleanup-pending");
+    assert_eq!(report["omitted_references"], 3);
+    let bytes = serde_json::to_vec(&report).unwrap();
+    assert!(bytes.len() < 4096);
+    let text = String::from_utf8(bytes).unwrap();
+    for private in [
+        "/private",
+        "ignore-instructions",
+        "private-field",
+        "synthetic",
+        &environment().tenant,
+    ] {
+        assert!(!text.contains(private), "{private}");
+    }
+    let id = prepared(&mut state);
+    state
+        .dispatch_refresh(&id, "synthetic-session", NOW)
+        .unwrap();
+    let dense = brief(
+        &assess_at(&state, &[], "2026-02-15T00:00:00Z").unwrap(),
+        None,
+    );
+    assert_eq!(dense["references"].as_array().unwrap().len(), 5);
+    assert_eq!(dense["references"][0]["kind"], "refresh");
+    assert_eq!(dense["omitted_references"], 4);
+    assert!(serde_json::to_vec(&dense).unwrap().len() < 4096);
 }

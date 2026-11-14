@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
-    io::{self, IsTerminal, Read, Write},
+    io::{self, BufRead, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -580,13 +580,33 @@ fn apply_and_store(
             | InventoryAction::ImportPack { .. }
             | InventoryAction::DiscoveryStep { .. }
             | InventoryAction::ResumeDiscovery { .. }
+            | InventoryAction::Reconcile { .. }
     );
-    let extra = apply(path, &mut state, action, &now)?;
+    let reconcile_at = match &action {
+        InventoryAction::Reconcile { reviewed_at } => Some(reviewed_at.clone()),
+        _ => None,
+    };
+    let (boundary, _boundary_guard) =
+        if matches!(&action, InventoryAction::RecordInventoryHints { .. }) {
+            inventory_capture_boundary(&state)
+        } else {
+            (None, None)
+        };
+    let extra = apply(path, &mut state, action, &now, boundary)?;
     state.validate()?;
     let loaded = packs(&state)?;
     let mut report = inventory::assess_at(&state, &loaded, &now)?;
+    let (evidence, _evidence_guards) = if resolve_work {
+        inventory_run_evidence(&state)?
+    } else {
+        (vec![], vec![])
+    };
     if resolve_work {
-        state.resolve_inventoried_work(&report)?;
+        state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
+        if let Some(reviewed_at) = reconcile_at {
+            state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
+            state.reconciled_at = Some(reviewed_at);
+        }
         report = inventory::assess_at(&state, &loaded, &now)?;
     }
     if let Some(before) = before
@@ -969,6 +989,116 @@ fn import_query_observations(
 fn canonical(path: &Path) -> Result<PathBuf, Diagnostic> {
     std::fs::canonicalize(path).map_err(|_| fail("Cannot resolve evidence path."))
 }
+
+fn destination(path: &Path) -> Result<PathBuf, Diagnostic> {
+    Ok(canonical(
+        path.parent()
+            .ok_or_else(|| fail("Retained discovery artifact needs a parent."))?,
+    )?
+    .join(
+        path.file_name()
+            .ok_or_else(|| fail("Retained discovery artifact needs a filename."))?,
+    ))
+}
+
+fn verify_run_reference(
+    state: &InventoryState,
+    run: &DiscoveryRun,
+    relay: &mcp::State,
+) -> Result<(), Diagnostic> {
+    let sources: BTreeSet<_> = relay
+        .request
+        .sources
+        .iter()
+        .map(discovery::source_id)
+        .collect();
+    if state.target.as_ref().map(|target| &target.environment) != Some(&relay.request.environment)
+        || destination(&relay.pack)? != destination(Path::new(&run.pack_path))?
+        || destination(&relay.receipt)? != destination(Path::new(&run.receipt_path))?
+        || relay.request.start != run.start
+        || relay.request.end != run.end
+        || relay.request.max_queries != run.max_queries
+        || relay.request.max_seconds != run.max_seconds
+        || relay.request.value_fields != run.value_fields
+        || sources != run.source_ids.iter().cloned().collect()
+        || relay.request.census
+        || (relay.request.depth == discovery::DiscoveryDepth::SourcesOnly)
+            != (run.mode == DiscoveryMode::Quick && run.quick_depth == QuickDepth::SourcesOnly)
+    {
+        return Err(fail(
+            "Retained discovery checkpoint differs from its inventory reference.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn inventory_capture_boundary(
+    state: &InventoryState,
+) -> (Option<InventoryCaptureBoundary>, Option<storage::Writer>) {
+    let inspect = || -> Result<_, Diagnostic> {
+        let run = state
+            .discovery_runs
+            .last()
+            .filter(|run| run.status != "complete")
+            .ok_or_else(|| fail("No unfinished discovery run."))?;
+        let path = Path::new(&run.state_path);
+        let writer = storage::Writer::acquire(path)?;
+        if !crate::setup_cli::private_input_exists(path)? {
+            return Err(fail("Retained discovery checkpoint is missing."));
+        }
+        let relay = mcp::inspect_state(path)?;
+        verify_run_reference(state, run, &relay)?;
+        let boundary = InventoryCaptureBoundary::from_checkpoint(&run.state_path, &relay)?;
+        Ok((Some(boundary), Some(writer)))
+    };
+    // An unavailable checkpoint withholds current-run credit without blocking query writing.
+    inspect().unwrap_or((None, None))
+}
+
+fn inventory_run_evidence(
+    state: &InventoryState,
+) -> Result<(Vec<InventoryRunEvidence>, Vec<storage::Writer>), Diagnostic> {
+    let mut evidence = Vec::new();
+    let mut guards = Vec::new();
+    let mut remaining = MAX_STATE_BYTES;
+    for (index, run) in state.discovery_runs.iter().enumerate() {
+        if run.status != "complete"
+            || !state.pending_inventory.iter().any(|work| {
+                work.resolution.is_none()
+                    && run.source_ids.contains(&work.id)
+                    && (index >= work.after_run
+                        || work
+                            .capture_boundary
+                            .as_ref()
+                            .is_some_and(|boundary| boundary.run == run.state_path))
+            })
+        {
+            continue;
+        }
+        let guard = storage::Writer::acquire(Path::new(&run.state_path))?;
+        for path in [&run.state_path, &run.pack_path, &run.receipt_path] {
+            let path = Path::new(path);
+            if !crate::setup_cli::private_input_exists(path)? {
+                return Err(fail("Completed discovery evidence is missing."));
+            }
+            let length = std::fs::metadata(path)
+                .map_err(|_| fail("Cannot inspect completed discovery evidence."))?
+                .len();
+            remaining = remaining.checked_sub(length).ok_or_else(|| {
+                fail("Completed discovery evidence exceeds the shared read budget.")
+            })?;
+        }
+        let (relay, report) = mcp::inspect_completed_report(Path::new(&run.state_path))?;
+        verify_run_reference(state, run, &relay)?;
+        evidence.push(InventoryRunEvidence {
+            run: run.state_path.clone(),
+            request_sha256: relay.request_sha256,
+            captures: report.captures,
+        });
+        guards.push(guard);
+    }
+    Ok((evidence, guards))
+}
 fn distinct_from_state(state: &Path, input: &Path) -> Result<(), Diagnostic> {
     if state.exists() && canonical(state)? == canonical(input)? {
         return Err(fail("Evidence input must differ from inventory state."));
@@ -1019,16 +1149,6 @@ fn check_retained_searches(
             "Selected discovery checkpoint differs from the confirmed inventory target.",
         ));
     }
-    let destination = |path: &Path| -> Result<PathBuf, Diagnostic> {
-        Ok(canonical(
-            path.parent()
-                .ok_or_else(|| fail("Retained discovery artifact needs a parent."))?,
-        )?
-        .join(
-            path.file_name()
-                .ok_or_else(|| fail("Retained discovery artifact needs a filename."))?,
-        ))
-    };
     for (index, run) in state.discovery_runs.iter().enumerate() {
         let path = Path::new(&run.state_path);
         if !crate::setup_cli::private_input_exists(path)? {
@@ -1082,6 +1202,7 @@ fn apply(
     state: &mut InventoryState,
     action: InventoryAction,
     now: &str,
+    capture_boundary: Option<InventoryCaptureBoundary>,
 ) -> Result<Value, Diagnostic> {
     match action {
         InventoryAction::Init {} => {
@@ -1183,7 +1304,11 @@ fn apply(
             )
         }
         InventoryAction::RecordInventoryHints { environment, hints } => {
-            let changed = state.record_inventory_hints(&environment, hints)?;
+            let changed = state.record_inventory_hints_with_boundary(
+                &environment,
+                hints,
+                capture_boundary,
+            )?;
             Ok(
                 json!({"new_work_revisions":changed,"evidence_kind":"unverified","executes_searches":false}),
             )
@@ -1664,10 +1789,6 @@ fn apply(
         }
         InventoryAction::Reconcile { reviewed_at } => {
             cqlmatic::environment::parse_time(&reviewed_at)?;
-            let report = inventory::assess_at(state, &packs(state)?, now)?;
-            state.resolve_inventoried_work(&report)?;
-            state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
-            state.reconciled_at = Some(reviewed_at);
             Ok(Value::Null)
         }
         InventoryAction::RecordFailure {
@@ -1816,11 +1937,19 @@ fn prompt(label: &str) -> Result<String, Diagnostic> {
     write!(out, "{label}: ").map_err(|_| fail("Cannot write inventory prompt."))?;
     out.flush()
         .map_err(|_| fail("Cannot write inventory prompt."))?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|_| fail("Cannot read inventory response."))?;
-    Ok(input.trim().into())
+    read_response(&mut io::stdin().lock())
+}
+
+fn read_response(input: &mut impl BufRead) -> Result<String, Diagnostic> {
+    let mut line = String::new();
+    if input
+        .read_line(&mut line)
+        .map_err(|_| fail("Cannot read inventory response."))?
+        == 0
+    {
+        return Err(fail("Terminal input ended without a selection."));
+    }
+    Ok(line.trim().into())
 }
 fn notice(message: &str) -> Result<(), Diagnostic> {
     writeln!(io::stdout().lock(), "{message}").map_err(|_| fail("Cannot write inventory guidance."))
@@ -2415,6 +2544,32 @@ fn interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inventory_input_distinguishes_eof_from_an_explicit_default() {
+        let error = read_response(&mut io::Cursor::new(b"")).unwrap_err();
+        assert_eq!(error.code, "INVENTORY_INPUT");
+        for line in ["\n", "  \t\r\n"] {
+            assert_eq!(read_response(&mut io::Cursor::new(line)).unwrap(), "");
+        }
+        assert_eq!(
+            read_response(&mut io::Cursor::new("later\n")).unwrap(),
+            "later"
+        );
+    }
+
+    #[test]
+    fn inventory_input_propagates_read_failure_without_a_default() {
+        struct FailedRead;
+        impl Read for FailedRead {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("synthetic read failure"))
+            }
+        }
+        let error = read_response(&mut io::BufReader::new(FailedRead)).unwrap_err();
+        assert_eq!(error.code, "INVENTORY_INPUT");
+        assert!(!error.message.contains("synthetic"));
+    }
 
     #[test]
     fn brief_budget_covers_the_whole_response_and_omits_complete_references() {
