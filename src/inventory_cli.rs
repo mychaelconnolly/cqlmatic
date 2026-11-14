@@ -539,6 +539,14 @@ fn apply_and_store(
     path: &Path,
     action: InventoryAction,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
+    apply_and_store_with_work_budget(path, action, MAX_STATE_BYTES)
+}
+
+fn apply_and_store_with_work_budget(
+    path: &Path,
+    action: InventoryAction,
+    work_budget: u64,
+) -> Result<(InventoryStatus, Value), Diagnostic> {
     protect_state(path)?;
     let writer = storage::Writer::acquire(path)?;
     protect_state(path)?;
@@ -592,14 +600,14 @@ fn apply_and_store(
         } else {
             (None, None)
         };
-    let extra = apply(path, &mut state, action, &now, boundary)?;
+    let mut extra = apply(path, &mut state, action, &now, boundary)?;
     state.validate()?;
     let loaded = packs(&state)?;
     let mut report = inventory::assess_at(&state, &loaded, &now)?;
-    let (evidence, _evidence_guards) = if resolve_work {
-        inventory_run_evidence(&state)?
+    let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
+        inventory_run_evidence(&state, work_budget)?
     } else {
-        (vec![], vec![])
+        (vec![], vec![], false)
     };
     if resolve_work {
         state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
@@ -608,6 +616,11 @@ fn apply_and_store(
             state.reconciled_at = Some(reviewed_at);
         }
         report = inventory::assess_at(&state, &loaded, &now)?;
+    }
+    if evidence_limited {
+        extra["inventory_work_evidence_limited"] = json!(true);
+        extra["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
+            "message":"Discovery progress was saved. Some older evidence was omitted from automatic pending-work resolution because its verification budget was reached. Unproven work remains pending."}]);
     }
     if let Some(before) = before
         && before == state_fingerprint(&state)?
@@ -682,6 +695,7 @@ fn action_brief(action: &Value) -> Value {
         "sources_registered",
         "parser_count",
         "automatic_refresh_available",
+        "inventory_work_evidence_limited",
     ] {
         if let Some(value) = action.get(key).filter(|v| v.is_boolean() || v.is_u64()) {
             compact[key] = value.clone();
@@ -720,6 +734,9 @@ fn action_brief(action: &Value) -> Value {
     }
     if let Some(probes) = action["relay"]["probes"].as_array() {
         compact["pending_probe_count"] = json!(probes.len());
+    }
+    if action["inventory_work_evidence_limited"] == true {
+        compact["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}]);
     }
     compact
 }
@@ -1057,11 +1074,11 @@ pub(crate) fn inventory_capture_boundary(
 
 fn inventory_run_evidence(
     state: &InventoryState,
-) -> Result<(Vec<InventoryRunEvidence>, Vec<storage::Writer>), Diagnostic> {
+    mut remaining: u64,
+) -> Result<(Vec<InventoryRunEvidence>, Vec<storage::Writer>, bool), Diagnostic> {
     let mut evidence = Vec::new();
     let mut guards = Vec::new();
-    let mut remaining = MAX_STATE_BYTES;
-    for (index, run) in state.discovery_runs.iter().enumerate() {
+    for (index, run) in state.discovery_runs.iter().enumerate().rev() {
         if run.status != "complete"
             || !state.pending_inventory.iter().any(|work| {
                 work.resolution.is_none()
@@ -1081,23 +1098,26 @@ fn inventory_run_evidence(
             if !crate::setup_cli::private_input_exists(path)? {
                 return Err(fail("Completed discovery evidence is missing."));
             }
-            let length = std::fs::metadata(path)
-                .map_err(|_| fail("Cannot inspect completed discovery evidence."))?
-                .len();
-            remaining = remaining.checked_sub(length).ok_or_else(|| {
-                fail("Completed discovery evidence exceeds the shared read budget.")
-            })?;
         }
         let (relay, report) = mcp::inspect_completed_report(Path::new(&run.state_path))?;
         verify_run_reference(state, run, &relay)?;
+        let request_sha256 = relay.request_sha256.clone();
+        drop(relay);
+        let length = serde_json::to_vec(&report.captures)
+            .map_err(|_| fail("Cannot serialize completed discovery captures."))?
+            .len() as u64;
+        let Some(next_remaining) = remaining.checked_sub(length) else {
+            return Ok((evidence, guards, true));
+        };
+        remaining = next_remaining;
         evidence.push(InventoryRunEvidence {
             run: run.state_path.clone(),
-            request_sha256: relay.request_sha256,
+            request_sha256,
             captures: report.captures,
         });
         guards.push(guard);
     }
-    Ok((evidence, guards))
+    Ok((evidence, guards, false))
 }
 fn distinct_from_state(state: &Path, input: &Path) -> Result<(), Diagnostic> {
     if state.exists() && canonical(state)? == canonical(input)? {
@@ -2545,6 +2565,207 @@ fn interactive(
 mod tests {
     use super::*;
 
+    fn work_action(path: &Path, action: Value, budget: u64) -> (InventoryStatus, Value) {
+        apply_and_store_with_work_budget(path, serde_json::from_value(action).unwrap(), budget)
+            .unwrap()
+    }
+
+    fn source_work_run(
+        path: &Path,
+        source: &str,
+        padding: usize,
+        budget: u64,
+    ) -> (InventoryStatus, Value) {
+        let (_, prepared) = work_action(
+            path,
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z",
+                "end":"2026-01-02T00:00:00Z","source_ids":[discovery::source_id(&cqlmatic::contracts::Scope {
+                    type_:Some(source.into()),..Default::default()})],"max_queries":1,"max_seconds":3600}),
+            MAX_STATE_BYTES,
+        );
+        let probes = prepared["relay"]["probes"].as_array().unwrap();
+        assert_eq!(probes.len(), 1);
+        let probe_id = probes[0]["probe_id"].as_str().unwrap();
+        work_action(
+            path,
+            json!({"kind":"dispatch-discovery","probe_id":probe_id}),
+            MAX_STATE_BYTES,
+        );
+        let answer = path.parent().unwrap().join(format!("{source}-answer.json"));
+        storage::Writer::acquire(&answer)
+            .unwrap()
+            .commit_bytes(
+                &serde_json::to_vec(
+                    &json!({"result":[{"events":10,"padding":"s".repeat(padding)}]}),
+                )
+                .unwrap(),
+                MAX_STATE_BYTES,
+            )
+            .unwrap();
+        work_action(
+            path,
+            json!({"kind":"discovery-step","answers":[{"probe_id":probe_id,"result_file":answer}]}),
+            budget,
+        )
+    }
+
+    #[test]
+    fn optional_work_budget_saves_progress_prioritizes_new_runs_and_preserves_validation() {
+        let directory =
+            std::env::temp_dir().join(format!("cqlmatic-work-budget-{}", std::process::id()));
+        crate::setup_cli::protect_directory(&directory).unwrap();
+        let path = directory.join("state.json");
+        let environment = json!({"cloud":"us1","tenant":"0".repeat(32),"view":"synthetic_view"});
+        work_action(
+            &path,
+            json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+            MAX_STATE_BYTES,
+        );
+        work_action(
+            &path,
+            json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
+                "context":"Synthetic proof budget fixture","expected_sources":[{"type":"initial"}]}),
+            MAX_STATE_BYTES,
+        );
+        work_action(
+            &path,
+            json!({"kind":"record-inventory-hints","environment":environment,"hints":[
+                {"source":{"type":"first"},"fields":[]},{"source":{"type":"second"},"fields":[]}]}),
+            MAX_STATE_BYTES,
+        );
+        work_action(
+            &path,
+            json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
+                "context":"Synthetic proof budget fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
+            MAX_STATE_BYTES,
+        );
+        let (first, action) = source_work_run(&path, "first", 8192, 0);
+        assert_eq!(action["relay"]["status"], "complete");
+        assert_eq!(action["inventory_work_evidence_limited"], true);
+        assert!(
+            first
+                .pending_inventory
+                .iter()
+                .all(|work| work.resolution.is_none())
+        );
+        let stored = load(&path).unwrap();
+        assert_eq!(stored.discovery_runs[0].status, "complete");
+        assert_eq!(
+            stored.active_pack.as_ref().unwrap().path,
+            first.active_pack.as_ref().unwrap().path
+        );
+        assert_eq!(stored.failures.len(), 0);
+        assert!(!stored.refresh_blocked());
+        assert!(
+            stored
+                .pending_inventory
+                .iter()
+                .all(|work| !work.deferred && work.notified_revision == 0)
+        );
+
+        let (evidence, guards, limited) = inventory_run_evidence(&stored, MAX_STATE_BYTES).unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert!(!limited);
+        assert_eq!(
+            storage::Writer::acquire(Path::new(&stored.discovery_runs[0].state_path))
+                .err()
+                .unwrap()
+                .code,
+            "PACK_BUSY"
+        );
+        drop(guards);
+        let mut mismatched = stored.clone();
+        let other = directory.join("other-pack.json");
+        storage::Writer::acquire(&other)
+            .unwrap()
+            .commit_bytes(
+                &storage::read_bytes(
+                    Path::new(&stored.discovery_runs[0].pack_path),
+                    MAX_STATE_BYTES,
+                )
+                .unwrap(),
+                MAX_STATE_BYTES,
+            )
+            .unwrap();
+        mismatched.discovery_runs[0].pack_path = other.to_string_lossy().into();
+        assert!(inventory_run_evidence(&mismatched, MAX_STATE_BYTES).is_err());
+        let receipt = Path::new(&stored.discovery_runs[0].receipt_path);
+        let bytes = std::fs::read(receipt).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::write(receipt, [bytes.as_slice(), b" "].concat()).unwrap();
+        assert!(
+            apply_and_store_with_work_budget(
+                &path,
+                serde_json::from_value(
+                    json!({"kind":"reconcile","reviewed_at":discovery::timestamp()})
+                )
+                .unwrap(),
+                MAX_STATE_BYTES,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(receipt, bytes).unwrap();
+
+        let (second, action) = source_work_run(&path, "second", 0, 4096);
+        assert_eq!(action["relay"]["status"], "complete");
+        assert_eq!(action["inventory_work_evidence_limited"], true);
+        let stored = load(&path).unwrap();
+        assert!(
+            stored
+                .discovery_runs
+                .iter()
+                .all(|run| run.status == "complete")
+        );
+        assert_eq!(
+            stored.active_pack.as_ref().unwrap().path,
+            second.active_pack.as_ref().unwrap().path
+        );
+        assert!(
+            stored
+                .pending_inventory
+                .iter()
+                .find(|work| work.source.type_.as_deref() == Some("first"))
+                .unwrap()
+                .resolution
+                .is_none()
+        );
+        assert!(
+            stored
+                .pending_inventory
+                .iter()
+                .find(|work| work.source.type_.as_deref() == Some("second"))
+                .unwrap()
+                .resolution
+                .is_some()
+        );
+        assert_eq!(stored.failures.len(), 0);
+        let bytes = brief_bytes(json!({"schema_version":1,"brief":true,
+            "status":inventory::brief(&second,None),"action":action_brief(&action)}))
+        .unwrap();
+        assert!(bytes.len() <= 4096);
+        let brief: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(brief["action"]["inventory_work_evidence_limited"], true);
+        assert_eq!(
+            brief["action"]["notices"][0]["code"],
+            "INVENTORY_WORK_EVIDENCE_LIMITED"
+        );
+        assert!(brief["action"]["notices"][0].get("message").is_none());
+
+        let (finished, action) = source_work_run(&path, "first", 0, 4096);
+        assert_eq!(action["relay"]["status"], "complete");
+        assert_eq!(action["inventory_work_evidence_limited"], true);
+        assert!(!finished.settings_attention);
+        assert!(
+            load(&path)
+                .unwrap()
+                .pending_inventory
+                .iter()
+                .all(|work| work.resolution.is_some())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn inventory_input_distinguishes_eof_from_an_explicit_default() {
         let error = read_response(&mut io::Cursor::new(b"")).unwrap_err();
@@ -2578,7 +2799,8 @@ mod tests {
             "arguments":{"query_string":raw},"diagnostics":[{"message":raw}],
             "excluded":[raw],"relay":{"status":"needs-probes","probes":[raw]},
             "acknowledged_snapshot":{"snapshot_sha256":"a".repeat(64),"count":1000},
-            "new_work_revisions":1000
+            "new_work_revisions":1000,"inventory_work_evidence_limited":true,
+            "notices":[{"code":raw,"message":raw}]
         }));
         let value = json!({"schema_version":1,"brief":true,
             "status":{"settings_attention":true,"refresh_blocked":true,
@@ -2595,6 +2817,11 @@ mod tests {
         assert_eq!(value["action"]["outcome"], "needs-probes");
         assert_eq!(value["action"]["pending_probe_count"], 1);
         assert_eq!(value["action"]["acknowledged_snapshot"]["count"], 1000);
+        assert_eq!(value["action"]["inventory_work_evidence_limited"], true);
+        assert_eq!(
+            value["action"]["notices"][0]["code"],
+            "INVENTORY_WORK_EVIDENCE_LIMITED"
+        );
         assert!(
             !String::from_utf8(bytes)
                 .unwrap()

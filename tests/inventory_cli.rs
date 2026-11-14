@@ -819,6 +819,72 @@ fn prepare_source_run(dir: &Path) -> Value {
 }
 
 #[test]
+fn large_valid_discovery_artifacts_save_completion_and_resolve_source_work() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    call(
+        &dir.0,
+        json!({"kind":"record-inventory-hints","environment":environment(),"hints":[{"source":{"type":"new_source"},"fields":[]}]}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources",
+            "context":"Synthetic large snapshot regression","expected_sources":[{"type":"new_source"}]}),
+    );
+    let pack = cqlmatic::environment::Pack::new(
+        serde_json::from_value(environment()).unwrap(),
+        cqlmatic::discovery::timestamp(),
+        cqlmatic::environment::PackData {
+            provenance: vec![json!({"id":"prov:synthetic-size","source_type":"manual-curation",
+                "canonical_source":"Synthetic size fixture","retrieved_at":"2026-01-02T00:00:00Z",
+                "redaction_status":"none","coverage_status":"declared-only","notes":"s".repeat(33 * 1024 * 1024)})],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let seed = dir.0.join("large-pack.json");
+    cqlmatic::storage::Writer::acquire(&seed)
+        .unwrap()
+        .commit(&pack)
+        .unwrap();
+    drop(pack);
+    call(&dir.0, json!({"kind":"import-pack","pack_file":seed}));
+    let mut request = source_run_request(4);
+    request["max_seconds"] = json!(3600);
+    let prepared = call(&dir.0, request);
+    let completed = relay(&dir.0, prepared, &[], &[], None);
+    assert_eq!(completed["action"]["relay"]["status"], "complete");
+    assert_eq!(completed["status"]["settings_attention"], false);
+    let saved: Value =
+        serde_json::from_slice(&fs::read(dir.0.join("workflow/state.json")).unwrap()).unwrap();
+    assert_eq!(saved["discovery_runs"][0]["status"], "complete");
+    assert_eq!(
+        saved["pending_inventory"][0]["resolution"]["kind"],
+        "inventoried"
+    );
+    let run = &saved["discovery_runs"][0];
+    let mut total = 0;
+    for name in ["state_path", "pack_path", "receipt_path"] {
+        let length = fs::metadata(run[name].as_str().unwrap()).unwrap().len();
+        assert!(length < cqlmatic::inventory::MAX_STATE_BYTES);
+        total += length;
+    }
+    assert!(total > cqlmatic::inventory::MAX_STATE_BYTES);
+    let (checkpoint, report) =
+        cqlmatic::mcp::inspect_completed_report(Path::new(run["state_path"].as_str().unwrap()))
+            .unwrap();
+    assert_eq!(checkpoint.status, "activated");
+    assert_eq!(report.status, "complete");
+    assert_eq!(report.captures.len(), 1);
+    assert!(serde_json::to_vec(&report.captures).unwrap().len() < 4096);
+    assert!(
+        !completed["action"]["inventory_work_evidence_limited"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+}
+
+#[test]
 fn prepared_run_resolves_only_field_measurements_accepted_after_its_hint() {
     for zero in [false, true] {
         let dir = Temp::new();
@@ -827,7 +893,9 @@ fn prepared_run_resolves_only_field_measurements_accepted_after_its_hint() {
             &dir.0,
             json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
         );
-        let prepared = call(&dir.0, source_run_request(40));
+        let mut request = source_run_request(40);
+        request["max_seconds"] = json!(3600);
+        let prepared = call(&dir.0, request);
         call(
             &dir.0,
             json!({"kind":"record-inventory-hints","environment":environment(),"hints":[{"source":{"type":"synthetic"},"fields":["hinted_field"]}]}),
@@ -879,6 +947,7 @@ fn hint_boundary_does_not_credit_earlier_fields_or_unavailable_checkpoints() {
             json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
         );
         let mut request = source_run_request(40);
+        request["max_seconds"] = json!(3600);
         request["value_fields"] = json!(["unrelated_field"]);
         let mut progress = call(&dir.0, request);
         for _ in 0..8 {
@@ -939,7 +1008,9 @@ fn hint_boundary_does_not_credit_earlier_fields_or_unavailable_checkpoints() {
         );
         assert_eq!(completed["status"]["settings_attention"], true);
         assert!(completed["status"]["pending_inventory"][0]["resolution"].is_null());
-        let next = call(&dir.0, source_run_request(40));
+        let mut request = source_run_request(40);
+        request["max_seconds"] = json!(3600);
+        let next = call(&dir.0, request);
         let completed = relay(
             &dir.0,
             next,
