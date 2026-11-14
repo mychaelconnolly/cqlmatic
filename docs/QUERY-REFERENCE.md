@@ -176,7 +176,7 @@ Raw checking parses an existing query; it does not accept the typed JSON variant
 
 - Empty input, whitespace-only input and `*` are match-all inputs. Pipes separate stages and cannot trail the query.
 - Whitespace, `//` line comments and closed `/* ... */` comments are consumed between tokens. Block comments are not nested. Quote slash-heavy text when it would be ambiguous with comments/regex.
-- Bare identifiers admit alphanumeric characters, `_`, `@`, `#`, `.`, qualified `:` segments, and physical numeric indices such as `items[0].name`. Quote other filter/output names with double quotes. Expression fields must be bare-compatible. Backtick/single-quote syntax is outside this subset.
+- Bare identifiers admit alphanumeric characters, `_`, `@`, `#`, `.`, qualified `:` segments, and physical numeric indices such as `items[0].name`. Quote other filter/output names with double quotes. Double-quote assignment field names that start with a NOT, AND or OR segment in any ASCII letter case, such as `"not.user" := "alice"`. Expression fields must be bare-compatible. Backtick/single-quote syntax is outside this subset.
 - Double-quoted strings use JSON escapes and cannot span raw lines. Filter patterns can be quoted/unquoted text, `/REGEX/flags`, or `?parameter`. Unresolved parameters are reported as unsupported; the checker does not substitute them.
 - Filters support `=`, `!=`, `<`, `<=`, `>`, `>=`, `like`, standalone text/regex, `true`, `false`, `NOT`/`!`, parentheses, explicit AND and implicit whitespace AND. CQL filter **OR binds before AND**: `a=1 AND b=2 OR c=3` means `a=1 AND (b=2 OR c=3)`. Parenthesize intentionally. This differs from bounded English, which rejects mixed operators without grouping.
 - Function calls use comma-separated positional/named arguments. Function lookup is case-insensitive; argument names/accepted value spellings must match their contracts. Assignments use `:=`. Expressions accept unary `!`, `-`, `+`; `* / %`, then `+ -`, then comparisons `== != <= >= < >`; binary operations associate left. Boolean `AND`/`OR` or `&&` are not scalar-expression operators.
@@ -255,7 +255,7 @@ Fixed durations are whole numbers with `ms/millisecond(s)`, `s/sec/second(s)`, `
 | `lower` | `field:f`, `as:s`, `locale:s`, `type:s` | `field` | `field` | transform | yes |
 | `upper` | `field:f`, `as:s`, `locale:s` | `field` | `field` | transform | yes |
 | `length` | `field:f`, `as:s` | `field` | `field` | transform | yes |
-| `concat` | `field:A`, `as:s`, `separator:s` | `field` | `field` | transform | yes |
+| `concat` | `field:F`, `as:s` | `field` | `field` | transform | yes |
 | `split` | `field:f`, `strip:b` | — | `field` | transform | no |
 | `replace` | `regex:r`, `with:s`, `field:f`, `as:s`, `flags:s` | `regex` | `regex` | transform | yes |
 | `format` | `format:s`, `field:F`, `as:s`, `timezone:s` | `format`, `field` | `format` | transform | yes |

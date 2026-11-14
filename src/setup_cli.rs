@@ -65,6 +65,15 @@ struct NativeRegistrationReceipt {
     commands_sha256: String,
     confirmation_sha256: String,
     baseline: ConfigBaseline,
+    #[serde(default)]
+    provenance: RegistrationProvenance,
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum RegistrationProvenance {
+    #[default]
+    ReviewedAddition,
+    ReviewedCimdLogin,
 }
 
 pub(crate) fn default_state_path() -> Result<PathBuf, Diagnostic> {
@@ -1548,10 +1557,35 @@ fn inspect_baseline(
 ) -> Result<ConfigBaseline, Diagnostic> {
     inspect_baseline_for(state, state_path, runner, BaselineInspection::Reuse)
 }
+fn inspect_operation_baseline(
+    state: &SetupState,
+    state_path: &Path,
+    runner: &mut impl Runner,
+    operation: PlanOperation,
+) -> Result<ConfigBaseline, Diagnostic> {
+    if operation != PlanOperation::Recover {
+        return inspect_baseline(state, state_path, runner);
+    }
+    state.validate()?;
+    if state.recovery_origin.is_none() {
+        return Err(err(
+            "SETUP_RECOVERY_ORIGIN",
+            "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Existing or manual entries cannot be adopted.",
+        ));
+    }
+    let baseline = inspect_baseline_for(state, state_path, runner, BaselineInspection::Structural)?;
+    if matching_registration_receipt(state, state_path, &baseline)? == Some(false) {
+        return Err(err(
+            "SETUP_REGISTRATION_RECEIPT",
+            "Existing registration provenance does not match the current client and configuration. Inspect it before recovery; no native login was attempted.",
+        ));
+    }
+    Ok(baseline)
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BaselineInspection {
     Reuse,
-    ReviewedAddition,
+    Structural,
 }
 fn inspect_baseline_for(
     state: &SetupState,
@@ -1607,7 +1641,7 @@ fn inspect_baseline_for(
                 let transport = &entry["transport"];
                 if transport["url"].as_str() == Some(selected.cloud.endpoint())
                     && matches!(transport["type"].as_str(), Some("streamable_http" | "http"))
-                    && entry["enabled"].as_bool() != Some(false)
+                    && entry["enabled"].as_bool() == Some(true)
                     && transport.get("http_headers").is_none_or(Value::is_null)
                     && transport
                         .get("bearer_token_env_var")
@@ -1750,35 +1784,78 @@ fn has_registration_receipt(
     {
         return Ok(false);
     }
+    Ok(matching_registration_receipt(state, state_path, baseline)? == Some(true))
+}
+fn matching_registration_receipt(
+    state: &SetupState,
+    state_path: &Path,
+    baseline: &ConfigBaseline,
+) -> Result<Option<bool>, Diagnostic> {
     let path = registration_receipt_path(state_path)?;
-    reject_links(&path)?;
-    if !path.exists() {
-        return Ok(false);
+    if !private_input_exists(&path)? {
+        return Ok(None);
     }
-    verify_private_file(&path)?;
     let raw = storage::read_bytes(&path, MAX_STATE_BYTES)?;
     let receipt: NativeRegistrationReceipt = serde_json::from_slice(&raw).map_err(|_| {
         err("SETUP_REGISTRATION_RECEIPT", "Native registration provenance is malformed. Review this server in Codex; no native change was attempted.")
     })?;
-    // Reconstruct original add arguments, including during a no-op apply's postcondition.
+    if receipt.schema_version != SCHEMA_VERSION
+        || !setup::is_digest(&receipt.selection_sha256)
+        || !setup::is_digest(&receipt.client_sha256)
+        || !setup::is_digest(&receipt.commands_sha256)
+        || !setup::is_digest(&receipt.confirmation_sha256)
+        || receipt.baseline.server != ExistingServer::Same
+        || !Path::new(&receipt.baseline.path).is_absolute()
+        || receipt
+            .baseline
+            .sha256
+            .as_deref()
+            .is_none_or(|hash| !setup::is_digest(hash))
+    {
+        return Err(err(
+            "SETUP_REGISTRATION_RECEIPT",
+            "Native registration provenance is invalid. Inspect it in protected local storage before continuing.",
+        ));
+    }
+    // Match completed provenance independently of a possibly interrupted state save.
     let mut provenance_state = state.clone();
     provenance_state.phase = SetupPhase::Selected;
+    provenance_state.plan = None;
+    provenance_state.recovery_origin = None;
+    provenance_state.configured = true;
+    provenance_state.configured_sha256 = baseline.sha256.clone();
+    if receipt.provenance == RegistrationProvenance::ReviewedCimdLogin
+        && provenance_state.selection.as_ref().is_none_or(|selection| {
+            selection.client != ClientKind::Codex
+                || !matches!(selection.registration, RegistrationMode::Cimd { .. })
+        })
+    {
+        return Ok(Some(false));
+    }
     let expected = setup::build_plan(
         &provenance_state,
-        PlanOperation::Configure,
-        ConfigBaseline {
-            path: baseline.path.clone(),
-            sha256: None,
-            server: ExistingServer::Absent,
+        match receipt.provenance {
+            RegistrationProvenance::ReviewedAddition => PlanOperation::Configure,
+            RegistrationProvenance::ReviewedCimdLogin => PlanOperation::Authenticate,
+        },
+        if receipt.provenance == RegistrationProvenance::ReviewedAddition {
+            ConfigBaseline {
+                path: baseline.path.clone(),
+                sha256: None,
+                server: ExistingServer::Absent,
+            }
+        } else {
+            baseline.clone()
         },
         None,
     )?;
-    Ok(receipt.schema_version == SCHEMA_VERSION
-        && receipt.baseline == *baseline
-        && receipt.selection_sha256 == registration_digest(&expected.selection)?
-        && receipt.client_sha256 == registration_digest(&expected.client)?
-        && receipt.commands_sha256 == registration_digest(&expected.commands)?
-        && setup::is_digest(&receipt.confirmation_sha256))
+    Ok(Some(
+        baseline.sha256.is_some()
+            && receipt.baseline == *baseline
+            && receipt.selection_sha256 == registration_digest(&expected.selection)?
+            && receipt.client_sha256 == registration_digest(&expected.client)?
+            && receipt.commands_sha256 == registration_digest(&expected.commands)?,
+    ))
 }
 fn save_registration_receipt(
     state_path: &Path,
@@ -1797,6 +1874,16 @@ fn save_registration_receipt(
         commands_sha256: registration_digest(&plan.commands)?,
         confirmation_sha256: plan.confirmation_sha256.clone(),
         baseline: baseline.clone(),
+        provenance: match plan.operation {
+            PlanOperation::Configure => RegistrationProvenance::ReviewedAddition,
+            PlanOperation::Recover => RegistrationProvenance::ReviewedCimdLogin,
+            PlanOperation::Authenticate => {
+                return Err(err(
+                    "SETUP_REGISTRATION_RECEIPT",
+                    "Ordinary authentication cannot create registration provenance.",
+                ));
+            }
+        },
     };
     let raw = serde_json::to_vec_pretty(&receipt).map_err(|_| {
         err("SETUP_REGISTRATION_RECEIPT", "Cannot save native registration provenance. Inspect the pending native command before continuing.")
@@ -1992,7 +2079,7 @@ fn perform(
                 state.clients.extend(clients);
             }
             state.invalidate_plan();
-            let baseline = inspect_baseline(state, state_path, runner)?;
+            let baseline = inspect_operation_baseline(state, state_path, runner, operation)?;
             let backup = if operation == PlanOperation::Configure {
                 backup_path(state_path, &baseline)?
             } else {
@@ -2070,7 +2157,7 @@ fn perform(
                     ));
                 }
             }
-            let baseline = inspect_baseline(state, state_path, runner)?;
+            let baseline = inspect_operation_baseline(state, state_path, runner, plan.operation)?;
             if baseline != plan.baseline {
                 return Err(err(
                     "SETUP_BASELINE_CHANGED",
@@ -2163,35 +2250,50 @@ fn perform(
                     && plan.baseline.server == ExistingServer::Absent
                     && !plan.commands.is_empty()
                 {
-                    BaselineInspection::ReviewedAddition
+                    BaselineInspection::Structural
                 } else {
                     BaselineInspection::Reuse
                 };
                 let actual = inspect_baseline_for(state, state_path, runner, inspection)?;
                 if actual.server != ExistingServer::Same
-                    || (inspection == BaselineInspection::ReviewedAddition
-                        && actual.sha256.is_none())
+                    || (inspection == BaselineInspection::Structural && actual.sha256.is_none())
                 {
                     return Err(err(
                         "SETUP_POSTCONDITION",
                         "Native command returned success but the desired server was not observed. Configuration remains pending for review; no authentication is claimed.",
                     ));
                 }
-                if inspection == BaselineInspection::ReviewedAddition {
+                if inspection == BaselineInspection::Structural {
                     save_registration_receipt(state_path, &plan, &actual)?;
                 }
+                state.recovery_origin = None;
                 state.configured = true;
                 state.configured_sha256 =
                     configured_fingerprint(&plan.selection, Path::new(&actual.path))?;
                 state.authentication_evidence = AuthenticationEvidence::None;
                 state.discovery_sha256 = None;
                 state.last_notice = Some(if plan.selection.client == ClientKind::Codex {
-                    "Configured the HTTP entry after the exact reviewed native add command. A protected receipt binds the requested registration arguments to unchanged local configuration; Codex list output does not independently inspect OAuth identity or attest authentication."
+                    "Configured HTTP entry matches protected provenance for reviewed native registration arguments and unchanged local configuration. Codex list output does not independently inspect OAuth identity or attest authentication."
                 } else if matches!(plan.selection.client, ClientKind::ClaudeCode | ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode) {
                     "Configured the selected host's HTTP entry. Its effective session source and OAuth client identity still require host-session confirmation; configuration does not attest authentication."
                 } else {
                     "Configured the selected native client; authentication is still required. Native list/config output does not attest authentication."
                 }.into());
+            } else if plan.operation == PlanOperation::Recover {
+                let actual = inspect_operation_baseline(state, state_path, runner, plan.operation)?;
+                if actual != plan.baseline {
+                    return Err(err(
+                        "SETUP_POSTCONDITION",
+                        "Native CIMD login completed but configuration changed. Recovery remains pending for inspection; no authentication is claimed.",
+                    ));
+                }
+                save_registration_receipt(state_path, &plan, &actual)?;
+                state.recovery_origin = None;
+                state.configured = true;
+                state.configured_sha256 = actual.sha256;
+                state.authentication_evidence = AuthenticationEvidence::None;
+                state.discovery_sha256 = None;
+                state.last_notice = Some("The reviewed explicit Codex CIMD login completed with unchanged HTTP configuration. Its protected receipt records that login, not a completed add or authentication attestation. Import a saved host tool-discovery report next.".into());
             } else {
                 state.last_notice = Some("Native authentication command completed, or native UI steps are pending. Its exit status does not attest authentication. Import a saved host tool-discovery report next.".into());
             }
@@ -2223,6 +2325,17 @@ fn perform(
             Ok(())
         }
         SetupAction::ImportDiscovery { file } => {
+            if state
+                .selection
+                .as_ref()
+                .is_some_and(|s| s.client.is_native())
+                && (!state.configured || state.phase == SetupPhase::CommandPending)
+            {
+                return Err(err(
+                    "SETUP_NOT_CONFIGURED",
+                    "Complete configuration and inspect any pending native command before importing discovery evidence. Acknowledge its exact reviewed hash, then preview recovery for an eligible Codex CIMD add; importing a report does not recover registration provenance.",
+                ));
+            }
             let raw = storage::read_bytes(Path::new(&file), MAX_DISCOVERY_BYTES)?;
             let report: HostToolDiscovery = serde_json::from_slice(&raw).map_err(|_| err("SETUP_DISCOVERY_JSON", "Expected a strict v1 saved HostToolDiscovery report. No query or network call was run."))?;
             if state
@@ -2259,13 +2372,58 @@ fn perform(
                     "Acknowledging a pending command requires its previously reviewed plan hash after inspecting the native client.",
                 ));
             }
-            state.invalidate_plan();
-            state.phase = SetupPhase::Selected;
-            state.configured = false;
-            state.configured_sha256 = None;
-            state.discovery_sha256 = None;
-            state.authentication_evidence = AuthenticationEvidence::None;
-            state.last_notice = Some("User acknowledged inspecting the pending native command. Preview the current configuration baseline before any further native action; no rollback was claimed.".into());
+            let pending = state.plan.as_ref().expect("checked above").clone();
+            let mut reviewed = state.clone();
+            let mut restored = None;
+            if pending.selection.client == ClientKind::Codex {
+                let clients = runner.detect(Some(ClientKind::Codex))?;
+                reviewed
+                    .clients
+                    .retain(|client| client.client != ClientKind::Codex);
+                reviewed.clients.extend(clients);
+                let baseline = inspect_baseline_for(
+                    &reviewed,
+                    state_path,
+                    runner,
+                    BaselineInspection::Structural,
+                )?;
+                match matching_registration_receipt(&reviewed, state_path, &baseline)? {
+                    Some(true) => restored = Some(baseline),
+                    Some(false) => {
+                        return Err(err(
+                            "SETUP_REGISTRATION_RECEIPT",
+                            "Existing registration provenance does not match the current client and configuration. Inspect it before acknowledging this pending action; no native login was attempted.",
+                        ));
+                    }
+                    None => {
+                        if reviewed.recovery_origin.is_none()
+                            && baseline.server == ExistingServer::Same
+                            && baseline.sha256.is_some()
+                            && baseline.path == pending.baseline.path
+                            && pending.validate_recovery_origin().is_ok()
+                        {
+                            reviewed.recovery_origin = Some(pending);
+                        }
+                    }
+                }
+            }
+            reviewed.invalidate_plan();
+            reviewed.phase = SetupPhase::Selected;
+            reviewed.configured = false;
+            reviewed.configured_sha256 = None;
+            reviewed.discovery_sha256 = None;
+            reviewed.authentication_evidence = AuthenticationEvidence::None;
+            reviewed.last_notice = Some("User acknowledged inspecting the pending native command. Preview the current configuration baseline before any further native action; no rollback was claimed.".into());
+            if let Some(baseline) = restored {
+                reviewed.recovery_origin = None;
+                reviewed.configured = true;
+                reviewed.configured_sha256 = baseline.sha256;
+                reviewed.phase = SetupPhase::AuthenticationRequired;
+                reviewed.last_notice = Some("The existing protected registration receipt matches the current client and unchanged HTTP configuration. Configuration state was restored without a native add or login; authentication still requires a saved host report.".into());
+            } else if reviewed.recovery_origin.is_some() {
+                reviewed.last_notice = Some("Acknowledged the pending command without retrying it. The HTTP entry has no registration receipt; the original reviewed fresh Codex CIMD add is retained as recovery eligibility, not proof it ran. Preview recovery for a fresh explicit CIMD login.".into());
+            }
+            *state = reviewed;
             Ok(())
         }
         SetupAction::Cancel {} => {
@@ -2322,21 +2480,22 @@ fn emit(result: SetupResult, json: bool) -> Result<i32, Diagnostic> {
     };
     writeln!(io::stdout().lock(), "{text}")
         .map_err(|_| err("SETUP_OUTPUT", "Cannot write setup result."))?;
+    if !json {
+        for diagnostic in &result.diagnostics {
+            let message = format!("{}: {}", diagnostic.code, diagnostic.message);
+            if diagnostic.severity == cqlmatic::contracts::Severity::Warning {
+                crate::terminal::warning_stdout(&message)
+                    .map_err(|_| err("SETUP_OUTPUT", "Cannot write setup warning."))?;
+            } else {
+                writeln!(io::stdout().lock(), "{}", crate::human(&message))
+                    .map_err(|_| err("SETUP_OUTPUT", "Cannot write setup diagnostic."))?;
+            }
+        }
+    }
     Ok(code)
 }
 fn banner_uses_color(terminal: bool, term: Option<&str>, no_color: bool) -> bool {
-    // IsTerminal and TERM do not establish Windows console ANSI processing.
-    cfg!(not(windows))
-        && terminal
-        && !no_color
-        && term.is_some_and(|term| {
-            matches!(
-                term,
-                "ansi" | "linux" | "xterm" | "screen" | "tmux" | "rxvt"
-            ) || ["xterm-", "screen-", "tmux-", "rxvt-"]
-                .iter()
-                .any(|prefix| term.starts_with(prefix))
-        })
+    crate::terminal::uses_color(terminal, term, no_color)
 }
 fn write_setup_banner(output: &mut impl Write, color: bool) -> Result<(), Diagnostic> {
     (if color {
@@ -2439,7 +2598,7 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
             );
         } else {
             println!(
-                "\nChoose: 1 detect native clients, 2 choose agent/cloud, 3 preview configuration, 4 preview login, 5 apply reviewed plan, 6 confirm sign-in, 7 import saved host report, 8 quit (progress saved), 9 acknowledge inspected pending command"
+                "\nChoose: 1 detect native clients, 2 choose agent/cloud, 3 preview configuration, 4 preview login, 5 apply reviewed plan, 6 confirm sign-in, 7 import saved host report, 8 quit (progress saved), 9 acknowledge inspected pending command, 10 preview CIMD recovery"
             );
         }
         let Some(choice) = prompt(&rx, "> ")? else {
@@ -2449,7 +2608,7 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
             })?;
             return Ok(1);
         };
-        if host_managed && matches!(choice.as_str(), "3" | "4" | "5" | "6" | "9") {
+        if host_managed && matches!(choice.as_str(), "3" | "4" | "5" | "6" | "9" | "10") {
             println!(
                 "This agent uses its own MCP configuration and sign-in. Import a saved host tool-discovery report after configuring it."
             );
@@ -2627,6 +2786,9 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
             },
             "4" => SetupAction::Preview {
                 operation: PlanOperation::Authenticate,
+            },
+            "10" => SetupAction::Preview {
+                operation: PlanOperation::Recover,
             },
             "5" => {
                 let Some(plan) = &state.plan else {
@@ -3035,6 +3197,8 @@ mod tests {
         observations: Vec<ClientObservation>,
         native_calls: usize,
         fail_after_mutation: bool,
+        error_after_mutation: Option<&'static str>,
+        mutate_on_login: bool,
         no_mutation: bool,
         saw_durable_pending: bool,
         commands: Vec<NativeCommand>,
@@ -3055,14 +3219,14 @@ mod tests {
                     .map(|(name, entry)| {
                         json!({
                             "name": name,
-                            "enabled": true,
+                            "enabled": entry.get("enabled").cloned().unwrap_or(json!(true)),
                             "transport": {
-                                "type": "streamable_http",
+                                "type": entry.get("type").cloned().unwrap_or(json!("streamable_http")),
                                 "url": entry["url"],
-                                "http_headers": null,
-                                "bearer_token_env_var": null,
-                                "env_http_headers": null,
-                                "http_headers_helper": null
+                                "http_headers": entry.get("http_headers").or_else(|| entry.get("headers")),
+                                "bearer_token_env_var": entry.get("bearer_token_env_var"),
+                                "env_http_headers": entry.get("env_http_headers"),
+                                "http_headers_helper": entry.get("http_headers_helper")
                             }
                         })
                     })
@@ -3076,14 +3240,26 @@ mod tests {
                 .args
                 .starts_with(&["mcp".into(), "add".into(), "--scope".into()]);
             let codex = command.args.starts_with(&["mcp".into(), "add".into()]) && !claude;
-            if !codex && !claude {
+            let login = command.args.starts_with(&["mcp".into(), "login".into()]);
+            if login {
+                assert_eq!(
+                    command.args,
+                    [
+                        "mcp",
+                        "login",
+                        "cs-mcp",
+                        "--oauth-client-registration",
+                        "cimd"
+                    ]
+                );
+            } else if !codex && !claude {
                 assert_eq!(command.args.first().map(String::as_str), Some("--add-mcp"));
             }
             self.native_calls += 1;
             self.commands.push(command.clone());
             self.saw_durable_pending =
                 load_state(&self.state_path)?.phase == SetupPhase::CommandPending;
-            if !self.no_mutation {
+            if !self.no_mutation && !login {
                 let mut value: Value = if self.config.exists() {
                     serde_json::from_slice(&fs::read(&self.config).unwrap()).unwrap()
                 } else if claude {
@@ -3118,6 +3294,14 @@ mod tests {
                 entry.remove("name");
                 value[if claude { "mcpServers" } else { "servers" }][&name] = Value::Object(entry);
                 fs::write(&self.config, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+            } else if login && self.mutate_on_login {
+                let mut value: Value =
+                    serde_json::from_slice(&fs::read(&self.config).unwrap()).unwrap();
+                value["changed_during_login"] = json!(true);
+                fs::write(&self.config, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            if let Some(code) = self.error_after_mutation {
+                return Err(err(code, "Synthetic interrupted native command."));
             }
             Ok(CommandOutput {
                 success: !self.fail_after_mutation,
@@ -3192,6 +3376,8 @@ mod tests {
                 observations: vec![client],
                 native_calls: 0,
                 fail_after_mutation: false,
+                error_after_mutation: None,
+                mutate_on_login: false,
                 no_mutation: false,
                 saw_durable_pending: false,
                 commands: Vec::new(),
@@ -3267,16 +3453,27 @@ mod tests {
             result
         }
         fn preview(&mut self) -> String {
-            self.action(SetupAction::Preview {
-                operation: PlanOperation::Configure,
-            })
-            .unwrap();
+            self.preview_operation(PlanOperation::Configure)
+        }
+        fn preview_operation(&mut self, operation: PlanOperation) -> String {
+            self.action(SetupAction::Preview { operation }).unwrap();
             self.state
                 .plan
                 .as_ref()
                 .unwrap()
                 .confirmation_sha256
                 .clone()
+        }
+        fn acknowledge(&mut self) -> Result<(), Diagnostic> {
+            self.action(SetupAction::AcknowledgePending {
+                confirmation_sha256: self
+                    .state
+                    .plan
+                    .as_ref()
+                    .unwrap()
+                    .confirmation_sha256
+                    .clone(),
+            })
         }
         fn apply(&mut self, hash: String) -> Result<(), Diagnostic> {
             self.action(SetupAction::Apply {
@@ -3309,6 +3506,445 @@ mod tests {
         RegistrationMode::Cimd {
             metadata_url: "https://chatgpt.com/oauth/codex/synthetic/client.json".into(),
             allowlist_confirmed: true,
+        }
+    }
+    fn interrupted_codex_add(code: &'static str) -> Harness {
+        let mut h = Harness::codex(codex_cimd_registration());
+        let hash = h.preview();
+        h.runner.error_after_mutation = Some(code);
+        assert_eq!(h.apply_in_terminal(hash).unwrap_err().code, code);
+        assert_eq!(h.state.phase, SetupPhase::CommandPending);
+        assert!(h.runner.config.exists());
+        assert!(!registration_receipt_path(&h.path).unwrap().exists());
+        h.runner.error_after_mutation = None;
+        h
+    }
+    fn codex_discovery_file(h: &Harness) -> String {
+        let path = h._temp.0.join("synthetic-discovery.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&HostToolDiscovery {
+                schema_version: SCHEMA_VERSION,
+                client: ClientKind::Codex,
+                host_id: None,
+                server_name: "cs-mcp".into(),
+                endpoint: Cloud::Us1.endpoint().into(),
+                authenticated: true,
+                effective_oauth_client_id: None,
+                effective_config_source: None,
+                tools: vec![DiscoveryTool {
+                    name: SEARCH_TOOL.into(),
+                    available: true,
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
+    #[test]
+    fn setup_codex_interrupted_add_recovers_only_through_fresh_reviewed_cimd_login() {
+        for code in ["SETUP_TIMEOUT", "SETUP_NATIVE_WAIT"] {
+            let mut h = interrupted_codex_add(code);
+            let original = h.state.plan.clone().unwrap();
+            assert_eq!(original.baseline.server, ExistingServer::Absent);
+            assert!(original.baseline.sha256.is_none());
+            let before = fs::read(&h.runner.config).unwrap();
+            let stored = fs::read_to_string(&h.path).unwrap();
+            assert!(!stored.contains("recovery_origin"));
+            h.state = load_state(&h.path).unwrap();
+            assert_eq!(
+                h.state.plan.as_ref().unwrap().confirmation_sha256,
+                original.confirmation_sha256
+            );
+            assert_eq!(
+                h.action(SetupAction::ImportDiscovery {
+                    file: h
+                        ._temp
+                        .0
+                        .join("absent-report")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .unwrap_err()
+                .code,
+                "SETUP_NOT_CONFIGURED"
+            );
+            assert_eq!(
+                h.apply_in_terminal(original.confirmation_sha256.clone())
+                    .unwrap_err()
+                    .code,
+                "SETUP_PENDING"
+            );
+            h.acknowledge().unwrap();
+            assert_eq!(h.state.recovery_origin.as_ref(), Some(&original));
+            assert!(!h.state.configured);
+            assert_eq!(h.runner.native_calls, 1);
+            assert_eq!(fs::read(&h.runner.config).unwrap(), before);
+            assert_eq!(
+                h.action(SetupAction::ImportDiscovery {
+                    file: codex_discovery_file(&h)
+                })
+                .unwrap_err()
+                .code,
+                "SETUP_NOT_CONFIGURED"
+            );
+            let hash = h.preview_operation(PlanOperation::Recover);
+            let recovery = h.state.plan.clone().unwrap();
+            assert_eq!(recovery.commands.len(), 1);
+            assert_eq!(
+                recovery.commands[0].args,
+                [
+                    "mcp",
+                    "login",
+                    "cs-mcp",
+                    "--oauth-client-registration",
+                    "cimd"
+                ]
+            );
+            assert!(recovery.commands[0].interactive);
+            assert_eq!(recovery.commands[0].timeout_seconds, 300);
+            assert!(recovery.backup_path.is_none());
+            assert_eq!(recovery.baseline.sha256, Some(sha256_hex(&before)));
+            assert_eq!(
+                h.apply_in_terminal(original.confirmation_sha256.clone())
+                    .unwrap_err()
+                    .code,
+                "SETUP_CONFIRMATION"
+            );
+            assert_eq!(
+                h.apply(hash.clone()).unwrap_err().code,
+                "SETUP_INTERACTIVE_REQUIRED"
+            );
+            h.apply_in_terminal(hash).unwrap();
+            assert_eq!(h.runner.native_calls, 2);
+            assert_eq!(h.runner.commands[1], recovery.commands[0]);
+            assert!(h.runner.saw_durable_pending);
+            assert_eq!(fs::read(&h.runner.config).unwrap(), before);
+            assert!(h.state.recovery_origin.is_none());
+            assert!(h.state.configured);
+            assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+            assert_eq!(
+                h.state.authentication_evidence,
+                AuthenticationEvidence::None
+            );
+            assert!(h.state.discovery_sha256.is_none());
+            let receipt: Value = serde_json::from_slice(
+                &fs::read(registration_receipt_path(&h.path).unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt["provenance"], "reviewed-cimd-login");
+            assert_eq!(
+                receipt["commands_sha256"],
+                registration_digest(&recovery.commands).unwrap()
+            );
+            assert_eq!(receipt["confirmation_sha256"], recovery.confirmation_sha256);
+            let hash = h.preview();
+            assert!(h.state.plan.as_ref().unwrap().commands.is_empty());
+            h.apply(hash).unwrap();
+            h.action(SetupAction::ImportDiscovery {
+                file: codex_discovery_file(&h),
+            })
+            .unwrap();
+            assert_eq!(h.state.phase, SetupPhase::ToolDiscoveryVerified);
+            assert_eq!(h.runner.native_calls, 2);
+        }
+    }
+    #[test]
+    fn setup_codex_receipt_before_configured_save_restores_without_native_action() {
+        for legacy_receipt in [false, true] {
+            let mut h = Harness::codex(codex_cimd_registration());
+            let hash = h.preview();
+            let mut interrupted = h.state.clone();
+            interrupted.phase = SetupPhase::CommandPending;
+            h.apply_in_terminal(hash).unwrap();
+            let receipt_path = registration_receipt_path(&h.path).unwrap();
+            let mut receipt: Value =
+                serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+            assert_eq!(receipt["provenance"], "reviewed-addition");
+            if legacy_receipt {
+                receipt.as_object_mut().unwrap().remove("provenance");
+                fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+            }
+            h.state = interrupted;
+            assert!(!h.state.configured);
+            assert!(h.state.configured_sha256.is_none());
+            h.acknowledge().unwrap();
+            assert!(h.state.configured);
+            assert!(h.state.plan.is_none());
+            assert!(h.state.recovery_origin.is_none());
+            assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+            assert_eq!(
+                h.state.authentication_evidence,
+                AuthenticationEvidence::None
+            );
+            assert_eq!(h.runner.native_calls, 1);
+            h.action(SetupAction::ImportDiscovery {
+                file: codex_discovery_file(&h),
+            })
+            .unwrap();
+            assert_eq!(h.state.phase, SetupPhase::ToolDiscoveryVerified);
+        }
+    }
+    #[test]
+    fn setup_codex_authenticate_timeout_keeps_matching_prior_provenance() {
+        let mut h = Harness::codex(codex_cimd_registration());
+        let hash = h.preview();
+        h.apply_in_terminal(hash).unwrap();
+        let receipt = fs::read(registration_receipt_path(&h.path).unwrap()).unwrap();
+        let hash = h.preview_operation(PlanOperation::Authenticate);
+        h.runner.error_after_mutation = Some("SETUP_TIMEOUT");
+        assert_eq!(h.apply_in_terminal(hash).unwrap_err().code, "SETUP_TIMEOUT");
+        h.runner.error_after_mutation = None;
+        h.acknowledge().unwrap();
+        assert!(h.state.configured);
+        assert!(h.state.recovery_origin.is_none());
+        assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+        assert_eq!(
+            h.state.authentication_evidence,
+            AuthenticationEvidence::None
+        );
+        assert_eq!(h.runner.native_calls, 2);
+        assert_eq!(
+            fs::read(registration_receipt_path(&h.path).unwrap()).unwrap(),
+            receipt
+        );
+    }
+    #[test]
+    fn setup_codex_repeated_recovery_timeouts_preserve_original_origin_and_pending_hash() {
+        let mut h = interrupted_codex_add("SETUP_TIMEOUT");
+        let original = h.state.plan.clone().unwrap();
+        h.acknowledge().unwrap();
+        for _ in 0..3 {
+            let hash = h.preview_operation(PlanOperation::Recover);
+            h.runner.error_after_mutation = Some("SETUP_TIMEOUT");
+            assert_eq!(
+                h.apply_in_terminal(hash.clone()).unwrap_err().code,
+                "SETUP_TIMEOUT"
+            );
+            assert_eq!(h.state.recovery_origin.as_ref(), Some(&original));
+            assert_eq!(h.state.phase, SetupPhase::CommandPending);
+            assert_eq!(h.state.plan.as_ref().unwrap().confirmation_sha256, hash);
+            h.action(SetupAction::Cancel {}).unwrap();
+            assert_eq!(h.state.phase, SetupPhase::CommandPending);
+            assert_eq!(
+                h.action(SetupAction::AcknowledgePending {
+                    confirmation_sha256: original.confirmation_sha256.clone()
+                })
+                .unwrap_err()
+                .code,
+                "SETUP_CONFIRMATION"
+            );
+            h.runner.error_after_mutation = None;
+            h.acknowledge().unwrap();
+            assert_eq!(h.state.recovery_origin.as_ref(), Some(&original));
+            assert_eq!(
+                fs::read_to_string(&h.path)
+                    .unwrap()
+                    .matches("\"recovery_origin\"")
+                    .count(),
+                1
+            );
+        }
+        let hash = h.preview_operation(PlanOperation::Recover);
+        let mut interrupted = h.state.clone();
+        interrupted.phase = SetupPhase::CommandPending;
+        h.apply_in_terminal(hash).unwrap();
+        h.state = interrupted;
+        let calls = h.runner.native_calls;
+        h.acknowledge().unwrap();
+        assert!(h.state.configured);
+        assert!(h.state.recovery_origin.is_none());
+        assert_eq!(h.runner.native_calls, calls);
+    }
+    #[test]
+    fn setup_codex_recovery_binds_fresh_client_config_and_derived_argv() {
+        for change in ["client", "config", "path", "argv"] {
+            let mut h = interrupted_codex_add("SETUP_TIMEOUT");
+            h.acknowledge().unwrap();
+            let mut hash = h.preview_operation(PlanOperation::Recover);
+            let expected = match change {
+                "client" => {
+                    h.runner.observations[0].executable_sha256 = sha256_hex(b"updated executable");
+                    "SETUP_CLIENT_CHANGED"
+                }
+                "config" => {
+                    let mut config: Value =
+                        serde_json::from_slice(&fs::read(&h.runner.config).unwrap()).unwrap();
+                    config["unrelated_preference"] = json!(true);
+                    fs::write(&h.runner.config, serde_json::to_vec(&config).unwrap()).unwrap();
+                    "SETUP_BASELINE_CHANGED"
+                }
+                "path" => {
+                    let next = h._temp.0.join("other-config.json");
+                    fs::copy(&h.runner.config, &next).unwrap();
+                    h.runner.config = next;
+                    "SETUP_BASELINE_CHANGED"
+                }
+                "argv" => {
+                    let plan = h.state.plan.as_mut().unwrap();
+                    plan.commands[0].args = vec!["mcp".into(), "add".into(), "unreviewed".into()];
+                    plan.confirmation_sha256 = plan.digest().unwrap();
+                    hash = plan.confirmation_sha256.clone();
+                    "SETUP_PLAN_INTEGRITY"
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(h.apply_in_terminal(hash).unwrap_err().code, expected);
+            assert_eq!(h.runner.native_calls, 1);
+            assert!(h.state.recovery_origin.is_some());
+            if change == "path" {
+                assert_eq!(
+                    h.action(SetupAction::Preview {
+                        operation: PlanOperation::Recover
+                    })
+                    .unwrap_err()
+                    .code,
+                    "SETUP_RECOVERY_BASELINE"
+                );
+            }
+        }
+    }
+    #[test]
+    fn setup_codex_recovery_rejects_other_auth_disabled_entries_and_post_login_drift() {
+        for (key, value) in [
+            ("enabled", json!(false)),
+            ("type", json!("stdio")),
+            ("headers", json!({"Authorization":"synthetic"})),
+            ("bearer_token_env_var", json!("SYNTHETIC_TOKEN")),
+            (
+                "env_http_headers",
+                json!({"Authorization":"SYNTHETIC_TOKEN"}),
+            ),
+            ("http_headers_helper", json!("synthetic-helper")),
+        ] {
+            let mut h = interrupted_codex_add("SETUP_TIMEOUT");
+            h.acknowledge().unwrap();
+            let mut config: Value =
+                serde_json::from_slice(&fs::read(&h.runner.config).unwrap()).unwrap();
+            config["servers"]["cs-mcp"][key] = value;
+            fs::write(&h.runner.config, serde_json::to_vec(&config).unwrap()).unwrap();
+            assert_eq!(
+                h.action(SetupAction::Preview {
+                    operation: PlanOperation::Recover
+                })
+                .unwrap_err()
+                .code,
+                "SETUP_COLLISION"
+            );
+            assert_eq!(h.runner.native_calls, 1);
+        }
+        let mut h = interrupted_codex_add("SETUP_TIMEOUT");
+        h.acknowledge().unwrap();
+        let original = h.state.recovery_origin.clone();
+        let hash = h.preview_operation(PlanOperation::Recover);
+        h.runner.mutate_on_login = true;
+        assert_eq!(
+            h.apply_in_terminal(hash).unwrap_err().code,
+            "SETUP_POSTCONDITION"
+        );
+        assert_eq!(h.state.phase, SetupPhase::CommandPending);
+        assert_eq!(h.state.recovery_origin, original);
+        assert!(!h.state.configured);
+        assert!(!registration_receipt_path(&h.path).unwrap().exists());
+    }
+    #[test]
+    fn setup_codex_manual_preexisting_and_reselected_entries_cannot_gain_recovery_origin() {
+        let mut h = Harness::codex(manual_registration("synthetic-id"));
+        let hash = h.preview();
+        h.runner.error_after_mutation = Some("SETUP_TIMEOUT");
+        assert_eq!(h.apply_in_terminal(hash).unwrap_err().code, "SETUP_TIMEOUT");
+        h.runner.error_after_mutation = None;
+        h.acknowledge().unwrap();
+        assert!(h.state.recovery_origin.is_none());
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Recover
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_RECOVERY_ORIGIN"
+        );
+        assert_eq!(h.runner.native_calls, 1);
+
+        let mut h = Harness::codex(codex_cimd_registration());
+        fs::write(
+            &h.runner.config,
+            serde_json::to_vec(
+                &json!({"servers":{"cs-mcp":{"type":"http","url":Cloud::Us1.endpoint()}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Recover
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_RECOVERY_ORIGIN"
+        );
+        assert_eq!(h.runner.native_calls, 0);
+
+        let mut h = interrupted_codex_add("SETUP_TIMEOUT");
+        h.acknowledge().unwrap();
+        h.action(SetupAction::Cancel {}).unwrap();
+        assert!(h.state.recovery_origin.is_some());
+        let mut selection = h.state.selection.clone().unwrap();
+        selection.cloud = Cloud::Us2;
+        h.action(SetupAction::Select { selection }).unwrap();
+        assert!(h.state.recovery_origin.is_none());
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Recover
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_RECOVERY_ORIGIN"
+        );
+    }
+    #[test]
+    fn setup_codex_pending_acknowledgement_and_recovery_reject_malformed_receipts() {
+        let mut h = interrupted_codex_add("SETUP_TIMEOUT");
+        let receipt = registration_receipt_path(&h.path).unwrap();
+        storage::Writer::acquire(&receipt)
+            .unwrap()
+            .commit_bytes(b"{}", MAX_STATE_BYTES)
+            .unwrap();
+        assert_eq!(
+            h.acknowledge().unwrap_err().code,
+            "SETUP_REGISTRATION_RECEIPT"
+        );
+        assert_eq!(h.state.phase, SetupPhase::CommandPending);
+        assert!(h.state.recovery_origin.is_none());
+        assert_eq!(h.runner.native_calls, 1);
+        fs::remove_file(&receipt).unwrap();
+        h.acknowledge().unwrap();
+        storage::Writer::acquire(&receipt)
+            .unwrap()
+            .commit_bytes(b"{\"provenance\":\"unreviewed\"}", MAX_STATE_BYTES)
+            .unwrap();
+        assert_eq!(
+            h.action(SetupAction::Preview {
+                operation: PlanOperation::Recover
+            })
+            .unwrap_err()
+            .code,
+            "SETUP_REGISTRATION_RECEIPT"
+        );
+        assert_eq!(h.runner.native_calls, 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(
+                h.action(SetupAction::Preview {
+                    operation: PlanOperation::Recover
+                })
+                .unwrap_err()
+                .code,
+                "SETUP_PROTECTION"
+            );
         }
     }
     #[test]

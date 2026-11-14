@@ -1,22 +1,20 @@
-# CQLmatic v0.1.5
+# CQLmatic v0.1.6
 
-CQLmatic keeps newer environment evidence active when you resume discovery and makes repeated imports easier to audit. Saved-query imports now identify query fields that still need directly returned values for strict checks.
+CQLmatic helps you keep your environment map current and recover interrupted work. You can refresh manually, receive 30-day reminders, resume discovery, and give your assistant a small status response.
 
 ## What changed
 
-- Resuming a completed discovery preserves the active pack and retained history. First promotion verifies the relay's pack, receipt and predecessor. If another import changed the working inventory, prepare discovery again from the current pack.
-- Repeated inventory actions preserve current-version state bytes when the action makes no change. Exact audit recovery, interrupted promotion and directory durability checks still run. Polling a failed discovery records its terminal failure once.
-- Saved-query imports return `uncredited_fields` with guidance for fields absent from positive returned values. A filter field omitted by `select` appears in this feedback. Observation credit continues to require a directly returned value.
-- Replaying a saved capture reuses its recorded observation and audit. Equivalent timestamp spellings represent the same instant. A different retrieval time for the same protected originals is a conflict. Separate captures with identical bytes can be retained using their own protected result files and distinct retrieval times.
-- Scout imports validate the confirmed environment, current mode's repository and completed window. Replaying an older exact scout preserves the latest source counts. Every successful discovery capture, including Sources Only, must be retrieved at or after its probe window ends.
-- Parser imports validate the retrieval timestamp before replacing the catalog, including requests with empty capture lists. Replaying an identical parser exclusion preserves reconciliation.
-- Generation, checking and assessment name the actual Full or Quick inventory mode while retaining the informational `CQL_QUICK_TARGET` code.
+- **Manual refresh and reminders.** Refresh the confirmed view's source list with a shallow census and a finite search lifetime. The inventory menu offers a reminder after 30 days, with a choice to refresh or be reminded in another 30 days. A reminder never starts a search. New source and field hints remain unverified work until inventory or an explicit exclusion resolves them.
+- **Setup recovery.** An eligible, partially completed Codex CIMD setup can use an inspected pending state and a newly reviewed recovery preview to finish native login without replacing or duplicating its server entry. A matching saved host report is still required for authentication and tool discovery.
+- **Resumable discovery.** New MCP checkpoints and native runs initialized with `--state` retain accepted captures across pause and resume. Retries use the remaining attempt and active-time budgets. Unknown search termination blocks further inventory searches until safely settled; stopping local waiting does not prove hosted cancellation.
+- **Evidence fixes.** A sparse source with positive whole-window volume and an empty recent fieldset can receive one fallback fieldset over the original window. Measurements keep their actual source and window; field names alone do not establish populated-field evidence. Quoted Boolean-keyword field names round-trip consistently, and the supported `concat` signature uses a field list without a separator parameter.
+- **Small status responses.** `status --json --brief` and inventory action brief output stay within 4,096 UTF-8 bytes. They expose readiness, counts, refresh reminders and bounded pending-work references while full and summary output remain available.
 
 ## Compatibility
 
-Existing inventory versions and saved observation IDs remain readable. A successful action migrates version-1 inventory as before. Record the actual UTC capture time when saving a result. Saved-query retrieval time is caller-attested.
+Inventory state versions 1 and 2 remain readable. The next successful action writes version 3 atomically; earlier binaries cannot read newly written version-3 state, and reconciliation must be renewed after migration. Existing packs remain readable.
 
-MCP discovery state binds the executable version. Start a new bounded run with new state and receipt paths after upgrading. Retained environment packs remain available for query writing.
+New discovery checkpoints use format 3. Compatible format-2 checkpoints keep their original absolute deadlines and failure behavior; they do not gain format-3 pause/resume allowances. Existing format-3 checkpoints keep their bound measurement policy. Completed format-2 checkpoints from `0.1.0` through `0.1.5` remain usable as inventory history when their target, captures and activation artifacts still validate. Executing or resuming discovery state remains bound to its executable version. Retained environment packs remain available for query writing. See [cancel and resume discovery](docs/ENVIRONMENT.md#cancel-and-resume-discovery) before upgrading an unfinished run.
 
 ## Before using it
 

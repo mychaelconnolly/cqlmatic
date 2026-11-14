@@ -272,6 +272,9 @@
             }
           ]
         },
+        "automatic_refresh_available": {
+          "type": "boolean"
+        },
         "blank_canvas": {
           "type": "boolean"
         },
@@ -312,6 +315,11 @@
         "full_map_complete": {
           "type": "boolean"
         },
+        "inventory_notification_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
         "message": {
           "type": "string"
         },
@@ -346,6 +354,12 @@
             "$ref": "#/$defs/ParserSummary"
           }
         },
+        "pending_inventory": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PendingInventoryWork"
+          }
+        },
         "query_observation_count": {
           "type": "integer",
           "format": "uint",
@@ -366,6 +380,28 @@
         "reconciliation": {
           "$ref": "#/$defs/Progress"
         },
+        "refresh_attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RefreshStatus"
+          }
+        },
+        "refresh_blocked": {
+          "type": "boolean"
+        },
+        "refresh_reminder": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefreshReminderStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refresh_settings": {
+          "$ref": "#/$defs/RefreshSettings"
+        },
         "schema_version": {
           "type": "integer",
           "format": "uint32",
@@ -381,6 +417,9 @@
           }
         },
         "selected_scope_complete": {
+          "type": "boolean"
+        },
+        "settings_attention": {
           "type": "boolean"
         },
         "sources": {
@@ -431,6 +470,13 @@
         "quick_depth",
         "unverified_lead_count",
         "query_observation_count",
+        "refresh_settings",
+        "automatic_refresh_available",
+        "refresh_attempts",
+        "refresh_blocked",
+        "pending_inventory",
+        "inventory_notification_count",
+        "settings_attention",
         "unverified_leads",
         "query_observations",
         "message",
@@ -660,6 +706,72 @@
         "review_lines"
       ]
     },
+    "PendingInventoryWork": {
+      "type": "object",
+      "properties": {
+        "after_run": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "deferred": {
+          "type": "boolean"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "new_source": {
+          "type": "boolean"
+        },
+        "notified_revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "$ref": "#/$defs/Scope"
+        },
+        "source_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source",
+        "fields",
+        "source_types",
+        "new_source",
+        "revision",
+        "notified_revision",
+        "deferred",
+        "after_run"
+      ]
+    },
     "Progress": {
       "type": "string",
       "enum": [
@@ -759,6 +871,160 @@
         "field",
         "values",
         "truncated"
+      ]
+    },
+    "RefreshLookback": {
+      "type": "string",
+      "enum": [
+        "24h",
+        "7d",
+        "14d",
+        "30d"
+      ]
+    },
+    "RefreshPhase": {
+      "type": "string",
+      "enum": [
+        "prepared",
+        "dispatched",
+        "unresolved",
+        "settled",
+        "imported"
+      ]
+    },
+    "RefreshReminderStatus": {
+      "type": "object",
+      "properties": {
+        "clock_skew": {
+          "type": "boolean"
+        },
+        "cycle_sha256": {
+          "type": "string"
+        },
+        "due": {
+          "type": "boolean"
+        },
+        "due_at": {
+          "type": "string"
+        },
+        "last_successful_window_end": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "show_startup_notice": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "due",
+        "show_startup_notice",
+        "cycle_sha256",
+        "due_at",
+        "clock_skew"
+      ]
+    },
+    "RefreshSettings": {
+      "type": "object",
+      "properties": {
+        "automatic": {
+          "type": "boolean"
+        },
+        "lookback": {
+          "$ref": "#/$defs/RefreshLookback"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "automatic",
+        "lookback"
+      ]
+    },
+    "RefreshStatus": {
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/SearchArguments"
+        },
+        "attempt_id": {
+          "type": "string"
+        },
+        "automatic": {
+          "type": "boolean"
+        },
+        "dispatched_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "host_evidence_sha256": {
+          "type": "string"
+        },
+        "max_search_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "phase": {
+          "$ref": "#/$defs/RefreshPhase"
+        },
+        "prepared_at": {
+          "type": "string"
+        },
+        "result_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "settlement_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "termination": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefreshTermination"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "session_id",
+        "environment",
+        "arguments",
+        "phase",
+        "automatic",
+        "prepared_at",
+        "max_search_seconds",
+        "host_evidence_sha256"
+      ]
+    },
+    "RefreshTermination": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "cancelled",
+        "timed-out",
+        "not-started",
+        "lifetime-expired",
+        "unresolved"
       ]
     },
     "Scope": {
@@ -1054,6 +1320,12 @@
           "format": "uint32",
           "minimum": 0
         },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "state": {
           "type": [
             "string",
@@ -1087,6 +1359,48 @@
       "required": [
         "source",
         "field"
+      ]
+    },
+    "WorkResolution": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "inventoried"
+            },
+            "run": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "run"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "excluded"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reason",
+            "reviewed_at"
+          ]
+        }
       ]
     }
   }

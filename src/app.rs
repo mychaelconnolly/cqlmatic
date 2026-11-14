@@ -2,7 +2,7 @@
 use crate::{
     contracts::*,
     environment::{self, Observation, Pack, observation},
-    inventory::{FieldObservation, QueryObservation, UnverifiedFieldLead},
+    inventory::{FieldObservation, InventoryHint, QueryObservation, UnverifiedFieldLead},
     language::{self, ast::*},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -201,6 +201,35 @@ pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnos
         }
     }
     Ok(leads.into_values().collect())
+}
+
+/// Suggestions retain exact input scopes; they are never observation evidence.
+pub fn inventory_hints(query: &str) -> Result<Vec<InventoryHint>, Diagnostic> {
+    let leads = unverified_leads(query)?;
+    let pipeline = language::parser::parse(query).map_err(|error| error.diagnostic)?;
+    let mut hints: BTreeMap<_, BTreeSet<String>> = BTreeMap::new();
+    let mut flow = Flow::default();
+    constrain(&mut flow, &pipeline.steps);
+    if !flow.uncertain_source && (flow.scope.repo.is_some() || flow.scope.type_.is_some()) {
+        hints.insert((flow.scope.repo, flow.scope.type_), BTreeSet::new());
+    }
+    for lead in leads {
+        hints
+            .entry((lead.source.repo, lead.source.type_))
+            .or_default()
+            .insert(lead.field);
+    }
+    Ok(hints
+        .into_iter()
+        .map(|((repo, type_), fields)| InventoryHint {
+            source: Scope {
+                repo,
+                type_,
+                event: None,
+            },
+            fields: fields.into_iter().collect(),
+        })
+        .collect())
 }
 
 pub fn uncredited_observation_fields(
@@ -2809,6 +2838,22 @@ mod tests {
         assert_eq!(a.validation.status, Acceptance::Accepted);
         assert_eq!(a.validation.execution, "not-run");
     }
+    #[test]
+    fn inventory_hints_keep_source_only_and_reject_uncertain_selectors() {
+        let hints = inventory_hints("#repo=unseen | count()").unwrap();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].source.repo.as_deref(), Some("unseen"));
+        assert!(hints[0].fields.is_empty());
+        assert!(inventory_hints("#repo=* | count()").unwrap().is_empty());
+        assert!(
+            inventory_hints("(#repo=a OR #repo=b) | count()")
+                .unwrap()
+                .is_empty()
+        );
+        let hints = inventory_hints("#repo=unseen | user=* | count()").unwrap();
+        assert_eq!(hints[0].fields, ["user"]);
+    }
+
     #[test]
     fn unresolved_english_never_emits_query() {
         let a = generate(

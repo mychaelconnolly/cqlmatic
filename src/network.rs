@@ -287,29 +287,59 @@ fn retry_after(
         .assume_utc();
     Ok(Some((date - now).try_into().unwrap_or(Duration::ZERO)))
 }
-fn response_json(mut response: Response) -> Result<Value, Diagnostic> {
-    if response.content_length().is_some_and(|n| n > MAX_RESPONSE) {
-        return Err(Diagnostic::error(
-            "HTTP_RESPONSE_LIMIT",
-            "Response exceeds the 8 MiB budget.",
-        ));
-    }
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut response)
-        .take(MAX_RESPONSE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| {
-            Diagnostic::error("HTTP_RESPONSE", "Cannot read the complete HTTP response.")
-        })?;
-    if bytes.len() as u64 > MAX_RESPONSE {
-        return Err(Diagnostic::error(
-            "HTTP_RESPONSE_LIMIT",
-            "Response exceeds the byte budget.",
-        ));
-    }
-    serde_json::from_slice(&bytes)
-        .map_err(|_| Diagnostic::error("HTTP_RESPONSE", "Expected a complete JSON response."))
+fn response_json(response: Response) -> Result<Value, Diagnostic> {
+    let content_length = response.content_length();
+    response_body(response, content_length, false)
 }
+fn http_status_error(method: &Method, status: reqwest::StatusCode, detail: &str) -> Diagnostic {
+    let code = if *method == Method::POST {
+        match status.as_u16() {
+            400 | 401 | 403 | 404 | 405 | 413 | 415 | 422 | 429 => "HTTP_START_REJECTED",
+            _ => "HTTP_START_AMBIGUOUS",
+        }
+    } else {
+        "HTTP_STATUS"
+    };
+    Diagnostic::error(
+        code,
+        format!("API returned HTTP {}. {}", status.as_u16(), detail),
+    )
+}
+fn response_body(
+    mut body: impl Read,
+    content_length: Option<u64>,
+    start_accepted: bool,
+) -> Result<Value, Diagnostic> {
+    let parsed = (|| {
+        if content_length.is_some_and(|n| n > MAX_RESPONSE) {
+            return Err(Diagnostic::error(
+                "HTTP_RESPONSE_LIMIT",
+                "Response exceeds the 8 MiB budget.",
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut body)
+            .take(MAX_RESPONSE + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| {
+                Diagnostic::error("HTTP_RESPONSE", "Cannot read the complete HTTP response.")
+            })?;
+        if bytes.len() as u64 > MAX_RESPONSE {
+            return Err(Diagnostic::error(
+                "HTTP_RESPONSE_LIMIT",
+                "Response exceeds the byte budget.",
+            ));
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|_| Diagnostic::error("HTTP_RESPONSE", "Expected a complete JSON response."))
+    })();
+    parsed.map_err(|diagnostic: Diagnostic| {
+        if start_accepted {
+            Diagnostic::error("HTTP_START_AMBIGUOUS", format!("Start returned a successful HTTP status but its response was unreadable ({}); a job may exist and the start was not retried.",diagnostic.code))
+        } else {diagnostic}
+    })
+}
+
 impl FalconClient {
     pub fn new(identity: &EnvironmentId, credentials: Credentials) -> Result<Self, Diagnostic> {
         credentials.validate_for(identity)?;
@@ -456,8 +486,8 @@ impl FalconClient {
                         wait(delay, deadline)?;
                         continue;
                     }
-                    if method == Method::DELETE && (status.is_success() || status.as_u16() == 404) {
-                        return Ok(json!({"deleted":true}));
+                    if method == Method::DELETE {
+                        return deletion_result(status);
                     }
                     if !status.is_success() {
                         let detail = response_json(response)
@@ -495,12 +525,10 @@ impl FalconClient {
                                     .collect::<String>()
                             })
                             .unwrap_or_default();
-                        return Err(Diagnostic::error(
-                            "HTTP_STATUS",
-                            format!("API returned HTTP {}. {}", status.as_u16(), detail),
-                        ));
+                        return Err(http_status_error(&method, status, &detail));
                     }
-                    return response_json(response);
+                    let content_length = response.content_length();
+                    return response_body(response, content_length, method == Method::POST);
                 }
             }
         }
@@ -568,6 +596,14 @@ pub trait SearchBackend {
     }
     fn observed_at(&self, _job: &str) -> Option<String> {
         None
+    }
+    fn checkpoint(
+        &mut self,
+        _view: &str,
+        _receipt: &JobReceipt,
+        _retrieved_at: &str,
+    ) -> Result<(), Diagnostic> {
+        Ok(())
     }
 }
 impl SearchBackend for FalconClient {
@@ -643,7 +679,7 @@ impl Default for JobPolicy {
         }
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobReceipt {
     pub query: String,
     pub start: String,
@@ -858,14 +894,26 @@ pub fn run_job(
             "unconfirmed"
         }
         .into();
-    } else if receipt
-        .diagnostic
-        .as_ref()
-        .is_some_and(|d| matches!(d.code.as_str(), "HTTP_START_AMBIGUOUS" | "HTTP_TRANSPORT"))
-    {
+    } else if receipt.diagnostic.as_ref().is_some_and(|d| {
+        matches!(
+            d.code.as_str(),
+            "HTTP_START_AMBIGUOUS" | "HTTP_TRANSPORT" | "HTTP_STATUS"
+        )
+    }) {
         receipt.cleanup = "unknown-job".into();
     }
     receipt
+}
+
+fn deletion_result(status: reqwest::StatusCode) -> Result<Value, Diagnostic> {
+    if matches!(status.as_u16(), 200 | 204 | 404) {
+        Ok(json!({"deleted":true}))
+    } else {
+        Err(Diagnostic::error(
+            "HTTP_CLEANUP",
+            "API did not confirm query-job deletion.",
+        ))
+    }
 }
 fn truth(v: &Value) -> bool {
     v == &Value::Bool(true) || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("true"))
@@ -929,6 +977,197 @@ pub(crate) fn flagged(v: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TruncatedBody;
+    impl Read for TruncatedBody {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+        }
+    }
+
+    #[test]
+    fn accepted_start_body_failures_are_ambiguous_but_preflight_parsing_is_not() {
+        let bodies: Vec<(Box<dyn Read>, Option<u64>, &str)> = vec![
+            (
+                Box::new(std::io::Cursor::new(b"{")),
+                Some(1),
+                "HTTP_RESPONSE",
+            ),
+            (
+                Box::new(std::io::Cursor::new(b"{\"id\":\"").chain(TruncatedBody)),
+                Some(100),
+                "HTTP_RESPONSE",
+            ),
+            (
+                Box::new(std::io::empty()),
+                Some(MAX_RESPONSE + 1),
+                "HTTP_RESPONSE_LIMIT",
+            ),
+            (Box::new(std::io::repeat(b' ')), None, "HTTP_RESPONSE_LIMIT"),
+        ];
+        for (body, length, cause) in bodies {
+            let diagnostic = response_body(body, length, true).unwrap_err();
+            assert_eq!(diagnostic.code, "HTTP_START_AMBIGUOUS");
+            assert!(diagnostic.message.contains(cause));
+        }
+        assert_eq!(
+            response_body(std::io::Cursor::new(b"{"), Some(1), false)
+                .unwrap_err()
+                .code,
+            "HTTP_RESPONSE"
+        );
+        assert_eq!(
+            response_body(std::io::empty(), Some(MAX_RESPONSE + 1), false)
+                .unwrap_err()
+                .code,
+            "HTTP_RESPONSE_LIMIT"
+        );
+    }
+
+    #[test]
+    fn start_statuses_require_definite_rejection_before_claiming_no_job() {
+        for status in [408, 499, 500, 501, 502, 503, 504, 599] {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            assert_eq!(
+                http_status_error(&Method::POST, status, "").code,
+                "HTTP_START_AMBIGUOUS"
+            );
+            assert_eq!(
+                http_status_error(&Method::GET, status, "").code,
+                "HTTP_STATUS"
+            );
+        }
+        for status in [400, 401, 403, 404, 405, 413, 415, 422, 429] {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            assert_eq!(
+                http_status_error(&Method::POST, status, "").code,
+                "HTTP_START_REJECTED"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_start_failures_block_retry_while_definite_rejections_remain_terminal() {
+        struct RejectedStart {
+            diagnostic: Diagnostic,
+            starts: usize,
+        }
+        impl SearchBackend for RejectedStart {
+            fn start(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: Instant,
+            ) -> Result<String, Diagnostic> {
+                self.starts += 1;
+                Err(self.diagnostic.clone())
+            }
+            fn poll(&mut self, _: &str, _: &str, _: Instant) -> Result<Value, Diagnostic> {
+                panic!("An unknown job cannot be polled")
+            }
+            fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
+                panic!("An unknown job cannot be stopped")
+            }
+        }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut diagnostics = vec![
+            response_body(std::io::Cursor::new(b"{"), Some(1), true).unwrap_err(),
+            response_body(
+                std::io::Cursor::new(b"{\"id\":\"").chain(TruncatedBody),
+                Some(100),
+                true,
+            )
+            .unwrap_err(),
+            response_body(std::io::empty(), Some(MAX_RESPONSE + 1), true).unwrap_err(),
+        ];
+        for status in [400, 401, 403, 408, 500, 502, 503, 504] {
+            diagnostics.push(http_status_error(
+                &Method::POST,
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                "",
+            ));
+        }
+        diagnostics.push(Diagnostic::error(
+            "HTTP_STATUS",
+            "Unclassified start status",
+        ));
+        for diagnostic in diagnostics {
+            let rejected = diagnostic.code == "HTTP_START_REJECTED";
+            let mut backend = RejectedStart {
+                diagnostic,
+                starts: 0,
+            };
+            let receipt = run_job(
+                &mut backend,
+                "search-all",
+                "count()",
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:01:00Z",
+                &JobPolicy::default(),
+            );
+            assert_eq!(
+                receipt.cleanup,
+                if rejected {
+                    "not-started"
+                } else {
+                    "unknown-job"
+                }
+            );
+            assert_eq!(receipt.cleanup_complete(), rejected);
+            let directory = std::env::temp_dir().join(format!(
+                "cqlmatic-rejected-start-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let state = directory.join("state.json");
+            let request =
+                serde_json::from_str(include_str!("../examples/mcp/discover.request.json"))
+                    .unwrap();
+            crate::mcp::init_resumable(
+                request,
+                &state,
+                &directory.join("pack.json"),
+                &directory.join("receipt.json"),
+                crate::mcp::Transport::Native,
+            )
+            .unwrap();
+            assert_eq!(
+                crate::mcp::run_native(&state, &mut backend).unwrap().status,
+                if rejected {
+                    "failed"
+                } else {
+                    "cleanup-pending"
+                }
+            );
+            assert_eq!(
+                crate::mcp::has_in_flight(&crate::mcp::inspect_state(&state).unwrap()),
+                !rejected
+            );
+            if rejected {
+                assert_eq!(crate::mcp::resume(&state).unwrap().status, "failed");
+            } else {
+                assert!(crate::mcp::resume(&state).is_err());
+            }
+            assert!(crate::mcp::recover_native_cleanup(&state, &mut backend).is_err());
+            assert_eq!(backend.starts, 2);
+            assert!(!directory.join("pack.json").exists());
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+    #[test]
+    fn asynchronous_deletion_does_not_confirm_cleanup() {
+        assert!(deletion_result(reqwest::StatusCode::ACCEPTED).is_err());
+        for status in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::NO_CONTENT,
+            reqwest::StatusCode::NOT_FOUND,
+        ] {
+            assert!(deletion_result(status).is_ok());
+        }
+        assert!(deletion_result(reqwest::StatusCode::INTERNAL_SERVER_ERROR).is_err());
+    }
     struct Fake {
         snapshots: std::collections::VecDeque<Value>,
         starts: u32,

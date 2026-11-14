@@ -364,6 +364,7 @@ def build(args):
     require(linux[:6] == b"\x7fELF\x02\x01" and len(linux) >= 20 and struct.unpack_from("<H", linux, 18)[0] == 62,
             "Linux input must be an x86_64 ELF image")
     require(sha256(linux) == args.linux_sha256 and sha256(windows) == args.windows_sha256, "Native digest differs")
+    public_bytes(linux, "Linux binary")
     imports = pe_imports(windows)
     metadata_raw = regular(args.windows_metadata)
     windows_metadata(metadata_raw, commit, args.windows_sha256, imports)

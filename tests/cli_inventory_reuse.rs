@@ -260,6 +260,10 @@ fn both_modes_reuse_default_and_explicit_active_packs_for_generate_and_check() {
                     assert_eq!(result["outcome"], "ready", "{result}");
                     assert_eq!(result["grounding"]["pack_id"], pack.content_digest);
                     assert_inventory_target_message(&result, "diagnostics", mode);
+                    assert!(
+                        !diagnostic(&result, "CQL_INVENTORY_PENDING", "info"),
+                        "{result}"
+                    );
                 }
             }
             if mode == DiscoveryMode::Full {
@@ -274,8 +278,259 @@ fn both_modes_reuse_default_and_explicit_active_packs_for_generate_and_check() {
                         .any(|lead| lead.field == "user")
                 );
             }
+            let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert!(saved.pending_inventory.is_empty());
         }
     }
+}
+
+#[test]
+fn both_modes_queue_source_only_hints_once_without_promoting_grounding() {
+    for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
+        for (query, selectors) in [
+            ("#repo=unseen | count()", json!({"repo":"unseen"})),
+            ("#type=unseen-type | count()", json!({"type":"unseen-type"})),
+            (
+                "#repo=sample #type=unseen-type | count()",
+                json!({"repo":"sample","type":"unseen-type"}),
+            ),
+        ] {
+            let dir = Temp::new();
+            let path = dir.default_state();
+            let initial = state(mode);
+            save_state(&path, &initial);
+            let (code, result) = dir.one(&["check", query, "--json"]);
+            assert_eq!(code, 0, "{result}");
+            assert!(
+                diagnostic(&result, "CQL_INVENTORY_PENDING", "info"),
+                "{result}"
+            );
+            let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved.pending_inventory.len(), 1);
+            let work = &saved.pending_inventory[0];
+            assert_eq!(serde_json::to_value(&work.source).unwrap(), selectors);
+            assert!(work.fields.is_empty());
+            assert!(work.new_source);
+            assert_eq!(work.revision, 1);
+            assert_eq!(work.notified_revision, 0);
+            assert_eq!(saved.inventory_notifications().len(), 1);
+            assert_eq!(
+                serde_json::to_value(&saved.sources).unwrap(),
+                serde_json::to_value(&initial.sources).unwrap()
+            );
+            assert!(saved.active_pack.is_none());
+            assert!(saved.query_observations.is_empty());
+            assert!(saved.unverified_leads.is_empty());
+            let before = fs::read(&path).unwrap();
+            let (_, again) = dir.one(&["check", query, "--json"]);
+            assert!(
+                diagnostic(&again, "CQL_INVENTORY_PENDING", "info"),
+                "{again}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+
+            let request = dir.0.join("source-only.json");
+            fs::write(&request, json!({"schema_version":1,"input":{"mode":"plan","plan":{"source":selectors,"filters":[],"steps":[]}}}).to_string()).unwrap();
+            let (_, generated) =
+                dir.one(&["generate", "--request", request.to_str().unwrap(), "--json"]);
+            assert_eq!(generated["validation"]["status"], "accepted", "{generated}");
+            assert!(
+                diagnostic(&generated, "CQL_INVENTORY_PENDING", "info"),
+                "{generated}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+
+            let (code, strict) = dir.one(&["check", query, "--json", "--require-observed"]);
+            assert_eq!(code, 1, "{strict}");
+            assert_eq!(strict["outcome"], "needs-context", "{strict}");
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn deferred_on_use_work_keeps_settings_attention_after_restart_and_new_fields_notify_again() {
+    for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
+        let dir = Temp::new();
+        let path = dir.default_state();
+        save_state(&path, &state(mode));
+        let (_, result) = dir.one(&["check", "#repo=unseen | count()", "--json"]);
+        assert!(diagnostic(&result, "CQL_INVENTORY_PENDING", "info"));
+        let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let work = &saved.pending_inventory[0];
+        let request = dir.0.join("defer.json");
+        fs::write(&request, json!({"schema_version":1,"action":{"kind":"acknowledge-inventory-work","work":[{"id":work.id,"revision":work.revision}],"defer":true}}).to_string()).unwrap();
+        let (code, deferred) = dir.one(&[
+            "env",
+            "inventory",
+            "--request",
+            request.to_str().unwrap(),
+            "--json",
+        ]);
+        assert_eq!(code, 0, "{deferred}");
+        assert_eq!(deferred["status"]["settings_attention"], true);
+        assert_eq!(deferred["status"]["pending_inventory"][0]["deferred"], true);
+        let before = fs::read(&path).unwrap();
+
+        let (_, status) = dir.one(&["status", "--json", "--summary"]);
+        assert_eq!(status["settings_attention"], true);
+        assert_eq!(status["counts"]["inventory_notifications"], 0);
+        let text = dir.binary().arg("status").output().unwrap();
+        assert!(text.status.success());
+        assert!(String::from_utf8_lossy(&text.stdout).contains("Settings *"));
+        let (_, replay) = dir.one(&["check", "#repo=unseen | count()", "--json"]);
+        assert!(!diagnostic(&replay, "CQL_INVENTORY_PENDING", "info"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let (_, novel) = dir.one(&["check", "#repo=unseen | new_field=* | count()", "--json"]);
+        assert!(
+            diagnostic(&novel, "CQL_INVENTORY_PENDING", "info"),
+            "{novel}"
+        );
+        let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.pending_inventory[0].revision, 2);
+        assert_eq!(saved.pending_inventory[0].notified_revision, 1);
+        assert_eq!(saved.pending_inventory[0].fields, ["new_field"]);
+        assert!(!saved.pending_inventory[0].deferred);
+        assert!(saved.query_observations.is_empty());
+        assert!(saved.packs.is_empty());
+        assert_eq!(saved.inventory_notifications().len(), 1);
+        let before = fs::read(&path).unwrap();
+        let (_, replay) = dir.one(&["check", "#repo=unseen | new_field=* | count()", "--json"]);
+        assert!(diagnostic(&replay, "CQL_INVENTORY_PENDING", "info"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn jsonl_source_only_notices_remain_one_result_per_request_without_acknowledging_delivery() {
+    for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
+        let dir = Temp::new();
+        let path = dir.default_state();
+        save_state(&path, &state(mode));
+        let input = [
+            "#repo=unseen | count()",
+            "#repo=unseen | count()",
+            "#type=unseen-type | count()",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(id, query)| {
+            json!({"schema_version":1,"id":id.to_string(),"query":query}).to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+        let (code, rows) = dir.run(&["check", "--jsonl"], input.as_bytes());
+        assert_eq!(code, 0, "{rows:?}");
+        assert_eq!(rows.len(), 3);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row["id"], index.to_string());
+            assert!(diagnostic(row, "CQL_INVENTORY_PENDING", "info"), "{row}");
+        }
+        let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.pending_inventory.len(), 2);
+        assert!(saved.pending_inventory.iter().all(|work| work.revision == 1
+            && work.notified_revision == 0
+            && work.fields.is_empty()));
+        assert_eq!(saved.inventory_notifications().len(), 2);
+        assert!(saved.query_observations.is_empty());
+        assert!(saved.packs.is_empty());
+    }
+}
+
+#[test]
+fn generation_jsonl_and_failed_output_do_not_acknowledge_inventory_work() {
+    for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
+        let dir = Temp::new();
+        let path = dir.default_state();
+        save_state(&path, &state(mode));
+        let input = (0..2)
+            .map(|index| {
+                json!({"schema_version":1,"id":index.to_string(),
+            "input":{"mode":"plan","plan":{"source":{"repo":"unseen"},"filters":[],"steps":[]}}})
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (code, rows) = dir.run(&["generate", "--jsonl"], input.as_bytes());
+        assert_eq!(code, 0, "{rows:?}");
+        assert_eq!(rows.len(), 2);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row["id"], index.to_string());
+            assert!(diagnostic(row, "CQL_INVENTORY_PENDING", "info"), "{row}");
+        }
+        let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.pending_inventory.len(), 1);
+        assert_eq!(saved.pending_inventory[0].notified_revision, 0);
+        let before = fs::read(&path).unwrap();
+        let (code, _) = dir.run(&["generate", "--jsonl"], input.as_bytes());
+        assert_eq!(code, 0);
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let request = dir.0.join("generate.json");
+        fs::write(&request, json!({"schema_version":1,
+            "input":{"mode":"plan","plan":{"source":{"repo":"output-failure"},"filters":[],"steps":[]}}}).to_string()).unwrap();
+        for args in [
+            vec!["generate", "--request", request.to_str().unwrap(), "--json"],
+            vec!["check", "#repo=output-failure | count()", "--json"],
+        ] {
+            let (reader, writer) = std::io::pipe().unwrap();
+            drop(reader);
+            let failed = dir
+                .binary()
+                .args(args)
+                .stdout(Stdio::from(writer))
+                .output()
+                .unwrap();
+            assert_eq!(failed.status.code(), Some(2), "{failed:?}");
+            let error: Value = serde_json::from_slice(&failed.stderr).unwrap();
+            assert_eq!(error["code"], "OUTPUT_IO");
+            let saved: InventoryState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved.pending_inventory.len(), 2);
+            assert!(
+                saved
+                    .pending_inventory
+                    .iter()
+                    .all(|work| work.notified_revision == 0)
+            );
+        }
+    }
+}
+
+#[test]
+fn foreground_queries_reuse_the_saved_pack_while_refresh_is_dispatched() {
+    let dir = Temp::new();
+    let mut state = state(DiscoveryMode::Full);
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    let pack_path = dir.0.join("snapshot/pack.json");
+    save_pack(&pack_path, &pack);
+    attach(&mut state, &pack_path, pack.content_digest.clone());
+    let now = cqlmatic::discovery::timestamp();
+    let host = serde_json::to_vec(&json!({"schema_version":1,"environment":environment(),
+        "session_id":"synthetic-session","verified_at":now,
+        "mechanism":"provider-enforced-search-lifetime","max_search_seconds":300,
+        "capability_reference":"Synthetic provider capability",
+        "verification_evidence":"Synthetic session verification of provider search lifetime"}))
+    .unwrap();
+    let id = state
+        .prepare_refresh("synthetic-session".into(), &host, false, &now)
+        .unwrap();
+    state
+        .dispatch_refresh(&id, "synthetic-session", &now)
+        .unwrap();
+    let path = dir.default_state();
+    save_state(&path, &state);
+    let before = fs::read(&path).unwrap();
+    let (code, checked) = dir.one(&[
+        "check",
+        "#repo=sample | user=* | count()",
+        "--json",
+        "--require-observed",
+    ]);
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(checked["outcome"], "ready");
+    assert_eq!(checked["grounding"]["pack_id"], pack.content_digest);
+    assert_eq!(fs::read(&path).unwrap(), before);
 }
 
 #[test]
@@ -601,6 +856,7 @@ fn unconfirmed_preferences_are_benign_only_without_evidence() {
     }
     let mut contradictory = state(DiscoveryMode::Quick);
     contradictory.target = None;
+    contradictory.refresh_reminder = None;
     save_state(&path, &contradictory);
     let (code, result) = dir.one(&["check", "count()", "--json"]);
     assert_eq!(code, 1, "{result}");

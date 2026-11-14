@@ -173,6 +173,131 @@ fn endpoint_signatures_accept_supported_forms_and_reject_invalid_arguments() {
 }
 
 #[test]
+fn concat_rejects_separator_in_checked_and_generated_calls() {
+    for query in [
+        r#"concat(field=[left,right],separator=":",as=joined)"#,
+        r#"joined := concat([left,right],separator=":")"#,
+    ] {
+        let result = check(query, false);
+        assert_eq!(result.outcome, Outcome::Invalid, "{query}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "CQL_ARGUMENT_UNKNOWN")
+        );
+    }
+    let result = generate(
+        json!({"source":{},"steps":[{"op":"call","function":"concat","args":[
+            {"name":"field","value":{"kind":"array","items":[{"kind":"literal","value":"left"},{"kind":"literal","value":"right"}]}},
+            {"name":"separator","value":{"kind":"literal","value":":"}},
+            {"name":"as","value":{"kind":"literal","value":"joined"}}
+        ]}]}),
+    );
+    assert_eq!(result.outcome, Outcome::Invalid);
+    assert!(result.query.is_none());
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "CQL_ARGUMENT_UNKNOWN")
+    );
+}
+
+#[test]
+fn concat_rejects_non_field_values_and_expressions() {
+    for query in [
+        "concat([user,1])",
+        "concat([user,true])",
+        "concat([user,user+1])",
+        "concat([user,lower(user)])",
+        "concat([user,[user]])",
+    ] {
+        let result = check(query, false);
+        assert_ne!(result.outcome, Outcome::Ready, "{query}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "CQL_ARGUMENT_TYPE")
+        );
+    }
+    for value in [
+        json!({"kind":"literal","value":1}),
+        json!({"kind":"literal","value":true}),
+        json!({"kind":"binary","operator":"add","left":{"kind":"field","name":"user"},"right":{"kind":"literal","value":1}}),
+    ] {
+        let result = generate(
+            json!({"source":{},"steps":[{"op":"call","function":"concat","args":[
+                {"name":"field","value":{"kind":"array","items":[{"kind":"literal","value":"user"},value]}}
+            ]}]}),
+        );
+        assert_ne!(result.outcome, Outcome::Ready);
+        assert!(result.query.is_none());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "CQL_ARGUMENT_TYPE")
+        );
+    }
+}
+
+#[test]
+fn concat_scalar_and_list_arguments_read_named_fields() {
+    for call in [
+        "concat(user,as=joined)",
+        r#"concat("user",as="joined")"#,
+        "concat([user],as=joined)",
+        r#"concat(field=["user",user],as=joined)"#,
+        "joined := concat(user)",
+        r#"joined := concat(["user"])"#,
+    ] {
+        let query = format!("#repo=example | {call}");
+        let result = check(&query, true);
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{query}: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(
+            result.grounding.basis["example:*:user"],
+            "observed in a bounded sample"
+        );
+        assert!(!result.grounding.basis.contains_key("example:*:joined"));
+    }
+    let result = check(
+        r#"#repo=example | concat(["user","unmeasured"],as=joined)"#,
+        true,
+    );
+    assert_eq!(result.outcome, Outcome::NeedsContext);
+    assert_eq!(
+        result.grounding.basis["example:*:user"],
+        "observed in a bounded sample"
+    );
+    assert!(
+        result
+            .grounding
+            .missing
+            .iter()
+            .any(|missing| missing.contains("unmeasured"))
+    );
+    for fields in [
+        json!({"kind":"literal","value":"user"}),
+        json!({"kind":"array","items":[{"kind":"literal","value":"user"},{"kind":"field","name":"user"}]}),
+    ] {
+        let result = generate(json!({"source":{},"steps":[
+            {"op":"assign","field":"user","expression":{"kind":"literal","value":"alice"}},
+            {"op":"call","function":"concat","args":[{"name":"field","value":fields},{"name":"as","value":{"kind":"literal","value":"joined"}}]}
+        ]}));
+        assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+        assert_eq!(result.grounding.basis["*:*:user"], "query-produced");
+        assert!(!result.grounding.basis.contains_key("*:*:alice"));
+    }
+}
+
+#[test]
 fn capture_analysis_tracks_nonempty_guarantees_on_every_successful_path() {
     for (pattern, expected) in [
         ("(?<x>a)", vec!["x"]),

@@ -122,7 +122,7 @@ impl Parser<'_> {
             && tail[s.len()..]
                 .chars()
                 .next()
-                .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                .is_none_or(|c| !c.is_alphanumeric() && !"_.[".contains(c))
         {
             self.pos += s.len();
             true
@@ -240,6 +240,13 @@ impl Parser<'_> {
         self.pos = start;
         if let Ok(name) = self.identifier() {
             if self.eat(":=") {
+                if !self.input[start..].starts_with('"') && reserved_field_prefix(&name) {
+                    self.pos = start;
+                    return self.fail(
+                        "Quote assignment field names whose initial segment is NOT, AND or OR.",
+                        true,
+                    );
+                }
                 return Ok(Step::Assign {
                     field: name,
                     value: self.expression(0)?,

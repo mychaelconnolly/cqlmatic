@@ -35,7 +35,7 @@ OLD_IDS = {"cqlmatic-docs": "11111111-1111-1111-1111-111111111111", "cqlmatic": 
 NEW_IDS = {"cqlmatic-docs": "33333333-3333-3333-3333-333333333333", "cqlmatic": "44444444-4444-4444-4444-444444444444"}
 
 
-def site_files(source=SOURCE, version="0.1.5"):
+def site_files(source=SOURCE, version="0.1.6"):
     files = {"landing/index.html": b"<h1>CQLmatic</h1>", "docs/index.html": b"<h1>Documentation</h1>",
              "landing/404.html": b"<h1>Not found</h1>", "docs/404.html": b"<h1>Not found</h1>",
              "landing/_headers": b"/*\n  X-Content-Type-Options: nosniff\n",
@@ -306,6 +306,96 @@ class DeploymentTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             return deploy.deploy_sites(client, Path("dist"), files, SOURCE, digest, Path("wrangler"), MARKER, 0,
                                        upload_site=upload or client.upload, check_content=check or (lambda *args: None))
+
+    def test_public_summary_allows_only_fixed_restoration_codes(self):
+        marker = "synthetic-provider-detail"
+        codes = ("restored", "no-upload-found", "prior-production-unchanged", "blocked-newer-production",
+                 "unavailable-first-deployment", "restoration-incomplete")
+        cases = [(code, code) for code in codes]
+        cases += [("restored-" + OLD_IDS["cqlmatic-docs"], "restored"),
+                  (marker, "restoration-incomplete"), ("restored-" + marker, "restoration-incomplete"),
+                  ("restored-" + OLD_IDS["cqlmatic-docs"] + marker, "restoration-incomplete"),
+                  ({"provider": marker}, "restoration-incomplete")]
+        for status, expected in cases:
+            proof = {"source_commit": SOURCE, "site_manifest_sha256": "c" * 64, "status": marker,
+                     "deployments": NEW_IDS, "previous_deployments": OLD_IDS, "failure": marker,
+                     "provider_metadata": {"unexpected": marker},
+                     "restoration": {"cqlmatic-docs": status, marker: marker}}
+            original = copy.deepcopy(proof)
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as work:
+                summary, stdout, stderr = Path(work) / "summary", io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    deploy.write_summary(proof)
+                public = {"source_commit": SOURCE, "site_manifest_sha256": "c" * 64, "status": "failed",
+                          "restoration": {"cqlmatic-docs": expected}}
+                self.assertEqual(json.loads(stdout.getvalue()), public)
+                raw = json.dumps(public, sort_keys=True, indent=2)
+                self.assertEqual(summary.read_text(), "Pages production result\n\n```json\n" + raw + "\n```\n")
+                self.assertEqual(stderr.getvalue(), "")
+                self.assertEqual(proof, original)
+
+    def test_public_summary_rejects_invalid_public_fields_before_output(self):
+        for field, value in (("source_commit", "synthetic-provider-detail"), ("source_commit", "0" * 40),
+                             ("site_manifest_sha256", "synthetic-provider-detail"),
+                             ("restoration", "synthetic-provider-detail")):
+            proof = {"source_commit": SOURCE, "site_manifest_sha256": "c" * 64, "status": "verified", field: value}
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as work:
+                summary, stdout = Path(work) / "summary", io.StringIO()
+                with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+                        contextlib.redirect_stdout(stdout), self.assertRaises(deploy.InvalidSite) as caught:
+                    deploy.write_summary(proof)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertFalse(summary.exists())
+                self.assertNotIn(value, str(caught.exception))
+
+    def test_deployment_results_keep_ids_and_provider_details_out_of_public_output(self):
+        marker = "synthetic-provider-detail"
+        files, digest = site_files()
+        for outcome in ("verified", "failed-upload", "uncertain-upload", "restoration-failed"):
+            client = FakeCloudflare()
+            def upload(*args):
+                if args[2] == "cqlmatic" and outcome == "failed-upload":
+                    raise deploy.InvalidSite(marker)
+                value = client.upload(*args)
+                return (None, False) if args[2] == "cqlmatic" and outcome == "uncertain-upload" else value
+            def check(host, *args):
+                if outcome == "restoration-failed" and host.endswith(".cqlmatic.pages.dev"):
+                    raise deploy.InvalidSite(marker)
+            if outcome == "restoration-failed":
+                def rollback(name, deployment_id):
+                    client.calls.append(("rollback", name, deployment_id))
+                    raise deploy.InvalidSite(marker)
+                client.rollback = rollback
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as work:
+                summary, stdout, stderr = Path(work) / "summary", io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}), \
+                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    proof = deploy.deploy_sites(client, Path("dist"), files, SOURCE, digest, Path("wrangler"), MARKER, 0,
+                                                upload_site=upload, check_content=check)
+                    proof["provider_metadata"] = {"unexpected": marker}
+                    deploy.write_summary(proof)
+                self.assertEqual(proof["status"], "verified" if outcome == "verified" else "failed")
+                self.assertEqual(proof["previous_deployments"], OLD_IDS)
+                self.assertEqual(proof["deployments"]["cqlmatic-docs"], NEW_IDS["cqlmatic-docs"])
+                rollback_calls = [call for call in client.calls if call[0] == "rollback"]
+                self.assertEqual(bool(rollback_calls), outcome != "verified")
+                for _, name, deployment_id in rollback_calls:
+                    self.assertEqual(deployment_id, OLD_IDS[name])
+                output = stdout.getvalue() + stderr.getvalue() + summary.read_text()
+                for private in (*OLD_IDS.values(), *NEW_IDS.values(), marker, "provider_metadata", "unexpected",
+                                "previous_deployments", "deployments", "failure"):
+                    self.assertNotIn(private, output)
+
+    def test_cli_validation_error_does_not_echo_untrusted_input(self):
+        marker = "synthetic-provider-detail-" + NEW_IDS["cqlmatic"]
+        result = deploy.subprocess.run([deploy.sys.executable, deploy.__file__, "--dist", "dist", "--source-sha", marker,
+                                        "--manifest-sha256", "c" * 64, "--wrangler", "wrangler", "--run-id", "123",
+                                        "--run-attempt", "1"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "A full nonzero source commit is required.\n")
+        self.assertNotIn(marker, result.stdout + result.stderr)
 
     def test_docs_first_and_both_immutable_and_custom_hosts_checked(self):
         client, checked = FakeCloudflare(), []

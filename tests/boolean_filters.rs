@@ -15,6 +15,18 @@ fn conjunctive_function_predicates_use_valid_pipeline_contexts() {
     assert!(!q.contains("AND"));
 }
 #[test]
+fn keyword_names_remain_valid_field_expressions() {
+    for field in ["not", "NOT", "and", "AND", "or", "OR"] {
+        let result = generate(json!([{"op":"fields","left":field,"operator":"eq","right":"peer"}]));
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{field}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+#[test]
 fn literal_stars_and_missing_policies_remain_boolean_filter_expressions() {
     for missing in ["include", "exclude"] {
         let result = generate(
@@ -40,6 +52,9 @@ fn function_or_is_refused_and_standalone_negation_is_preserved() {
     assert!(result.query.unwrap().contains("| !regex("));
     for query in [
         "not (user=alice OR user=bob)",
+        "NOT(user=alice)",
+        "NOT user=alice",
+        "user=bob NOT peer=alice",
         "!(user=alice OR user=bob)",
         "!regex(\"a\", field=name)",
     ] {

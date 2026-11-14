@@ -166,6 +166,7 @@ pub enum AuthenticationEvidence {
 pub enum PlanOperation {
     Configure,
     Authenticate,
+    Recover,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -235,6 +236,48 @@ impl SetupPlan {
         }
         Ok(())
     }
+    /// Check recovery eligibility without asserting that the original add was dispatched.
+    pub fn validate_recovery_origin(&self) -> Result<(), Diagnostic> {
+        self.validate()?;
+        let client = self.client.as_ref().ok_or_else(|| {
+            error(
+                "SETUP_RECOVERY_ORIGIN",
+                "Recovery needs the original reviewed Codex CIMD add plan.",
+            )
+        })?;
+        if self.operation != PlanOperation::Configure
+            || self.selection.client != ClientKind::Codex
+            || !matches!(self.selection.registration, RegistrationMode::Cimd { .. })
+            || self.baseline.server != ExistingServer::Absent
+            || !Path::new(&self.baseline.path).is_absolute()
+            || self
+                .baseline
+                .sha256
+                .as_deref()
+                .is_some_and(|hash| !is_digest(hash))
+            || self.config_write_sha256.is_some()
+            || client.client != ClientKind::Codex
+            || !Path::new(&client.executable).is_absolute()
+            || !is_digest(&client.executable_sha256)
+            || !is_digest(&client.capability_sha256)
+            || client.version.len() > 160
+            || !client.supports_http
+            || !client.supports_cimd
+            || self.commands
+                != vec![NativeCommand {
+                    program: client.executable.clone(),
+                    args: configure_args(&self.selection, client)?,
+                    interactive: true,
+                    timeout_seconds: 300,
+                }]
+        {
+            return Err(error(
+                "SETUP_RECOVERY_ORIGIN",
+                "Recovery needs the original reviewed fresh Codex CIMD add plan; an existing entry or another registration is insufficient.",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -251,6 +294,9 @@ pub struct SetupState {
     pub configured_sha256: Option<String>,
     pub discovery_sha256: Option<String>,
     pub last_notice: Option<String>,
+    /// Original acknowledged fresh Codex CIMD add; eligibility is not dispatch proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_origin: Option<SetupPlan>,
 }
 impl Default for SetupState {
     fn default() -> Self {
@@ -266,6 +312,7 @@ impl Default for SetupState {
             configured_sha256: None,
             discovery_sha256: None,
             last_notice: None,
+            recovery_origin: None,
         }
     }
 }
@@ -303,6 +350,21 @@ impl SetupState {
                 ));
             }
         }
+        if let Some(origin) = &self.recovery_origin {
+            origin.validate_recovery_origin()?;
+            if self.selection.as_ref() != Some(&origin.selection)
+                || origin.state_revision >= self.revision
+                || self.configured
+                || self.configured_sha256.is_some()
+                || self.discovery_sha256.is_some()
+                || self.authentication_evidence != AuthenticationEvidence::None
+            {
+                return Err(error(
+                    "SETUP_RECOVERY_ORIGIN",
+                    "Recovery origin must match the acknowledged selection and remain unconfigured without authentication evidence.",
+                ));
+            }
+        }
         if self.configured && self.selection.is_none() {
             return Err(error(
                 "SETUP_STATE",
@@ -335,6 +397,7 @@ impl SetupState {
         self.revision += 1;
         self.selection = Some(selection.clone());
         self.plan = None;
+        self.recovery_origin = None;
         self.configured = false;
         self.configured_sha256 = None;
         self.discovery_sha256 = None;
@@ -801,8 +864,24 @@ pub fn build_plan(
                 }
             }
         }
-        PlanOperation::Authenticate => {
-            if !state.configured || baseline.server != ExistingServer::Same {
+        PlanOperation::Authenticate | PlanOperation::Recover => {
+            if operation == PlanOperation::Recover {
+                let origin = state.recovery_origin.as_ref().ok_or_else(|| error(
+                    "SETUP_RECOVERY_ORIGIN",
+                    "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Existing or manual entries cannot be adopted.",
+                ))?;
+                if baseline.path != origin.baseline.path
+                    || baseline.server != ExistingServer::Same
+                    || baseline.sha256.is_none()
+                    || client.as_ref().is_none_or(|client| !client.supports_login)
+                {
+                    return Err(error(
+                        "SETUP_RECOVERY_BASELINE",
+                        "Recovery requires the same enabled HTTP entry and config path, a current file fingerprint, and native CIMD login support. Inspect the client before previewing again.",
+                    ));
+                }
+                changes.push("The acknowledged add may have changed configuration; its dispatch or completion is not established. Reassert CIMD through the reviewed native login without adding or overwriting the server.".into());
+            } else if !state.configured || baseline.server != ExistingServer::Same {
                 return Err(error(
                     "SETUP_NOT_CONFIGURED",
                     "Configure this exact server before authenticating.",
@@ -935,6 +1014,8 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
                 next_actions.push(format!("Configure '{}' as an HTTP MCP server at {} in {}. Confirm the effective server and supported OAuth identity before connecting; do not fall back to DCR.", s.server_name, s.cloud.endpoint(), s.client.label()));
                 next_actions.push(host_setup_hint(s.client).into());
                 next_actions.push("Save a caller-supplied v1 HostToolDiscovery report for this host/server/endpoint and import it with cqlmatic setup; setup does not inspect host configuration or run a query.".into());
+            } else if state.recovery_origin.is_some() {
+                next_actions.push("Preview recovery (operation recover) to review a fresh explicit Codex CIMD login and the current configuration fingerprint; apply only with its new confirmation_sha256. Acknowledgement did not retry the pending command or establish that it ran.".into());
             } else {
                 next_actions.push("Preview the exact host configuration action and local changes; apply only with that preview's confirmation_sha256.".into());
                 if let Some(s) = selected && matches!(s.client, ClientKind::ClaudeCode | ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode) {
@@ -942,7 +1023,7 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
                 }
             }
         }
-        SetupPhase::CommandPending => next_actions.push("Inspect the selected native client's configuration and authentication UI. The last native command may have partially changed it. Setup will not retry or claim rollback. Preview after local review acknowledges the current baseline.".into()),
+        SetupPhase::CommandPending => next_actions.push("Inspect the selected native client's configuration and authentication UI. The last native command may have partially changed it. Acknowledge its exact reviewed confirmation_sha256 after inspection; this does not retry it or claim rollback. An eligible fresh Codex CIMD add can then preview recovery with a new hash.".into()),
         SetupPhase::AuthenticationRequired => {
             next_actions.push("Complete Falcon sign-in and consent in the selected native client. Its successful configuration command does not prove authentication.".into());
             next_actions.push("Ask the selected host session to report its effective OAuth client ID and configuration source, then save tool discovery for this exact client/server/endpoint; import it to confirm falcon_search_ngsiem is available.".into());
@@ -963,7 +1044,7 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
             "Inspect the effective server and OAuth client ID in this host session. Claude/Copilot reports require effective_oauth_client_id and effective_config_source matching the selected session; those fields remain optional for legacy Codex/VS Code reports."
         };
         handoff = Some(format!(
-            "Continue CQLmatic setup in {} using MCP server '{}' at {}. {} {} Discover tools and save a v1 HostToolDiscovery report with client{}/server_name/endpoint/authenticated/tools for `cqlmatic setup` import; exact available falcon_search_ngsiem is required for verified discovery. Additional reported tools are advisory and their names do not establish read or write behavior. Reports are caller-supplied evidence, not independent transport or identity attestation. Run `cqlmatic env inventory --help`, then offer a persistent Quick or Full choice in Settings. Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can consume substantial time and model tokens. For Quick, offer the chosen view (keeps its visibility boundary) or explicit search-all (widens the visible-source census), then sources-only (presence checks without field inventory) or sources + field samples (bounded field observations with other fields and parser reviews pending). Confirm cloud/CID, source IDs, exact target/view, absolute UTC window, finite query/time budgets and authorization before any search. Search-all requires separate explicit authorization for that target and window; never select or relay it automatically. Full scouting emits search-all regardless of the saved view; without that authorization use an authorized Quick or selected-source workflow and leave full-map coverage pending. Settings can switch to Full later without discarding saved evidence; Quick evidence alone does not establish Full completion. Use protected local output paths. You perform model reasoning and authorized read-only MCP calls; relay saved MCP results into CQLmatic's offline flow. Later query execution must retain the confirmed target and view. Registration and browser consent remain my steps. Do not run a live query merely to mark setup complete.",
+            "Continue CQLmatic setup in {} using MCP server '{}' at {}. {} {} Discover tools and save a v1 HostToolDiscovery report with client{}/server_name/endpoint/authenticated/tools for `cqlmatic setup` import; exact available falcon_search_ngsiem is required for verified discovery. Additional reported tools are advisory and their names do not establish read or write behavior. Reports are caller-supplied evidence, not independent transport or identity attestation. Run `cqlmatic env inventory --help`, then offer a persistent Quick or Full choice in Settings. At the beginning of each relevant MCP assistant session, read `cqlmatic status --json --brief` for bounded pending attempts, refresh_reminder and work-notice flags; obtain focused details only when needed. Use brief inventory action responses for routine bookkeeping. Automatic startup refresh is unavailable; do not prepare, dispatch or scout at session entry. Manual Refresh in `cqlmatic env inventory` or Settings prepares an action without executing MCP calls. When refresh_reminder.show_startup_notice is true, present the 30-day due hint with Run or Remind me in 30 days, then submit acknowledge-refresh-reminder with its exact cycle_sha256 and defer:false. Use defer:true only after the user chooses the 30-day deferral. Acknowledgement records delivery, not completed refresh. For user-requested manual refresh, require protected evidence that this exact host session enforces a finite search lifetime of 1–600 seconds; a client timeout or advertised default is insufficient. Do not repeatedly request automatic-startup capability evidence at each launch. Present separate concise new-work or actionable failure notices at a safe foreground point, then acknowledge the exact displayed notification snapshot or individual revisions. Status, brief reads and background imports do not acknowledge delivery. Preserve the confirmed view and unresolved attempts, and follow docs/MCP-COMPANION.md for dispatch, settlement, import and notifications. Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can consume substantial time and model tokens. For Quick, offer the chosen view (keeps its visibility boundary) or explicit search-all (widens the visible-source census), then sources-only (presence checks without field inventory) or sources + field samples (bounded field observations with other fields and parser reviews pending). Confirm cloud/CID, source IDs, exact target/view, absolute UTC window, finite query/time budgets and authorization before any search. Search-all requires separate explicit authorization for that target and window; never select or relay it automatically. Full scouting emits search-all regardless of the saved view; without that authorization use an authorized Quick or selected-source workflow and leave full-map coverage pending. Settings can switch to Full later without discarding saved evidence; Quick evidence alone does not establish Full completion. Use protected local output paths. You perform model reasoning and authorized read-only MCP calls; relay saved MCP results into CQLmatic's offline flow. Later query execution must retain the confirmed target and view. Registration and browser consent remain my steps. Do not run a live query merely to mark setup complete.",
             host_name,
             s.server_name,
             s.cloud.endpoint(),

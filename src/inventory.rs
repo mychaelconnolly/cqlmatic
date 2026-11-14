@@ -14,6 +14,15 @@ pub const DISCOVERY_WARNING: &str = "Initial environment discovery is extensive.
 pub const SCOUT_QUERY: &str =
     "groupBy([#repo, #type, @sourcetype], function=count(as=events), limit=max)";
 pub const MAX_STATE_BYTES: u64 = 67_108_864;
+pub const STATE_VERSION: u32 = 3;
+pub const REFRESH_OFF_WARNING: &str = "Turning off automatic inventory refresh can leave new repositories, sources, and types undiscovered. Manual refresh remains available.";
+pub const REFRESH_SECONDS: u64 = 300;
+pub const MANUAL_REFRESH_SECONDS: u64 = 600;
+pub const AUTOMATIC_REFRESH_AVAILABLE: bool = false;
+const REFRESH_REMINDER_DAYS: i64 = 30;
+const MAX_PENDING_WORK: usize = 1000;
+// shortcut: retain 200 refresh attempts per state, add protected archival for longer histories.
+const MAX_REFRESH_ATTEMPTS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -32,6 +41,53 @@ pub enum InventoryAction {
         mode: DiscoveryMode,
         #[serde(default)]
         quick_depth: QuickDepth,
+    },
+    SetRefreshSettings {
+        automatic: bool,
+        lookback: RefreshLookback,
+    },
+    PrepareRefresh {
+        session_id: String,
+        host_evidence_file: String,
+        #[serde(default)]
+        automatic: bool,
+    },
+    DispatchRefresh {
+        attempt_id: String,
+        session_id: String,
+    },
+    SettleRefresh {
+        attempt_id: String,
+        evidence_file: String,
+    },
+    ImportRefresh {
+        attempt_id: String,
+        result_file: String,
+        retrieved_at: String,
+    },
+    RecordInventoryHints {
+        environment: EnvironmentId,
+        hints: Vec<InventoryHint>,
+    },
+    AcknowledgeInventoryWork {
+        work: Vec<WorkRevision>,
+        #[serde(default)]
+        defer: bool,
+    },
+    AcknowledgeInventoryNotice {
+        snapshot_sha256: String,
+        #[serde(default)]
+        defer: bool,
+    },
+    AcknowledgeRefreshReminder {
+        cycle_sha256: String,
+        #[serde(default)]
+        defer: bool,
+    },
+    ExcludeInventoryWork {
+        work: Vec<WorkRevision>,
+        reason: String,
+        reviewed_at: String,
     },
     ImportQueryObservations {
         query_file: String,
@@ -118,6 +174,11 @@ pub enum InventoryAction {
         #[serde(default)]
         answers: Vec<DiscoveryAnswer>,
     },
+    DispatchDiscovery {
+        probe_id: String,
+    },
+    PauseDiscovery {},
+    ResumeDiscovery {},
     ImportPack {
         pack_file: String,
     },
@@ -138,6 +199,8 @@ pub enum InventoryAction {
 pub struct StatusRequest {
     pub schema_version: u32,
     pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +227,234 @@ pub enum QuickDepth {
     SourcesOnly,
     #[default]
     SourcesAndFields,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+pub enum RefreshLookback {
+    #[default]
+    #[serde(rename = "24h")]
+    Day,
+    #[serde(rename = "7d")]
+    Week,
+    #[serde(rename = "14d")]
+    Fortnight,
+    #[serde(rename = "30d")]
+    Month,
+}
+impl RefreshLookback {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Day => "24h",
+            Self::Week => "7d",
+            Self::Fortnight => "14d",
+            Self::Month => "30d",
+        }
+    }
+
+    fn days(self) -> i64 {
+        match self {
+            Self::Day => 1,
+            Self::Week => 7,
+            Self::Fortnight => 14,
+            Self::Month => 30,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshSettings {
+    pub automatic: bool,
+    pub lookback: RefreshLookback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshReminder {
+    pub environment: EnvironmentId,
+    pub baseline_at: String,
+    pub notified_cycle_sha256: Option<String>,
+    pub defer_until: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshReminderStatus {
+    pub due: bool,
+    pub show_startup_notice: bool,
+    pub cycle_sha256: String,
+    pub last_successful_window_end: Option<String>,
+    pub due_at: String,
+    pub clock_skew: bool,
+}
+
+/// Caller-supplied capability evidence; a client wait timeout is not a search lifetime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshHostEvidence {
+    pub schema_version: u32,
+    pub environment: EnvironmentId,
+    pub session_id: String,
+    pub verified_at: String,
+    pub mechanism: RefreshLifetimeMechanism,
+    #[cfg_attr(test, schemars(range(min = 1, max = 600)))]
+    pub max_search_seconds: u64,
+    pub capability_reference: String,
+    pub verification_evidence: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum RefreshLifetimeMechanism {
+    ProviderEnforcedSearchLifetime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum RefreshPhase {
+    Prepared,
+    Dispatched,
+    Unresolved,
+    Settled,
+    Imported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum RefreshTermination {
+    Completed,
+    Cancelled,
+    TimedOut,
+    NotStarted,
+    LifetimeExpired,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshSettlement {
+    pub schema_version: u32,
+    pub attempt_id: String,
+    pub environment: EnvironmentId,
+    pub session_id: String,
+    pub arguments: SearchArguments,
+    pub termination: RefreshTermination,
+    pub recorded_at: String,
+    #[serde(default)]
+    pub search_started_at: Option<String>,
+    #[serde(default)]
+    pub result_sha256: Option<String>,
+    pub evidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshAttempt {
+    pub id: String,
+    pub environment: EnvironmentId,
+    pub session_id: String,
+    pub arguments: SearchArguments,
+    pub automatic: bool,
+    pub host_evidence: RawSnapshot,
+    pub prepared_at: String,
+    pub dispatched_at: Option<String>,
+    pub phase: RefreshPhase,
+    pub settlement: Option<RawSnapshot>,
+    #[serde(default)]
+    pub settlement_history: Vec<RawSnapshot>,
+    pub result: Option<RawSnapshot>,
+}
+impl RefreshAttempt {
+    pub fn search_lifetime_seconds(&self) -> Result<u64, Diagnostic> {
+        let host: RefreshHostEvidence = serde_json::from_slice(&self.host_evidence.bytes()?)
+            .map_err(|_| fail("Invalid saved refresh host capability evidence."))?;
+        Ok(host.max_search_seconds)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RefreshStatus {
+    pub attempt_id: String,
+    pub session_id: String,
+    pub environment: EnvironmentId,
+    pub arguments: SearchArguments,
+    pub phase: RefreshPhase,
+    pub automatic: bool,
+    pub prepared_at: String,
+    pub dispatched_at: Option<String>,
+    pub max_search_seconds: u64,
+    pub termination: Option<RefreshTermination>,
+    pub host_evidence_sha256: String,
+    pub settlement_sha256: Option<String>,
+    pub result_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InventoryHint {
+    pub source: Scope,
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SourceMetadata {
+    pub source: Scope,
+    pub source_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WorkRevision {
+    pub id: String,
+    pub revision: u64,
+}
+
+/// Content commitment for the selected state's complete unacknowledged notice set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryNoticeSnapshot {
+    pub snapshot_sha256: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum WorkResolution {
+    Inventoried { run: String },
+    Excluded { reason: String, reviewed_at: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PendingInventoryWork {
+    pub id: String,
+    pub source: Scope,
+    pub fields: Vec<String>,
+    pub source_types: Vec<String>,
+    pub new_source: bool,
+    pub revision: u64,
+    pub notified_revision: u64,
+    pub deferred: bool,
+    pub after_run: usize,
+    pub resolution: Option<WorkResolution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +788,16 @@ pub struct InventoryState {
     pub unverified_leads: Vec<UnverifiedFieldLead>,
     #[serde(default)]
     pub query_observations: Vec<QueryObservation>,
+    #[serde(default)]
+    pub refresh_settings: RefreshSettings,
+    #[serde(default)]
+    pub refresh_attempts: Vec<RefreshAttempt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_reminder: Option<RefreshReminder>,
+    #[serde(default)]
+    pub source_metadata: Vec<SourceMetadata>,
+    #[serde(default)]
+    pub pending_inventory: Vec<PendingInventoryWork>,
     pub scout_plan: Option<ScoutPlan>,
     pub scouting: Vec<ScoutEvidence>,
     pub target: Option<ConfirmedTarget>,
@@ -601,6 +902,15 @@ pub struct InventoryStatus {
     pub quick_depth: QuickDepth,
     pub unverified_lead_count: usize,
     pub query_observation_count: usize,
+    pub refresh_settings: RefreshSettings,
+    pub automatic_refresh_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_reminder: Option<RefreshReminderStatus>,
+    pub refresh_attempts: Vec<RefreshStatus>,
+    pub refresh_blocked: bool,
+    pub pending_inventory: Vec<PendingInventoryWork>,
+    pub inventory_notification_count: usize,
+    pub settings_attention: bool,
     pub unverified_leads: Vec<UnverifiedFieldLead>,
     pub query_observations: Vec<QueryObservation>,
     pub message: String,
@@ -952,7 +1262,13 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
-            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count},
+            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,
+            "pending_inventory":status.pending_inventory.len(),"inventory_notifications":status.inventory_notification_count},
+        "refresh_settings":status.refresh_settings,"automatic_refresh_available":status.automatic_refresh_available,
+        "refresh_reminder":status.refresh_reminder,"refresh_blocked":status.refresh_blocked,
+        "settings_attention":status.settings_attention,
+        "refresh_attempts":status.refresh_attempts,
+        "pending_inventory":status.pending_inventory,
         "sources":status.sources.iter().map(|source| json!({"source_id":source.source_id,"selectors":source.selectors,
             "expected":source.expected,"status":source.status,"interpretation":source.interpretation,"parser":source.parser,
             "measurements":source.measurements,"observation":source.observation,"scouted_events":source.scouted_events,
@@ -961,6 +1277,166 @@ pub fn summary(status: &InventoryStatus) -> Value {
                 "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).collect::<Vec<_>>(),
         "active_pack":status.active_pack,"covered_queries_usable":status.covered_queries_usable,"next_actions":status.next_actions
     })
+}
+
+/// Fixed vocabulary and opaque references only; no retained evidence becomes agent instructions.
+pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
+    let reminder = status.refresh_reminder.as_ref().filter(|reminder| {
+        reminder.cycle_sha256.len() == 64
+            && reminder.cycle_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            && environment::parse_time(&reminder.due_at).is_ok()
+            && reminder
+                .last_successful_window_end
+                .as_ref()
+                .is_none_or(|at| environment::parse_time(at).is_ok())
+    });
+    let reserved = status.refresh_attempts.iter().find(|attempt| {
+        matches!(
+            attempt.phase,
+            RefreshPhase::Prepared | RefreshPhase::Dispatched | RefreshPhase::Unresolved
+        )
+    });
+    let recorded = reserved
+        .or_else(|| {
+            status
+                .refresh_attempts
+                .iter()
+                .rev()
+                .find(|attempt| session_id.is_some_and(|session| attempt.session_id == session))
+        })
+        .or_else(|| status.refresh_attempts.last());
+    let current_session_match = recorded
+        .is_some_and(|attempt| session_id.is_some_and(|session| attempt.session_id == session));
+    let allowance_used = session_id.map(|session| {
+        status.refresh_attempts.iter().any(|attempt| {
+            attempt.automatic && attempt.session_id == session && attempt.dispatched_at.is_some()
+        })
+    });
+    let prepared_for_current_session = reserved
+        .is_some_and(|attempt| attempt.phase == RefreshPhase::Prepared && current_session_match);
+    let blocker = match reserved {
+        Some(attempt) if attempt.phase == RefreshPhase::Unresolved => "termination-unresolved",
+        Some(attempt) if attempt.phase == RefreshPhase::Dispatched => "awaiting-host-settlement",
+        Some(attempt) if attempt.automatic && !status.automatic_refresh_available => {
+            "automatic-unavailable"
+        }
+        Some(_) if prepared_for_current_session => "reserved-for-current-session",
+        Some(_) => "reserved-for-other-or-unidentified-session",
+        None if status.environment.is_none() => "target-required",
+        None => "manual-refresh-available",
+    };
+    let mut notices = Vec::new();
+    if blocker == "termination-unresolved" {
+        notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a timeout or lost response does not establish termination."}));
+    } else if blocker == "awaiting-host-settlement" {
+        notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
+            "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
+    } else if blocker == "automatic-unavailable" {
+        notices.push(json!({"code":"REFRESH_RESERVED","severity":"info",
+            "message":"A legacy automatic refresh is reserved. Safely settle it as not-started before preparing an explicit manual refresh."}));
+    } else if reserved.is_some() {
+        notices.push(json!({"code":"REFRESH_RESERVED","severity":"info",
+            "message":"A refresh attempt is reserved. Dispatch requires its exact verified session. Reservation does not establish that a backend search is running."}));
+    }
+    if blocker == "target-required" {
+        notices.push(json!({"code":"INVENTORY_TARGET_REQUIRED","severity":"info",
+            "message":"Confirm the exact target before inventory refresh."}));
+    }
+    if reminder.is_some_and(|reminder| reminder.show_startup_notice) {
+        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info",
+            "message":"Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."}));
+    }
+    if !status.pending_inventory.is_empty() {
+        notices.push(json!({"code":"INVENTORY_WORK_PENDING","severity":"warning",
+            "message":"Settings *: inventory work remains pending. Acknowledgement or deferral updates its notice; applicable inventory or explicit exclusion resolves the work."}));
+    }
+    let mut work: Vec<_> = status
+        .pending_inventory
+        .iter()
+        .filter(|work| work.resolution.is_none() && work.notified_revision < work.revision)
+        .collect();
+    work.sort_by_key(|work| (&work.id, work.revision));
+    let mut references = Vec::new();
+    let safe_id = |id: &str, prefix: &str, length: usize| {
+        id.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.len() == length && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    };
+    if let Some(attempt) = reserved
+        && safe_id(&attempt.attempt_id, "refresh:", 64)
+    {
+        references.push(json!({"kind":"refresh","id":attempt.attempt_id,"phase":attempt.phase}));
+    }
+    for entry in &work {
+        if references.len() == 5 {
+            break;
+        }
+        if safe_id(&entry.id, "env:repo:", 16) {
+            references.push(json!({"kind":"work","id":entry.id,"revision":entry.revision,
+                "unacknowledged":entry.notified_revision < entry.revision,"deferred":entry.deferred}));
+        }
+    }
+    for attempt in status.refresh_attempts.iter().rev() {
+        if references.len() == 5 {
+            break;
+        }
+        if reserved.is_none_or(|reserved| reserved.attempt_id != attempt.attempt_id)
+            && safe_id(&attempt.attempt_id, "refresh:", 64)
+        {
+            references
+                .push(json!({"kind":"refresh","id":attempt.attempt_id,"phase":attempt.phase}));
+        }
+    }
+    json!({
+        "schema_version":1,"brief":true,"blank_canvas":status.blank_canvas,
+        "discovery_mode":status.discovery_mode,"quick_depth":status.quick_depth,
+        "target_present":status.environment.is_some(),"full_map_complete":status.full_map_complete,
+        "selected_scope_complete":status.selected_scope_complete,"quick_scope_complete":status.quick_scope_complete,
+        "covered_queries_usable":status.covered_queries_usable,"has_active_pack":status.active_pack.is_some(),
+        "refresh_blocked":status.refresh_blocked,
+        "readiness":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "settings_attention":status.settings_attention,"settings_label":if status.settings_attention { "Settings *" } else { "Settings" },
+        "refresh":{"automatic":status.refresh_settings.automatic,"automatic_available":status.automatic_refresh_available,"lookback":status.refresh_settings.lookback,
+            "recorded_phase":recorded.map(|attempt| attempt.phase),"known_termination":recorded.and_then(|attempt| attempt.termination),
+            "recorded_max_search_seconds":recorded.map(|attempt| attempt.max_search_seconds),
+            "current_session_match":current_session_match,"session_allowance_used":allowance_used,
+            "prepared_for_current_session":prepared_for_current_session,"blocker":blocker,
+            "max_automatic_search_seconds":REFRESH_SECONDS,"max_manual_search_seconds":MANUAL_REFRESH_SECONDS},
+        "refresh_reminder":reminder,
+        "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|source| source.expected).count(),
+            "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
+            "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
+            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,
+            "pending_inventory":status.pending_inventory.iter().filter(|work| work.resolution.is_none()).count(),
+            "inventory_notifications":status.inventory_notification_count,
+            "refresh_attempts":status.refresh_attempts.len()},
+        "notification_snapshot":inventory_notice_snapshot(status.environment.as_ref(), &status.pending_inventory).ok().flatten(),
+        "notices":notices,"omitted_references":work.len() + status.refresh_attempts.len() - references.len(),"references":references
+    })
+}
+
+fn inventory_notice_snapshot(
+    environment: Option<&EnvironmentId>,
+    pending: &[PendingInventoryWork],
+) -> Result<Option<InventoryNoticeSnapshot>, Diagnostic> {
+    let mut work: Vec<_> = pending
+        .iter()
+        .filter(|work| work.resolution.is_none() && work.notified_revision < work.revision)
+        .map(|work| (&work.id, work.revision))
+        .collect();
+    if work.is_empty() {
+        return Ok(None);
+    }
+    work.sort_unstable();
+    let environment =
+        environment.ok_or_else(|| fail("Inventory notices require a confirmed target."))?;
+    let bytes = serde_json::to_vec(&("cqlmatic.inventory-notice", 1_u32, environment, &work))
+        .map_err(|_| fail("Cannot fingerprint the inventory notice snapshot."))?;
+    Ok(Some(InventoryNoticeSnapshot {
+        snapshot_sha256: sha256_hex(&bytes),
+        count: work.len(),
+    }))
 }
 
 fn fail(message: &str) -> Diagnostic {
@@ -1003,17 +1479,881 @@ fn scope_ok(scope: &Scope) -> Result<(), Diagnostic> {
 }
 
 impl InventoryState {
+    fn validate_refresh(&self) -> Result<(), Diagnostic> {
+        if let Some(reminder) = &self.refresh_reminder {
+            environment::validate_identity(&reminder.environment)?;
+            environment::parse_time(&reminder.baseline_at)?;
+            if let Some(until) = &reminder.defer_until {
+                environment::parse_time(until)?;
+            }
+            if self
+                .target
+                .as_ref()
+                .is_none_or(|target| target.environment != reminder.environment)
+                || reminder.notified_cycle_sha256.as_ref().is_some_and(|hash| {
+                    hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+                })
+            {
+                return Err(fail(
+                    "Refresh reminders require the exact confirmed target and a valid cycle SHA-256.",
+                ));
+            }
+        }
+        if self.target.is_none()
+            && (!self.refresh_attempts.is_empty()
+                || !self.source_metadata.is_empty()
+                || !self.pending_inventory.is_empty())
+        {
+            return Err(fail(
+                "Continuing inventory evidence requires a confirmed environment.",
+            ));
+        }
+        if self.refresh_attempts.len() > MAX_REFRESH_ATTEMPTS
+            || self.pending_inventory.len() > MAX_PENDING_WORK
+            || self.source_metadata.len() > 10_000
+        {
+            return Err(fail(
+                "Inventory refresh history or pending work exceeds its finite limit.",
+            ));
+        }
+        let mut metadata = BTreeSet::new();
+        for entry in &self.source_metadata {
+            scope_ok(&entry.source)?;
+            let id = discovery::source_id(&entry.source);
+            if !metadata.insert(id.clone()) || !self.sources.iter().any(|s| s.id == id) {
+                return Err(fail(
+                    "Source metadata requires a distinct retained source identity.",
+                ));
+            }
+            distinct_text(&entry.source_types)?;
+        }
+        let mut work_ids = BTreeSet::new();
+        for work in &self.pending_inventory {
+            scope_ok(&work.source)?;
+            if work.id != discovery::source_id(&work.source)
+                || !work_ids.insert(&work.id)
+                || work.revision == 0
+                || work.notified_revision > work.revision
+                || work.after_run > self.discovery_runs.len()
+                || (!work.new_source && work.fields.is_empty() && work.source_types.is_empty())
+            {
+                return Err(fail(
+                    "Invalid pending inventory identity, revision or coverage boundary.",
+                ));
+            }
+            distinct_text(&work.fields)?;
+            distinct_text(&work.source_types)?;
+            for field in &work.fields {
+                crate::language::plan::checked_field(field)?;
+            }
+            match &work.resolution {
+                Some(WorkResolution::Excluded {
+                    reason,
+                    reviewed_at,
+                }) => {
+                    text(reason)?;
+                    environment::parse_time(reviewed_at)?;
+                }
+                Some(WorkResolution::Inventoried { run })
+                    if !self.discovery_runs.iter().enumerate().any(|(index, r)| {
+                        &r.state_path == run
+                            && index >= work.after_run
+                            && r.status == "complete"
+                            && r.source_ids.contains(&work.id)
+                    }) =>
+                {
+                    return Err(fail(
+                        "Inventory work resolution requires its exact completed source run.",
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let mut attempt_ids = BTreeSet::new();
+        for (index, attempt) in self.refresh_attempts.iter().enumerate() {
+            environment::validate_identity(&attempt.environment)?;
+            text(&attempt.session_id)?;
+            if self
+                .target
+                .as_ref()
+                .is_none_or(|t| t.environment != attempt.environment)
+                || attempt.arguments.repository != attempt.environment.view
+                || attempt.arguments.query_string != SCOUT_QUERY
+                || attempt.id != refresh_id(attempt, index)?
+                || !attempt_ids.insert(&attempt.id)
+            {
+                return Err(fail(
+                    "Refresh must retain its exact confirmed target, session, query and identity.",
+                ));
+            }
+            let start = environment::parse_time(&attempt.arguments.start)?;
+            let end = environment::parse_time(&attempt.arguments.end)?;
+            if !attempt.arguments.start.ends_with('Z')
+                || !attempt.arguments.end.ends_with('Z')
+                || start >= end
+                || end - start > time::Duration::days(30)
+                || end != environment::parse_time(&attempt.prepared_at)?
+            {
+                return Err(fail(
+                    "Shallow refresh requires an absolute UTC window of at most 30 days.",
+                ));
+            }
+            let host: RefreshHostEvidence = serde_json::from_slice(&attempt.host_evidence.bytes()?)
+                .map_err(|_| fail("Invalid saved refresh host capability evidence."))?;
+            validate_refresh_host(
+                &host,
+                &attempt.environment,
+                &attempt.session_id,
+                attempt.automatic,
+                &attempt.prepared_at,
+            )?;
+            let dispatched = attempt
+                .dispatched_at
+                .as_ref()
+                .map(|v| environment::parse_time(v))
+                .transpose()?;
+            if dispatched.is_some_and(|at| at < end)
+                || (attempt.phase == RefreshPhase::Prepared && dispatched.is_some())
+                || matches!(
+                    attempt.phase,
+                    RefreshPhase::Dispatched | RefreshPhase::Unresolved | RefreshPhase::Imported
+                ) && dispatched.is_none()
+            {
+                return Err(fail("Invalid durable refresh dispatch transition."));
+            }
+            let settlement = attempt
+                .settlement
+                .as_ref()
+                .map(|snapshot| {
+                    let report: RefreshSettlement = serde_json::from_slice(&snapshot.bytes()?)
+                        .map_err(|_| fail("Invalid saved refresh settlement."))?;
+                    validate_refresh_settlement(attempt, &report, &snapshot.retrieved_at)?;
+                    Ok::<_, Diagnostic>(report)
+                })
+                .transpose()?;
+            if attempt.settlement_history.len() > 20 {
+                return Err(fail("Refresh settlement history exceeds its finite limit."));
+            }
+            for snapshot in &attempt.settlement_history {
+                let report: RefreshSettlement = serde_json::from_slice(&snapshot.bytes()?)
+                    .map_err(|_| fail("Invalid retained refresh reconciliation evidence."))?;
+                validate_refresh_settlement(attempt, &report, &snapshot.retrieved_at)?;
+                if report.termination != RefreshTermination::Unresolved {
+                    return Err(fail(
+                        "Only unresolved settlements may precede final refresh reconciliation.",
+                    ));
+                }
+            }
+            if matches!(
+                attempt.phase,
+                RefreshPhase::Settled | RefreshPhase::Imported
+            ) && settlement
+                .as_ref()
+                .is_none_or(|s| s.termination == RefreshTermination::Unresolved)
+                || attempt.phase == RefreshPhase::Unresolved
+                    && settlement
+                        .as_ref()
+                        .is_none_or(|s| s.termination != RefreshTermination::Unresolved)
+                || matches!(
+                    attempt.phase,
+                    RefreshPhase::Prepared | RefreshPhase::Dispatched
+                ) && settlement.is_some()
+            {
+                return Err(fail("Invalid refresh settlement phase."));
+            }
+            if let Some(result) = &attempt.result {
+                if attempt.phase != RefreshPhase::Imported
+                    || settlement
+                        .as_ref()
+                        .is_none_or(|s| s.termination != RefreshTermination::Completed)
+                    || environment::parse_time(&result.retrieved_at)? < end
+                    || settlement.as_ref().and_then(|s| s.result_sha256.as_ref())
+                        != Some(&result.sha256)
+                {
+                    return Err(fail(
+                        "Refresh result requires an exact completed settlement.",
+                    ));
+                }
+                refresh_rows(&result.bytes()?)?;
+            } else if attempt.phase == RefreshPhase::Imported {
+                return Err(fail("Imported refresh is missing its original result."));
+            }
+        }
+        if self
+            .refresh_attempts
+            .iter()
+            .filter(|a| {
+                matches!(
+                    a.phase,
+                    RefreshPhase::Prepared | RefreshPhase::Dispatched | RefreshPhase::Unresolved
+                )
+            })
+            .count()
+            > 1
+        {
+            return Err(fail("Only one unresolved refresh attempt may exist."));
+        }
+        Ok(())
+    }
+
+    pub fn refresh_blocked(&self) -> bool {
+        self.refresh_attempts.iter().any(|a| {
+            matches!(
+                a.phase,
+                RefreshPhase::Prepared | RefreshPhase::Dispatched | RefreshPhase::Unresolved
+            )
+        })
+    }
+
+    pub fn inventory_notifications(&self) -> Vec<PendingInventoryWork> {
+        self.pending_inventory
+            .iter()
+            .filter(|w| w.resolution.is_none() && w.notified_revision < w.revision)
+            .cloned()
+            .collect()
+    }
+
+    pub fn notification_snapshot(&self) -> Result<Option<InventoryNoticeSnapshot>, Diagnostic> {
+        self.validate()?;
+        inventory_notice_snapshot(
+            self.target.as_ref().map(|target| &target.environment),
+            &self.pending_inventory,
+        )
+    }
+
+    pub fn acknowledge_inventory_notice(
+        &mut self,
+        snapshot_sha256: &str,
+        defer: bool,
+    ) -> Result<InventoryNoticeSnapshot, Diagnostic> {
+        let snapshot = self
+            .notification_snapshot()?
+            .filter(|snapshot| snapshot.snapshot_sha256 == snapshot_sha256)
+            .ok_or_else(|| {
+                fail("Inventory notice changed or is empty; inspect the selected state's current notice before acknowledging.")
+            })?;
+        let work: Vec<_> = self
+            .inventory_notifications()
+            .into_iter()
+            .map(|work| WorkRevision {
+                id: work.id,
+                revision: work.revision,
+            })
+            .collect();
+        self.acknowledge_inventory_work(&work, defer)?;
+        Ok(snapshot)
+    }
+
+    fn refresh_reminder_status(
+        &self,
+        now: &str,
+    ) -> Result<Option<RefreshReminderStatus>, Diagnostic> {
+        let now = environment::parse_time(now)?;
+        let Some(target) = &self.target else {
+            return Ok(None);
+        };
+        let baseline = environment::parse_time(
+            self.refresh_reminder
+                .as_ref()
+                .map_or(&target.confirmed_at, |reminder| &reminder.baseline_at),
+        )?;
+        let mut last_successful = None;
+        for attempt in &self.refresh_attempts {
+            if attempt.phase == RefreshPhase::Imported
+                && attempt.environment == target.environment
+                && let Some(result) = &attempt.result
+                && refresh_rows(&result.bytes()?).is_ok()
+            {
+                let end = environment::parse_time(&attempt.arguments.end)?;
+                last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
+            }
+        }
+        for scout in &self.scouting {
+            if scout.plan.environment == target.environment
+                && scout.plan.arguments.repository == target.environment.view
+                && refresh_rows(&scout.snapshot.bytes()?).is_ok()
+            {
+                let end = environment::parse_time(&scout.plan.arguments.end)?;
+                last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
+            }
+        }
+        let anchor = last_successful.map_or(baseline, |end| baseline.max(end));
+        let interval = time::Duration::days(REFRESH_REMINDER_DAYS);
+        let mut due_at = anchor
+            .checked_add(interval)
+            .ok_or_else(|| fail("Refresh reminder date exceeds the supported timestamp range."))?;
+        let deferred = self
+            .refresh_reminder
+            .as_ref()
+            .and_then(|reminder| reminder.defer_until.as_deref())
+            .map(environment::parse_time)
+            .transpose()?;
+        if let Some(until) = deferred {
+            due_at = due_at.max(until);
+        }
+        let canonical = |at: time::OffsetDateTime| {
+            at.to_offset(time::UtcOffset::UTC)
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| fail("Cannot format refresh reminder date."))
+        };
+        let anchor = canonical(anchor)?;
+        let due_at_text = canonical(due_at)?;
+        let cycle = serde_json::to_vec(&(
+            "cqlmatic.refresh-reminder",
+            1_u32,
+            &target.environment,
+            anchor,
+            &due_at_text,
+        ))
+        .map_err(|_| fail("Cannot fingerprint refresh reminder cycle."))?;
+        let cycle_sha256 = sha256_hex(&cycle);
+        let clock_skew = baseline > now
+            || last_successful.is_some_and(|end| end > now)
+            || deferred.is_some_and(|until| until - now > interval);
+        let due = now >= due_at;
+        Ok(Some(RefreshReminderStatus {
+            due,
+            show_startup_notice: due
+                && !clock_skew
+                && self
+                    .refresh_reminder
+                    .as_ref()
+                    .and_then(|reminder| reminder.notified_cycle_sha256.as_ref())
+                    != Some(&cycle_sha256),
+            cycle_sha256,
+            last_successful_window_end: last_successful.map(canonical).transpose()?,
+            due_at: due_at_text,
+            clock_skew,
+        }))
+    }
+
+    pub fn acknowledge_refresh_reminder(
+        &mut self,
+        cycle_sha256: &str,
+        defer: bool,
+        now: &str,
+    ) -> Result<RefreshReminderStatus, Diagnostic> {
+        self.validate()?;
+        if cycle_sha256.len() != 64 || !cycle_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(fail("Supply the current refresh reminder cycle SHA-256."));
+        }
+        let current = self
+            .refresh_reminder_status(now)?
+            .filter(|status| status.due && !status.clock_skew && status.cycle_sha256 == cycle_sha256)
+            .ok_or_else(|| Diagnostic::error(
+                "INVENTORY_REFRESH_REMINDER_STALE",
+                "Refresh reminder changed or is not due; inspect the selected state's current cycle before acknowledging.",
+            ))?;
+        let mut candidate = self.clone();
+        let target = candidate
+            .target
+            .as_ref()
+            .expect("Due reminder has a target");
+        let reminder = candidate
+            .refresh_reminder
+            .get_or_insert_with(|| RefreshReminder {
+                environment: target.environment.clone(),
+                baseline_at: target.confirmed_at.clone(),
+                notified_cycle_sha256: None,
+                defer_until: None,
+            });
+        reminder.notified_cycle_sha256 = Some(current.cycle_sha256);
+        if defer {
+            reminder.defer_until = Some(
+                environment::parse_time(now)?
+                    .checked_add(time::Duration::days(REFRESH_REMINDER_DAYS))
+                    .ok_or_else(|| fail("Refresh deferral exceeds the supported timestamp range."))?
+                    .to_offset(time::UtcOffset::UTC)
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .map_err(|_| fail("Cannot format refresh deferral date."))?,
+            );
+        }
+        candidate.validate()?;
+        let status = candidate
+            .refresh_reminder_status(now)?
+            .expect("Acknowledged reminder retains its target");
+        *self = candidate;
+        Ok(status)
+    }
+
+    pub fn record_inventory_hints(
+        &mut self,
+        environment: &EnvironmentId,
+        hints: Vec<InventoryHint>,
+    ) -> Result<usize, Diagnostic> {
+        if self
+            .target
+            .as_ref()
+            .is_none_or(|t| &t.environment != environment)
+        {
+            return Err(fail(
+                "Inventory hints require the exact confirmed environment.",
+            ));
+        }
+        let mut candidate = self.clone();
+        let mut changed = 0;
+        for hint in hints {
+            scope_ok(&hint.source)?;
+            for field in &hint.fields {
+                crate::language::plan::checked_field(field)?;
+            }
+            let new_source = !candidate.sources.iter().any(|s| s.selectors == hint.source);
+            changed += usize::from(candidate.queue_inventory_work(
+                hint.source,
+                hint.fields,
+                vec![],
+                new_source,
+            )?);
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(changed)
+    }
+
+    fn queue_inventory_work(
+        &mut self,
+        source: Scope,
+        fields: Vec<String>,
+        source_types: Vec<String>,
+        new_source: bool,
+    ) -> Result<bool, Diagnostic> {
+        if !new_source && fields.is_empty() && source_types.is_empty() {
+            return Ok(false);
+        }
+        let id = discovery::source_id(&source);
+        let work = if let Some(index) = self.pending_inventory.iter().position(|w| w.id == id) {
+            &mut self.pending_inventory[index]
+        } else {
+            if self.pending_inventory.len() >= MAX_PENDING_WORK {
+                return Err(fail(
+                    "Pending inventory work is limited to 1000 exact source identities.",
+                ));
+            }
+            self.pending_inventory.push(PendingInventoryWork {
+                id,
+                source,
+                fields: vec![],
+                source_types: vec![],
+                new_source: false,
+                revision: 0,
+                notified_revision: 0,
+                deferred: false,
+                after_run: self.discovery_runs.len(),
+                resolution: None,
+            });
+            self.pending_inventory
+                .last_mut()
+                .expect("Just appended pending inventory work")
+        };
+        let mut changed = new_source && !work.new_source;
+        work.new_source |= new_source;
+        for (incoming, retained) in [
+            (fields, &mut work.fields),
+            (source_types, &mut work.source_types),
+        ] {
+            for value in incoming {
+                if !retained.contains(&value) {
+                    retained.push(value);
+                    changed = true;
+                }
+            }
+            retained.sort();
+        }
+        if changed {
+            work.revision = work
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| fail("Inventory work revision overflow."))?;
+            work.deferred = false;
+            work.resolution = None;
+            work.after_run = self.discovery_runs.len();
+        }
+        Ok(changed)
+    }
+
+    pub fn acknowledge_inventory_work(
+        &mut self,
+        work: &[WorkRevision],
+        defer: bool,
+    ) -> Result<(), Diagnostic> {
+        let mut candidate = self.clone();
+        for revision in work {
+            let entry = candidate.pending_inventory.iter_mut().find(|w| w.id == revision.id && w.revision == revision.revision && w.resolution.is_none())
+                .ok_or_else(|| fail("Inventory work changed; inspect its current revision before acknowledging."))?;
+            entry.notified_revision = entry.revision;
+            entry.deferred = defer;
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    pub fn exclude_inventory_work(
+        &mut self,
+        work: &[WorkRevision],
+        reason: &str,
+        reviewed_at: &str,
+    ) -> Result<(), Diagnostic> {
+        text(reason)?;
+        environment::parse_time(reviewed_at)?;
+        let mut candidate = self.clone();
+        candidate.acknowledge_inventory_work(work, false)?;
+        for revision in work {
+            let entry = candidate
+                .pending_inventory
+                .iter_mut()
+                .find(|w| w.id == revision.id)
+                .expect("Acknowledged exact work identity");
+            entry.resolution = Some(WorkResolution::Excluded {
+                reason: reason.into(),
+                reviewed_at: reviewed_at.into(),
+            });
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    pub fn resolve_inventoried_work(&mut self, status: &InventoryStatus) -> Result<(), Diagnostic> {
+        for work in self
+            .pending_inventory
+            .iter_mut()
+            .filter(|w| w.resolution.is_none())
+        {
+            let Some(source) = status
+                .sources
+                .iter()
+                .find(|s| s.source_id == work.id && s.status == Progress::Done)
+            else {
+                continue;
+            };
+            let Some(run) = self
+                .discovery_runs
+                .iter()
+                .skip(work.after_run)
+                .rev()
+                .find(|r| r.status == "complete" && r.source_ids.contains(&work.id))
+            else {
+                continue;
+            };
+            if !work.fields.is_empty()
+                && run.mode == DiscoveryMode::Quick
+                && run.quick_depth == QuickDepth::SourcesOnly
+            {
+                continue;
+            }
+            if work
+                .fields
+                .iter()
+                .all(|name| source.fields.iter().any(|f| &f.field == name && f.measured))
+            {
+                work.resolution = Some(WorkResolution::Inventoried {
+                    run: run.state_path.clone(),
+                });
+                work.deferred = false;
+                work.notified_revision = work.revision;
+            }
+        }
+        self.validate()
+    }
+
+    pub fn prepare_refresh(
+        &mut self,
+        session_id: String,
+        host_raw: &[u8],
+        automatic: bool,
+        now: &str,
+    ) -> Result<String, Diagnostic> {
+        self.validate()?;
+        if automatic && !AUTOMATIC_REFRESH_AVAILABLE {
+            return Err(fail(
+                "Automatic inventory refresh is unavailable. Use explicit manual refresh.",
+            ));
+        }
+        if self.refresh_blocked() {
+            return Err(fail(
+                "Reconcile the exact unresolved refresh before preparing another attempt.",
+            ));
+        }
+        if automatic && !self.refresh_settings.automatic {
+            return Err(fail(
+                "Automatic inventory refresh is off. Manual refresh remains available.",
+            ));
+        }
+        if automatic
+            && self
+                .refresh_attempts
+                .iter()
+                .any(|a| a.automatic && a.session_id == session_id && a.dispatched_at.is_some())
+        {
+            return Err(fail(
+                "Automatic inventory refresh was already dispatched in this host session. Manual refresh remains available.",
+            ));
+        }
+        if self.refresh_attempts.len() >= MAX_REFRESH_ATTEMPTS {
+            return Err(fail(
+                "Refresh history reached its finite limit; retain it and use a new explicitly selected workflow state.",
+            ));
+        }
+        if self
+            .scout_plan
+            .as_ref()
+            .is_some_and(|p| !self.scouting.iter().any(|s| &s.plan == p))
+        {
+            return Err(fail(
+                "Finish or safely reconcile pending scouting before preparing refresh; its progress is retained.",
+            ));
+        }
+        let target = self
+            .target
+            .as_ref()
+            .ok_or_else(|| fail("Confirm an exact target before inventory refresh."))?;
+        let host: RefreshHostEvidence = serde_json::from_slice(host_raw).map_err(|_| fail("Expected strict protected host evidence for a provider-enforced search lifetime; a client timeout is insufficient."))?;
+        validate_refresh_host(&host, &target.environment, &session_id, automatic, now)?;
+        let end = environment::parse_time(now)?;
+        let start = (end - time::Duration::days(self.refresh_settings.lookback.days()))
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|_| fail("Cannot format refresh window."))?;
+        let mut attempt = RefreshAttempt {
+            id: String::new(),
+            environment: target.environment.clone(),
+            session_id,
+            arguments: SearchArguments {
+                repository: target.environment.view.clone(),
+                query_string: SCOUT_QUERY.into(),
+                start,
+                end: now.into(),
+            },
+            automatic,
+            host_evidence: RawSnapshot::new(host_raw, now)?,
+            prepared_at: now.into(),
+            dispatched_at: None,
+            phase: RefreshPhase::Prepared,
+            settlement: None,
+            settlement_history: vec![],
+            result: None,
+        };
+        attempt.id = refresh_id(&attempt, self.refresh_attempts.len())?;
+        let id = attempt.id.clone();
+        self.refresh_attempts.push(attempt);
+        self.validate()?;
+        Ok(id)
+    }
+
+    pub fn dispatch_refresh(
+        &mut self,
+        attempt_id: &str,
+        session_id: &str,
+        now: &str,
+    ) -> Result<SearchArguments, Diagnostic> {
+        self.validate()?;
+        if !AUTOMATIC_REFRESH_AVAILABLE
+            && self
+                .refresh_attempts
+                .iter()
+                .any(|attempt| attempt.id == attempt_id && attempt.automatic)
+        {
+            return Err(fail(
+                "Automatic inventory refresh is unavailable; safely settle this prepared attempt as not-started before manual refresh.",
+            ));
+        }
+        if self.refresh_attempts.iter().any(|a| {
+            a.id == attempt_id
+                && a.automatic
+                && self.refresh_attempts.iter().any(|other| {
+                    other.id != a.id
+                        && other.automatic
+                        && other.session_id == a.session_id
+                        && other.dispatched_at.is_some()
+                })
+        }) {
+            return Err(fail(
+                "Another automatic refresh was already dispatched in this host session; this prepared attempt cannot renew that allowance.",
+            ));
+        }
+        if !self.refresh_settings.automatic
+            && self
+                .refresh_attempts
+                .iter()
+                .any(|a| a.id == attempt_id && a.automatic)
+        {
+            return Err(fail(
+                "Automatic refresh is off; settle the prepared attempt as not-started before preparing a manual refresh.",
+            ));
+        }
+        let attempt = self
+            .refresh_attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .ok_or_else(|| fail("Unknown exact refresh attempt."))?;
+        if attempt.phase != RefreshPhase::Prepared || attempt.session_id != session_id {
+            return Err(fail(
+                "Dispatch requires the exact prepared refresh and verified host session; dispatched attempts must be reconciled, never retried.",
+            ));
+        }
+        if environment::parse_time(now)? < environment::parse_time(&attempt.prepared_at)? {
+            return Err(fail("Refresh dispatch cannot precede preparation."));
+        }
+        attempt.phase = RefreshPhase::Dispatched;
+        attempt.dispatched_at = Some(now.into());
+        let arguments = attempt.arguments.clone();
+        self.validate()?;
+        Ok(arguments)
+    }
+
+    pub fn settle_refresh(
+        &mut self,
+        attempt_id: &str,
+        raw: &[u8],
+        now: &str,
+    ) -> Result<(), Diagnostic> {
+        let report: RefreshSettlement = serde_json::from_slice(raw)
+            .map_err(|_| fail("Expected strict exact-attempt host settlement evidence."))?;
+        let mut candidate = self.clone();
+        let attempt = candidate
+            .refresh_attempts
+            .iter_mut()
+            .find(|a| a.id == attempt_id)
+            .ok_or_else(|| fail("Unknown exact refresh attempt."))?;
+        validate_refresh_settlement(attempt, &report, now)?;
+        if attempt
+            .settlement
+            .as_ref()
+            .is_some_and(|s| s.sha256 == sha256_hex(raw))
+        {
+            return Ok(());
+        }
+        if matches!(
+            attempt.phase,
+            RefreshPhase::Settled | RefreshPhase::Imported
+        ) {
+            return Err(fail("Refresh already has different settlement evidence."));
+        }
+        if let Some(previous) = attempt.settlement.take() {
+            if attempt.settlement_history.len() >= 20 {
+                return Err(fail(
+                    "Refresh reconciliation history reached its finite limit; retain the unresolved attempt for inspection.",
+                ));
+            }
+            attempt.settlement_history.push(previous);
+        }
+        attempt.phase = if report.termination == RefreshTermination::Unresolved {
+            RefreshPhase::Unresolved
+        } else {
+            RefreshPhase::Settled
+        };
+        attempt.settlement = Some(RawSnapshot::new(raw, now)?);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    pub fn import_refresh(
+        &mut self,
+        attempt_id: &str,
+        raw: &[u8],
+        retrieved_at: &str,
+    ) -> Result<usize, Diagnostic> {
+        let rows = refresh_rows(raw)?;
+        let mut candidate = self.clone();
+        let index = candidate
+            .refresh_attempts
+            .iter()
+            .position(|a| a.id == attempt_id)
+            .ok_or_else(|| fail("Unknown exact refresh attempt."))?;
+        let attempt = &candidate.refresh_attempts[index];
+        if attempt.phase == RefreshPhase::Imported {
+            let saved = attempt
+                .result
+                .as_ref()
+                .expect("Validated imported refresh has its capture");
+            if saved.sha256 == sha256_hex(raw)
+                && environment::parse_time(&saved.retrieved_at)?
+                    == environment::parse_time(retrieved_at)?
+            {
+                return Ok(0);
+            }
+            return Err(fail(
+                "Refresh import conflicts with its retained exact capture.",
+            ));
+        }
+        let settlement = attempt
+            .settlement
+            .as_ref()
+            .ok_or_else(|| fail("Settle the exact refresh before importing its result."))?;
+        let report: RefreshSettlement = serde_json::from_slice(&settlement.bytes()?)
+            .map_err(|_| fail("Invalid refresh settlement."))?;
+        if attempt.phase != RefreshPhase::Settled
+            || report.termination != RefreshTermination::Completed
+            || report.result_sha256.as_deref() != Some(sha256_hex(raw).as_str())
+            || environment::parse_time(retrieved_at)?
+                < environment::parse_time(&attempt.arguments.end)?
+        {
+            return Err(fail(
+                "Only an exactly completed, settled refresh can contribute metadata.",
+            ));
+        }
+        let mut changed = 0;
+        for (source, source_types, events) in rows {
+            let id = discovery::source_id(&source);
+            let new_source = !candidate.sources.iter().any(|s| s.id == id);
+            if new_source {
+                candidate.sources.push(InventorySource {
+                    id: id.clone(),
+                    selectors: source.clone(),
+                    scouted_events: Some(events),
+                    expected: false,
+                    review: None,
+                    binding: None,
+                });
+            }
+            let novel = if let Some(existing) = candidate
+                .source_metadata
+                .iter_mut()
+                .find(|m| m.source == source)
+            {
+                let novel: Vec<_> = source_types
+                    .iter()
+                    .filter(|s| !existing.source_types.contains(s))
+                    .cloned()
+                    .collect();
+                existing.source_types.extend(novel.clone());
+                existing.source_types.sort();
+                novel
+            } else {
+                candidate.source_metadata.push(SourceMetadata {
+                    source: source.clone(),
+                    source_types: source_types.clone(),
+                });
+                if new_source { source_types } else { vec![] }
+            };
+            changed +=
+                usize::from(candidate.queue_inventory_work(source, vec![], novel, new_source)?);
+        }
+        let attempt = &mut candidate.refresh_attempts[index];
+        attempt.result = Some(RawSnapshot::new(raw, retrieved_at)?);
+        attempt.phase = RefreshPhase::Imported;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(changed)
+    }
+
     pub fn new(now: &str) -> Result<Self, Diagnostic> {
         environment::parse_time(now)?;
         Ok(Self {
             format: "cqlmatic-inventory-state".into(),
-            schema_version: 2,
+            schema_version: STATE_VERSION,
             created_at: now.into(),
             updated_at: now.into(),
             discovery_mode: DiscoveryMode::Full,
             quick_depth: QuickDepth::SourcesAndFields,
             unverified_leads: vec![],
             query_observations: vec![],
+            refresh_settings: RefreshSettings::default(),
+            refresh_attempts: vec![],
+            refresh_reminder: None,
+            source_metadata: vec![],
+            pending_inventory: vec![],
             scout_plan: None,
             scouting: vec![],
             target: None,
@@ -1035,16 +2375,30 @@ impl InventoryState {
         copy.reconciled_evidence_sha256 = None;
         copy.reconciled_at = None;
         copy.updated_at.clear();
+        // Preserve historical reconciliation commitments when the runtime preference default changes.
+        copy.refresh_settings = RefreshSettings {
+            automatic: true,
+            lookback: RefreshLookback::Day,
+        };
+        copy.refresh_attempts.clear();
+        copy.refresh_reminder = None;
+        for work in &mut copy.pending_inventory {
+            work.notified_revision = 0;
+            work.deferred = false;
+        }
         serde_json::to_vec(&copy)
             .map(|b| sha256_hex(&b))
             .map_err(|_| fail("Cannot serialize inventory evidence."))
     }
     pub fn validate(&self) -> Result<(), Diagnostic> {
-        if self.format != "cqlmatic-inventory-state" || !matches!(self.schema_version, 1 | 2) {
+        if self.format != "cqlmatic-inventory-state"
+            || !matches!(self.schema_version, 1..=STATE_VERSION)
+        {
             return Err(fail("Unsupported inventory state."));
         }
         environment::parse_time(&self.created_at)?;
         environment::parse_time(&self.updated_at)?;
+        self.validate_refresh()?;
         if let Some(active) = &self.active_pack
             && !self
                 .packs
@@ -1247,16 +2601,17 @@ impl InventoryState {
         }) {
             return Ok(());
         }
-        for source in &mut self.sources {
+        let mut candidate = self.clone();
+        for source in &mut candidate.sources {
             source.scouted_events = None;
         }
         for (id, (selectors, events)) in observations {
-            if let Some(source) = self.sources.iter_mut().find(|s| s.id == id) {
+            if let Some(source) = candidate.sources.iter_mut().find(|s| s.id == id) {
                 source.scouted_events = Some(events);
             } else {
-                self.sources.push(InventorySource {
+                candidate.sources.push(InventorySource {
                     id,
-                    selectors,
+                    selectors: selectors.clone(),
                     scouted_events: Some(events),
                     expected: self
                         .target
@@ -1265,9 +2620,14 @@ impl InventoryState {
                     review: None,
                     binding: None,
                 });
+                if candidate.target.is_some() {
+                    candidate.queue_inventory_work(selectors, vec![], vec![], true)?;
+                }
             }
         }
-        self.scouting.push(evidence);
+        candidate.scouting.push(evidence);
+        candidate.validate()?;
+        *self = candidate;
         Ok(())
     }
     fn validate_scout_environment(&self, environment: &EnvironmentId) -> Result<(), Diagnostic> {
@@ -1345,6 +2705,18 @@ impl InventoryState {
                 binding: None,
             });
         }
+        if self.refresh_reminder.is_none() {
+            self.refresh_reminder = Some(RefreshReminder {
+                environment: environment.clone(),
+                baseline_at: self
+                    .target
+                    .as_ref()
+                    .map_or(now, |target| &target.confirmed_at)
+                    .into(),
+                notified_cycle_sha256: None,
+                defer_until: None,
+            });
+        }
         self.target = Some(ConfirmedTarget {
             environment,
             scope,
@@ -1382,12 +2754,13 @@ impl InventoryState {
             if !candidate.sources.iter().any(|s| s.id == id) {
                 candidate.sources.push(InventorySource {
                     id,
-                    selectors,
+                    selectors: selectors.clone(),
                     scouted_events: None,
                     expected: false,
                     review: None,
                     binding: None,
                 });
+                candidate.queue_inventory_work(selectors, vec![], vec![], true)?;
             }
         }
         candidate.validate()?;
@@ -1581,6 +2954,181 @@ impl InventoryState {
         discovery::validate_request(&request)?;
         Ok(request)
     }
+}
+
+fn distinct_text(values: &[String]) -> Result<(), Diagnostic> {
+    let mut seen = BTreeSet::new();
+    for value in values {
+        text(value)?;
+        if !seen.insert(value) {
+            return Err(fail("Inventory metadata and work fields must be distinct."));
+        }
+    }
+    if values.len() > 4000 {
+        return Err(fail(
+            "Inventory metadata and work fields are limited to 4000 values.",
+        ));
+    }
+    Ok(())
+}
+
+fn refresh_id(attempt: &RefreshAttempt, index: usize) -> Result<String, Diagnostic> {
+    serde_json::to_vec(&(
+        &attempt.environment,
+        &attempt.session_id,
+        &attempt.arguments,
+        &attempt.host_evidence.sha256,
+        &attempt.prepared_at,
+        index,
+    ))
+    .map(|bytes| format!("refresh:{}", sha256_hex(&bytes)))
+    .map_err(|_| fail("Cannot fingerprint refresh attempt."))
+}
+
+fn validate_refresh_host(
+    host: &RefreshHostEvidence,
+    environment: &EnvironmentId,
+    session_id: &str,
+    automatic: bool,
+    now: &str,
+) -> Result<(), Diagnostic> {
+    text(session_id)?;
+    text(&host.capability_reference)?;
+    text(&host.verification_evidence)?;
+    if host.schema_version != 1
+        || &host.environment != environment
+        || host.session_id != session_id
+        || !(1..=if automatic {
+            REFRESH_SECONDS
+        } else {
+            MANUAL_REFRESH_SECONDS
+        })
+            .contains(&host.max_search_seconds)
+        || environment::parse_time(&host.verified_at)? > environment::parse_time(now)?
+    {
+        return Err(fail(
+            "Host evidence must bind this exact target/session to a verified provider-enforced search lifetime of 1..300 seconds for automatic refresh or 1..600 seconds for explicit manual refresh. Client wait timeouts do not qualify.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_refresh_settlement(
+    attempt: &RefreshAttempt,
+    report: &RefreshSettlement,
+    now: &str,
+) -> Result<(), Diagnostic> {
+    text(&report.evidence)?;
+    let recorded = environment::parse_time(&report.recorded_at)?;
+    if (report.termination == RefreshTermination::Completed) != report.result_sha256.is_some()
+        || report
+            .result_sha256
+            .as_ref()
+            .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(fail(
+            "Completed refresh settlement requires the exact full result SHA-256; other outcomes cannot attest a result.",
+        ));
+    }
+    if report.schema_version != 1
+        || report.attempt_id != attempt.id
+        || report.environment != attempt.environment
+        || report.session_id != attempt.session_id
+        || report.arguments != attempt.arguments
+        || recorded > environment::parse_time(now)?
+        || recorded < environment::parse_time(&attempt.prepared_at)?
+        || (attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted)
+        || attempt
+            .dispatched_at
+            .as_ref()
+            .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
+    {
+        return Err(fail(
+            "Settlement must identify the exact target, session, attempt and arguments after dispatch; a lost response is unresolved.",
+        ));
+    }
+    if report.termination == RefreshTermination::LifetimeExpired {
+        let dispatched = environment::parse_time(
+            attempt
+                .dispatched_at
+                .as_deref()
+                .ok_or_else(|| fail("No dispatched refresh lifetime exists."))?,
+        )?;
+        let started = environment::parse_time(report.search_started_at.as_deref().ok_or_else(|| fail("Lifetime reconciliation requires host evidence of actual provider search start, not client dispatch time."))?)?;
+        if started < dispatched
+            || recorded - started
+                < time::Duration::seconds(attempt.search_lifetime_seconds()? as i64)
+        {
+            return Err(fail(
+                "The verified provider search lifetime has not elapsed; refresh remains unresolved.",
+            ));
+        }
+    }
+    if let Some(started) = &report.search_started_at {
+        let started = environment::parse_time(started)?;
+        if report.termination == RefreshTermination::NotStarted
+            || started > recorded
+            || attempt
+                .dispatched_at
+                .as_ref()
+                .is_none_or(|at| environment::parse_time(at).is_ok_and(|at| started < at))
+        {
+            return Err(fail(
+                "Reported provider search start must follow exact dispatch and precede settlement.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+type RefreshRows = Vec<(Scope, Vec<String>, u64)>;
+fn refresh_rows(raw: &[u8]) -> Result<RefreshRows, Diagnostic> {
+    let result = mcp::normalize(raw)?;
+    if result.rows.len() >= 10_000 {
+        return Err(fail(
+            "Cap-sized refresh results cannot establish a complete metadata capture.",
+        ));
+    }
+    let mut sources = BTreeMap::<String, (Scope, BTreeSet<String>, u64)>::new();
+    for row in result.rows {
+        let selector = |key| -> Result<Option<String>, Diagnostic> {
+            match row.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(s)) if s.is_empty() => Ok(None),
+                Some(Value::String(s)) => Ok(Some(s.clone())),
+                _ => Err(fail(
+                    "Census selectors and source-type metadata must be strings.",
+                )),
+            }
+        };
+        let source = Scope {
+            repo: selector("#repo")?,
+            type_: selector("#type")?,
+            event: None,
+        };
+        scope_ok(&source)?;
+        let source_type = selector("@sourcetype")?;
+        let events = row
+            .get("events")
+            .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
+            .ok_or_else(|| fail("Census rows require nonnegative events counts."))?;
+        let entry =
+            sources
+                .entry(discovery::source_id(&source))
+                .or_insert((source, BTreeSet::new(), 0));
+        if let Some(value) = source_type {
+            text(&value)?;
+            entry.1.insert(value);
+        }
+        entry.2 = entry
+            .2
+            .checked_add(events)
+            .ok_or_else(|| fail("Census count overflow."))?;
+    }
+    Ok(sources
+        .into_values()
+        .map(|(source, types, count)| (source, types.into_iter().collect(), count))
+        .collect())
 }
 
 fn validate_scout_plan(plan: &ScoutPlan) -> Result<(), Diagnostic> {
@@ -1917,9 +3465,30 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         && catalog_complete
         && unclassified.is_empty()
         && sources.iter().all(|s| s.expected)
+        && state
+            .pending_inventory
+            .iter()
+            .all(|w| w.resolution.is_some() || !w.new_source && w.source_types.is_empty())
         && scoped_complete
         && reconciliation == Progress::Done;
     let mut next_actions = Vec::new();
+    if state
+        .refresh_attempts
+        .iter()
+        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
+    {
+        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search; a client timeout or lost response does not establish termination.".into());
+    }
+    let prepared = state
+        .refresh_attempts
+        .iter()
+        .find(|a| a.phase == RefreshPhase::Prepared);
+    if prepared.is_some_and(|attempt| attempt.automatic) {
+        next_actions.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started before preparing explicit manual refresh.".into());
+    }
+    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
+        next_actions.push(format!("A manual refresh is prepared for recorded host session {:?}; dispatch only from that exact verified session.", attempt.session_id));
+    }
     if target.is_none() {
         next_actions.push("Confirm CID, cloud, searchable view, target scope and context.".into());
     }
@@ -1947,6 +3516,15 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
                 .into(),
         );
     }
+    let pending_inventory: Vec<_> = state
+        .pending_inventory
+        .iter()
+        .filter(|w| w.resolution.is_none())
+        .cloned()
+        .collect();
+    if !pending_inventory.is_empty() {
+        next_actions.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
+    }
     Ok(InventoryStatus {
         schema_version: 1,
         blank_canvas: target.is_none()
@@ -1964,6 +3542,43 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         quick_depth: state.quick_depth,
         unverified_lead_count: state.unverified_leads.len(),
         query_observation_count: state.query_observations.len(),
+        refresh_settings: state.refresh_settings.clone(),
+        automatic_refresh_available: AUTOMATIC_REFRESH_AVAILABLE,
+        refresh_reminder: None,
+        refresh_attempts: state
+            .refresh_attempts
+            .iter()
+            .map(|a| {
+                let termination = a
+                    .settlement
+                    .as_ref()
+                    .map(|snapshot| {
+                        serde_json::from_slice::<RefreshSettlement>(&snapshot.bytes()?)
+                            .map(|settlement| settlement.termination)
+                            .map_err(|_| fail("Invalid saved refresh settlement."))
+                    })
+                    .transpose()?;
+                Ok(RefreshStatus {
+                    attempt_id: a.id.clone(),
+                    session_id: a.session_id.clone(),
+                    environment: a.environment.clone(),
+                    arguments: a.arguments.clone(),
+                    phase: a.phase,
+                    automatic: a.automatic,
+                    prepared_at: a.prepared_at.clone(),
+                    dispatched_at: a.dispatched_at.clone(),
+                    max_search_seconds: a.search_lifetime_seconds()?,
+                    termination,
+                    host_evidence_sha256: a.host_evidence.sha256.clone(),
+                    settlement_sha256: a.settlement.as_ref().map(|s| s.sha256.clone()),
+                    result_sha256: a.result.as_ref().map(|s| s.sha256.clone()),
+                })
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?,
+        refresh_blocked: state.refresh_blocked(),
+        inventory_notification_count: state.inventory_notifications().len(),
+        settings_attention: !pending_inventory.is_empty(),
+        pending_inventory,
         unverified_leads: state.unverified_leads.clone(),
         query_observations: state.query_observations.clone(),
         message: if state.discovery_mode == DiscoveryMode::Quick {
@@ -2017,6 +3632,24 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         covered_queries_usable: true,
         active_pack: state.active_pack.clone(),
     })
+}
+
+pub fn assess_at(
+    state: &InventoryState,
+    packs: &[Pack],
+    now: &str,
+) -> Result<InventoryStatus, Diagnostic> {
+    let mut status = assess(state, packs)?;
+    status.refresh_reminder = state.refresh_reminder_status(now)?;
+    if status
+        .refresh_reminder
+        .as_ref()
+        .is_some_and(|reminder| reminder.due)
+    {
+        status.settings_attention = true;
+        status.next_actions.push("Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh.".into());
+    }
+    Ok(status)
 }
 
 fn assess_source(

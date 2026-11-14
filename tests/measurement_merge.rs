@@ -33,6 +33,313 @@ fn field(pack: &Pack) -> &Value {
     &pack.data.fields[0]
 }
 
+fn source_pack(end: &str, retrieved: &str, created: &str, observed: bool) -> Pack {
+    let mut pack = pack(end, retrieved, created, true, None);
+    pack.data.fields.clear();
+    pack.data.sources[0]["evidence"]
+        .as_object_mut()
+        .unwrap()
+        .remove("measured_fields");
+    pack.data.sources[0]["evidence"]["observed"] = json!(observed);
+    pack.content_digest = pack.digest().unwrap();
+    pack.validate().unwrap();
+    pack
+}
+
+#[test]
+fn older_or_tied_opposite_source_measurements_fail_in_both_directions() {
+    for (previous, incoming) in [(true, false), (false, true)] {
+        let old = source_pack(
+            "2026-01-03T00:00:00Z",
+            "2026-01-04T00:00:00Z",
+            "2026-01-04T00:00:00Z",
+            previous,
+        );
+        let before = serde_json::to_vec(&old).unwrap();
+        for (end, retrieved) in [
+            ("2026-01-02T00:00:00Z", "2026-01-05T00:00:00Z"),
+            ("2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z"),
+        ] {
+            let candidate = source_pack(end, retrieved, "2026-01-06T00:00:00Z", incoming);
+            let error = environment::merge(&old, &candidate).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .starts_with("Source measurement ordering conflict")
+            );
+            assert_eq!(serde_json::to_vec(&old).unwrap(), before);
+        }
+    }
+}
+
+fn pack_with_user_sample() -> Pack {
+    let mut old = pack(
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        true,
+        None,
+    );
+    old.data.fields[0]["id"] = json!("env:field:slot");
+    old.data.fields[0]["path"] = json!("user");
+    old.data.sources[0]["evidence"]["measured_fields"] = json!(["user"]);
+    old.data.values.push(json!({
+        "id":"env:value:user:alice","field_id":"env:field:slot","value":"alice",
+        "value_kind":"sample","vocabulary":"sampled","evidence_kind":"observed",
+        "provenance_ids":[old.data.fields[0]["provenance_ids"][0]]
+    }));
+    old.content_digest = old.digest().unwrap();
+    old.validate().unwrap();
+    old
+}
+
+#[test]
+fn a_reused_field_id_cannot_rebind_a_retained_sample() {
+    let old = pack_with_user_sample();
+    let before = serde_json::to_vec(&old).unwrap();
+    for (path, tag, different_source) in [
+        ("host", false, false),
+        ("user", true, false),
+        ("user", false, true),
+    ] {
+        let mut candidate = pack(
+            "2026-01-04T00:00:00Z",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+            true,
+            None,
+        );
+        candidate.data.fields[0]["id"] = json!("env:field:slot");
+        candidate.data.fields[0]["path"] = json!(path);
+        candidate.data.fields[0]["is_tag"] = json!(tag);
+        candidate.data.sources[0]["evidence"]["measured_fields"] =
+            json!([if tag { format!("#{path}") } else { path.into() }]);
+        if different_source {
+            candidate.data.sources[0]["id"] = json!("env:repo:other");
+            candidate.data.sources[0]["selectors"]["repo"] = json!("other");
+            candidate.data.fields[0]["source_id"] = json!("env:repo:other");
+        }
+        candidate.content_digest = candidate.digest().unwrap();
+        candidate.validate().unwrap();
+        let candidate_before = serde_json::to_vec(&candidate).unwrap();
+        let error = environment::merge(&old, &candidate).unwrap_err();
+        assert!(error.message.contains("field ID"));
+        assert_eq!(serde_json::to_vec(&old).unwrap(), before);
+        assert_eq!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
+    }
+}
+
+#[test]
+fn changed_ids_for_the_same_semantic_field_preserve_and_remap_samples() {
+    let old = pack_with_user_sample();
+    let mut candidate = pack(
+        "2026-01-04T00:00:00Z",
+        "2026-01-05T00:00:00Z",
+        "2026-01-06T00:00:00Z",
+        true,
+        None,
+    );
+    candidate.data.sources[0]["id"] = json!("env:repo:fresh");
+    candidate.data.sources[0]["evidence"]["measured_fields"] = json!(["user"]);
+    candidate.data.fields[0]["id"] = json!("env:field:fresh");
+    candidate.data.fields[0]["source_id"] = json!("env:repo:fresh");
+    candidate.data.fields[0]["path"] = json!("user");
+    let mut sample = old.data.values[0].clone();
+    sample["id"] = json!("env:value:user:bob");
+    sample["field_id"] = json!("env:field:fresh");
+    sample["value"] = json!("bob");
+    sample["provenance_ids"] = candidate.data.fields[0]["provenance_ids"].clone();
+    candidate.data.values.push(sample);
+    candidate.content_digest = candidate.digest().unwrap();
+    candidate.validate().unwrap();
+    let merged = environment::merge(&old, &candidate).unwrap();
+    merged.validate().unwrap();
+    assert_eq!(merged.data.fields.len(), 1);
+    assert_eq!(field(&merged)["id"], "env:field:slot");
+    assert_eq!(field(&merged)["path"], "user");
+    assert_eq!(field(&merged)["source_id"], "env:repo:events");
+    assert_eq!(merged.data.values[0], old.data.values[0]);
+    assert_eq!(merged.data.values[1]["field_id"], "env:field:slot");
+    assert_eq!(merged.data.values[1]["value"], "bob");
+}
+
+#[test]
+fn older_or_tied_consistent_source_measurements_preserve_current_proof() {
+    for observed in [true, false] {
+        let old = source_pack(
+            "2026-01-03T00:00:00Z",
+            "2026-01-04T00:00:00Z",
+            "2026-01-04T00:00:00Z",
+            observed,
+        );
+        for (end, retrieved) in [
+            ("2026-01-02T00:00:00Z", "2026-01-05T00:00:00Z"),
+            ("2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z"),
+        ] {
+            let candidate = source_pack(end, retrieved, "2026-01-06T00:00:00Z", observed);
+            let merged = environment::merge(&old, &candidate).unwrap();
+            assert_eq!(merged.data.sources[0], old.data.sources[0]);
+            let history = &candidate.data.provenance[1];
+            assert!(merged.data.provenance.contains(history));
+            if end != "2026-01-03T00:00:00Z" {
+                assert!(
+                    !merged.data.sources[0]["provenance_ids"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&history["id"])
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn newer_opposite_source_measurements_replace_current_proof_in_both_directions() {
+    for (previous, incoming) in [(true, false), (false, true)] {
+        let old = source_pack(
+            "2026-01-02T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            "2026-06-01T00:00:00Z",
+            previous,
+        );
+        let candidate = source_pack(
+            "2026-01-04T00:00:00Z",
+            "2026-07-02T00:00:00Z",
+            "2026-07-03T00:00:00Z",
+            incoming,
+        );
+        let merged = environment::merge(&old, &candidate).unwrap();
+        assert_eq!(merged.data.sources[0], candidate.data.sources[0]);
+        assert!(merged.data.provenance.contains(&old.data.provenance[1]));
+        assert!(
+            !merged.data.sources[0]["provenance_ids"]
+                .as_array()
+                .unwrap()
+                .contains(&old.data.provenance[1]["id"])
+        );
+    }
+}
+
+#[test]
+fn opposite_unorderable_source_decisions_fail_in_both_directions() {
+    for (previous, incoming) in [(true, false), (false, true)] {
+        for missing_window in ["retained", "incoming", "both"] {
+            let mut old = source_pack(
+                "2026-01-02T00:00:00Z",
+                "2026-01-03T00:00:00Z",
+                "2026-06-01T00:00:00Z",
+                previous,
+            );
+            let mut candidate = source_pack(
+                "2026-03-02T00:00:00Z",
+                "2026-07-02T00:00:00Z",
+                "2026-07-03T00:00:00Z",
+                incoming,
+            );
+            if missing_window != "incoming" {
+                old.data.sources[0]["evidence"]["observation_window"] = Value::Null;
+                old.content_digest = old.digest().unwrap();
+            }
+            if missing_window != "retained" {
+                candidate.data.sources[0]["evidence"]["observation_window"] = Value::Null;
+                candidate.content_digest = candidate.digest().unwrap();
+            }
+            old.validate().unwrap();
+            candidate.validate().unwrap();
+            assert!(
+                environment::merge(&old, &candidate)
+                    .unwrap_err()
+                    .message
+                    .starts_with("Source measurement ordering conflict")
+            );
+        }
+    }
+}
+
+#[test]
+fn an_unqualified_source_refresh_preserves_current_positive_proof() {
+    let old = source_pack(
+        "2026-01-02T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        "2026-01-03T00:00:00Z",
+        true,
+    );
+    for observed in [json!(true), Value::Null] {
+        let mut candidate = source_pack(
+            "2026-01-04T00:00:00Z",
+            "2026-01-05T00:00:00Z",
+            "2026-01-06T00:00:00Z",
+            true,
+        );
+        candidate.data.sources[0]["evidence"]["observed"] = observed;
+        candidate.data.provenance[1]["coverage_status"] = json!("partial");
+        candidate.content_digest = candidate.digest().unwrap();
+        candidate.validate().unwrap();
+        let merged = environment::merge(&old, &candidate).unwrap();
+        assert_eq!(merged.data.sources[0], old.data.sources[0]);
+        assert!(
+            merged
+                .data
+                .provenance
+                .contains(&candidate.data.provenance[1])
+        );
+    }
+}
+
+#[test]
+fn an_older_source_refresh_cannot_demote_an_omitted_newer_field() {
+    let old = pack(
+        "2026-01-03T00:00:00Z",
+        "2026-01-04T00:00:00Z",
+        "2026-01-04T00:00:00Z",
+        true,
+        None,
+    );
+    let mut candidate = pack(
+        "2026-01-02T00:00:00Z",
+        "2026-01-05T00:00:00Z",
+        "2026-01-06T00:00:00Z",
+        true,
+        None,
+    );
+    candidate.data.fields.clear();
+    candidate.data.sources[0]["evidence"]
+        .as_object_mut()
+        .unwrap()
+        .remove("measured_fields");
+    candidate.content_digest = candidate.digest().unwrap();
+    candidate.validate().unwrap();
+    let merged = environment::merge(&old, &candidate).unwrap();
+    assert_eq!(merged.data.sources[0], old.data.sources[0]);
+    assert_eq!(field(&merged), field(&old));
+}
+
+#[test]
+fn a_retained_source_measurement_does_not_block_a_newer_explicit_field_measurement() {
+    let old = pack(
+        "2026-01-03T00:00:00Z",
+        "2026-01-04T00:00:00Z",
+        "2026-01-04T00:00:00Z",
+        true,
+        Some(0.5),
+    );
+    let mut candidate = pack(
+        "2026-01-02T00:00:00Z",
+        "2026-01-05T00:00:00Z",
+        "2026-01-06T00:00:00Z",
+        true,
+        Some(0.7),
+    );
+    let window = "2026-01-01T00:00:00Z/2026-01-04T00:00:00Z";
+    candidate.data.fields[0]["observation_window"] = json!(window);
+    candidate.data.provenance[0]["observation_window"] = json!(window);
+    candidate.content_digest = candidate.digest().unwrap();
+    candidate.validate().unwrap();
+    let merged = environment::merge(&old, &candidate).unwrap();
+    assert_eq!(merged.data.sources[0], old.data.sources[0]);
+    assert_eq!(field(&merged), field(&candidate));
+}
+
 #[test]
 fn a_backdated_opposite_measurement_cannot_replace_a_newer_negative() {
     let old = pack(
