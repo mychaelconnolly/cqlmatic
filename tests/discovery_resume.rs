@@ -516,6 +516,8 @@ fn delegated_cancel_proof_is_attempt_bound_and_retries_consume_budget() {
 
 #[test]
 fn inventory_association_preserves_legacy_captures_and_requires_the_held_owner() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 4);
     let first = run.probe();
     mcp::dispatch(&run.state, &first).unwrap();
@@ -597,6 +599,8 @@ fn inventory_association_preserves_legacy_captures_and_requires_the_held_owner()
 
 #[test]
 fn native_checkpoints_cannot_be_associated_with_inventory() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Native, 2);
     let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
     let relay = storage::Writer::acquire(&run.state).unwrap();
@@ -616,6 +620,8 @@ fn native_checkpoints_cannot_be_associated_with_inventory() {
 
 #[test]
 fn nonresumable_inventory_actions_require_original_recovery_workflow() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 2);
     let request = mcp::resumable_request(&run.state).unwrap();
     let legacy = run.directory.join("legacy-state.json");
@@ -641,6 +647,8 @@ fn nonresumable_inventory_actions_require_original_recovery_workflow() {
 
 #[test]
 fn request_mutations_fail_closed() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 3);
     mcp::pause(&run.state).unwrap();
     let mut foreign = run.saved();
@@ -651,6 +659,8 @@ fn request_mutations_fail_closed() {
 
 #[test]
 fn independent_cancel_does_not_signal_or_modify_an_owned_checkpoint() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Native, 3);
     let before = fs::read(&run.state).unwrap();
     let _owner = storage::Writer::acquire(&run.state).unwrap();
@@ -750,6 +760,8 @@ fn cancellation_proof(run: &Run, id: &str) -> PathBuf {
 
 #[test]
 fn cancelled_mcp_attempt_requires_its_exact_saved_terminal_proof() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 3);
     let id = run.probe();
     mcp::dispatch(&run.state, &id).unwrap();
@@ -820,6 +832,8 @@ fn cancelled_mcp_attempt_requires_its_exact_saved_terminal_proof() {
 
 #[test]
 fn hosted_attempt_outcomes_match_their_transport_lifecycle() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 3);
     let id = run.probe();
     mcp::dispatch(&run.state, &id).unwrap();
@@ -843,6 +857,8 @@ fn hosted_attempt_outcomes_match_their_transport_lifecycle() {
 
 #[test]
 fn earlier_mcp_cancellation_cannot_lose_its_terminal_proof() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 4);
     let id = run.probe();
     mcp::dispatch(&run.state, &id).unwrap();
