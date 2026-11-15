@@ -1984,6 +1984,200 @@ fn deprecated_finite_name_conversion_does_not_require_an_uncertain_old_column() 
     }
 }
 
+fn null_field_columns(result: &AssessResult) -> Vec<&str> {
+    result
+        .findings
+        .iter()
+        .filter(|finding| finding.code == "RESULT_NULL_FIELDS")
+        .filter_map(|finding| {
+            let (column, _) = finding
+                .message
+                .strip_prefix("Output column '")?
+                .split_once("' has ")?;
+            Some(column)
+        })
+        .collect()
+}
+
+#[test]
+fn array_drop_and_rename_update_expected_element_columns_like_drop_and_rename() {
+    for (query, row) in [
+        (
+            r#""a[0]":=1 | array:drop("a[]") | marker:=1"#,
+            json!({"marker":1}),
+        ),
+        (
+            r#""a[0]":=1 | array:rename(array="a[]", asArray="b[]") | marker:=1"#,
+            json!({"b[0]":1,"marker":1}),
+        ),
+        (
+            r#""a[0]":=1 | "a[1]":=2 | "a[2]":=3 | array:drop("a[]") | marker:=1"#,
+            json!({"marker":1}),
+        ),
+        (
+            r#""a[0]":=1 | "a[1]":=2 | "a[2]":=3 | array:rename("a[]", asArray="b[]") | marker:=1"#,
+            json!({"b[0]":1,"b[1]":2,"b[2]":3,"marker":1}),
+        ),
+        // Unchanged controls: plain `drop` and `rename`.
+        ("x:=1 | drop([x]) | marker:=1", json!({"marker":1})),
+        (
+            r#""a[0]":=1 | drop("a[0]") | marker:=1"#,
+            json!({"marker":1}),
+        ),
+        (
+            "x:=1 | rename(x, as=y) | marker:=1",
+            json!({"y":1,"marker":1}),
+        ),
+    ] {
+        let result = assess_accepted(query, json!({"result":[row]}));
+        assert_eq!(
+            result.outcome,
+            AssessOutcome::NoFindings,
+            "{query}: {:?}",
+            result.findings
+        );
+        assert!(
+            !result.columns.keys().any(|column| column.starts_with("a[")),
+            "{query}: {:?}",
+            result.columns
+        );
+    }
+}
+
+#[test]
+fn array_rename_expects_moved_elements_under_the_new_name() {
+    // A result that still holds the old name, or lacks a moved element, does not match the query.
+    for (query, row, missing) in [
+        (
+            r#""a[0]":=1 | array:rename(array="a[]", asArray="b[]") | marker:=1"#,
+            json!({"a[0]":1,"marker":1}),
+            vec!["b[0]"],
+        ),
+        (
+            r#""a[0]":=1 | "a[1]":=2 | "a[2]":=3 | array:rename("a[]", asArray="b[]") | marker:=1"#,
+            json!({"b[0]":1,"b[1]":2,"marker":1}),
+            vec!["b[2]"],
+        ),
+        // Control: the plain rename has the same expectation.
+        (
+            "x:=1 | rename(x, as=y) | marker:=1",
+            json!({"x":1,"marker":1}),
+            vec!["y"],
+        ),
+    ] {
+        let result = assess_accepted(query, json!({"result":[row]}));
+        assert_eq!(
+            result.outcome,
+            AssessOutcome::Advisory,
+            "{query}: {:?}",
+            result.findings
+        );
+        assert_eq!(null_field_columns(&result), missing, "{query}");
+    }
+    // A moved count keeps its count meaning.
+    let query = r#"count(as=n) | rename(n, as="a[0]") | array:rename("a[]", asArray="b[]")"#;
+    let zero = assess_accepted(query, json!({"result":[{"b[0]":0}]}));
+    assert_eq!(zero.outcome, AssessOutcome::Advisory, "{:?}", zero.findings);
+    finding(&zero, "RESULT_ZERO_COUNT", Severity::Warning);
+    assert!(null_field_columns(&zero).is_empty(), "{:?}", zero.findings);
+    let nonzero = assess_accepted(query, json!({"result":[{"b[0]":3}]}));
+    assert_eq!(
+        nonzero.outcome,
+        AssessOutcome::NoFindings,
+        "{:?}",
+        nonzero.findings
+    );
+}
+
+#[test]
+fn dropped_array_elements_left_in_the_result_are_not_inspected_like_plain_drop() {
+    // Assessment checks expected columns for missing values; it does not flag extra columns.
+    // This result was no-findings before `array:drop` was followed too, with `a[0]` expected.
+    for (query, row) in [
+        (
+            r#""a[0]":=1 | array:drop("a[]") | marker:=1"#,
+            json!({"a[0]":1,"marker":1}),
+        ),
+        ("x:=1 | drop([x]) | marker:=1", json!({"x":1,"marker":1})),
+    ] {
+        let result = assess_accepted(query, json!({"result":[row]}));
+        assert_eq!(
+            result.outcome,
+            AssessOutcome::NoFindings,
+            "{query}: {:?}",
+            result.findings
+        );
+        assert_eq!(
+            result.columns.keys().collect::<Vec<_>>(),
+            ["marker"],
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn array_drop_and_rename_keep_elements_they_may_not_remove() {
+    for (query, row, missing) in [
+        // An element after a gap is removed only if the event holds the missing index.
+        (
+            r#""a[0]":=1 | "a[2]":=3 | array:drop("a[]") | marker:=1"#,
+            json!({"marker":1}),
+            vec!["a[2]"],
+        ),
+        // Another array, or a root that only shares a prefix, is untouched.
+        (
+            r#""a[0]":=1 | "b[0]":=2 | array:drop("b[]") | marker:=1"#,
+            json!({"marker":1}),
+            vec!["a[0]"],
+        ),
+        (
+            r#""a[0]":=1 | "b[0]":=2 | array:drop("b[]") | marker:=1"#,
+            json!({"a[0]":1,"marker":1}),
+            vec![],
+        ),
+        (
+            r#""ab[0]":=1 | array:drop("a[]") | marker:=1"#,
+            json!({"marker":1}),
+            vec!["ab[0]"],
+        ),
+        // Structured members, nested arrays and an argument without `[]` are not followed.
+        (
+            r#""a[0].x":=1 | array:drop("a[]") | marker:=1"#,
+            json!({"marker":1}),
+            vec!["a[0].x"],
+        ),
+        (
+            r#""a[0][0]":=1 | array:drop("a[0][]") | marker:=1"#,
+            json!({"marker":1}),
+            vec!["a[0][0]"],
+        ),
+        (
+            r#""a[0]":=1 | array:rename("a[]", asArray="b") | marker:=1"#,
+            json!({"b[0]":1,"marker":1}),
+            vec!["a[0]"],
+        ),
+        // The destination's elements beyond the moved ones may or may not survive.
+        (
+            r#""a[0]":=1 | "b[0]":=5 | "b[1]":=6 | array:rename("a[]", asArray="b[]") | marker:=1"#,
+            json!({"b[0]":1,"marker":1}),
+            vec!["b[1]"],
+        ),
+    ] {
+        let result = assess_accepted(query, json!({"result":[row]}));
+        assert_eq!(null_field_columns(&result), missing, "{query}");
+        assert_eq!(
+            result.outcome,
+            if missing.is_empty() {
+                AssessOutcome::NoFindings
+            } else {
+                AssessOutcome::Advisory
+            },
+            "{query}: {:?}",
+            result.findings
+        );
+    }
+}
+
 #[test]
 fn reducing_after_uncertain_composite_shapes_restores_count_checks() {
     for query in [

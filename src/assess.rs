@@ -1524,6 +1524,39 @@ fn inspect_call(
                 }
             }
         }
+        "array:drop" | "array:rename" => {
+            // Both walk a flat `name[]` from index 0 to the first gap, so only the leading run of
+            // required elements is certainly removed or moved. Other elements and spellings, and
+            // a destination's other elements, keep their tracked status.
+            let flat = |name: &str| {
+                args.get(name)
+                    .and_then(|v| v.text())
+                    .and_then(|array| array.strip_suffix("[]"))
+                    .filter(|root| !root.is_empty() && !root.contains(['[', ']', '*']))
+            };
+            let target = flat("asArray");
+            if let Some(source) = flat("array")
+                && (spec.name == "array:drop" || target.is_some_and(|target| target != source))
+            {
+                for index in 0.. {
+                    let old = format!("{source}[{index}]");
+                    if !state.outputs.remove(&old) {
+                        break;
+                    }
+                    state.optional.remove(&old);
+                    let count = state.counts.remove(&old);
+                    if let Some(target) = target {
+                        let new = format!("{target}[{index}]");
+                        state.optional.remove(&new);
+                        state.counts.remove(&new);
+                        state.outputs.insert(new.clone());
+                        if count {
+                            state.counts.insert(new);
+                        }
+                    }
+                }
+            }
+        }
         "lowercase"
             if args
                 .get("include")
