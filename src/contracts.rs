@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const PROFILE: &str = "cqlmatic-ngsiem-core-v2";
+pub const PROFILE: &str = "cqlmatic-ngsiem-core-v3";
 pub const MAX_REQUEST_BYTES: usize = 1_048_576;
 pub const MAX_QUERY_UTF16: usize = 66_000;
 pub const MAX_DEPTH: usize = 64;
@@ -511,6 +511,8 @@ pub enum GenerateInput {
 pub struct Context {
     #[serde(default)]
     pub environment: Option<EnvironmentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_context_id: Option<String>,
     #[serde(default)]
     pub confirmed_fields: Vec<String>,
     #[serde(default)]

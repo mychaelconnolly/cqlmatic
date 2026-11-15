@@ -337,8 +337,8 @@ fn default_scalar_outputs_preserve_bounded_table_export_schemas() {
 fn bounded_writes_and_local_file_reads_preserve_known_export_destinations() {
     for operation in [
         "eval(k=1)",
-        "default(user,value=\"fallback\")",
-        "default([user,k],value=\"fallback\")",
+        "default(field=user,value=\"fallback\")",
+        "default(field=[user,k],value=\"fallback\")",
     ] {
         let q = format!(
             "defineTable({{#repo=example | select([user,\"#repo\"]) | {operation}}},name=\"t\",include=\"*\") | #repo=example | match(table=\"t\",field=user)"
@@ -365,7 +365,7 @@ fn bounded_writes_and_local_file_reads_preserve_known_export_destinations() {
         );
     }
     assert_eq!(
-        check(r##"default("#repo",value="changed")"##, false).outcome,
+        check(r##"default(field="#repo",value="changed")"##, false).outcome,
         Outcome::Invalid
     );
 }

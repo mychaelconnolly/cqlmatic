@@ -51,6 +51,8 @@ struct TerminalEvidence {
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub(crate) transport: Transport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inventory_owner: Option<PathBuf>,
     #[serde(default)]
     pub(crate) sparse_fieldset_fallback: bool,
     binding_sha256: String,
@@ -65,7 +67,7 @@ fn error(code: &str, message: &str) -> Diagnostic {
     Diagnostic::error(code, message)
 }
 
-fn binding(state: &State, session: &Session) -> String {
+fn binding(state: &State, session: &Session) -> Result<String, Diagnostic> {
     let mut bytes = serde_json::to_vec(&(
         &state.request_sha256,
         &state.created_at,
@@ -74,15 +76,32 @@ fn binding(state: &State, session: &Session) -> String {
         session.transport,
         &session.predecessor_sha256,
     ))
-    .expect("checkpoint identity serializes");
+    .map_err(|_| error("LOCAL_PATH", "Discovery paths must be valid UTF-8."))?;
     // Missing/false retains the exact identity and measurement graph of older checkpoints.
     if session.sparse_fieldset_fallback {
         bytes.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
     }
-    sha256_hex(&bytes)
+    if let Some(owner) = &session.inventory_owner {
+        bytes.extend_from_slice(b"\0inventory-owner-v1\0");
+        bytes.extend_from_slice(
+            &serde_json::to_vec(owner)
+                .map_err(|_| error("LOCAL_PATH", "Discovery paths must be valid UTF-8."))?,
+        );
+    }
+    Ok(sha256_hex(&bytes))
 }
 
 impl Session {
+    pub fn verified_predecessor(&self, pack: &Path) -> Result<Option<&str>, Diagnostic> {
+        if optional_bytes(pack)?.map(|bytes| sha256_hex(&bytes)) != self.predecessor_sha256 {
+            return Err(error(
+                "MCP_ACTIVATION_CONFLICT",
+                "The starting pack changed; no new search or replacement is allowed for this checkpoint.",
+            ));
+        }
+        Ok(self.predecessor_sha256.as_deref())
+    }
+
     pub(crate) fn attempts_len(&self) -> usize {
         self.attempts.len()
     }
@@ -145,30 +164,78 @@ pub fn is_resumable(state: &State) -> bool {
 
 pub fn has_in_flight(state: &State) -> bool {
     state.session.as_ref().is_some_and(|session| {
-        session.attempts.last().is_some_and(|attempt| {
-            let unproven_native_failure = session.transport == Transport::Native
-                && attempt.outcome == "failed"
-                && attempt.job_id.is_none()
-                && attempt.receipt.as_ref().is_none_or(|receipt| {
-                    receipt.cleanup == "not-started"
-                        && receipt.diagnostic.as_ref().is_some_and(|d| {
-                            d.code == "HTTP_STATUS"
-                                || (!attempt.no_start_confirmed
-                                    && matches!(
-                                        d.code.as_str(),
-                                        "HTTP_RESPONSE" | "HTTP_RESPONSE_LIMIT"
-                                    ))
-                        })
-                });
-            matches!(
-                attempt.outcome.as_str(),
-                "dispatched" | "started" | "cleanup-pending" | "ambiguous"
-            ) || (session.transport == Transport::Mcp
-                && attempt.outcome == "failed"
-                && attempt.terminal.is_some())
-                || unproven_native_failure
-        })
+        session
+            .attempts
+            .iter()
+            .any(|attempt| attempt_uncertain(session.transport, attempt))
     })
+}
+
+fn attempt_uncertain(transport: Transport, attempt: &Attempt) -> bool {
+    if matches!(
+        attempt.outcome.as_str(),
+        "dispatched" | "started" | "cleanup-pending" | "ambiguous"
+    ) {
+        return true;
+    }
+    match transport {
+        Transport::Mcp => {
+            attempt.outcome == "failed"
+                || (attempt.outcome == "cancelled" && attempt.terminal.is_none())
+        }
+        Transport::Native => match attempt.outcome.as_str() {
+            "cancelled" => !native_cleanup_confirmed(attempt),
+            "failed" if attempt.job_id.is_some() => !native_cleanup_confirmed(attempt),
+            "failed" => attempt.receipt.as_ref().is_none_or(|receipt| {
+                receipt.cleanup != "not-started"
+                    || receipt.completion == "complete"
+                    || receipt.diagnostic.as_ref().is_none_or(|d| {
+                        matches!(
+                            d.code.as_str(),
+                            "HTTP_START_AMBIGUOUS" | "HTTP_TRANSPORT" | "HTTP_STATUS"
+                        ) || (!attempt.no_start_confirmed
+                            && !matches!(
+                                d.code.as_str(),
+                                "HTTP_START_REJECTED"
+                                    | "AUTH_REJECTED"
+                                    | "AUTH_RESPONSE"
+                                    | "HTTP_DEADLINE"
+                            ))
+                    })
+            }),
+            _ => false,
+        },
+    }
+}
+
+fn native_cleanup_confirmed(attempt: &Attempt) -> bool {
+    attempt.job_id.is_some()
+        && attempt.receipt.as_ref().is_some_and(|receipt| {
+            receipt.job_id == attempt.job_id
+                && receipt.query == attempt.probe.query
+                && receipt.start == attempt.probe.start
+                && receipt.end == attempt.probe.end
+                && receipt.cleanup == "confirmed"
+        })
+}
+
+fn record_native_cleanup(attempt: &mut Attempt) {
+    let receipt = attempt.receipt.get_or_insert_with(|| JobReceipt {
+        query: attempt.probe.query.clone(),
+        start: attempt.probe.start.clone(),
+        end: attempt.probe.end.clone(),
+        job_id: attempt.job_id.clone(),
+        completion: "cancelled".into(),
+        cleanup: "confirmed".into(),
+        polls: 0,
+        events: vec![],
+        metadata: None,
+        issues: BTreeMap::new(),
+        diagnostic: None,
+    });
+    // A start-storage failure can leave a no-job receipt beside the saved real job ID.
+    receipt.job_id = attempt.job_id.clone();
+    receipt.cleanup = "confirmed".into();
 }
 
 pub fn resumable_request(path: &Path) -> Result<DiscoverRequest, Diagnostic> {
@@ -210,12 +277,16 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
         };
     };
     if state.schema_version != 3
-        || session.binding_sha256 != binding(state, session)
+        || session.binding_sha256 != binding(state, session)?
         || session.periods.is_empty()
         || session.periods.len() > 4096
         || session.attempts.len() > state.request.max_queries as usize
         || (session.transport == Transport::Mcp && !session.captures.is_empty())
         || (session.transport == Transport::Native && !state.answers.is_empty())
+        || session
+            .inventory_owner
+            .as_ref()
+            .is_some_and(|owner| session.transport != Transport::Mcp || !owner.is_absolute())
         || session.capture_sha256.len() != session.captures.len()
     {
         return Err(tampered());
@@ -243,6 +314,7 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
         return Err(tampered());
     }
     let mut pending = 0;
+    let mut completed_probes = BTreeSet::new();
     let mut last_dispatch = environment::parse_time(&state.created_at)?;
     for (index, attempt) in session.attempts.iter().enumerate() {
         let id = discovery::probe_id(&state.request.environment.view, &attempt.probe);
@@ -278,8 +350,24 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
             }
         }
         if attempt.outcome == "complete"
-            && !state.answers.contains_key(&id)
-            && !session.captures.contains_key(&id)
+            && (!completed_probes.insert(id.clone())
+                || (!state.answers.contains_key(&id) && !session.captures.contains_key(&id)))
+        {
+            return Err(tampered());
+        }
+        if session.transport == Transport::Mcp
+            && (attempt.job_id.is_some()
+                || attempt.receipt.is_some()
+                || matches!(attempt.outcome.as_str(), "failed" | "ambiguous")
+                || (attempt.outcome == "cancelled" && attempt.terminal.is_none()))
+        {
+            return Err(tampered());
+        }
+        if let Some(receipt) = &attempt.receipt
+            && (receipt.query != attempt.probe.query
+                || receipt.start != attempt.probe.start
+                || receipt.end != attempt.probe.end
+                || (receipt.job_id.is_some() && receipt.job_id != attempt.job_id))
         {
             return Err(tampered());
         }
@@ -338,9 +426,18 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
             if terminal && attempt.outcome == "completed" {
                 complete_result(&raw, &attempt.probe).map_err(|_| tampered())?;
             }
+            if terminal && session.transport == Transport::Mcp && attempt.outcome == "cancelled" {
+                validate_cancellation(state, attempt, &id, &raw).map_err(|_| tampered())?;
+            }
         }
     }
-    if pending > 1 || (matches!(state.status.as_str(), "paused" | "activated") && pending != 0) {
+    if pending > 1
+        || (matches!(state.status.as_str(), "paused" | "activated") && pending != 0)
+        || (matches!(
+            state.status.as_str(),
+            "cancel-requested" | "cleanup-pending"
+        ) && !has_in_flight(state))
+    {
         return Err(tampered());
     }
     for (id, answer) in &state.answers {
@@ -392,13 +489,7 @@ pub(super) fn ensure_predecessor(state: &State) -> Result<(), Diagnostic> {
         return Ok(());
     }
     let session = state.session.as_ref().ok_or_else(tampered)?;
-    if optional_bytes(&state.pack)?.map(|bytes| sha256_hex(&bytes)) != session.predecessor_sha256 {
-        return Err(error(
-            "MCP_ACTIVATION_CONFLICT",
-            "The starting pack changed; no new search or replacement is allowed for this checkpoint.",
-        ));
-    }
-    Ok(())
+    session.verified_predecessor(&state.pack).map(|_| ())
 }
 
 pub fn init_resumable(
@@ -407,6 +498,41 @@ pub fn init_resumable(
     pack_path: &Path,
     receipt_path: &Path,
     transport: Transport,
+) -> Result<StepOutput, Diagnostic> {
+    init_resumable_with_owner(
+        request,
+        state_path,
+        pack_path,
+        receipt_path,
+        transport,
+        None,
+    )
+}
+
+pub fn init_inventory_resumable(
+    request: DiscoverRequest,
+    state_path: &Path,
+    pack_path: &Path,
+    receipt_path: &Path,
+    owner: &storage::Writer,
+) -> Result<StepOutput, Diagnostic> {
+    init_resumable_with_owner(
+        request,
+        state_path,
+        pack_path,
+        receipt_path,
+        Transport::Mcp,
+        Some(owner.identity()?),
+    )
+}
+
+fn init_resumable_with_owner(
+    request: DiscoverRequest,
+    state_path: &Path,
+    pack_path: &Path,
+    receipt_path: &Path,
+    transport: Transport,
+    inventory_owner: Option<PathBuf>,
 ) -> Result<StepOutput, Diagnostic> {
     // Hold the state lock throughout initialization; a partially initialized run is never exposed.
     discovery::validate_request(&request)?;
@@ -452,6 +578,7 @@ pub fn init_resumable(
     };
     let mut session = Session {
         transport,
+        inventory_owner,
         sparse_fieldset_fallback: true,
         binding_sha256: String::new(),
         predecessor_sha256: optional_bytes(&state.pack)?.map(|bytes| sha256_hex(&bytes)),
@@ -463,7 +590,7 @@ pub fn init_resumable(
         captures: BTreeMap::new(),
         capture_sha256: BTreeMap::new(),
     };
-    session.binding_sha256 = binding(&state, &session);
+    session.binding_sha256 = binding(&state, &session)?;
     state.session = Some(session);
     let probes = pending(&state)?;
     writer.create_new_bytes(&state_bytes(&state)?, MAX_PACK_BYTES)?;
@@ -570,7 +697,113 @@ fn current_output(state: &State) -> Result<StepOutput, Diagnostic> {
 pub fn dispatch(path: &Path, probe_id: &str) -> Result<StepOutput, Diagnostic> {
     let writer = storage::Writer::acquire(path)?;
     let mut state = read_state(path)?;
+    require_standalone(&state)?;
     reserve(&writer, &mut state, probe_id, Transport::Mcp)?;
+    current_output(&state)
+}
+
+fn require_standalone(state: &State) -> Result<(), Diagnostic> {
+    if state
+        .session
+        .as_ref()
+        .is_some_and(|s| s.inventory_owner.is_some())
+    {
+        return Err(error(
+            "DISCOVERY_INVENTORY_OWNER",
+            "This discovery belongs to an inventory. Use its dispatch-discovery or resume-discovery action so retained search guards are checked.",
+        ));
+    }
+    Ok(())
+}
+
+fn require_inventory(state: &State, owner: &storage::Writer) -> Result<(), Diagnostic> {
+    let session = state.session.as_ref().ok_or_else(|| {
+        error(
+            "MCP_STATE_RESTART",
+            "This run has no resumable checkpoint; keep its original recovery workflow.",
+        )
+    })?;
+    let matches = match session.inventory_owner.as_ref() {
+        Some(path) => owner.matches_identity(path)?,
+        None => false,
+    };
+    if !matches || session.transport != Transport::Mcp {
+        return Err(error(
+            "DISCOVERY_INVENTORY_OWNER",
+            "Discovery checkpoint does not belong to the locked inventory.",
+        ));
+    }
+    Ok(())
+}
+
+/// Verify an existing owner against the locked inventory without associating the checkpoint.
+pub fn inspect_inventory_owner(state: &State, owner: &storage::Writer) -> Result<bool, Diagnostic> {
+    let Some(session) = &state.session else {
+        return Ok(false);
+    };
+    if session.transport != Transport::Mcp {
+        return Err(error(
+            "DISCOVERY_TRANSPORT",
+            "Inventory discovery requires the MCP transport.",
+        ));
+    }
+    if session.inventory_owner.is_none() {
+        return Ok(false);
+    }
+    require_inventory(state, owner)?;
+    Ok(true)
+}
+
+/// Associate a retained checkpoint only after verifying its complete inventory reference
+/// while holding the inventory writer followed by this checkpoint writer.
+pub fn bind_inventory_owner(
+    writer: &storage::Writer,
+    owner: &storage::Writer,
+) -> Result<(), Diagnostic> {
+    bind_inventory_owner_for_producer(writer, owner, env!("CARGO_PKG_VERSION"))
+}
+
+pub(super) fn bind_inventory_owner_for_producer(
+    writer: &storage::Writer,
+    owner: &storage::Writer,
+    producer: &str,
+) -> Result<(), Diagnostic> {
+    let mut state = inspect_state_for_producer(&writer.identity()?, producer)?;
+    let Some(session) = &mut state.session else {
+        // Non-resumable legacy states cannot reserve or resume discovery attempts.
+        return Ok(());
+    };
+    if session.transport != Transport::Mcp {
+        return Err(error(
+            "DISCOVERY_TRANSPORT",
+            "Inventory discovery requires the MCP transport.",
+        ));
+    }
+    if session.inventory_owner.is_some() {
+        return require_inventory(&state, owner);
+    }
+    if state.producer_version != producer {
+        // Preserve foreign history for its producing executable.
+        return Ok(());
+    }
+    session.inventory_owner = Some(owner.identity()?);
+    let digest = binding(&state, state.session.as_ref().expect("session checked"))?;
+    state
+        .session
+        .as_mut()
+        .expect("session checked")
+        .binding_sha256 = digest;
+    store(writer, &state)
+}
+
+pub fn dispatch_inventory(
+    writer: &storage::Writer,
+    owner: &storage::Writer,
+    probe_id: &str,
+) -> Result<StepOutput, Diagnostic> {
+    let mut state = read_state(&writer.identity()?)?;
+    require_inventory(&state, owner)?;
+    reserve(writer, &mut state, probe_id, Transport::Mcp)?;
     current_output(&state)
 }
 
@@ -611,17 +844,31 @@ pub fn pause(path: &Path) -> Result<StepOutput, Diagnostic> {
 pub fn resume(path: &Path) -> Result<StepOutput, Diagnostic> {
     let writer = storage::Writer::acquire(path)?;
     let mut state = read_state(path)?;
+    require_standalone(&state)?;
+    resume_locked(&writer, &mut state)
+}
+
+pub fn resume_inventory(
+    writer: &storage::Writer,
+    owner: &storage::Writer,
+) -> Result<StepOutput, Diagnostic> {
+    let mut state = read_state(&writer.identity()?)?;
+    require_inventory(&state, owner)?;
+    resume_locked(writer, &mut state)
+}
+
+fn resume_locked(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Diagnostic> {
     if state.session.is_none() {
         return Err(error(
             "MCP_STATE_RESTART",
             "Legacy discovery cannot acquire a renewed resume allowance.",
         ));
     }
-    ensure_predecessor(&state)?;
+    ensure_predecessor(state)?;
     if matches!(state.status.as_str(), "activated" | "activating" | "failed") {
-        return advance(&writer, &mut state);
+        return advance(writer, state);
     }
-    if has_in_flight(&state) {
+    if has_in_flight(state) {
         return Err(error(
             "DISCOVERY_CLEANUP_PENDING",
             "Settle the exact outstanding attempt before resuming; no search was started.",
@@ -629,13 +876,13 @@ pub fn resume(path: &Path) -> Result<StepOutput, Diagnostic> {
     }
     if state.status == "paused" {
         if state.session.as_ref().expect("session checked").transport == Transport::Native {
-            let (candidate, report) = replay_native(&state);
+            let (candidate, report) = replay_native(state);
             if let Some(candidate) = candidate {
-                return activate(&writer, &mut state, candidate, report);
+                return activate(writer, state, candidate, report);
             }
         }
         let now = discovery::timestamp();
-        elapsed(&state, &now)?;
+        elapsed(state, &now)?;
         let session = state.session.as_mut().expect("session checked");
         if session.periods.len() >= 4096 {
             return Err(error(
@@ -648,7 +895,7 @@ pub fn resume(path: &Path) -> Result<StepOutput, Diagnostic> {
             end: None,
         });
         state.status = "needs-probes".into();
-        store(&writer, &state)?;
+        store(writer, state)?;
     }
     if state
         .session
@@ -656,9 +903,9 @@ pub fn resume(path: &Path) -> Result<StepOutput, Diagnostic> {
         .is_some_and(|s| s.transport == Transport::Mcp)
         && state.status == "needs-probes"
     {
-        advance(&writer, &mut state)
+        advance(writer, state)
     } else {
-        current_output(&state)
+        current_output(state)
     }
 }
 
@@ -859,6 +1106,39 @@ struct DelegatedCancellation {
     caller_assertion: String,
 }
 
+fn validate_cancellation(
+    state: &State,
+    attempt: &Attempt,
+    probe_id: &str,
+    raw: &[u8],
+) -> Result<(), Diagnostic> {
+    let evidence: DelegatedCancellation = serde_json::from_slice(raw).map_err(|_| {
+        error(
+            "MCP_CLEANUP_EVIDENCE",
+            "Invalid delegated cancellation report.",
+        )
+    })?;
+    if evidence.schema_version != 1
+        || evidence.request_sha256 != state.request_sha256
+        || evidence.probe_id != probe_id
+        || discovery::probe_id(&state.request.environment.view, &attempt.probe) != probe_id
+        || evidence.repository != state.request.environment.view
+        || evidence.query_sha256 != sha256_hex(attempt.probe.query.as_bytes())
+        || evidence.start != attempt.probe.start
+        || evidence.end != attempt.probe.end
+        || evidence.dispatched_at != attempt.dispatched_at
+        || evidence.outcome != "cancelled"
+        || evidence.cleanup != "confirmed"
+        || evidence.caller_assertion != "exact-host-attempt-terminal-cleanup"
+    {
+        return Err(error(
+            "MCP_CLEANUP_EVIDENCE",
+            "Cancellation evidence must attest terminal cleanup of this exact host attempt, query, target and window.",
+        ));
+    }
+    Ok(())
+}
+
 /// Imports protected caller-attested evidence; this does not independently stop a hosted job.
 pub fn settle_cancelled(
     path: &Path,
@@ -885,30 +1165,7 @@ pub fn settle_cancelled(
             )
         })?;
     let raw = storage::read_bytes(evidence_file, MAX_RESULT_BYTES as u64)?;
-    let evidence: DelegatedCancellation = serde_json::from_slice(&raw).map_err(|_| {
-        error(
-            "MCP_CLEANUP_EVIDENCE",
-            "Invalid delegated cancellation report.",
-        )
-    })?;
-    if evidence.schema_version != 1
-        || evidence.request_sha256 != state.request_sha256
-        || evidence.probe_id != probe_id
-        || discovery::probe_id(&state.request.environment.view, &attempt.probe) != probe_id
-        || evidence.repository != state.request.environment.view
-        || evidence.query_sha256 != sha256_hex(attempt.probe.query.as_bytes())
-        || evidence.start != attempt.probe.start
-        || evidence.end != attempt.probe.end
-        || evidence.dispatched_at != attempt.dispatched_at
-        || evidence.outcome != "cancelled"
-        || evidence.cleanup != "confirmed"
-        || evidence.caller_assertion != "exact-host-attempt-terminal-cleanup"
-    {
-        return Err(error(
-            "MCP_CLEANUP_EVIDENCE",
-            "Cancellation evidence must attest terminal cleanup of this exact host attempt, query, target and window.",
-        ));
-    }
+    validate_cancellation(&state, attempt, probe_id, &raw)?;
     let session = state.session.as_mut().expect("session checked");
     let attempt = session.attempts.last_mut().expect("attempt checked");
     attempt.outcome = "cancelled".into();
@@ -1028,19 +1285,23 @@ impl<B: SearchBackend> SearchBackend for NativeBackend<'_, B> {
                         &job,
                         std::time::Instant::now() + Duration::from_secs(5),
                     );
-                    self.state
+                    let attempt = self
+                        .state
                         .session
                         .as_mut()
                         .expect("session checked")
                         .attempts
                         .last_mut()
-                        .expect("reserved")
-                        .outcome = if cleanup.is_ok() {
+                        .expect("reserved");
+                    attempt.outcome = if cleanup.is_ok() {
                         "cancelled"
                     } else {
                         "cleanup-pending"
                     }
                     .into();
+                    if cleanup.is_ok() {
+                        record_native_cleanup(attempt);
+                    }
                     let _ = store(self.writer, self.state);
                     return Err(d);
                 }
@@ -1118,6 +1379,9 @@ impl<B: SearchBackend> SearchBackend for NativeBackend<'_, B> {
             "cleanup-pending"
         }
         .into();
+        if result.is_ok() {
+            record_native_cleanup(attempt);
+        }
         store(self.writer, self.state)?;
         result
     }
@@ -1163,10 +1427,10 @@ impl<B: SearchBackend> SearchBackend for NativeBackend<'_, B> {
         if discovery::probe_id(view, &attempt.probe) != id {
             return Err(tampered());
         }
-        attempt.receipt = Some(receipt.clone());
         if receipt.job_id.is_none() && attempt.job_id.is_some() {
             return store(self.writer, self.state);
         }
+        attempt.receipt = Some(receipt.clone());
         if receipt.completion == "complete"
             && receipt.cleanup == "confirmed"
             && let Err(d) = budget
@@ -1197,7 +1461,7 @@ impl<B: SearchBackend> SearchBackend for NativeBackend<'_, B> {
             session.captures.insert(id, capture);
         } else if receipt.cleanup == "unconfirmed" || receipt.cleanup == "unknown-job" {
             attempt.outcome = "cleanup-pending".into();
-        } else if receipt.completion == "cancelled" {
+        } else if receipt.completion == "cancelled" && receipt.job_id.is_some() {
             attempt.outcome = "cancelled".into();
         } else {
             attempt.outcome = "failed".into();
@@ -1218,6 +1482,12 @@ pub fn recover_native_cleanup(
     }
     let writer = storage::Writer::acquire(path)?;
     let mut state = read_state(path)?;
+    if matches!(state.status.as_str(), "activated" | "activating") {
+        return Err(error(
+            "DISCOVERY_PHASE",
+            "Cleanup recovery cannot modify an activated discovery or an activation in progress.",
+        ));
+    }
     if state
         .session
         .as_ref()
@@ -1229,41 +1499,69 @@ pub fn recover_native_cleanup(
             "No native job needs cleanup recovery.",
         ));
     }
-    let job = state
+    let attempts = state
         .session
         .as_ref()
         .expect("session checked")
         .attempts
-        .last()
-        .expect("in flight")
-        .job_id
-        .clone()
-        .ok_or_else(|| {
-            error(
-                "DISCOVERY_CLEANUP_PENDING",
-                "The start outcome has no known job ID; automatic cleanup or retry is unsafe.",
-            )
-        })?;
-    let result = backend.stop(
-        &state.request.environment.view,
-        &job,
-        std::time::Instant::now() + Duration::from_secs(5),
-    );
-    let session = state.session.as_mut().expect("session checked");
-    let attempt = session.attempts.last_mut().expect("in flight");
-    attempt.outcome = if result.is_ok() {
-        "cancelled"
-    } else {
-        "cleanup-pending"
+        .len();
+    let mut attempted_cleanup = false;
+    let mut persistence_error = None;
+    for index in 0..attempts {
+        let attempt = &state.session.as_ref().expect("session checked").attempts[index];
+        if !attempt_uncertain(Transport::Native, attempt) {
+            continue;
+        }
+        let Some(job) = attempt.job_id.clone() else {
+            continue;
+        };
+        attempted_cleanup = true;
+        let result = backend.stop(
+            &state.request.environment.view,
+            &job,
+            std::time::Instant::now() + Duration::from_secs(5),
+        );
+        let session = state.session.as_mut().expect("session checked");
+        let last = index + 1 == session.attempts.len();
+        let attempt = &mut session.attempts[index];
+        if result.is_ok() {
+            attempt.outcome = "cancelled".into();
+            record_native_cleanup(attempt);
+        } else if last {
+            attempt.outcome = "cleanup-pending".into();
+        }
+        if !has_in_flight(&state) {
+            state
+                .session
+                .as_mut()
+                .expect("session checked")
+                .pause_clock(&discovery::timestamp())?;
+        }
+        if state.status != "failed" {
+            state.status = if has_in_flight(&state) {
+                "cleanup-pending"
+            } else {
+                "paused"
+            }
+            .into();
+        }
+        // Continue cleaning validated jobs when saving their terminal proof fails.
+        if let Err(diagnostic) = store(&writer, &state) {
+            persistence_error.get_or_insert(diagnostic);
+        }
     }
-    .into();
-    if result.is_ok() {
-        session.pause_clock(&discovery::timestamp())?;
-        state.status = "paused".into();
-    } else {
-        state.status = "cleanup-pending".into();
+    if !attempted_cleanup {
+        return Err(error(
+            "DISCOVERY_CLEANUP_PENDING",
+            "The start outcome has no known job ID; automatic cleanup or retry is unsafe.",
+        ));
     }
-    store(&writer, &state)?;
+    if let Some(diagnostic) = persistence_error {
+        return Err(diagnostic);
+    }
+    if state.status == "failed" {
+        return advance(&writer, &mut state);
+    }
     current_output(&state)
 }
 
@@ -1376,6 +1674,78 @@ pub fn run_native(path: &Path, backend: &mut impl SearchBackend) -> Result<StepO
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn inventory_owner_requires_utf8_before_checkpoint_creation() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(
+            std::env::temp_dir().join(format!("cqlmatic-owner-path-{}", std::process::id())),
+        );
+        fs::create_dir(&directory.0).unwrap();
+        let owner_path = directory.0.join(OsStr::from_bytes(b"inventory-\xff.json"));
+        let owner = storage::Writer::acquire(&owner_path).unwrap();
+        let state_path = directory.0.join("relay.json");
+        let pack_path = directory.0.join("pack.json");
+        let receipt_path = directory.0.join("receipt.json");
+        let request: DiscoverRequest =
+            serde_json::from_str(include_str!("../examples/mcp/discover.request.json")).unwrap();
+        let diagnostic = init_inventory_resumable(
+            request.clone(),
+            &state_path,
+            &pack_path,
+            &receipt_path,
+            &owner,
+        )
+        .unwrap_err();
+        assert_eq!(diagnostic.code, "LOCAL_PATH");
+        for path in [&owner_path, &state_path, &pack_path, &receipt_path] {
+            assert!(!path.exists());
+        }
+        drop(owner);
+        for (pack, receipt) in [(&owner_path, &receipt_path), (&pack_path, &owner_path)] {
+            assert_eq!(
+                init_resumable(request.clone(), &state_path, pack, receipt, Transport::Mcp)
+                    .unwrap_err()
+                    .code,
+                "LOCAL_PATH"
+            );
+            assert!(!state_path.exists());
+        }
+        init_resumable(
+            request,
+            &state_path,
+            &pack_path,
+            &receipt_path,
+            Transport::Mcp,
+        )
+        .unwrap();
+        let before = fs::read(&state_path).unwrap();
+        let writer = storage::Writer::acquire(&state_path).unwrap();
+        let owner = storage::Writer::acquire(&owner_path).unwrap();
+        assert_eq!(
+            bind_inventory_owner(&writer, &owner).unwrap_err().code,
+            "LOCAL_PATH"
+        );
+        assert!(fs::read(&state_path).unwrap() == before);
+        let unicode_owner =
+            storage::Writer::acquire(&directory.0.join("inventory-é.json")).unwrap();
+        bind_inventory_owner(&writer, &unicode_owner).unwrap();
+        assert_eq!(
+            inspect_state(&state_path)
+                .unwrap()
+                .session
+                .unwrap()
+                .inventory_owner,
+            Some(unicode_owner.identity().unwrap())
+        );
+    }
+
     #[test]
     fn paused_intervals_preserve_the_exact_remaining_allowance() {
         let mut request: DiscoverRequest =
@@ -1400,6 +1770,7 @@ mod tests {
         };
         let mut session = Session {
             transport: Transport::Mcp,
+            inventory_owner: None,
             sparse_fieldset_fallback: false,
             binding_sha256: String::new(),
             predecessor_sha256: None,

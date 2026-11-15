@@ -79,6 +79,11 @@ enum Command {
 }
 #[derive(Args)]
 struct Common {
+    #[arg(
+        long,
+        help = "Caller-attested current authorization-context ID for exact capability evidence; never inferred from CID"
+    )]
+    execution_context_id: Option<String>,
     #[arg(long, help = "Emit compact structured results")]
     json: bool,
     #[arg(
@@ -217,7 +222,7 @@ struct CatalogArgs {
         help = "Include full knowledge records instead of the compact index"
     )]
     full: bool,
-    #[arg(long,default_value_t=10,value_parser=clap::value_parser!(u32).range(1..=100))]
+    #[arg(long,default_value_t=10,value_parser=clap::value_parser!(u32).range(1..=250))]
     limit: u32,
 }
 #[derive(Subcommand)]
@@ -493,6 +498,9 @@ fn emit_analysis(a: &Analysis, common: &Common, generated: bool) -> Result<i32, 
     Ok(a.exit_code(common.fail_on_warning))
 }
 fn context(mut c: Context, common: &Common) -> Context {
+    if let Some(context) = &common.execution_context_id {
+        c.execution_context_id = Some(context.clone());
+    }
     c.require_observed |= common.require_observed;
     c.accept_mixed_record_kinds |= common.accept_mixed_record_kinds;
     c.accept_partial_coverage |= common.accept_partial_coverage;
@@ -570,6 +578,7 @@ fn select_inventory(
             || !state.pending_inventory.is_empty()
             || !state.source_metadata.is_empty()
             || !state.refresh_attempts.is_empty()
+            || !state.capability_runs.is_empty()
             || state.reconciled_evidence_sha256.is_some()
             || state.reconciled_at.is_some()
         {
@@ -719,6 +728,9 @@ fn save_inventory_hints(
     if added == 0 && changed == 0 {
         return Ok((0, notifications.len()));
     }
+    if current.schema_version < inventory::STATE_VERSION {
+        current.field_evidence_schema_version = Some(current.schema_version);
+    }
     current.schema_version = inventory::STATE_VERSION;
     current.updated_at = discovery::timestamp();
     current.validate()?;
@@ -862,6 +874,8 @@ fn analyze_generate(
         Ok((quick, applied)) => (quick, applied, None),
         Err(d) => (None, false, Some(inventory_notice(d))),
     };
+    let capability_now = discovery::timestamp();
+    let capability_context = request.context.execution_context_id.clone();
     let evidence = quick.as_ref().map(|quick| app::GroundingEvidence {
         environment: &quick
             .state
@@ -871,6 +885,17 @@ fn analyze_generate(
             .environment,
         active_pack: quick.active_pack.as_ref(),
         query_observations: &quick.state.query_observations,
+        capabilities: Some(cqlmatic::capability::CapabilityEvidence {
+            runs: &quick.state.capability_runs,
+            environment: &quick
+                .state
+                .target
+                .as_ref()
+                .expect("confirmed target")
+                .environment,
+            execution_context_id: capability_context.as_deref(),
+            now: &capability_now,
+        }),
     });
     let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
     let result = app::generate_with_evidence(request, primary, evidence);
@@ -903,6 +928,8 @@ fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>
         Ok((quick, applied)) => (quick, applied, None),
         Err(d) => (None, false, Some(inventory_notice(d))),
     };
+    let capability_now = discovery::timestamp();
+    let capability_context = request.context.execution_context_id.clone();
     let evidence = quick.as_ref().map(|quick| app::GroundingEvidence {
         environment: &quick
             .state
@@ -912,6 +939,17 @@ fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>
             .environment,
         active_pack: quick.active_pack.as_ref(),
         query_observations: &quick.state.query_observations,
+        capabilities: Some(cqlmatic::capability::CapabilityEvidence {
+            runs: &quick.state.capability_runs,
+            environment: &quick
+                .state
+                .target
+                .as_ref()
+                .expect("confirmed target")
+                .environment,
+            execution_context_id: capability_context.as_deref(),
+            now: &capability_now,
+        }),
     });
     let query = request.query.clone();
     let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
@@ -1304,7 +1342,7 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
         )?;
     } else if args.profile {
         output(
-            &json!({"profile_id":PROFILE,"assurance":"bounded offline syntax, signature and placement checks; no execution proof","max_query_utf16":MAX_QUERY_UTF16,"max_request_bytes":MAX_REQUEST_BYTES,"max_depth":MAX_DEPTH,"max_nodes":MAX_NODES,"regex":"conservative syntax subset; engine-specific escapes and Unicode case folding are unsupported","offsets":"zero-based UTF-8 bytes; end exclusive; one-based Unicode line/column","knowledge_revision":environment::KNOWLEDGE_REVISION,"functions":catalog::FUNCTIONS.len(),"analyst_workflow":"cql:workflow:analyst","knowledge_records":catalog::records().len()}),
+            &json!({"profile_id":PROFILE,"assurance":"bounded offline syntax, signature and placement checks; no execution proof","max_query_utf16":MAX_QUERY_UTF16,"max_request_bytes":MAX_REQUEST_BYTES,"max_depth":MAX_DEPTH,"max_nodes":MAX_NODES,"regex":"conservative common LogScale/JitRex subset; flags i, m, d and F; engine-specific escapes, g and Unicode case folding are unsupported","offsets":"zero-based UTF-8 bytes; end exclusive; one-based Unicode line/column","knowledge_revision":environment::KNOWLEDGE_REVISION,"functions":catalog::FUNCTIONS.len(),"function_scope_counts":catalog::function_scope()["counts"],"form_assessments":catalog::function_scope()["assessment_summary"],"scope_reviewed_at":catalog::function_scope()["reviewed_at"],"analyst_workflow":"cql:workflow:analyst","knowledge_records":catalog::records().len()}),
             true,
         )?;
     } else if args.recipes {
@@ -1319,6 +1357,12 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
             .map(|f| {
                 let mut value = serde_json::to_value(f).expect("function serializes");
                 value["scalar_computation"] = json!(f.scalar_computation());
+                value["requirements"] = json!(f.requirements());
+                value["parameters"] = json!(catalog::parameter_rules(f.name));
+                value["scope"] = json!(catalog::scope_entry(f.name));
+                if f.name == "readFile" {
+                    value["variadic_argument"] = json!("file");
+                }
                 value
             })
             .collect::<Vec<_>>();
@@ -1851,7 +1895,7 @@ fn main() -> ExitCode {
         Ok(code) => ExitCode::from(code as u8),
         Err(d) => {
             let d = if brief {
-                inventory_cli::brief_failure()
+                inventory_cli::brief_failure_for(&d)
             } else {
                 d
             };

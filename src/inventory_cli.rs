@@ -77,6 +77,16 @@ pub struct StatusArgs {
 fn fail(message: &str) -> Diagnostic {
     Diagnostic::error("INVENTORY_INPUT", message)
 }
+fn discovery_run_failure(index: usize, message: &str) -> Diagnostic {
+    discovery_run_diagnostic(index, fail(message))
+}
+fn discovery_run_diagnostic(index: usize, mut diagnostic: Diagnostic) -> Diagnostic {
+    if diagnostic.pointer.is_none() {
+        diagnostic.message = format!("Discovery run_index {index}: {}", diagnostic.message);
+        diagnostic.pointer = Some(format!("/discovery_runs/{index}"));
+    }
+    diagnostic
+}
 fn output(value: &impl Serialize) -> Result<(), Diagnostic> {
     let mut out = io::stdout().lock();
     serde_json::to_writer(&mut out, value).map_err(|_| fail("Cannot emit inventory result."))?;
@@ -88,6 +98,38 @@ pub fn brief_failure() -> Diagnostic {
         "INVENTORY_BRIEF_FAILED",
         "Inventory brief command failed. Inspect protected full-mode output locally.",
     )
+}
+
+pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
+    let index = diagnostic
+        .pointer
+        .as_deref()
+        .and_then(|pointer| pointer.strip_prefix("/discovery_runs/"))
+        .and_then(|index| {
+            index
+                .parse::<usize>()
+                .ok()
+                .filter(|value| value.to_string() == index)
+        });
+    if diagnostic.code == "MCP_STATE_PRODUCER" {
+        let mut failure = Diagnostic::error(
+            "MCP_STATE_PRODUCER",
+            "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally.",
+        );
+        failure.pointer = index.map(|index| format!("/discovery_runs/{index}"));
+        return failure;
+    }
+    let Some(index) = index else {
+        return brief_failure();
+    };
+    let mut failure = Diagnostic::error(
+        "INVENTORY_BRIEF_FAILED",
+        format!(
+            "Inventory brief command failed for discovery run_index {index}. Inspect protected full-mode output locally."
+        ),
+    );
+    failure.pointer = Some(format!("/discovery_runs/{index}"));
+    failure
 }
 
 fn brief_bytes(mut value: Value) -> Result<Vec<u8>, Diagnostic> {
@@ -165,7 +207,11 @@ pub fn default_state_path() -> Result<PathBuf, Diagnostic> {
 
 fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
     let path = explicit.map_or_else(default_state_path, Ok)?;
-    std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory state path."))
+    let path =
+        std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory state path."))?;
+    path.to_str()
+        .ok_or_else(|| fail("Cannot resolve inventory state path."))?;
+    Ok(path)
 }
 fn load_existing(path: &Path) -> Result<Option<InventoryState>, Diagnostic> {
     if !crate::setup_cli::private_input_exists(path)? {
@@ -247,50 +293,8 @@ fn cumulative_pack_bytes(pack: &Pack) -> Result<Vec<u8>, Diagnostic> {
         .map_err(|_| fail("Cannot serialize the cumulative environment pack."))
 }
 
-fn promote_discovery(
-    state: &mut InventoryState,
-    completion: &mcp::VerifiedCompletion,
-    now: &str,
-) -> Result<(), Diagnostic> {
-    let run = state
-        .discovery_runs
-        .last()
-        .expect("Only a prepared discovery run can complete");
-    for (recorded, sealed) in [
-        (&run.pack_path, &completion.pack_path),
-        (&run.receipt_path, &completion.receipt_path),
-    ] {
-        let path = Path::new(recorded);
-        if !crate::setup_cli::private_input_exists(path)? || canonical(path)? != canonical(sealed)?
-        {
-            return Err(fail(
-                "Recorded discovery artifact paths differ from the verified relay.",
-            ));
-        }
-    }
-    let pack = {
-        let bytes = storage::read_bytes(
-            Path::new(&run.pack_path),
-            cqlmatic::environment::MAX_PACK_BYTES,
-        )?;
-        if cqlmatic::sha256_hex(&bytes) != completion.pack_sha256 {
-            return Err(fail("Discovery pack bytes differ from the verified relay."));
-        }
-        storage::decode_pack(&bytes)?
-    };
-    let mut registered = state.packs.iter().filter(|p| p.path == run.pack_path);
-    if let Some(reference) = registered.next() {
-        if reference.content_digest != pack.content_digest
-            || reference.discovery_run.as_deref() != Some(run.state_path.as_str())
-            || registered.next().is_some()
-        {
-            return Err(fail(
-                "Retained discovery pack reference differs from the verified relay.",
-            ));
-        }
-        return Ok(());
-    }
-    let predecessor = cumulative_pack(state)?
+fn cumulative_predecessor(state: &InventoryState) -> Result<Option<String>, Diagnostic> {
+    Ok(cumulative_pack(state)?
         .as_ref()
         .map(cumulative_pack_bytes)
         .transpose()?
@@ -298,11 +302,64 @@ fn promote_discovery(
             // create_new_bytes adds this newline when staging the predecessor.
             bytes.push(b'\n');
             cqlmatic::sha256_hex(&bytes)
-        });
-    if predecessor != completion.predecessor_pack_sha256 {
-        return Err(fail(
+        }))
+}
+
+fn promote_discovery(
+    state: &mut InventoryState,
+    run_index: usize,
+    completion: &mcp::VerifiedCompletion,
+    now: &str,
+) -> Result<Option<Diagnostic>, Diagnostic> {
+    let run = state
+        .discovery_runs
+        .get(run_index)
+        .expect("Only a prepared discovery run can complete");
+    let pack = (|| {
+        for (recorded, sealed) in [
+            (&run.pack_path, &completion.pack_path),
+            (&run.receipt_path, &completion.receipt_path),
+        ] {
+            let path = Path::new(recorded);
+            if !crate::setup_cli::private_input_exists(path)?
+                || canonical(path)? != canonical(sealed)?
+            {
+                return Err(fail(
+                    "Recorded discovery artifact paths differ from the verified relay.",
+                ));
+            }
+        }
+        let bytes = storage::read_bytes(
+            Path::new(&run.pack_path),
+            cqlmatic::environment::MAX_PACK_BYTES,
+        )?;
+        if cqlmatic::sha256_hex(&bytes) != completion.pack_sha256 {
+            return Err(fail("Discovery pack bytes differ from the verified relay."));
+        }
+        storage::decode_pack(&bytes)
+    })()
+    .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
+    let mut registered = state.packs.iter().filter(|p| p.path == run.pack_path);
+    if let Some(reference) = registered.next() {
+        if reference.content_digest != pack.content_digest
+            || reference.discovery_run.as_deref() != Some(run.state_path.as_str())
+            || registered.next().is_some()
+        {
+            return Err(discovery_run_failure(
+                run_index,
+                "Retained discovery pack reference differs from the verified relay.",
+            ));
+        }
+        return Ok(None);
+    }
+    let predecessor = cumulative_predecessor(state)?;
+    if run.status == "superseded" || predecessor != completion.predecessor_pack_sha256 {
+        let mut diagnostic = discovery_run_failure(
+            run_index,
             "Discovery completed against an earlier inventory. Prepare discovery again from the current inventory. The completed run's pack and receipt are retained.",
-        ));
+        );
+        diagnostic.code = "DISCOVERY_SUPERSEDED".into();
+        return Ok(Some(diagnostic));
     }
     let reference = PackReference {
         path: run.pack_path.clone(),
@@ -312,7 +369,7 @@ fn promote_discovery(
     };
     state.active_pack = Some(reference.clone());
     state.packs.push(reference);
-    Ok(())
+    Ok(None)
 }
 
 fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
@@ -334,6 +391,17 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         }
     )
     .map_err(|_| fail("Cannot emit inventory status."))?;
+    if status.active_pack.is_some() {
+        let message = if status.capability_blocked {
+            "Optional function checks: exact search termination must be settled before another dispatch."
+        } else if status.capabilities.is_empty() {
+            "Optional function checks: available after field-pack activation; choose capabilities to review and opt in."
+        } else {
+            "Optional function checks: retained separately; inspect dated case outcomes with status --json."
+        };
+        crate::terminal::secondary(&mut out, message, io::stdout().is_terminal())
+            .map_err(|_| fail("Cannot emit inventory status."))?;
+    }
     let refresh_phase =
         status
             .refresh_attempts
@@ -557,82 +625,163 @@ fn apply_and_store_with_work_budget(
         Some(state) => state,
         None => InventoryState::new(&now)?,
     };
-    state.schema_version = STATE_VERSION;
-    // Hold other checkpoints through commit; selected discovery dispatch acquires its own writer.
-    let guarded_runs = match &action {
-        InventoryAction::PrepareDiscovery { .. }
-        | InventoryAction::PrepareRefresh { .. }
-        | InventoryAction::DispatchRefresh { .. }
-        | InventoryAction::PrepareScout { .. } => state.discovery_runs.len(),
-        InventoryAction::DispatchDiscovery { .. } => state.discovery_runs.len().saturating_sub(1),
-        _ => 0,
-    };
-    let _relay_guards = if guarded_runs > 0 {
-        state
-            .discovery_runs
-            .iter()
-            .take(guarded_runs)
-            .map(|run| storage::Writer::acquire(Path::new(&run.state_path)))
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        vec![]
-    };
-    let resolve_work = matches!(
-        &action,
-        InventoryAction::ConfirmTarget { .. }
-            | InventoryAction::ReviewSource { .. }
-            | InventoryAction::BindParser { .. }
-            | InventoryAction::ParserNotApplicable { .. }
-            | InventoryAction::ImportParsers { .. }
-            | InventoryAction::FetchParsers { .. }
-            | InventoryAction::ImportPack { .. }
-            | InventoryAction::DiscoveryStep { .. }
-            | InventoryAction::ResumeDiscovery { .. }
-            | InventoryAction::Reconcile { .. }
-    );
-    let reconcile_at = match &action {
-        InventoryAction::Reconcile { reviewed_at } => Some(reviewed_at.clone()),
+    let selected_run = match &action {
+        InventoryAction::DiscoveryStep { run_index, .. }
+        | InventoryAction::DispatchDiscovery { run_index, .. }
+        | InventoryAction::PauseDiscovery { run_index }
+        | InventoryAction::ResumeDiscovery { run_index } => {
+            Some(discovery_run_index(&state, *run_index)?)
+        }
         _ => None,
     };
-    let (boundary, _boundary_guard) =
-        if matches!(&action, InventoryAction::RecordInventoryHints { .. }) {
-            inventory_capture_boundary(&state)
-        } else {
-            (None, None)
+    (|| {
+        // Hold checkpoints through commit in inventory-then-relay order, including the selected run.
+        let guarded_runs = match &action {
+            InventoryAction::PrepareCapabilities { .. }
+            | InventoryAction::DispatchCapability { .. }
+            | InventoryAction::ResumeCapabilities { .. }
+            | InventoryAction::DispatchRefresh { .. }
+            | InventoryAction::PrepareDiscovery { .. }
+            | InventoryAction::PrepareRefresh { .. }
+            | InventoryAction::PrepareScout { .. }
+            | InventoryAction::DispatchDiscovery { .. }
+            | InventoryAction::ResumeDiscovery { .. } => state.discovery_runs.len(),
+            _ => 0,
         };
-    let mut extra = apply(path, &mut state, action, &now, boundary)?;
-    state.validate()?;
-    let loaded = packs(&state)?;
-    let mut report = inventory::assess_at(&state, &loaded, &now)?;
-    let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
-        inventory_run_evidence(&state, work_budget)?
-    } else {
-        (vec![], vec![], false)
-    };
-    if resolve_work {
-        state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
-        if let Some(reviewed_at) = reconcile_at {
-            state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
-            state.reconciled_at = Some(reviewed_at);
+        let relay_guards = if guarded_runs > 0 {
+            state
+                .discovery_runs
+                .iter()
+                .enumerate()
+                .take(guarded_runs)
+                .map(|(index, run)| {
+                    storage::Writer::acquire(Path::new(&run.state_path))
+                        .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            vec![]
+        };
+        if let Some(index) = selected_run {
+            // Step and pause take their own checkpoint lock after this read-only preflight.
+            let _selected_guard = if relay_guards.is_empty() {
+                Some(
+                    storage::Writer::acquire(Path::new(&state.discovery_runs[index].state_path))
+                        .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?,
+                )
+            } else {
+                None
+            };
+            let relay = mcp::inspect_state(Path::new(&state.discovery_runs[index].state_path))
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+            verify_run_reference(&state, &state.discovery_runs[index], &relay)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+            mcp::require_current_producer(&relay)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
         }
-        report = inventory::assess_at(&state, &loaded, &now)?;
-    }
-    if evidence_limited {
-        extra["inventory_work_evidence_limited"] = json!(true);
-        extra["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
+        if !relay_guards.is_empty() {
+            // Validate every reference before durably associating pre-owner resumable checkpoints.
+            for (index, run) in state.discovery_runs.iter().enumerate() {
+                let path = Path::new(&run.state_path);
+                if !crate::setup_cli::private_input_exists(path)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+                {
+                    return Err(discovery_run_failure(
+                        index,
+                        "Retained discovery checkpoint is missing; reconcile it before preparing another run.",
+                    ));
+                }
+                let relay = mcp::inspect_state(path)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+                verify_run_reference(&state, run, &relay)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+                preflight_foreign_run(&state, &action, index, &relay, &writer)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+            }
+            for (index, relay) in relay_guards.iter().enumerate() {
+                mcp::bind_inventory_owner(relay, &writer)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+            }
+        }
+        if state.schema_version < STATE_VERSION {
+            state.field_evidence_schema_version = Some(state.schema_version);
+        }
+        state.schema_version = STATE_VERSION;
+        let resolve_work = matches!(
+            &action,
+            InventoryAction::ConfirmTarget { .. }
+                | InventoryAction::ReviewSource { .. }
+                | InventoryAction::BindParser { .. }
+                | InventoryAction::ParserNotApplicable { .. }
+                | InventoryAction::ImportParsers { .. }
+                | InventoryAction::FetchParsers { .. }
+                | InventoryAction::ImportPack { .. }
+                | InventoryAction::DiscoveryStep { .. }
+                | InventoryAction::ResumeDiscovery { .. }
+                | InventoryAction::Reconcile { .. }
+        );
+        let reconcile_at = match &action {
+            InventoryAction::Reconcile { reviewed_at } => Some(reviewed_at.clone()),
+            _ => None,
+        };
+        let (boundary, _boundary_guard) =
+            if matches!(&action, InventoryAction::RecordInventoryHints { .. }) {
+                inventory_capture_boundary(&state)
+            } else {
+                (None, None)
+            };
+        let mut extra = apply(
+            path,
+            &mut state,
+            action,
+            &now,
+            boundary,
+            &writer,
+            &relay_guards,
+        )?;
+        if let Some(index) = selected_run {
+            extra["run_index"] = json!(index);
+        }
+        if extra["relay"]["status"] == "needs-probes"
+            && let Some(index) = extra["run_index"].as_u64()
+        {
+            extra["next_action"] = json!(format!(
+                "Use run_index {index} for each dispatch-discovery and discovery-step action. Reserve the exact probe before one MCP call, save its entire result, then submit its probe_id and result_file; use discovery-step with answers=[] to poll this run."
+            ));
+        }
+        state.validate()?;
+        let loaded = packs(&state)?;
+        let mut report = inventory::assess_at(&state, &loaded, &now)?;
+        let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
+            inventory_run_evidence(&state, work_budget, &relay_guards)?
+        } else {
+            (vec![], vec![], false)
+        };
+        if resolve_work {
+            state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
+            if let Some(reviewed_at) = reconcile_at {
+                state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
+                state.reconciled_at = Some(reviewed_at);
+            }
+            report = inventory::assess_at(&state, &loaded, &now)?;
+        }
+        if evidence_limited {
+            extra["inventory_work_evidence_limited"] = json!(true);
+            extra["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
             "message":"Discovery progress was saved. Some older evidence was omitted from automatic pending-work resolution because its verification budget was reached. Unproven work remains pending."}]);
-    }
-    if let Some(before) = before
-        && before == state_fingerprint(&state)?
-    {
-        writer.confirm_parent_durable()?;
-    } else {
-        state.updated_at = now;
-        let bytes = serde_json::to_vec_pretty(&state)
-            .map_err(|_| fail("Cannot serialize inventory state."))?;
-        writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
-    }
-    Ok((report, extra))
+        }
+        if let Some(before) = before
+            && before == state_fingerprint(&state)?
+        {
+            writer.confirm_parent_durable()?;
+        } else {
+            state.updated_at = now;
+            let bytes = serde_json::to_vec_pretty(&state)
+                .map_err(|_| fail("Cannot serialize inventory state."))?;
+            writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
+        }
+        Ok((report, extra))
+    })()
 }
 
 fn action_summary(action: &Value) -> Value {
@@ -648,9 +797,13 @@ fn action_summary(action: &Value) -> Value {
             );
         }
         if relay.get("status").and_then(Value::as_str) == Some("needs-probes") {
-            compact["next_action"] = json!(
-                "Submit discovery-step with answers=[] and --json without --summary to obtain exact pending probe arguments."
-            );
+            let selection = action["run_index"]
+                .as_u64()
+                .map(|index| format!("run_index={index}, "))
+                .unwrap_or_default();
+            compact["next_action"] = json!(format!(
+                "Submit discovery-step with {selection}answers=[] and --json without --summary to obtain exact pending probe arguments."
+            ));
         } else if let Some(compact) = compact.as_object_mut() {
             compact.remove("next_action");
         }
@@ -696,6 +849,7 @@ fn action_brief(action: &Value) -> Value {
         "parser_count",
         "automatic_refresh_available",
         "inventory_work_evidence_limited",
+        "run_index",
     ] {
         if let Some(value) = action.get(key).filter(|v| v.is_boolean() || v.is_u64()) {
             compact[key] = value.clone();
@@ -1008,6 +1162,9 @@ fn canonical(path: &Path) -> Result<PathBuf, Diagnostic> {
 }
 
 fn destination(path: &Path) -> Result<PathBuf, Diagnostic> {
+    if crate::setup_cli::private_input_exists(path)? {
+        return canonical(path);
+    }
     Ok(canonical(
         path.parent()
             .ok_or_else(|| fail("Retained discovery artifact needs a parent."))?,
@@ -1056,7 +1213,7 @@ pub(crate) fn inventory_capture_boundary(
         let run = state
             .discovery_runs
             .last()
-            .filter(|run| run.status != "complete")
+            .filter(|run| !matches!(run.status.as_str(), "complete" | "superseded"))
             .ok_or_else(|| fail("No unfinished discovery run."))?;
         let path = Path::new(&run.state_path);
         let writer = storage::Writer::acquire(path)?;
@@ -1075,6 +1232,7 @@ pub(crate) fn inventory_capture_boundary(
 fn inventory_run_evidence(
     state: &InventoryState,
     mut remaining: u64,
+    held_guards: &[storage::Writer],
 ) -> Result<(Vec<InventoryRunEvidence>, Vec<storage::Writer>, bool), Diagnostic> {
     let mut evidence = Vec::new();
     let mut guards = Vec::new();
@@ -1092,19 +1250,45 @@ fn inventory_run_evidence(
         {
             continue;
         }
-        let guard = storage::Writer::acquire(Path::new(&run.state_path))?;
+        if let Some(guard) = held_guards.get(index) {
+            if guard
+                .identity()
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+                != destination(Path::new(&run.state_path))
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+            {
+                return Err(discovery_run_failure(
+                    index,
+                    "Held discovery lock differs from its inventory reference.",
+                ));
+            }
+        } else {
+            guards.push(
+                storage::Writer::acquire(Path::new(&run.state_path))
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?,
+            );
+        }
         for path in [&run.state_path, &run.pack_path, &run.receipt_path] {
             let path = Path::new(path);
-            if !crate::setup_cli::private_input_exists(path)? {
-                return Err(fail("Completed discovery evidence is missing."));
+            if !crate::setup_cli::private_input_exists(path)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+            {
+                return Err(discovery_run_failure(
+                    index,
+                    "Completed discovery evidence is missing.",
+                ));
             }
         }
-        let (relay, report) = mcp::inspect_completed_report(Path::new(&run.state_path))?;
-        verify_run_reference(state, run, &relay)?;
+        let (relay, report) = mcp::inspect_completed_report(Path::new(&run.state_path))
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+        verify_run_reference(state, run, &relay)
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
         let request_sha256 = relay.request_sha256.clone();
         drop(relay);
         let length = serde_json::to_vec(&report.captures)
-            .map_err(|_| fail("Cannot serialize completed discovery captures."))?
+            .map_err(|_| {
+                discovery_run_failure(index, "Cannot serialize completed discovery captures.")
+            })?
             .len() as u64;
         let Some(next_remaining) = remaining.checked_sub(length) else {
             return Ok((evidence, guards, true));
@@ -1115,7 +1299,6 @@ fn inventory_run_evidence(
             request_sha256,
             captures: report.captures,
         });
-        guards.push(guard);
     }
     Ok((evidence, guards, false))
 }
@@ -1135,21 +1318,133 @@ fn resumable_elapsed(state_path: &str) -> Result<f64, Diagnostic> {
 
 fn finish_discovery(
     state: &mut InventoryState,
+    run_index: usize,
     output: &mcp::StepOutput,
     now: &str,
-) -> Result<(), Diagnostic> {
+) -> Result<Option<Diagnostic>, Diagnostic> {
+    let diagnostic = if output.status == "complete" {
+        let completion = output.completion.as_ref().ok_or_else(|| {
+            discovery_run_failure(run_index, "Completed relay has no verified artifacts.")
+        })?;
+        promote_discovery(state, run_index, completion, now)?
+    } else {
+        None
+    };
     let run = state
         .discovery_runs
-        .last_mut()
+        .get_mut(run_index)
         .ok_or_else(|| fail("No prepared discovery run."))?;
-    run.status = output.status.into();
+    run.status = if diagnostic.is_some() {
+        "superseded"
+    } else {
+        output.status
+    }
+    .into();
     run.answered = output.answered;
-    if output.status == "complete" {
-        let completion = output
-            .completion
-            .as_ref()
-            .ok_or_else(|| fail("Completed relay has no verified artifacts."))?;
-        promote_discovery(state, completion, now)?;
+    Ok(diagnostic)
+}
+
+fn check_discovery_predecessor(state: &InventoryState, index: usize) -> Result<(), Diagnostic> {
+    let relay = mcp::inspect_state(Path::new(&state.discovery_runs[index].state_path))
+        .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+    if let Some(session) = &relay.session
+        && !matches!(relay.status.as_str(), "activating" | "activated")
+        && session
+            .verified_predecessor(&relay.pack)
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+            != cumulative_predecessor(state)?.as_deref()
+    {
+        return Err(discovery_run_failure(
+            index,
+            "Discovery started from an earlier inventory; its accepted captures are retained. Prepare discovery again from the current inventory with explicit finite budgets.",
+        ));
+    }
+    Ok(())
+}
+
+fn check_retained_run(relay: &mcp::State) -> Result<(), Diagnostic> {
+    if mcp::has_in_flight(relay)
+        || matches!(
+            relay.status.as_str(),
+            "cancel-requested" | "cleanup-pending"
+        )
+    {
+        return Err(fail(
+            "A retained discovery search has unresolved termination or cleanup. Reconcile that exact attempt before another discovery search.",
+        ));
+    }
+    match relay.status.as_str() {
+        "activated" => Ok(()),
+        "failed" | "paused" if mcp::is_resumable(relay) => Ok(()),
+        _ => Err(fail(
+            "A retained discovery run is unfinished or its legacy termination is uncertain. Explicitly pause or reconcile it before another discovery search.",
+        )),
+    }
+}
+
+fn preflight_foreign_run(
+    state: &InventoryState,
+    action: &InventoryAction,
+    index: usize,
+    relay: &mcp::State,
+    owner: &storage::Writer,
+) -> Result<(), Diagnostic> {
+    let owned = mcp::inspect_inventory_owner(relay, owner)?;
+    let Err(version) = mcp::require_current_producer(relay) else {
+        return Ok(());
+    };
+    if mcp::is_resumable(relay)
+        && !matches!(relay.status.as_str(), "activated" | "failed")
+        && !owned
+    {
+        return Err(version);
+    }
+    check_retained_run(relay).map_err(|mut diagnostic| {
+        diagnostic.message.push(' ');
+        diagnostic.message.push_str(&version.message);
+        diagnostic
+    })?;
+    if relay.status == "paused"
+        && let InventoryAction::PrepareDiscovery {
+            start,
+            end,
+            source_ids,
+            value_fields,
+            kind_fields,
+            population_fields,
+            max_queries,
+            max_seconds,
+        } = action
+    {
+        let request = state.discovery_request(
+            start.clone(),
+            end.clone(),
+            source_ids,
+            value_fields.clone(),
+            kind_fields.clone(),
+            population_fields.clone(),
+            *max_queries,
+            *max_seconds,
+        )?;
+        let fingerprint = serde_json::to_vec(&request)
+            .map(|bytes| cqlmatic::sha256_hex(&bytes))
+            .map_err(|_| fail("Cannot fingerprint discovery request."))?;
+        if relay.request_sha256 == fingerprint
+            && relay
+                .session
+                .as_ref()
+                .expect("paused resumable checked")
+                .verified_predecessor(&relay.pack)?
+                == cumulative_predecessor(state)?.as_deref()
+        {
+            return Err(discovery_run_failure(
+                index,
+                &format!(
+                    "An identical discovery request is safely paused; retain its original allowance. {}",
+                    version.message
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1157,8 +1452,13 @@ fn finish_discovery(
 fn check_retained_searches(
     state: &InventoryState,
     request: Option<&discovery::DiscoverRequest>,
-    skip_selected: bool,
+    selected_run: Option<usize>,
 ) -> Result<(), Diagnostic> {
+    if state.capability_blocked() {
+        return Err(fail(
+            "Reconcile the exact capability attempt before another inventory search.",
+        ));
+    }
     let fingerprint = request
         .map(|r| serde_json::to_vec(r).map(|bytes| cqlmatic::sha256_hex(&bytes)))
         .transpose()
@@ -1169,53 +1469,71 @@ fn check_retained_searches(
             "Selected discovery checkpoint differs from the confirmed inventory target.",
         ));
     }
+    let mut identical_paused = Vec::new();
     for (index, run) in state.discovery_runs.iter().enumerate() {
         let path = Path::new(&run.state_path);
-        if !crate::setup_cli::private_input_exists(path)? {
-            return Err(fail(
+        if !crate::setup_cli::private_input_exists(path)
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+        {
+            return Err(discovery_run_failure(
+                index,
                 "Retained discovery checkpoint is missing; reconcile it before preparing another run.",
             ));
         }
-        let relay = mcp::inspect_state(path)?;
-        if environment.is_none_or(|environment| &relay.request.environment != environment)
-            || destination(&relay.pack)? != destination(Path::new(&run.pack_path))?
-            || destination(&relay.receipt)? != destination(Path::new(&run.receipt_path))?
-        {
-            return Err(fail(
-                "Retained discovery checkpoint differs from its inventory reference.",
-            ));
-        }
-        if skip_selected && index + 1 == state.discovery_runs.len() {
+        let relay = mcp::inspect_state(path)
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+        verify_run_reference(state, run, &relay)
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+        if selected_run == Some(index) {
             continue;
         }
-        if mcp::has_in_flight(&relay)
-            || matches!(
-                relay.status.as_str(),
-                "cancel-requested" | "cleanup-pending"
-            )
+        check_retained_run(&relay)
+            .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+        if relay.status == "paused"
+            && mcp::is_resumable(&relay)
+            && selected_run.is_none()
+            && fingerprint.as_ref() == Some(&relay.request_sha256)
         {
-            return Err(fail(
-                "A retained discovery search has unresolved termination or cleanup. Reconcile that exact attempt before preparing another run.",
-            ));
+            let predecessor = relay
+                .session
+                .as_ref()
+                .expect("resumable checked")
+                .verified_predecessor(&relay.pack)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+                .map(str::to_owned);
+            identical_paused.push((index, predecessor));
         }
-        match relay.status.as_str() {
-            "activated" => {}
-            "failed" if mcp::is_resumable(&relay) => {}
-            "paused" if mcp::is_resumable(&relay) => {
-                if fingerprint.as_ref() == Some(&relay.request_sha256) {
-                    return Err(fail(
-                        "An identical discovery request is safely paused. Resume it with its accepted captures and remaining budget.",
-                    ));
-                }
-            }
-            _ => {
-                return Err(fail(
-                    "A retained discovery run is unfinished or its legacy termination is uncertain. Explicitly pause or reconcile it before preparing another run.",
-                ));
-            }
+    }
+    if !identical_paused.is_empty() {
+        let predecessor = cumulative_predecessor(state)?;
+        if let Some((index, _)) = identical_paused
+            .iter()
+            .find(|(_, previous)| previous == &predecessor)
+        {
+            return Err(discovery_run_failure(
+                *index,
+                &format!(
+                    "An identical discovery request is safely paused. Submit resume-discovery with run_index {index} to retain its accepted captures and remaining budget."
+                ),
+            ));
         }
     }
     Ok(())
+}
+
+fn discovery_run_index(
+    state: &InventoryState,
+    run_index: Option<usize>,
+) -> Result<usize, Diagnostic> {
+    let index = run_index
+        .or_else(|| state.discovery_runs.len().checked_sub(1))
+        .ok_or_else(|| fail("Prepare discovery before selecting a run."))?;
+    if index >= state.discovery_runs.len() {
+        return Err(fail(&format!(
+            "Discovery run_index {index} is out of range."
+        )));
+    }
+    Ok(index)
 }
 fn apply(
     path: &Path,
@@ -1223,8 +1541,164 @@ fn apply(
     action: InventoryAction,
     now: &str,
     capture_boundary: Option<InventoryCaptureBoundary>,
+    owner: &storage::Writer,
+    relay_guards: &[storage::Writer],
 ) -> Result<Value, Diagnostic> {
     match action {
+        InventoryAction::PrepareCapabilities {
+            execution_context_id,
+            session_id,
+            case_ids,
+            host_evidence_file,
+            max_queries,
+            max_seconds,
+        } => {
+            if state.active_pack.is_none() {
+                return Err(fail(
+                    "Activate the ordinary field pack before preparing optional capability checks.",
+                ));
+            }
+            if state.refresh_blocked() {
+                return Err(fail(
+                    "Reconcile the outstanding refresh before optional capability checks.",
+                ));
+            }
+            check_retained_searches(state, None, None)?;
+            for previous in &state.capability_runs {
+                if previous.execution_context_id == execution_context_id
+                    && previous.session_id == session_id
+                    && previous.matches_current_cases()
+                    && previous.attempts.len() < previous.max_queries as usize
+                    && previous.remaining_seconds(now)? > 0.0
+                    && previous.status().cases.iter().any(|case| {
+                        case.last_outcome != Some(cqlmatic::capability::CapabilityOutcome::Verified)
+                    })
+                {
+                    return Err(fail(
+                        "Resume the retained capability checkpoint with its original remaining allowance.",
+                    ));
+                }
+            }
+            distinct_from_state(path, Path::new(&host_evidence_file))?;
+            let raw = observation_input(Path::new(&host_evidence_file), 64 * 1024)?;
+            let environment = state
+                .target
+                .as_ref()
+                .ok_or_else(|| fail("Confirm the capability target first."))?
+                .environment
+                .clone();
+            let run = cqlmatic::capability::CapabilityRun::prepare(
+                environment,
+                execution_context_id,
+                session_id,
+                case_ids,
+                &raw,
+                max_queries,
+                max_seconds,
+                now,
+                state.capability_runs.len(),
+            )?;
+            let status = run.status();
+            state.capability_runs.push(run);
+            Ok(json!({"capability":status,"executes_searches":false,
+                "next_action":"Review the selected fixed cases, then reserve one dispatch-capability action before each authorized MCP call. Capability outcomes do not change the completed field pack."}))
+        }
+        InventoryAction::DispatchCapability {
+            run_id,
+            case_id,
+            execution_context_id,
+            session_id,
+        } => {
+            if state.refresh_blocked() {
+                return Err(fail(
+                    "Reconcile the outstanding refresh before a capability search.",
+                ));
+            }
+            check_retained_searches(state, None, None)?;
+            let bytes = serde_json::to_vec_pretty(state)
+                .map_err(|_| fail("Cannot preflight capability capture capacity."))?;
+            if bytes.len() as u64 + (mcp::MAX_RESULT_BYTES as u64 * 2) + 4 * 1024 * 1024
+                > MAX_STATE_BYTES
+            {
+                return Err(fail(
+                    "Inventory has insufficient protected capacity for a complete capability result and settlement; no dispatch was reserved.",
+                ));
+            }
+            let run = state
+                .capability_runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or_else(|| fail("Unknown capability checkpoint."))?;
+            let attempt = run.dispatch(case_id, &execution_context_id, &session_id, now)?;
+            Ok(
+                json!({"run_id":run_id,"attempt_id":attempt.reservation.id,"case_id":case_id,
+                "case_revision":attempt.case_revision,"query_sha256":attempt.query_sha256,
+                "phase":"dispatched","tool":"falcon_search_ngsiem","arguments":attempt.reservation.arguments,
+                "search_budget":{"max_queries":1,"max_seconds":attempt.reservation.search_lifetime_seconds()?,"enforced_by":"verified-provider-search-lifetime"},
+                "executes_searches":false,
+                "next_action":"This exact attempt is reserved. Execute once in the recorded authorization context and host session. Save the entire result and exact settlement, then use submit-capability. A lost response blocks every subsequent inventory dispatch."}),
+            )
+        }
+        InventoryAction::SubmitCapability {
+            run_id,
+            attempt_id,
+            execution_context_id,
+            result_file,
+            settlement_file,
+            retrieved_at,
+        } => {
+            distinct_from_state(path, Path::new(&settlement_file))?;
+            let settlement = observation_input(Path::new(&settlement_file), 64 * 1024)?;
+            let result = result_file
+                .map(|file| {
+                    distinct_from_state(path, Path::new(&file))?;
+                    observation_input(Path::new(&file), mcp::MAX_RESULT_BYTES as u64)
+                })
+                .transpose()?;
+            let run = state
+                .capability_runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or_else(|| fail("Unknown capability checkpoint."))?;
+            run.submit(
+                &attempt_id,
+                &execution_context_id,
+                result.as_deref(),
+                &settlement,
+                &retrieved_at,
+                now,
+            )?;
+            Ok(
+                json!({"capability":run.status(),"executes_searches":false,"evidence_basis":"caller-attested exact authorization context, full capture and settlement; expected-output checks replay on reread"}),
+            )
+        }
+        InventoryAction::PauseCapabilities { run_id } => {
+            let run = state
+                .capability_runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or_else(|| fail("Unknown capability checkpoint."))?;
+            run.pause(now)?;
+            Ok(json!({"capability":run.status(),"executes_searches":false}))
+        }
+        InventoryAction::ResumeCapabilities {
+            run_id,
+            execution_context_id,
+        } => {
+            if state.refresh_blocked() {
+                return Err(fail(
+                    "Reconcile the outstanding refresh before resuming capability checks.",
+                ));
+            }
+            check_retained_searches(state, None, None)?;
+            let run = state
+                .capability_runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or_else(|| fail("Unknown capability checkpoint."))?;
+            run.resume(&execution_context_id, now)?;
+            Ok(json!({"capability":run.status(),"executes_searches":false}))
+        }
         InventoryAction::Init {} => {
             if path.exists() {
                 return Err(fail(
@@ -1270,7 +1744,7 @@ fn apply(
             host_evidence_file,
             automatic,
         } => {
-            check_retained_searches(state, None, false)?;
+            check_retained_searches(state, None, None)?;
             distinct_from_state(path, Path::new(&host_evidence_file))?;
             let raw = observation_input(Path::new(&host_evidence_file), 64 * 1024)?;
             let id = state.prepare_refresh(session_id, &raw, automatic, now)?;
@@ -1284,7 +1758,7 @@ fn apply(
             attempt_id,
             session_id,
         } => {
-            check_retained_searches(state, None, false)?;
+            check_retained_searches(state, None, None)?;
             let arguments = state.dispatch_refresh(&attempt_id, &session_id, now)?;
             let max_seconds = state
                 .refresh_attempts
@@ -1379,7 +1853,7 @@ fn apply(
             end,
             max_seconds,
         } => {
-            check_retained_searches(state, None, false)?;
+            check_retained_searches(state, None, None)?;
             if state.refresh_blocked() {
                 return Err(fail(
                     "Reconcile the unresolved refresh before preparing a new search.",
@@ -1587,7 +2061,7 @@ fn apply(
                 max_queries,
                 max_seconds,
             )?;
-            check_retained_searches(state, Some(&request), false)?;
+            check_retained_searches(state, Some(&request), None)?;
             let prior = cumulative_pack(state)?;
             let run_dir = snapshot_directory(path, "discovery", state.discovery_runs.len() + 1)?;
             let relay = run_dir.join("relay-state.json");
@@ -1603,13 +2077,8 @@ fn apply(
                 .filter(|s| request.sources.contains(&s.selectors))
                 .map(|s| s.id.clone())
                 .collect();
-            let output = mcp::init_resumable(
-                request.clone(),
-                &relay,
-                &pack,
-                &receipt,
-                mcp::Transport::Mcp,
-            )?;
+            let output =
+                mcp::init_inventory_resumable(request.clone(), &relay, &pack, &receipt, owner)?;
             state.discovery_runs.push(DiscoveryRun {
                 state_path: absolute_path(&relay)?,
                 pack_path: absolute_path(&pack)?,
@@ -1627,15 +2096,17 @@ fn apply(
                 quick_depth: state.quick_depth,
             });
             Ok(
-                json!({"warning":DISCOVERY_WARNING,"relay":output,"next_action":"Before each MCP call, submit dispatch-discovery with its probe_id. Relay that probe through the existing CrowdStrike MCP, save the entire result, then submit discovery-step with probe_id and result_file. The CLI does not implement MCP OAuth or internal model calls."}),
+                json!({"run_index":state.discovery_runs.len()-1,"warning":DISCOVERY_WARNING,"relay":output,"next_action":"Before each MCP call, submit dispatch-discovery with its probe_id. Relay that probe through the existing CrowdStrike MCP, save the entire result, then submit discovery-step with probe_id and result_file. The CLI does not implement MCP OAuth or internal model calls."}),
             )
         }
-        InventoryAction::DiscoveryStep { answers } => {
+        InventoryAction::DiscoveryStep { answers, run_index } => {
+            let run_index = discovery_run_index(state, run_index)?;
             let run = state
                 .discovery_runs
-                .last_mut()
+                .get(run_index)
                 .ok_or_else(|| fail("Prepare discovery before relaying saved answers."))?;
-            let already_complete = run.status == "complete";
+            let already_finalized = matches!(run.status.as_str(), "complete" | "superseded");
+            let already_superseded = run.status == "superseded";
             let answers: Vec<_> = answers
                 .into_iter()
                 .map(|a| (a.probe_id, PathBuf::from(a.result_file)))
@@ -1651,11 +2122,27 @@ fn apply(
             } else {
                 mcp::step(relay_path, &answers)
             };
-            let relay = read_json::<mcp::State>(Path::new(&run.state_path)).ok();
+            if let Err(diagnostic) = &result
+                && diagnostic.code == "MCP_STATE_PRODUCER"
+            {
+                return Err(discovery_run_diagnostic(run_index, diagnostic.clone()));
+            }
+            let relay = mcp::inspect_state(Path::new(&run.state_path))
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
+            if result.is_err() {
+                verify_run_reference(state, run, &relay)
+                    .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
+            }
+            let duplicate_superseded = already_superseded
+                && !answers.is_empty()
+                && answers.iter().all(|(id, _)| relay.answers.contains_key(id));
+            let run = state
+                .discovery_runs
+                .get_mut(run_index)
+                .expect("Selected run exists");
             let stored_failure = if run.status == "failed"
                 && let Ok(output) = &result
                 && output.terminal_failure
-                && let Some(relay) = &relay
             {
                 let created_at = cqlmatic::environment::parse_time(&relay.created_at)?;
                 output.diagnostics.iter().all(|diagnostic| {
@@ -1670,7 +2157,7 @@ fn apply(
             } else {
                 false
             };
-            if !stored_failure && let Some(relay) = relay {
+            if !stored_failure {
                 run.answered = relay.answers.len();
                 // Finalize terminal status only from the verified relay output.
                 if matches!(
@@ -1684,9 +2171,10 @@ fn apply(
                 ) {
                     run.status = relay.status;
                 }
-                if !already_complete {
+                if !already_finalized {
                     run.elapsed_seconds = if resumable {
-                        resumable_elapsed(&run.state_path)?
+                        resumable_elapsed(&run.state_path)
+                            .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?
                     } else {
                         (cqlmatic::environment::parse_time(now)?
                             - cqlmatic::environment::parse_time(&relay.created_at)?)
@@ -1697,7 +2185,7 @@ fn apply(
             }
             match result {
                 Ok(output) => {
-                    finish_discovery(state, &output, now)?;
+                    let superseded = finish_discovery(state, run_index, &output, now)?;
                     if !stored_failure && matches!(output.status, "failed" | "activation-blocked") {
                         for diagnostic in &output.diagnostics {
                             state.failures.push(InventoryFailure {
@@ -1708,20 +2196,31 @@ fn apply(
                             });
                         }
                     }
-                    Ok(json!({"relay":output}))
+                    Ok(match superseded {
+                        Some(diagnostic) => {
+                            json!({"status":"incomplete","diagnostics":[diagnostic],"relay":output})
+                        }
+                        None => json!({"relay":output}),
+                    })
                 }
                 Err(diagnostic) => {
-                    state.failures.push(InventoryFailure {
-                        stage: "discovery".into(),
-                        source_id: None,
-                        message: diagnostic.message.clone(),
-                        recorded_at: now.into(),
-                    });
+                    if !(duplicate_superseded && diagnostic.code == "MCP_ALREADY_ANSWERED") {
+                        state.failures.push(InventoryFailure {
+                            stage: "discovery".into(),
+                            source_id: None,
+                            message: diagnostic.message.clone(),
+                            recorded_at: now.into(),
+                        });
+                    }
                     Ok(json!({"status":"incomplete","diagnostics":[diagnostic]}))
                 }
             }
         }
-        InventoryAction::DispatchDiscovery { probe_id } => {
+        InventoryAction::DispatchDiscovery {
+            probe_id,
+            run_index,
+        } => {
+            let run_index = discovery_run_index(state, run_index)?;
             if state.refresh_blocked() {
                 return Err(fail(
                     "Reconcile the unresolved refresh before dispatching a discovery search.",
@@ -1729,40 +2228,71 @@ fn apply(
             }
             let selected = state
                 .discovery_runs
-                .last()
+                .get(run_index)
                 .ok_or_else(|| fail("Prepare discovery before dispatching a probe."))?;
-            let request = mcp::inspect_state(Path::new(&selected.state_path))?.request;
-            check_retained_searches(state, Some(&request), true)?;
+            let request = mcp::inspect_state(Path::new(&selected.state_path))
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?
+                .request;
+            check_retained_searches(state, Some(&request), Some(run_index))?;
+            check_discovery_predecessor(state, run_index)?;
             let run = state
                 .discovery_runs
-                .last_mut()
+                .get_mut(run_index)
                 .ok_or_else(|| fail("Prepare discovery before dispatching a probe."))?;
-            let output = mcp::dispatch(Path::new(&run.state_path), &probe_id)?;
+            let relay = relay_guards
+                .get(run_index)
+                .ok_or_else(|| fail("Selected discovery lock is missing."))?;
+            let output = mcp::dispatch_inventory(relay, owner, &probe_id)
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             run.status = output.status.into();
             run.answered = output.answered;
-            run.elapsed_seconds = resumable_elapsed(&run.state_path)?;
+            run.elapsed_seconds = resumable_elapsed(&run.state_path)
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             Ok(json!({"relay":output,"executes_searches":false}))
         }
-        InventoryAction::PauseDiscovery {} => {
+        InventoryAction::PauseDiscovery { run_index } => {
+            let run_index = discovery_run_index(state, run_index)?;
             let run = state
                 .discovery_runs
-                .last_mut()
+                .get_mut(run_index)
                 .ok_or_else(|| fail("No prepared discovery to pause."))?;
-            let output = mcp::pause(Path::new(&run.state_path))?;
+            let output = mcp::pause(Path::new(&run.state_path))
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             run.status = output.status.into();
             run.answered = output.answered;
-            run.elapsed_seconds = resumable_elapsed(&run.state_path)?;
+            run.elapsed_seconds = resumable_elapsed(&run.state_path)
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             Ok(json!({"relay":output,"executes_searches":false}))
         }
-        InventoryAction::ResumeDiscovery {} => {
+        InventoryAction::ResumeDiscovery { run_index } => {
+            let run_index = discovery_run_index(state, run_index)?;
+            if state.capability_blocked() {
+                return Err(fail(
+                    "Reconcile outstanding capability termination before resuming discovery.",
+                ));
+            }
+            check_retained_searches(state, None, Some(run_index))?;
+            check_discovery_predecessor(state, run_index)?;
             let run = state
                 .discovery_runs
-                .last_mut()
+                .get_mut(run_index)
                 .ok_or_else(|| fail("No prepared discovery to resume."))?;
-            let output = mcp::resume(Path::new(&run.state_path))?;
-            run.elapsed_seconds = resumable_elapsed(&run.state_path)?;
-            finish_discovery(state, &output, now)?;
-            Ok(json!({"relay":output,"executes_searches":false}))
+            let relay = relay_guards
+                .get(run_index)
+                .ok_or_else(|| fail("Selected discovery lock is missing."))?;
+            let output = mcp::resume_inventory(relay, owner)
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
+            if !matches!(run.status.as_str(), "complete" | "superseded") {
+                run.elapsed_seconds = resumable_elapsed(&run.state_path)
+                    .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
+            }
+            let superseded = finish_discovery(state, run_index, &output, now)?;
+            Ok(match superseded {
+                Some(diagnostic) => {
+                    json!({"status":"incomplete","diagnostics":[diagnostic],"relay":output,"executes_searches":false})
+                }
+                None => json!({"relay":output,"executes_searches":false}),
+            })
         }
         InventoryAction::ImportPack { pack_file } => {
             distinct_from_state(path, Path::new(&pack_file))?;
@@ -2380,6 +2910,95 @@ fn settings_action(state: &InventoryState) -> Result<InventoryAction, Diagnostic
     }
 }
 
+fn capability_action(state: &InventoryState) -> Result<Option<InventoryAction>, Diagnostic> {
+    use cqlmatic::capability::CaseId;
+    if state.active_pack.is_none() {
+        return Err(fail(
+            "Activate the field pack before optional function checks.",
+        ));
+    }
+    notice(
+        "Optional function checks use a separate finite allowance. The activated field pack remains available. Checks run only when you relay a reserved case through your authorized host; this menu makes no MCP calls.",
+    )?;
+    let choice = prompt("Function checks [prepare / dispatch / submit / pause / resume / later]")?;
+    if choice.is_empty() || choice == "later" {
+        return Ok(None);
+    }
+    let case = |value: &str| {
+        serde_json::from_value::<CaseId>(json!(value)).map_err(|_| fail("Choose a shipped case ID: array-union, array-intersection, array-reduce-row, array-reduce-column or math-sqrt."))
+    };
+    if choice == "prepare" {
+        let selected =
+            prompt("Case IDs separated by commas (empty selects the four ArrayFunctions cases)")?;
+        let case_ids = if selected.trim().is_empty() {
+            vec![
+                CaseId::ArrayUnion,
+                CaseId::ArrayIntersection,
+                CaseId::ArrayReduceRow,
+                CaseId::ArrayReduceColumn,
+            ]
+        } else {
+            selected
+                .split(',')
+                .map(|value| case(value.trim()))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for case in &case_ids {
+            notice(&format!("{:?}: {}", case, case.query()))?;
+        }
+        return Ok(Some(InventoryAction::PrepareCapabilities {
+            execution_context_id: prompt(
+                "Current caller-attested authorization-context ID (same CID alone is insufficient)",
+            )?,
+            session_id: prompt("Verified host session ID")?,
+            case_ids,
+            host_evidence_file: prompt(
+                "Protected provider-enforced search-lifetime evidence file",
+            )?,
+            max_queries: u32::try_from(number(
+                "Maximum total attempts including failures/retries",
+                8,
+            )?)
+            .map_err(|_| fail("Capability attempt budget is out of range."))?,
+            max_seconds: number("Maximum active seconds across pauses and resumes", 1200)?,
+        }));
+    }
+    let run = state
+        .capability_runs
+        .last()
+        .ok_or_else(|| fail("Prepare optional function checks first."))?;
+    let run_id = run.id.clone();
+    Ok(Some(match choice.as_str() {
+        "dispatch" => InventoryAction::DispatchCapability {
+            run_id,
+            case_id: case(&prompt("Reviewed case ID to dispatch once")?)?,
+            execution_context_id: prompt("Current caller-attested authorization-context ID")?,
+            session_id: prompt("Current verified host session ID")?,
+        },
+        "submit" => {
+            let attempt_id = prompt("Exact reserved capability attempt ID")?;
+            let execution_context_id = prompt("Current caller-attested authorization-context ID")?;
+            let result = prompt(
+                "Protected exact raw result file (empty only when no response was captured)",
+            )?;
+            InventoryAction::SubmitCapability {
+                run_id,
+                attempt_id,
+                execution_context_id,
+                result_file: (!result.is_empty()).then_some(result),
+                settlement_file: prompt("Protected exact-attempt termination settlement file")?,
+                retrieved_at: prompt("Actual result retrieval time (RFC3339 UTC)")?,
+            }
+        }
+        "pause" => InventoryAction::PauseCapabilities { run_id },
+        "resume" => InventoryAction::ResumeCapabilities {
+            run_id,
+            execution_context_id: prompt("Current caller-attested authorization-context ID")?,
+        },
+        _ => return Err(fail("Select a displayed function-check action.")),
+    }))
+}
+
 fn interactive(
     path: &Path,
     mut state: InventoryState,
@@ -2437,9 +3056,14 @@ fn interactive(
     }
     render(&report)?;
     let choice = prompt(&format!(
-        "Action [refresh{} / scout / confirm / review / parsers / bind / discover / pause / resume / poll / reconcile / settings{} / request / status]",
+        "Action [refresh{} / scout / confirm / review / parsers / bind / discover / pause / resume / poll / reconcile{} / settings{} / request / status]",
         if report.refresh_reminder.as_ref().is_some_and(|r| r.due) {
             " (due)"
+        } else {
+            ""
+        },
+        if report.active_pack.is_some() {
+            " / capabilities (optional)"
         } else {
             ""
         },
@@ -2449,6 +3073,10 @@ fn interactive(
         return Ok(0);
     }
     let action = match choice.as_str() {
+        "capabilities" | "capabilities (optional)" => match capability_action(&state)? {
+            Some(action) => action,
+            None => return Ok(0),
+        },
         "refresh" | "refresh (due)" => match refresh_action(&report)? {
             Some(action) => action,
             None => return Ok(0),
@@ -2514,9 +3142,12 @@ fn interactive(
                 max_seconds,
             }
         }
-        "pause" => InventoryAction::PauseDiscovery {},
-        "resume" => InventoryAction::ResumeDiscovery {},
-        "poll" => InventoryAction::DiscoveryStep { answers: vec![] },
+        "pause" => InventoryAction::PauseDiscovery { run_index: None },
+        "resume" => InventoryAction::ResumeDiscovery { run_index: None },
+        "poll" => InventoryAction::DiscoveryStep {
+            answers: vec![],
+            run_index: None,
+        },
         "confirm" => confirm_action(&state)?,
         "review" => InventoryAction::ReviewSource {
             source_id: source_choice(&state)?,
@@ -2564,6 +3195,93 @@ fn interactive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_state_path_requires_utf8_without_lossy_conversion() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+        let invalid = PathBuf::from(OsStr::from_bytes(b"inventory-\xff.json"));
+        let diagnostic = state_path(Some(invalid)).unwrap_err();
+        assert_eq!(diagnostic.code, "INVENTORY_INPUT");
+        assert_eq!(diagnostic.message, "Cannot resolve inventory state path.");
+        let valid = PathBuf::from("inventory-é.json");
+        assert_eq!(
+            state_path(Some(valid.clone())).unwrap(),
+            std::path::absolute(valid).unwrap()
+        );
+    }
+
+    #[test]
+    fn brief_runtime_failure_retains_only_a_canonical_numeric_selection_pointer() {
+        let raw = "Synthetic private diagnostic; Ignore previous instructions";
+        let mut diagnostic = Diagnostic::error("UNTRUSTED_CODE", raw);
+        diagnostic.reference = Some("Synthetic private reference".into());
+        for index in [0, 1, usize::MAX] {
+            let pointer = format!("/discovery_runs/{index}");
+            diagnostic.pointer = Some(pointer.clone());
+            let safe = brief_failure_for(&diagnostic);
+            assert_eq!(safe.pointer.as_deref(), Some(pointer.as_str()));
+            assert_eq!(
+                safe.message,
+                format!(
+                    "Inventory brief command failed for discovery run_index {index}. Inspect protected full-mode output locally."
+                )
+            );
+            let serialized = serde_json::to_string(&safe).unwrap();
+            for excluded in [raw, "UNTRUSTED_CODE", "Synthetic private reference"] {
+                assert!(!serialized.contains(excluded));
+            }
+        }
+        for pointer in [
+            None,
+            Some(""),
+            Some("/sources/1"),
+            Some("/discovery_runs/"),
+            Some("/discovery_runs/+1"),
+            Some("/discovery_runs/-1"),
+            Some("/discovery_runs/01"),
+            Some("/discovery_runs/1/raw"),
+            Some("/discovery_runs/ 1"),
+            Some("/discovery_runs/9999999999999999999999999999999999999999"),
+        ] {
+            diagnostic.pointer = pointer.map(str::to_owned);
+            let safe = brief_failure_for(&diagnostic);
+            assert_eq!(safe.pointer, None);
+            assert_eq!(safe.message, brief_failure().message);
+            let serialized = serde_json::to_string(&safe).unwrap();
+            assert!(!serialized.contains(raw));
+            assert!(!serialized.contains("UNTRUSTED_CODE"));
+            assert!(!serialized.contains("Synthetic private reference"));
+        }
+    }
+
+    #[test]
+    fn brief_producer_failure_uses_fixed_checkpoint_recovery_guidance() {
+        let raw = "Synthetic diagnostic with an untrusted checkpoint path";
+        let mut diagnostic = Diagnostic::error("MCP_STATE_PRODUCER", raw);
+        diagnostic.reference = Some("Synthetic untrusted reference".into());
+        for pointer in [None, Some("/discovery_runs/7"), Some("/discovery_runs/07")] {
+            diagnostic.pointer = pointer.map(str::to_owned);
+            let safe = brief_failure_for(&diagnostic);
+            assert_eq!(safe.code, "MCP_STATE_PRODUCER");
+            assert!(safe.message.contains("unowned"));
+            assert!(safe.message.contains("standalone"));
+            assert!(safe.message.contains("checkpoint"));
+            assert!(safe.message.contains("bound to inventory"));
+            assert!(safe.message.contains("outstanding inventory searches"));
+            assert!(safe.message.contains("concurrent inventory execution"));
+            assert!(!safe.message.contains("--state"));
+            assert_eq!(
+                safe.pointer.as_deref(),
+                pointer.filter(|p| *p == "/discovery_runs/7")
+            );
+            let serialized = serde_json::to_vec(&safe).unwrap();
+            assert!(serialized.len() < 4096);
+            let serialized = String::from_utf8(serialized).unwrap();
+            assert!(!serialized.contains(raw));
+            assert!(!serialized.contains("Synthetic untrusted reference"));
+        }
+    }
 
     fn work_action(path: &Path, action: Value, budget: u64) -> (InventoryStatus, Value) {
         apply_and_store_with_work_budget(path, serde_json::from_value(action).unwrap(), budget)
@@ -2663,7 +3381,8 @@ mod tests {
                 .all(|work| !work.deferred && work.notified_revision == 0)
         );
 
-        let (evidence, guards, limited) = inventory_run_evidence(&stored, MAX_STATE_BYTES).unwrap();
+        let (evidence, guards, limited) =
+            inventory_run_evidence(&stored, MAX_STATE_BYTES, &[]).unwrap();
         assert_eq!(evidence.len(), 1);
         assert!(!limited);
         assert_eq!(
@@ -2688,7 +3407,7 @@ mod tests {
             )
             .unwrap();
         mismatched.discovery_runs[0].pack_path = other.to_string_lossy().into();
-        assert!(inventory_run_evidence(&mismatched, MAX_STATE_BYTES).is_err());
+        assert!(inventory_run_evidence(&mismatched, MAX_STATE_BYTES, &[]).is_err());
         let receipt = Path::new(&stored.discovery_runs[0].receipt_path);
         let bytes = std::fs::read(receipt).unwrap();
         let before = std::fs::read(&path).unwrap();

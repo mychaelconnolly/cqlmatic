@@ -14,7 +14,7 @@ pub const DISCOVERY_WARNING: &str = "Initial environment discovery is extensive.
 pub const SCOUT_QUERY: &str =
     "groupBy([#repo, #type, @sourcetype], function=count(as=events), limit=max)";
 pub const MAX_STATE_BYTES: u64 = 67_108_864;
-pub const STATE_VERSION: u32 = 3;
+pub const STATE_VERSION: u32 = 4;
 pub const REFRESH_OFF_WARNING: &str = "Turning off automatic inventory refresh can leave new repositories, sources, and types undiscovered. Manual refresh remains available.";
 pub const REFRESH_SECONDS: u64 = 300;
 pub const MANUAL_REFRESH_SECONDS: u64 = 600;
@@ -171,14 +171,54 @@ pub enum InventoryAction {
         max_seconds: u64,
     },
     DiscoveryStep {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_index: Option<usize>,
         #[serde(default)]
         answers: Vec<DiscoveryAnswer>,
     },
     DispatchDiscovery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_index: Option<usize>,
         probe_id: String,
     },
-    PauseDiscovery {},
-    ResumeDiscovery {},
+    PauseDiscovery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_index: Option<usize>,
+    },
+    ResumeDiscovery {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_index: Option<usize>,
+    },
+    PrepareCapabilities {
+        execution_context_id: String,
+        session_id: String,
+        case_ids: Vec<crate::capability::CaseId>,
+        host_evidence_file: String,
+        max_queries: u32,
+        max_seconds: u64,
+    },
+    DispatchCapability {
+        run_id: String,
+        case_id: crate::capability::CaseId,
+        execution_context_id: String,
+        session_id: String,
+    },
+    SubmitCapability {
+        run_id: String,
+        attempt_id: String,
+        execution_context_id: String,
+        #[serde(default)]
+        result_file: Option<String>,
+        settlement_file: String,
+        retrieved_at: String,
+    },
+    PauseCapabilities {
+        run_id: String,
+    },
+    ResumeCapabilities {
+        run_id: String,
+        execution_context_id: String,
+    },
     ImportPack {
         pack_file: String,
     },
@@ -857,6 +897,8 @@ pub struct InventoryFailure {
 pub struct InventoryState {
     pub format: String,
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_evidence_schema_version: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -871,6 +913,8 @@ pub struct InventoryState {
     pub refresh_settings: RefreshSettings,
     #[serde(default)]
     pub refresh_attempts: Vec<RefreshAttempt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_runs: Vec<crate::capability::CapabilityRun>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_reminder: Option<RefreshReminder>,
     #[serde(default)]
@@ -987,6 +1031,8 @@ pub struct InventoryStatus {
     pub refresh_reminder: Option<RefreshReminderStatus>,
     pub refresh_attempts: Vec<RefreshStatus>,
     pub refresh_blocked: bool,
+    pub capabilities: Vec<crate::capability::CapabilityStatus>,
+    pub capability_blocked: bool,
     pub pending_inventory: Vec<PendingInventoryWork>,
     pub inventory_notification_count: usize,
     pub settings_attention: bool,
@@ -1345,6 +1391,7 @@ pub fn summary(status: &InventoryStatus) -> Value {
             "pending_inventory":status.pending_inventory.len(),"inventory_notifications":status.inventory_notification_count},
         "refresh_settings":status.refresh_settings,"automatic_refresh_available":status.automatic_refresh_available,
         "refresh_reminder":status.refresh_reminder,"refresh_blocked":status.refresh_blocked,
+        "capabilities":status.capabilities,"capability_blocked":status.capability_blocked,
         "settings_attention":status.settings_attention,
         "refresh_attempts":status.refresh_attempts,
         "pending_inventory":status.pending_inventory,
@@ -1396,7 +1443,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     let mut discovery_work: Vec<_> = status
         .discovery_runs
         .iter()
-        .filter(|run| !matches!(run.status.as_str(), "complete" | "paused"))
+        .filter(|run| !matches!(run.status.as_str(), "complete" | "superseded" | "paused"))
         .collect();
     discovery_work.sort_by_key(|run| {
         (
@@ -1408,20 +1455,30 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         .iter()
         .filter(|run| matches!(run.status.as_str(), "cancel-requested" | "cleanup-pending"))
         .count();
-    let blocker = match reserved {
-        Some(attempt) if attempt.phase == RefreshPhase::Unresolved => "termination-unresolved",
-        Some(attempt) if attempt.phase == RefreshPhase::Dispatched => "awaiting-host-settlement",
-        Some(attempt) if attempt.automatic && !status.automatic_refresh_available => {
-            "automatic-unavailable"
+    let blocker = if status.capability_blocked {
+        "capability-termination-unresolved"
+    } else {
+        match reserved {
+            Some(attempt) if attempt.phase == RefreshPhase::Unresolved => "termination-unresolved",
+            Some(attempt) if attempt.phase == RefreshPhase::Dispatched => {
+                "awaiting-host-settlement"
+            }
+            Some(attempt) if attempt.automatic && !status.automatic_refresh_available => {
+                "automatic-unavailable"
+            }
+            Some(_) if prepared_for_current_session => "reserved-for-current-session",
+            Some(_) => "reserved-for-other-or-unidentified-session",
+            None if status.environment.is_none() => "target-required",
+            None if discovery_recovery > 0 => "recorded-discovery-recovery-required",
+            None if !discovery_work.is_empty() => "recorded-discovery-unfinished",
+            None => "manual-refresh-available",
         }
-        Some(_) if prepared_for_current_session => "reserved-for-current-session",
-        Some(_) => "reserved-for-other-or-unidentified-session",
-        None if status.environment.is_none() => "target-required",
-        None if discovery_recovery > 0 => "recorded-discovery-recovery-required",
-        None if !discovery_work.is_empty() => "recorded-discovery-unfinished",
-        None => "manual-refresh-available",
     };
     let mut notices = Vec::new();
+    if status.capability_blocked {
+        notices.push(json!({"code":"CAPABILITY_SETTLEMENT_REQUIRED","severity":"warning",
+            "message":"A capability search has unresolved termination. Submit exact settlement before another inventory dispatch."}));
+    }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
             "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a timeout or lost response does not establish termination."}));
@@ -1513,6 +1570,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "selected_scope_complete":status.selected_scope_complete,"quick_scope_complete":status.quick_scope_complete,
         "covered_queries_usable":status.covered_queries_usable,"has_active_pack":status.active_pack.is_some(),
         "refresh_blocked":status.refresh_blocked,
+        "capability_blocked":status.capability_blocked,"capability_run_count":status.capabilities.len(),
         "readiness":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
         "settings_attention":status.settings_attention,"settings_label":if status.settings_attention { "Settings *" } else { "Settings" },
         "refresh":{"automatic":status.refresh_settings.automatic,"automatic_available":status.automatic_refresh_available,"lookback":status.refresh_settings.lookback,
@@ -1691,6 +1749,9 @@ fn scope_ok(scope: &Scope) -> Result<(), Diagnostic> {
 }
 
 impl InventoryState {
+    pub fn capability_blocked(&self) -> bool {
+        self.capability_runs.iter().any(|run| run.blocked())
+    }
     fn validate_refresh(&self) -> Result<(), Diagnostic> {
         if let Some(reminder) = &self.refresh_reminder {
             environment::validate_identity(&reminder.environment)?;
@@ -2119,7 +2180,10 @@ impl InventoryState {
             let run = self
                 .discovery_runs
                 .last()
-                .filter(|run| run.state_path == boundary.run && run.status != "complete")
+                .filter(|run| {
+                    run.state_path == boundary.run
+                        && !matches!(run.status.as_str(), "complete" | "superseded")
+                })
                 .ok_or_else(|| {
                     fail("Inventory hints require the exact unfinished discovery run.")
                 })?;
@@ -2738,6 +2802,7 @@ impl InventoryState {
         Ok(Self {
             format: "cqlmatic-inventory-state".into(),
             schema_version: STATE_VERSION,
+            field_evidence_schema_version: None,
             created_at: now.into(),
             updated_at: now.into(),
             discovery_mode: DiscoveryMode::Full,
@@ -2746,6 +2811,7 @@ impl InventoryState {
             query_observations: vec![],
             refresh_settings: RefreshSettings::default(),
             refresh_attempts: vec![],
+            capability_runs: vec![],
             refresh_reminder: None,
             source_metadata: vec![],
             pending_inventory: vec![],
@@ -2776,6 +2842,15 @@ impl InventoryState {
             lookback: RefreshLookback::Day,
         };
         copy.refresh_attempts.clear();
+        copy.capability_runs.clear();
+        copy.schema_version =
+            copy.field_evidence_schema_version
+                .unwrap_or(if copy.schema_version == 4 {
+                    3
+                } else {
+                    copy.schema_version
+                });
+        copy.field_evidence_schema_version = None;
         copy.refresh_reminder = None;
         for work in &mut copy.pending_inventory {
             work.notified_revision = 0;
@@ -2793,7 +2868,42 @@ impl InventoryState {
         }
         environment::parse_time(&self.created_at)?;
         environment::parse_time(&self.updated_at)?;
+        if self
+            .field_evidence_schema_version
+            .is_some_and(|version| self.schema_version != 4 || !(1..=3).contains(&version))
+        {
+            return Err(fail("Invalid retained field-evidence schema version."));
+        }
         self.validate_refresh()?;
+        if self.schema_version < 4 && !self.capability_runs.is_empty() {
+            return Err(fail(
+                "Legacy inventory states cannot attest capability checks.",
+            ));
+        }
+        if self.capability_runs.len() > crate::capability::MAX_RUNS {
+            return Err(fail("Capability history exceeds its finite limit."));
+        }
+        for (index, run) in self.capability_runs.iter().enumerate() {
+            run.validate(index)?;
+            if self
+                .target
+                .as_ref()
+                .is_none_or(|target| target.environment != run.environment)
+            {
+                return Err(fail(
+                    "Capability evidence requires its exact confirmed inventory target.",
+                ));
+            }
+        }
+        if self
+            .capability_runs
+            .iter()
+            .filter(|run| run.blocked())
+            .count()
+            > 1
+        {
+            return Err(fail("Only one capability search may await termination."));
+        }
         if let Some(active) = &self.active_pack
             && !self
                 .packs
@@ -3367,7 +3477,7 @@ fn distinct_text(values: &[String]) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn refresh_id(attempt: &RefreshAttempt, index: usize) -> Result<String, Diagnostic> {
+pub(crate) fn refresh_id(attempt: &RefreshAttempt, index: usize) -> Result<String, Diagnostic> {
     serde_json::to_vec(&(
         &attempt.environment,
         &attempt.session_id,
@@ -3380,7 +3490,7 @@ fn refresh_id(attempt: &RefreshAttempt, index: usize) -> Result<String, Diagnost
     .map_err(|_| fail("Cannot fingerprint refresh attempt."))
 }
 
-fn validate_refresh_host(
+pub(crate) fn validate_refresh_host(
     host: &RefreshHostEvidence,
     environment: &EnvironmentId,
     session_id: &str,
@@ -3408,7 +3518,7 @@ fn validate_refresh_host(
     Ok(())
 }
 
-fn validate_refresh_settlement(
+pub(crate) fn validate_refresh_settlement(
     attempt: &RefreshAttempt,
     report: &RefreshSettlement,
     now: &str,
@@ -3867,6 +3977,11 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         && scoped_complete
         && reconciliation == Progress::Done;
     let mut next_actions = Vec::new();
+    if state.capability_blocked() {
+        next_actions.push("A capability search has unresolved termination. Submit exact settlement before dispatching any further inventory search.".into());
+    } else if state.active_pack.is_some() && state.capability_runs.is_empty() {
+        next_actions.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
+    }
     if state
         .refresh_attempts
         .iter()
@@ -3940,6 +4055,12 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         refresh_settings: state.refresh_settings.clone(),
         automatic_refresh_available: AUTOMATIC_REFRESH_AVAILABLE,
         refresh_reminder: None,
+        capabilities: state
+            .capability_runs
+            .iter()
+            .map(|run| run.status())
+            .collect(),
+        capability_blocked: state.capability_blocked(),
         refresh_attempts: state
             .refresh_attempts
             .iter()

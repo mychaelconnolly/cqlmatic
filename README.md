@@ -20,6 +20,8 @@ CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crow
 
 Version `0.1.6` adds manual inventory refresh with 30-day reminders, recovery for partially completed setup, and discovery that can pause and resume. A bounded status response helps assistants track pending work, while measurement and query-field fixes preserve the distinction between hints and evidence.
 
+The current source profile, `cqlmatic-ngsiem-core-v3`, provides bounded contracts and offline guidance for 194 Query candidate function names, with optional target capability checks after field-pack activation. Inspect `cqlmatic catalog --profile` for the profile and knowledge revision in your installed binary; older release packages do not gain source changes automatically.
+
 **[Try v0.1.6](#try-v016)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
 
 **Quick start:**
@@ -134,6 +136,8 @@ A field name in a reference guide does not tell you whether your data contains i
 
 Every installation starts with a **blank canvas**. Your map is built from your environment and saved locally for later queries. Parser declarations, observed fields, historical evidence, and unfinished work remain distinct. Discovery is limited to the confirmed target, permissions, time windows, and budgets; it cannot reveal telemetry outside your account's visibility.
 
+After a field pack is active, **capabilities (optional)** in `cqlmatic env inventory` offers a separate, finite set of function checks. They are off by default, and choosing Later preserves the completed map. Positive observations apply only to the tested argument shape, current authorization context, environment/view and case revision, and expire after 30 days. They do not confirm every function or feature. See [the exact actions and evidence limits](USAGE.md#optional-function-capability-checks).
+
 ### Write with the saved map
 
 Generation, checking, and saved-result assessment reuse the confirmed local inventory's active pack in both Full and Quick modes. Use `status` to inspect its target, path, and remaining gaps:
@@ -161,6 +165,8 @@ Initial discovery is extensive. It uses multiple searches and may take substanti
 Recipes, typed plans, and bounded English share one deterministic construction pipeline. Typed plans support joins and linked searches.
 
 Bundled CQL guidance and CPS/ECS field references are also searchable offline through the [catalog](USAGE.md#look-up-syntax-and-fields).
+
+The source profile covers 193 current Query candidates plus deprecated `lowercase`; the [reference ledger](data/function-scope.json) separately excludes parser-only `copyEvent` and unreleased `math:spherical2cartesian`. Reference lookup, typed construction and raw checking each have bounded coverage. Unresolved dashboard parameters and saved-query helpers have no binding/substitution interface and remain unsupported.
 
 Use `--require-observed` to require qualifying snapshot evidence for referenced deployment fields. Keep matching modes, missing-field choices, and exact versus estimated distinct counts explicit. Supported hazards include grouping ceilings even with `limit=max`.
 

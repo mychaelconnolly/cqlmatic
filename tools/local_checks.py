@@ -52,11 +52,14 @@ def synthetic_replay(binary, out):
         rounds += 1
         if rounds > 8:
             raise RuntimeError("Replay round bound exceeded")
-        answers = []
-        for probe in step["probes"]:
-            answers.extend(("--answer", f"{probe['probe_id']}={fixture(probe)}"))
-        step, _ = cli(binary, ["env", "discover", "--mcp", "--state", str(state), *answers],
-                      out, f"step-{rounds}", (0, 3))
+        for index, probe in enumerate(step["probes"], 1):
+            cli(binary, ["env", "discover", "--mcp", "--state", str(state),
+                         "--dispatch", probe["probe_id"]], out, f"dispatch-{rounds}-{index}", (3,))
+            step, _ = cli(binary, ["env", "discover", "--mcp", "--state", str(state),
+                                  "--answer", f"{probe['probe_id']}={fixture(probe)}"],
+                          out, f"step-{rounds}-{index}", (0, 3))
+            if step.get("status") != "needs-probes":
+                break
     if step.get("status") != "complete" or not pack.is_file() or not receipt.is_file():
         raise RuntimeError("Replay did not activate")
     text = 'show events from synthetic_repo where user equals "synthetic-user" select user limit 20'

@@ -6,12 +6,12 @@ Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file
 
 | Request / rendered query | Purpose | Expected diagnostics |
 | --- | --- | --- |
-| [aggregation-rate.request.json](aggregation-rate.request.json) / [CQL](aggregation-rate.cql) | Per-host event/failure counts, arithmetic rate, threshold and numeric ranking | `CQL_GROUPBY_LIMIT` **info**; 3 lenient grounding warnings |
-| [array-map.request.json](array-map.request.json) / [CQL](array-map.cql) | Flat-element binding, explicit squared output, physical-index projection | `CQL_ARRAY_OUTPUT_REUSE` warning; 4 lenient grounding warnings |
+| [aggregation-rate.request.json](aggregation-rate.request.json) / [CQL](aggregation-rate.cql) | Per-host event/failure counts, arithmetic rate, threshold and numeric ranking | `CQL_GROUPBY_LIMIT` **info**; `CQL_TARGET_REQUIREMENT` warning; 3 lenient grounding warnings |
+| [array-map.request.json](array-map.request.json) / [CQL](array-map.cql) | Flat-element binding, explicit squared output, physical-index projection | `CQL_ARRAY_OUTPUT_REUSE`, `CQL_TARGET_REQUIREMENT` warnings; 4 lenient grounding warnings |
 | [mixed-join.request.json](mixed-join.request.json) / [CQL](mixed-join.cql) | Independent repository source, two ordered key pairs, left join, explicit exports/caps | `CQL_JOIN_COST` warning; 6 lenient grounding warnings |
-| [mixed-table.request.json](mixed-table.request.json) / [CQL](mixed-table.cql) | Declaration preamble, independent repository, explicit table exports, retaining lookup | `CQL_LOOKUP_COMPLETENESS` warning; 5 lenient grounding warnings |
-| [temporal-bucket.request.json](temporal-bucket.request.json) / [CQL](temporal-bucket.cql) | UTC fixed buckets, explicit numeric order and preceding neighbor | `CQL_TIME_BUCKET_LIMIT` warning; 1 lenient grounding warning |
-| [temporal-correlation.request.json](temporal-correlation.request.json) / [CQL](temporal-correlation.cql) | Named mandatory queries, include fields/all, equality links and bounded count with signed anchors | `CQL_TIME_WINDOW_RUNTIME`, `CQL_CORRELATION_CAPABILITY` warnings; 6 lenient grounding warnings |
+| [mixed-table.request.json](mixed-table.request.json) / [CQL](mixed-table.cql) | Declaration preamble, independent repository, explicit table exports, retaining lookup | `CQL_LOOKUP_COMPLETENESS` warning; 2 `CQL_TARGET_REQUIREMENT` warnings; 5 lenient grounding warnings |
+| [temporal-bucket.request.json](temporal-bucket.request.json) / [CQL](temporal-bucket.cql) | UTC fixed buckets, explicit numeric order and preceding neighbor | `CQL_TIME_BUCKET_LIMIT`, `CQL_TARGET_REQUIREMENT` warnings; 1 lenient grounding warning |
+| [temporal-correlation.request.json](temporal-correlation.request.json) / [CQL](temporal-correlation.cql) | Named mandatory queries, include fields/all, equality links and bounded count with signed anchors | `CQL_TIME_WINDOW_RUNTIME`, `CQL_CORRELATION_CAPABILITY`, `CQL_TARGET_REQUIREMENT` warnings; 6 lenient grounding warnings |
 
 ```sh
 cqlmatic generate --request examples/query-reference/aggregation-rate.request.json --json
@@ -26,13 +26,19 @@ python3 - <<'PY'
 import json, pathlib, subprocess
 folder = pathlib.Path('examples/query-reference')
 expected = {
-    'aggregation-rate': ([('CQL_GROUPBY_LIMIT', 'info')], 3),
-    'array-map': ([('CQL_ARRAY_OUTPUT_REUSE', 'warning')], 4),
+    'aggregation-rate': ([('CQL_GROUPBY_LIMIT', 'info'),
+                          ('CQL_TARGET_REQUIREMENT', 'warning')], 3),
+    'array-map': ([('CQL_ARRAY_OUTPUT_REUSE', 'warning'),
+                   ('CQL_TARGET_REQUIREMENT', 'warning')], 4),
     'mixed-join': ([('CQL_JOIN_COST', 'warning')], 6),
-    'mixed-table': ([('CQL_LOOKUP_COMPLETENESS', 'warning')], 5),
-    'temporal-bucket': ([('CQL_TIME_BUCKET_LIMIT', 'warning')], 1),
+    'mixed-table': ([('CQL_LOOKUP_COMPLETENESS', 'warning'),
+                     ('CQL_TARGET_REQUIREMENT', 'warning'),
+                     ('CQL_TARGET_REQUIREMENT', 'warning')], 5),
+    'temporal-bucket': ([('CQL_TIME_BUCKET_LIMIT', 'warning'),
+                         ('CQL_TARGET_REQUIREMENT', 'warning')], 1),
     'temporal-correlation': ([('CQL_TIME_WINDOW_RUNTIME', 'warning'),
-                              ('CQL_CORRELATION_CAPABILITY', 'warning')], 6),
+                              ('CQL_CORRELATION_CAPABILITY', 'warning'),
+                              ('CQL_TARGET_REQUIREMENT', 'warning')], 6),
 }
 for name, (specific, unverified_fields) in expected.items():
     diagnostics = specific + [('CQL_GROUNDING_LENIENT', 'warning')] * unverified_fields
@@ -85,11 +91,12 @@ cqlmatic generate --intent 'count events where a equals 1 and b equals 2 or c eq
 cqlmatic generate --intent 'show events where user is not "admin"' --json
 cqlmatic check 'user=?who' --json
 cqlmatic check 'regex("x",field=user) OR user="admin"' --json
-cqlmatic check 'sort(user,limit=max)' --json
 cqlmatic check 'defineTable({true},name="t",include=*) | join({true},field=user)' --json
 cqlmatic check 'correlate(A:{true},aggregation=[N:{collect([user],multival=false)}])' --json
 ```
 
-Expected outcomes respectively: needs-context (`CQL_INTENT_UNRESOLVED`), needs-context (`CQL_INTENT_UNRESOLVED`), unsupported (`CQL_UNSUPPORTED_PARAMETER`), unsupported (`CQL_UNSUPPORTED_SYNTAX`, Boolean function composition), invalid (`CQL_ARGUMENT_TYPE`), invalid (`CQL_TABLE_JOIN_CONFLICT`), unsupported (`CQL_UNSUPPORTED_CORRELATION_ROWS`). Other advisory diagnostics can accompany these failures. An unsupported result is a coverage boundary, not a universal vendor-language rejection.
+Expected outcomes respectively: needs-context (`CQL_INTENT_UNRESOLVED`), needs-context (`CQL_INTENT_UNRESOLVED`), unsupported (`CQL_UNSUPPORTED_PARAMETER`), unsupported (`CQL_UNSUPPORTED_SYNTAX`, Boolean function composition), invalid (`CQL_TABLE_JOIN_CONFLICT`), unsupported (`CQL_UNSUPPORTED_CORRELATION_ROWS`). Other advisory diagnostics can accompany these failures. An unsupported result is a coverage boundary, not a universal vendor-language rejection.
+
+`cqlmatic check 'sort(user,limit=max)' --json` returns ready under the default warning policy, with unverified-field guidance. The `max` alias uses the target's `StateRowLimit`; it does not mean unlimited results. Saved-result assessment reports the effective ceiling as unverified when the target value is unknown.
 
 Inspect warnings before adapting examples. In particular, all grouping limits remain finite in practice; arrays can have gaps/stale indices; joins/lookups can retain nullable outputs; declared tables cannot coexist with join/selfJoinFilter; temporal windows/order/capability depend on the selected execution target. The bucket example's neighbor follows the resulting sorted rows and is not an implicit per-host previous-bucket calculation.

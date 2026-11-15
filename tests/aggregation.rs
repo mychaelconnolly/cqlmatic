@@ -54,10 +54,13 @@ fn argument_types_and_context_do_not_silently_widen() {
         "stats()",
         "collect(fields=user,limit=10)",
         "select(user)",
-        "top(user,max=user,limit=5,error=5,rest=other)",
+        "top(user,max=user,limit=5,error=5,rest=\"true\")",
         r#"formatted:=formatTime("%F",field=epoch+1,unit=milliseconds,timezone=UTC)"#,
         r#"formatTime("%F",as=formatted,unit=auto,locale=en_US)"#,
         "round(user,how=ceil,as=rounded)",
+        "sort(user,limit=max,type=hex)",
+        "table([user],type=hex)",
+        "head(0)",
     ] {
         assert_eq!(
             check(query, false).outcome,
@@ -73,7 +76,6 @@ fn argument_types_and_context_do_not_silently_widen() {
         "selectFromMax(user)",
         "selectLast(user,other)",
         "top(user,limit=max)",
-        "sort(user,limit=max)",
         r#"formatTime("%F")"#,
         r#"formatTime("%F",as=x,unit=hours)"#,
         "round(user+1)",
@@ -89,13 +91,14 @@ fn argument_types_and_context_do_not_silently_widen() {
 }
 
 #[test]
-fn max_row_limits_are_supported_only_for_head_tail_and_table() {
+fn max_row_limits_are_supported_for_ordered_row_selectors() {
     for query in [
         "head(max)",
         "tail(max)",
         "table([user], limit=max)",
         "table([user], limit=10)",
         "head(10)",
+        "sort(user,limit=max)",
     ] {
         let result = check(query, false);
         assert_eq!(
@@ -105,11 +108,7 @@ fn max_row_limits_are_supported_only_for_head_tail_and_table() {
             result.diagnostics
         );
     }
-    for query in [
-        "sort(user,limit=max)",
-        "top(user,limit=max)",
-        "collect([user],limit=max)",
-    ] {
+    for query in ["top(user,limit=max)", "collect([user],limit=max)"] {
         let result = check(query, false);
         assert_eq!(
             result.outcome,

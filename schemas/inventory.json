@@ -15,6 +15,165 @@
     "state"
   ],
   "$defs": {
+    "ActivePeriod": {
+      "type": "object",
+      "properties": {
+        "end": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "start"
+      ]
+    },
+    "CapabilityAttempt": {
+      "type": "object",
+      "properties": {
+        "capture": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "case_id": {
+          "$ref": "#/$defs/CaseId"
+        },
+        "case_revision": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/CapabilityOutcome"
+        },
+        "query_sha256": {
+          "type": "string"
+        },
+        "reservation": {
+          "$ref": "#/$defs/RefreshAttempt"
+        },
+        "resources": {
+          "$ref": "#/$defs/ResourceBindings"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "case_revision",
+        "resources",
+        "query_sha256",
+        "reservation",
+        "outcome"
+      ]
+    },
+    "CapabilityOutcome": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "unknown"
+      ]
+    },
+    "CapabilityRun": {
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityAttempt"
+          }
+        },
+        "case_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CaseId"
+          }
+        },
+        "case_revisions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentId"
+        },
+        "execution_context_id": {
+          "type": "string"
+        },
+        "host_evidence": {
+          "$ref": "#/$defs/RawSnapshot"
+        },
+        "id": {
+          "type": "string"
+        },
+        "max_queries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "ordinal": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "pause_requested": {
+          "type": "boolean"
+        },
+        "periods": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActivePeriod"
+          }
+        },
+        "prepared_at": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "environment",
+        "execution_context_id",
+        "session_id",
+        "case_ids",
+        "case_revisions",
+        "max_queries",
+        "max_seconds",
+        "prepared_at",
+        "host_evidence",
+        "attempts",
+        "periods",
+        "pause_requested",
+        "ordinal"
+      ]
+    },
+    "CaseId": {
+      "type": "string",
+      "enum": [
+        "array-union",
+        "array-intersection",
+        "array-reduce-row",
+        "array-reduce-column",
+        "math-sqrt"
+      ]
+    },
     "Cloud": {
       "type": "string",
       "enum": [
@@ -919,6 +1078,14 @@
             "kind": {
               "type": "string",
               "const": "discovery-step"
+            },
+            "run_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
             }
           },
           "additionalProperties": false,
@@ -935,6 +1102,14 @@
             },
             "probe_id": {
               "type": "string"
+            },
+            "run_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
             }
           },
           "additionalProperties": false,
@@ -949,6 +1124,14 @@
             "kind": {
               "type": "string",
               "const": "pause-discovery"
+            },
+            "run_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
             }
           },
           "additionalProperties": false,
@@ -962,11 +1145,170 @@
             "kind": {
               "type": "string",
               "const": "resume-discovery"
+            },
+            "run_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
             }
           },
           "additionalProperties": false,
           "required": [
             "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "case_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/CaseId"
+              }
+            },
+            "execution_context_id": {
+              "type": "string"
+            },
+            "host_evidence_file": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "prepare-capabilities"
+            },
+            "max_queries": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "execution_context_id",
+            "session_id",
+            "case_ids",
+            "host_evidence_file",
+            "max_queries",
+            "max_seconds"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "case_id": {
+              "$ref": "#/$defs/CaseId"
+            },
+            "execution_context_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "dispatch-capability"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "session_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "run_id",
+            "case_id",
+            "execution_context_id",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempt_id": {
+              "type": "string"
+            },
+            "execution_context_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "submit-capability"
+            },
+            "result_file": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "retrieved_at": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "settlement_file": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "run_id",
+            "attempt_id",
+            "execution_context_id",
+            "settlement_file",
+            "retrieved_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pause-capabilities"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "run_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "execution_context_id": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "resume-capabilities"
+            },
+            "run_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "run_id",
+            "execution_context_id"
           ]
         },
         {
@@ -1184,6 +1526,12 @@
           ],
           "default": null
         },
+        "capability_runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityRun"
+          }
+        },
         "created_at": {
           "type": "string"
         },
@@ -1202,6 +1550,14 @@
           "items": {
             "$ref": "#/$defs/InventoryFailure"
           }
+        },
+        "field_evidence_schema_version": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         },
         "format": {
           "type": "string"
@@ -1994,6 +2350,23 @@
       "required": [
         "automatic",
         "lookback"
+      ]
+    },
+    "ResourceBindings": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        }
       ]
     },
     "Scope": {

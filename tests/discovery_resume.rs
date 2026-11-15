@@ -83,6 +83,11 @@ struct Fake {
     starts: Vec<String>,
     polls: usize,
     stops: usize,
+    stopped_jobs: Vec<String>,
+    fail_stop_job: Option<String>,
+    interrupt_stop: Option<String>,
+    block_checkpoint: bool,
+    restore_checkpoint_on_stop: Option<String>,
     cancel_after: Option<usize>,
     cancel_poll: bool,
     fail_cleanup: bool,
@@ -167,9 +172,25 @@ impl SearchBackend for Fake {
             .unwrap_or_else(|| vec![json!({"events":"10"})]);
         Ok(json!({"done":true,"cancelled":false,"metaData":{},"events":rows}))
     }
-    fn stop(&mut self, _: &str, _: &str, _: Instant) -> Result<(), Diagnostic> {
+    fn stop(&mut self, _: &str, job: &str, deadline: Instant) -> Result<(), Diagnostic> {
+        assert!(deadline > Instant::now());
         self.stops += 1;
-        if self.fail_cleanup {
+        self.stopped_jobs.push(job.into());
+        if self.interrupt_stop.as_deref() == Some(job) {
+            self.interrupt_stop = None;
+            panic!("Synthetic interrupted cleanup");
+        }
+        if self.block_checkpoint {
+            self.block_checkpoint = false;
+            fs::rename(&self.state, self.state.with_extension("saved")).unwrap();
+            fs::create_dir(&self.state).unwrap();
+        }
+        if self.restore_checkpoint_on_stop.as_deref() == Some(job) {
+            self.restore_checkpoint_on_stop = None;
+            fs::remove_dir(&self.state).unwrap();
+            fs::rename(self.state.with_extension("saved"), &self.state).unwrap();
+        }
+        if self.fail_cleanup || self.fail_stop_job.as_deref() == Some(job) {
             return Err(Diagnostic::error(
                 "HTTP_TRANSPORT",
                 "Synthetic failed cleanup",
@@ -494,6 +515,131 @@ fn delegated_cancel_proof_is_attempt_bound_and_retries_consume_budget() {
 }
 
 #[test]
+fn inventory_association_preserves_legacy_captures_and_requires_the_held_owner() {
+    let run = Run::new(Transport::Mcp, 4);
+    let first = run.probe();
+    mcp::dispatch(&run.state, &first).unwrap();
+    mcp::pause(&run.state).unwrap();
+    assert_eq!(run.answer(&first).status, "paused");
+    let before = run.saved();
+    assert!(before["session"].get("inventory_owner").is_none());
+
+    let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
+    let other = storage::Writer::acquire(&run.directory.join("other-inventory.json")).unwrap();
+    let relay = storage::Writer::acquire(&run.state).unwrap();
+    assert!(
+        !mcp::inspect_inventory_owner(&mcp::inspect_state(&run.state).unwrap(), &owner).unwrap()
+    );
+    assert_eq!(run.saved(), before);
+    mcp::bind_inventory_owner(&relay, &owner).unwrap();
+    let associated = run.saved();
+    assert_eq!(
+        associated["session"]["inventory_owner"],
+        json!(owner.identity().unwrap())
+    );
+    let mut preserved = associated.clone();
+    preserved["session"]
+        .as_object_mut()
+        .unwrap()
+        .remove("inventory_owner");
+    preserved["session"]["binding_sha256"] = before["session"]["binding_sha256"].clone();
+    assert_eq!(preserved, before);
+    let bytes = fs::read(&run.state).unwrap();
+    assert!(
+        mcp::inspect_inventory_owner(&mcp::inspect_state(&run.state).unwrap(), &owner).unwrap()
+    );
+    assert_eq!(
+        mcp::inspect_inventory_owner(&mcp::inspect_state(&run.state).unwrap(), &other)
+            .unwrap_err()
+            .code,
+        "DISCOVERY_INVENTORY_OWNER"
+    );
+    mcp::bind_inventory_owner(&relay, &owner).unwrap();
+    assert_eq!(fs::read(&run.state).unwrap(), bytes);
+    for error in [
+        mcp::bind_inventory_owner(&relay, &other).unwrap_err(),
+        mcp::resume_inventory(&relay, &other).unwrap_err(),
+        mcp::dispatch_inventory(&relay, &other, &first).unwrap_err(),
+    ] {
+        assert_eq!(error.code, "DISCOVERY_INVENTORY_OWNER");
+    }
+    assert_eq!(fs::read(&run.state).unwrap(), bytes);
+    assert_eq!(mcp::resume(&run.state).unwrap_err().code, "PACK_BUSY");
+    drop(relay);
+    for error in [
+        mcp::resume(&run.state).unwrap_err(),
+        mcp::dispatch(&run.state, &first).unwrap_err(),
+    ] {
+        assert_eq!(error.code, "DISCOVERY_INVENTORY_OWNER");
+    }
+    assert_eq!(fs::read(&run.state).unwrap(), bytes);
+
+    let relay = storage::Writer::acquire(&run.state).unwrap();
+    let resumed = mcp::resume_inventory(&relay, &owner).unwrap();
+    let second = resumed.probes[0]["probe_id"].as_str().unwrap();
+    assert_ne!(second, first);
+    mcp::dispatch_inventory(&relay, &owner, second).unwrap();
+    drop(relay);
+    assert_eq!(mcp::pause(&run.state).unwrap().status, "cancel-requested");
+    let proof = cancellation_proof(&run, second);
+    assert_eq!(
+        mcp::settle_cancelled(&run.state, second, &proof)
+            .unwrap()
+            .status,
+        "paused"
+    );
+    assert_eq!(run.saved()["answers"][&first], before["answers"][&first]);
+    assert_eq!(
+        run.saved()["session"]["attempts"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn native_checkpoints_cannot_be_associated_with_inventory() {
+    let run = Run::new(Transport::Native, 2);
+    let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
+    let relay = storage::Writer::acquire(&run.state).unwrap();
+    let before = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::inspect_inventory_owner(&mcp::inspect_state(&run.state).unwrap(), &owner)
+            .unwrap_err()
+            .code,
+        "DISCOVERY_TRANSPORT"
+    );
+    assert_eq!(
+        mcp::bind_inventory_owner(&relay, &owner).unwrap_err().code,
+        "DISCOVERY_TRANSPORT"
+    );
+    assert_eq!(fs::read(&run.state).unwrap(), before);
+}
+
+#[test]
+fn nonresumable_inventory_actions_require_original_recovery_workflow() {
+    let run = Run::new(Transport::Mcp, 2);
+    let request = mcp::resumable_request(&run.state).unwrap();
+    let legacy = run.directory.join("legacy-state.json");
+    mcp::init(
+        request,
+        &legacy,
+        &run.directory.join("legacy-pack.json"),
+        &run.directory.join("legacy-receipt.json"),
+    )
+    .unwrap();
+    let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
+    let relay = storage::Writer::acquire(&legacy).unwrap();
+    let before = fs::read(&legacy).unwrap();
+    assert!(!mcp::inspect_inventory_owner(&mcp::inspect_state(&legacy).unwrap(), &owner).unwrap());
+    for diagnostic in [
+        mcp::resume_inventory(&relay, &owner).unwrap_err(),
+        mcp::dispatch_inventory(&relay, &owner, "unused").unwrap_err(),
+    ] {
+        assert_eq!(diagnostic.code, "MCP_STATE_RESTART");
+    }
+    assert_eq!(fs::read(&legacy).unwrap(), before);
+}
+
+#[test]
 fn request_mutations_fail_closed() {
     let run = Run::new(Transport::Mcp, 3);
     mcp::pause(&run.state).unwrap();
@@ -603,6 +749,658 @@ fn cancellation_proof(run: &Run, id: &str) -> PathBuf {
 }
 
 #[test]
+fn cancelled_mcp_attempt_requires_its_exact_saved_terminal_proof() {
+    let run = Run::new(Transport::Mcp, 3);
+    let id = run.probe();
+    mcp::dispatch(&run.state, &id).unwrap();
+    let reserved = run.saved();
+    let mut edited = reserved.clone();
+    edited["session"]["attempts"][0]["outcome"] = json!("cancelled");
+    edited["status"] = json!("failed");
+    edited["failure"] = serde_json::to_value(Diagnostic::error("MCP_DEADLINE", "Expired")).unwrap();
+    run.save(&edited);
+    let bytes = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::inspect_state(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
+    assert!(mcp::dispatch(&run.state, &id).is_err());
+    assert!(mcp::resume(&run.state).is_err());
+    assert_eq!(fs::read(&run.state).unwrap(), bytes);
+
+    run.save(&reserved);
+    let proof = cancellation_proof(&run, &id);
+    mcp::settle_cancelled(&run.state, &id, &proof).unwrap();
+    let settled = run.saved();
+    fs::remove_file(&proof).unwrap();
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+    for field in [
+        "schema_version",
+        "request_sha256",
+        "probe_id",
+        "repository",
+        "query_sha256",
+        "start",
+        "end",
+        "dispatched_at",
+        "outcome",
+        "cleanup",
+        "caller_assertion",
+    ] {
+        let mut altered = settled.clone();
+        let terminal = &mut altered["session"]["attempts"][0]["terminal"];
+        let raw = terminal["raw_hex"]
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect::<Vec<_>>();
+        let mut report: Value = serde_json::from_slice(&raw).unwrap();
+        report[field] = json!("foreign");
+        let raw = serde_json::to_vec(&report).unwrap();
+        terminal["raw_hex"] = json!(
+            raw.iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        terminal["raw_sha256"] = json!(sha256_hex(&raw));
+        run.save(&altered);
+        assert_eq!(
+            mcp::inspect_state(&run.state).unwrap_err().code,
+            "MCP_STATE_TAMPERED",
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn hosted_attempt_outcomes_match_their_transport_lifecycle() {
+    let run = Run::new(Transport::Mcp, 3);
+    let id = run.probe();
+    mcp::dispatch(&run.state, &id).unwrap();
+    let reserved = run.saved();
+    for outcome in ["failed", "ambiguous"] {
+        let mut edited = reserved.clone();
+        edited["session"]["attempts"][0]["outcome"] = json!(outcome);
+        if outcome == "failed" {
+            edited["status"] = json!("failed");
+            edited["failure"] =
+                serde_json::to_value(Diagnostic::error("MCP_TOOL_ERROR", "Unknown result"))
+                    .unwrap();
+        }
+        run.save(&edited);
+        assert!(
+            matches!(mcp::inspect_state(&run.state), Err(diagnostic) if diagnostic.code == "MCP_STATE_TAMPERED"),
+            "{outcome} must not become a hosted-attempt lifecycle state"
+        );
+    }
+}
+
+#[test]
+fn earlier_mcp_cancellation_cannot_lose_its_terminal_proof() {
+    let run = Run::new(Transport::Mcp, 4);
+    let id = run.probe();
+    mcp::dispatch(&run.state, &id).unwrap();
+    let timeout = run.directory.join("timeout.json");
+    fs::write(&timeout, br#"{"result":[],"error":"client timeout"}"#).unwrap();
+    mcp::step_resumable(&run.state, &[(id.clone(), timeout)]).unwrap();
+    let proof = cancellation_proof(&run, &id);
+    mcp::settle_cancelled(&run.state, &id, &proof).unwrap();
+    mcp::resume(&run.state).unwrap();
+    mcp::dispatch(&run.state, &id).unwrap();
+    let proof = cancellation_proof(&run, &id);
+    mcp::settle_cancelled(&run.state, &id, &proof).unwrap();
+    let mut old = run.saved();
+    let first = &mut old["session"]["attempts"][0];
+    first["terminal"] = Value::Null;
+    run.save(&old);
+    let before = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::inspect_state(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
+    assert!(mcp::resume(&run.state).is_err());
+    assert!(mcp::dispatch(&run.state, &id).is_err());
+    assert_eq!(
+        run.saved()["session"]["attempts"].as_array().unwrap().len(),
+        2
+    );
+    assert!(fs::read(&run.state).unwrap() == before);
+}
+
+fn completed_mcp_retry(cancellations: usize) -> Run {
+    let run = Run::new(Transport::Mcp, 6);
+    let id = run.probe();
+    for _ in 0..cancellations {
+        mcp::dispatch(&run.state, &id).unwrap();
+        let proof = cancellation_proof(&run, &id);
+        mcp::settle_cancelled(&run.state, &id, &proof).unwrap();
+        mcp::resume(&run.state).unwrap();
+    }
+    mcp::dispatch(&run.state, &id).unwrap();
+    run.answer(&id);
+    assert_eq!(run.saved()["answers"].as_object().unwrap().len(), 1);
+    assert_eq!(
+        mcp::resumable_info(&run.state).unwrap()["attempts"],
+        cancellations + 1
+    );
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+    run
+}
+
+fn reject_duplicate_success(run: &Run, edited: &Value) {
+    run.save(edited);
+    let before = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::inspect_state(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
+    assert_eq!(
+        mcp::resume(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
+    assert_eq!(fs::read(&run.state).unwrap(), before);
+}
+
+#[test]
+fn earlier_mcp_attempt_cannot_borrow_a_retry_answer() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = completed_mcp_retry(1);
+    let mut edited = run.saved();
+    edited["session"]["attempts"][0]["outcome"] = json!("complete");
+    edited["session"]["attempts"][0]["terminal"] = Value::Null;
+    reject_duplicate_success(&run, &edited);
+}
+
+#[test]
+fn later_mcp_attempt_cannot_borrow_an_accepted_answer() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = completed_mcp_retry(0);
+    let mut edited = run.saved();
+    let duplicate = edited["session"]["attempts"][0].clone();
+    edited["session"]["attempts"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate);
+    reject_duplicate_success(&run, &edited);
+}
+
+#[test]
+fn three_mcp_attempts_keep_their_own_termination_proofs() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = completed_mcp_retry(2);
+    let accepted = run.saved();
+    for index in [0, 1] {
+        let mut edited = accepted.clone();
+        edited["session"]["attempts"][index]["outcome"] = json!("complete");
+        edited["session"]["attempts"][index]["terminal"] = Value::Null;
+        reject_duplicate_success(&run, &edited);
+    }
+    run.save(&accepted);
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+}
+
+#[test]
+fn native_attempts_cannot_share_an_accepted_capture() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for cancellations in [1, 2] {
+        let run = Run::new(Transport::Native, 6);
+        let mut backend = Fake::for_run(&run);
+        for _ in 0..cancellations {
+            backend.cancel_poll = true;
+            assert_eq!(
+                mcp::run_native(&run.state, &mut backend).unwrap().status,
+                "paused"
+            );
+            network::CANCELLED.store(false, Ordering::Relaxed);
+            mcp::resume(&run.state).unwrap();
+        }
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "complete"
+        );
+        let accepted = run.saved();
+        assert_eq!(
+            accepted["session"]["attempts"].as_array().unwrap().len(),
+            cancellations + 2
+        );
+        for index in 0..cancellations {
+            let mut edited = accepted.clone();
+            edited["session"]["attempts"][index]["outcome"] = json!("complete");
+            reject_duplicate_success(&run, &edited);
+        }
+        let mut edited = accepted.clone();
+        let duplicate = edited["session"]["attempts"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        edited["session"]["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        reject_duplicate_success(&run, &edited);
+        run.save(&accepted);
+        let starts = backend.starts.len();
+        let bytes = fs::read(&run.state).unwrap();
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "complete"
+        );
+        assert_eq!(backend.starts.len(), starts);
+        assert_eq!(fs::read(&run.state).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn earlier_native_cancellation_without_receipt_remains_uncertain() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = Run::new(Transport::Native, 4);
+    let mut backend = Fake::for_run(&run);
+    for _ in 0..2 {
+        backend.cancel_poll = true;
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "paused"
+        );
+        network::CANCELLED.store(false, Ordering::Relaxed);
+        mcp::resume(&run.state).unwrap();
+    }
+    mcp::pause(&run.state).unwrap();
+    let mut old = run.saved();
+    assert_eq!(old["session"]["attempts"].as_array().unwrap().len(), 2);
+    old["session"]["attempts"][0]["receipt"] = Value::Null;
+    run.save(&old);
+    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+    assert!(mcp::resume(&run.state).is_err());
+    assert_eq!(
+        mcp::run_native(&run.state, &mut backend).unwrap().status,
+        "cleanup-pending"
+    );
+    assert_eq!(backend.starts.len(), 2);
+    let last = run.saved()["session"]["attempts"][1].clone();
+    backend.fail_cleanup = true;
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap()
+            .status,
+        "cleanup-pending"
+    );
+    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+    backend.fail_cleanup = false;
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap()
+            .status,
+        "paused"
+    );
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+    let saved = run.saved();
+    assert_eq!(
+        saved["session"]["attempts"][0]["receipt"]["job_id"],
+        "native-job-1"
+    );
+    assert_eq!(saved["session"]["attempts"][1], last);
+}
+
+#[test]
+fn recovering_an_earlier_attempt_keeps_time_running_until_all_jobs_settle() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let (run, mut backend, saved) = native_cleanup_history(2);
+    backend.fail_stop_job = Some("native-job-1".into());
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap()
+            .status,
+        "cleanup-pending"
+    );
+    assert_eq!(backend.stopped_jobs, ["native-job-1", "native-job-2"]);
+    let remaining = run.saved();
+    assert_eq!(remaining["session"]["periods"], saved["session"]["periods"]);
+    assert_eq!(
+        remaining["session"]["attempts"][0],
+        saved["session"]["attempts"][0]
+    );
+    assert_eq!(
+        remaining["session"]["attempts"][1]["receipt"]["cleanup"],
+        "confirmed"
+    );
+    backend.fail_stop_job = None;
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap()
+            .status,
+        "paused"
+    );
+    assert_eq!(
+        backend.stopped_jobs,
+        ["native-job-1", "native-job-2", "native-job-1"]
+    );
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+    let settled = run.saved();
+    assert_eq!(settled["session"]["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        settled["session"]["periods"].as_array().unwrap().len(),
+        saved["session"]["periods"].as_array().unwrap().len()
+    );
+    assert!(
+        settled["session"]["periods"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["end"]
+            .is_string()
+    );
+    assert_eq!(settled["request"], saved["request"]);
+    assert_eq!(backend.starts.len(), 2);
+    let before = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap_err()
+            .code,
+        "DISCOVERY_PHASE"
+    );
+    assert_eq!(fs::read(&run.state).unwrap(), before);
+}
+
+fn native_cleanup_history(attempts: usize) -> (Run, Fake, Value) {
+    let run = Run::new(Transport::Native, 6);
+    let mut backend = Fake::for_run(&run);
+    for index in 0..attempts {
+        backend.cancel_poll = true;
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "paused"
+        );
+        network::CANCELLED.store(false, Ordering::Relaxed);
+        if index + 1 != attempts {
+            mcp::resume(&run.state).unwrap();
+        }
+    }
+    let mut saved = run.saved();
+    for attempt in saved["session"]["attempts"].as_array_mut().unwrap() {
+        attempt["receipt"] = Value::Null;
+    }
+    saved["session"]["attempts"][attempts - 1]["outcome"] = json!("started");
+    saved["session"]["periods"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap()["end"] = Value::Null;
+    saved["status"] = json!("cleanup-pending");
+    run.save(&saved);
+    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+    backend.stopped_jobs.clear();
+    (run, backend, saved)
+}
+
+#[test]
+fn native_cleanup_reaches_known_jobs_after_jobless_uncertainty() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for attempts in [2, 3] {
+        let (run, mut backend, mut saved) = native_cleanup_history(attempts);
+        saved["session"]["attempts"][0]["outcome"] = json!("failed");
+        saved["session"]["attempts"][0]["job_id"] = Value::Null;
+        run.save(&saved);
+        let before = mcp::resumable_info(&run.state).unwrap();
+        assert_eq!(
+            mcp::recover_native_cleanup(&run.state, &mut backend)
+                .unwrap()
+                .status,
+            "cleanup-pending"
+        );
+        assert_eq!(
+            backend.stopped_jobs,
+            (2..=attempts)
+                .map(|index| format!("native-job-{index}"))
+                .collect::<Vec<_>>()
+        );
+        let cleaned = run.saved();
+        assert_eq!(
+            cleaned["session"]["attempts"][0],
+            saved["session"]["attempts"][0]
+        );
+        assert_eq!(cleaned["session"]["periods"], saved["session"]["periods"]);
+        assert_eq!(cleaned["request"], saved["request"]);
+        for attempt in cleaned["session"]["attempts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(1)
+        {
+            assert_eq!(attempt["outcome"], "cancelled");
+            assert_eq!(attempt["receipt"]["cleanup"], "confirmed");
+        }
+        let after = mcp::resumable_info(&run.state).unwrap();
+        assert_eq!(after["attempts"], before["attempts"]);
+        assert!(
+            after["active_milliseconds"].as_u64().unwrap()
+                >= before["active_milliseconds"].as_u64().unwrap()
+        );
+        assert_eq!(after["in_flight"], true);
+        assert!(mcp::resume(&run.state).is_err());
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "cleanup-pending"
+        );
+        let bytes = fs::read(&run.state).unwrap();
+        let stops = backend.stops;
+        assert_eq!(
+            mcp::recover_native_cleanup(&run.state, &mut backend)
+                .unwrap_err()
+                .code,
+            "DISCOVERY_CLEANUP_PENDING"
+        );
+        assert_eq!(fs::read(&run.state).unwrap(), bytes);
+        assert_eq!(backend.stops, stops);
+        assert_eq!(backend.starts.len(), attempts);
+    }
+}
+
+#[test]
+fn native_cleanup_persists_each_job_before_later_interruption() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let (run, mut backend, saved) = native_cleanup_history(2);
+    backend.interrupt_stop = Some("native-job-2".into());
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || mcp::recover_native_cleanup(&run.state, &mut backend)
+        ))
+        .is_err()
+    );
+    let interrupted = run.saved();
+    mcp::inspect_state(&run.state).unwrap();
+    assert_eq!(
+        interrupted["session"]["attempts"][0]["receipt"]["cleanup"],
+        "confirmed"
+    );
+    assert_eq!(
+        interrupted["session"]["attempts"][1],
+        saved["session"]["attempts"][1]
+    );
+    assert_eq!(
+        interrupted["session"]["periods"],
+        saved["session"]["periods"]
+    );
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap()
+            .status,
+        "paused"
+    );
+    assert_eq!(
+        backend.stopped_jobs,
+        ["native-job-1", "native-job-2", "native-job-2"]
+    );
+    let settled = run.saved();
+    assert_eq!(settled["session"]["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(settled["request"], saved["request"]);
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+}
+
+#[test]
+fn native_cleanup_reaches_later_jobs_when_checkpoint_storage_fails() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let (run, mut backend, saved) = native_cleanup_history(2);
+    let bytes = fs::read(&run.state).unwrap();
+    backend.block_checkpoint = true;
+    let result = mcp::recover_native_cleanup(&run.state, &mut backend);
+    fs::remove_dir(&run.state).unwrap();
+    fs::rename(run.state.with_extension("saved"), &run.state).unwrap();
+    assert_eq!(result.unwrap_err().code, "LOCAL_IO");
+    assert_eq!(fs::read(&run.state).unwrap(), bytes);
+    assert_eq!(backend.stopped_jobs, ["native-job-1", "native-job-2"]);
+    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+    assert!(mcp::resume(&run.state).is_err());
+    assert_eq!(
+        mcp::recover_native_cleanup(&run.state, &mut backend)
+            .unwrap()
+            .status,
+        "paused"
+    );
+    let settled = run.saved();
+    assert_eq!(settled["session"]["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        settled["session"]["periods"].as_array().unwrap().len(),
+        saved["session"]["periods"].as_array().unwrap().len()
+    );
+    assert_eq!(settled["request"], saved["request"]);
+    assert_eq!(backend.starts.len(), 2);
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+}
+
+#[test]
+fn native_cleanup_returns_first_storage_error_after_later_save_succeeds() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let (run, mut backend, saved) = native_cleanup_history(2);
+    backend.block_checkpoint = true;
+    backend.restore_checkpoint_on_stop = Some("native-job-2".into());
+    let result = mcp::recover_native_cleanup(&run.state, &mut backend);
+    if run.state.is_dir() {
+        fs::remove_dir(&run.state).unwrap();
+        fs::rename(run.state.with_extension("saved"), &run.state).unwrap();
+    }
+    assert_eq!(result.unwrap_err().code, "LOCAL_IO");
+    assert_eq!(backend.stopped_jobs, ["native-job-1", "native-job-2"]);
+    let settled = run.saved();
+    assert_eq!(settled["status"], "paused");
+    assert_eq!(settled["session"]["attempts"].as_array().unwrap().len(), 2);
+    for (index, attempt) in settled["session"]["attempts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(attempt["receipt"]["cleanup"], "confirmed");
+        assert_eq!(
+            attempt["receipt"]["job_id"],
+            saved["session"]["attempts"][index]["job_id"]
+        );
+    }
+    assert_eq!(
+        settled["session"]["periods"].as_array().unwrap().len(),
+        saved["session"]["periods"].as_array().unwrap().len()
+    );
+    assert!(
+        settled["session"]["periods"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["end"]
+            .is_string()
+    );
+    assert_eq!(settled["request"], saved["request"]);
+    assert_eq!(backend.starts.len(), 2);
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+}
+
+#[test]
+fn native_cleanup_preserves_terminal_failure_and_refuses_activation_history() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = Run::new(Transport::Native, 4);
+    let mut backend = Fake::for_run(&run);
+    backend.cancel_poll = true;
+    mcp::run_native(&run.state, &mut backend).unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    mcp::resume(&run.state).unwrap();
+    assert_eq!(
+        mcp::run_native(&run.state, &mut backend).unwrap().status,
+        "complete"
+    );
+    let mut completed = run.saved();
+    completed["session"]["attempts"][0]["receipt"] = Value::Null;
+    for status in ["activated", "activating"] {
+        let mut saved = completed.clone();
+        saved["status"] = json!(status);
+        if status == "activating" {
+            saved["pack_sha256"] = Value::Null;
+        }
+        run.save(&saved);
+        assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+        let before = fs::read(&run.state).unwrap();
+        let stops = backend.stops;
+        assert_eq!(
+            mcp::recover_native_cleanup(&run.state, &mut backend)
+                .unwrap_err()
+                .code,
+            "DISCOVERY_PHASE"
+        );
+        assert_eq!(fs::read(&run.state).unwrap(), before);
+        assert_eq!(backend.stops, stops);
+        mcp::inspect_state(&run.state).unwrap();
+    }
+    completed["status"] = json!("failed");
+    completed["failure"] =
+        serde_json::to_value(Diagnostic::error("MCP_DEADLINE", "Expired")).unwrap();
+    completed["activation"] = Value::Null;
+    completed["pack_sha256"] = Value::Null;
+    run.save(&completed);
+    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+    for fail_cleanup in [true, false] {
+        backend.fail_cleanup = fail_cleanup;
+        let output = mcp::recover_native_cleanup(&run.state, &mut backend).unwrap();
+        assert_eq!(output.status, "failed");
+        assert_eq!(output.diagnostics[0].code, "MCP_DEADLINE");
+        let state = mcp::inspect_state(&run.state).unwrap();
+        assert_eq!(state.status, "failed");
+        assert_eq!(mcp::has_in_flight(&state), fail_cleanup);
+        assert_eq!(run.saved()["failure"], completed["failure"]);
+    }
+    assert_eq!(backend.starts.len(), 3);
+}
+
+#[test]
 fn rejected_mcp_results_remain_in_flight_until_exact_cleanup_and_charged_retry() {
     let _lock = SIGNAL.lock().unwrap();
     network::CANCELLED.store(false, Ordering::Relaxed);
@@ -694,7 +1492,7 @@ fn acceptable_original_result_can_settle_a_previously_uncertain_host_call() {
 }
 
 #[test]
-fn older_format_three_failures_are_not_revived_or_assumed_clean() {
+fn unsupported_hosted_failure_cannot_be_relabelled_as_terminal() {
     let _lock = SIGNAL.lock().unwrap();
     network::CANCELLED.store(false, Ordering::Relaxed);
     let run = Run::new(Transport::Mcp, 3);
@@ -714,9 +1512,17 @@ fn older_format_three_failures_are_not_revived_or_assumed_clean() {
         .unwrap()
         .remove("rejected_results");
     run.save(&old);
-    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
-    assert_eq!(mcp::resume(&run.state).unwrap().status, "failed");
+    let before = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::inspect_state(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
+    assert_eq!(
+        mcp::resume(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
     assert!(mcp::dispatch(&run.state, &id).is_err());
+    assert!(fs::read(&run.state).unwrap() == before);
 }
 
 #[test]
@@ -742,6 +1548,79 @@ fn definite_preflight_rejection_and_older_unclassified_native_failure_stay_disti
     assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
     assert_eq!(mcp::resume(&run.state).unwrap().status, "failed");
     assert_eq!(backend.starts.len(), 1);
+}
+
+#[test]
+fn native_failure_needs_confirmed_cleanup_or_a_definite_nonstart() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = Run::new(Transport::Native, 3);
+    let mut backend = Fake::for_run(&run);
+    backend.start_diagnostic = Some("HTTP_START_REJECTED");
+    mcp::run_native(&run.state, &mut backend).unwrap();
+    let original = run.saved();
+    for (code, definite, uncertain) in [
+        ("HTTP_START_REJECTED", false, false),
+        ("HTTP_RESPONSE", false, true),
+        ("HTTP_RESPONSE", true, false),
+        ("HTTP_START_AMBIGUOUS", true, true),
+        ("HTTP_TRANSPORT", true, true),
+        ("HTTP_STATUS", true, true),
+        ("UNCLASSIFIED", false, true),
+    ] {
+        let mut old = original.clone();
+        let attempt = &mut old["session"]["attempts"][0];
+        attempt["receipt"]["diagnostic"]["code"] = json!(code);
+        attempt["no_start_confirmed"] = json!(definite);
+        run.save(&old);
+        assert_eq!(
+            mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()),
+            uncertain,
+            "{code}"
+        );
+        assert_eq!(
+            mcp::run_native(&run.state, &mut backend).unwrap().status,
+            "failed"
+        );
+        assert_eq!(backend.starts.len(), 1);
+    }
+    let run = Run::new(Transport::Native, 3);
+    let mut backend = Fake::for_run(&run);
+    backend.cancel_poll = true;
+    mcp::run_native(&run.state, &mut backend).unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let mut old = run.saved();
+    old["session"]["attempts"][0]["outcome"] = json!("failed");
+    old["session"]["attempts"][0]["receipt"]["cleanup"] = json!("unconfirmed");
+    run.save(&old);
+    assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+    assert!(mcp::resume(&run.state).is_err());
+    mcp::recover_native_cleanup(&run.state, &mut backend).unwrap();
+    assert!(!mcp::has_in_flight(
+        &mcp::inspect_state(&run.state).unwrap()
+    ));
+    assert_eq!(backend.starts.len(), 1);
+}
+
+#[test]
+fn cancelled_native_preflight_keeps_its_definite_nonstart_outcome() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = Run::new(Transport::Native, 3);
+    let mut backend = Fake::for_run(&run);
+    backend.start_diagnostic = Some("CANCELLED");
+    assert_eq!(
+        mcp::run_native(&run.state, &mut backend).unwrap().status,
+        "failed"
+    );
+    let state = mcp::inspect_state(&run.state).unwrap();
+    assert!(!mcp::has_in_flight(&state));
+    let attempt = &run.saved()["session"]["attempts"][0];
+    assert_eq!(attempt["outcome"], "failed");
+    assert_eq!(attempt["no_start_confirmed"], true);
+    assert_eq!(attempt["receipt"]["cleanup"], "not-started");
+    assert_eq!(backend.starts.len(), 1);
+    assert_eq!(backend.stops, 0);
 }
 
 #[test]

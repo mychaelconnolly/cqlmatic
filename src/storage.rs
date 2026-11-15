@@ -33,6 +33,37 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
 fn io(context: &str, e: std::io::Error) -> Diagnostic {
     Diagnostic::error("LOCAL_IO", format!("{context}: {e}"))
 }
+
+fn linked(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
+fn path_identity(path: &Path) -> Result<PathBuf, Diagnostic> {
+    match fs::canonicalize(path) {
+        Ok(path) => return Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io("Cannot resolve writer destination", error)),
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent =
+        fs::canonicalize(parent).map_err(|error| io("Cannot resolve writer directory", error))?;
+    Ok(parent.join(
+        path.file_name().ok_or_else(|| {
+            Diagnostic::error("LOCAL_PATH", "Writer destination needs a filename.")
+        })?,
+    ))
+}
 pub fn read_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, Diagnostic> {
     let meta = fs::symlink_metadata(path).map_err(|e| io("Cannot inspect input", e))?;
     if !meta.is_file() || meta.file_type().is_symlink() {
@@ -101,6 +132,32 @@ pub(crate) fn writer_lock_path(path: &Path) -> Result<PathBuf, Diagnostic> {
     Ok(parent.join(format!(".{name}.lock")))
 }
 impl Writer {
+    pub fn identity(&self) -> Result<PathBuf, Diagnostic> {
+        path_identity(&self.path)
+    }
+
+    pub fn matches_identity(&self, path: &Path) -> Result<bool, Diagnostic> {
+        for path in [&self.path, path] {
+            let absolute = std::path::absolute(path)
+                .map_err(|error| io("Cannot resolve owner path", error))?;
+            for ancestor in absolute.ancestors() {
+                match fs::symlink_metadata(ancestor) {
+                    Ok(metadata) => {
+                        if linked(&metadata) {
+                            return Err(Diagnostic::error(
+                                "LOCAL_FILE_TYPE",
+                                "Owner paths must not traverse symlinks or reparse points.",
+                            ));
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io("Cannot inspect owner path", error)),
+                }
+            }
+        }
+        Ok(self.identity()? == path_identity(path)?)
+    }
+
     pub fn acquire(path: &Path) -> Result<Self, Diagnostic> {
         let parent = path
             .parent()
@@ -122,16 +179,14 @@ impl Writer {
                 ));
             }
         }
-        if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink() || !m.is_file()) {
+        if fs::symlink_metadata(path).is_ok_and(|m| linked(&m) || !m.is_file()) {
             return Err(Diagnostic::error(
                 "LOCAL_FILE_TYPE",
                 "Pack destination must not be a symlink or non-file.",
             ));
         }
         let lock_path = writer_lock_path(path)?;
-        if fs::symlink_metadata(&lock_path)
-            .is_ok_and(|m| m.file_type().is_symlink() || !m.is_file())
-        {
+        if fs::symlink_metadata(&lock_path).is_ok_and(|m| linked(&m) || !m.is_file()) {
             return Err(Diagnostic::error(
                 "LOCAL_FILE_TYPE",
                 "Pack lock must be a regular file.",
@@ -437,6 +492,74 @@ mod tests {
             PackData::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn writer_identity_tracks_creation_and_case_variants_without_alias_locks() {
+        let directory = temp();
+        let path = directory.join("owner.json");
+        let writer = Writer::acquire(&path).unwrap();
+        assert_eq!(
+            writer.identity().unwrap(),
+            fs::canonicalize(&directory).unwrap().join("owner.json")
+        );
+        assert!(writer.matches_identity(&path).unwrap());
+        assert!(
+            !writer
+                .matches_identity(&directory.join("different.json"))
+                .unwrap()
+        );
+        writer.create_new_bytes(b"{}", 4096).unwrap();
+        assert_eq!(writer.identity().unwrap(), fs::canonicalize(&path).unwrap());
+        let alias = directory.join("OWNER.json");
+        if alias.exists() {
+            assert!(writer.matches_identity(&alias).unwrap());
+            assert_eq!(Writer::acquire(&alias).err().unwrap().code, "PACK_BUSY");
+            let identity = writer.identity().unwrap();
+            drop(writer);
+            let alternate = Writer::acquire(&alias).unwrap();
+            assert_eq!(alternate.identity().unwrap(), identity);
+        } else {
+            assert!(!writer.matches_identity(&alias).unwrap());
+            drop(writer);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_matching_rejects_linked_files_ancestors_and_lock_files() {
+        use std::os::unix::fs::symlink;
+        let directory = temp();
+        let path = directory.join("owner.json");
+        let owner = Writer::acquire(&path).unwrap();
+        owner.create_new_bytes(b"{}", 4096).unwrap();
+        let alias = directory.join("alias.json");
+        symlink(&path, &alias).unwrap();
+        assert_eq!(
+            owner.matches_identity(&alias).unwrap_err().code,
+            "LOCAL_FILE_TYPE"
+        );
+        assert_eq!(
+            Writer::acquire(&alias).err().unwrap().code,
+            "LOCAL_FILE_TYPE"
+        );
+        let ancestor = directory.join("linked");
+        symlink(&directory, &ancestor).unwrap();
+        assert_eq!(
+            owner
+                .matches_identity(&ancestor.join("owner.json"))
+                .unwrap_err()
+                .code,
+            "LOCAL_FILE_TYPE"
+        );
+        let other = directory.join("other.json");
+        symlink(&path, writer_lock_path(&other).unwrap()).unwrap();
+        assert_eq!(
+            Writer::acquire(&other).err().unwrap().code,
+            "LOCAL_FILE_TYPE"
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn lock_contention_and_failed_commit_preserve_snapshot() {

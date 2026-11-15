@@ -59,10 +59,152 @@ fn historical_pack_admission_preserves_original_identity_and_digest() {
         merged.data.provenance[0]["retrieved_at"],
         "2026-10-01T00:00:00Z"
     );
+    let mut previous = current.clone();
+    previous.profile_id = "cqlmatic-ngsiem-core-v2".into();
+    previous.knowledge_revision = old.knowledge_revision.clone();
+    previous.content_digest = previous.digest().unwrap();
+    previous.validate().unwrap();
+    assert_eq!(previous.digest().unwrap(), previous.content_digest);
+    assert_eq!(current.profile_id, "cqlmatic-ngsiem-core-v3");
     current.knowledge_revision = "undeclared".into();
     current.content_digest = current.digest().unwrap();
     assert_eq!(current.validate().unwrap_err().code, "PACK_PROFILE");
     assert_eq!(old.digest().unwrap(), old.content_digest);
+}
+
+#[test]
+fn bundled_reference_digest_and_legacy_pins_are_separate_identities() {
+    let inputs: &[(&str, &[u8])] = &[
+        (
+            "data/knowledge.json",
+            include_bytes!("../data/knowledge.json"),
+        ),
+        (
+            "data/function-parameters.json",
+            include_bytes!("../data/function-parameters.json"),
+        ),
+        (
+            "data/function-scope.json",
+            include_bytes!("../data/function-scope.json"),
+        ),
+        (
+            "docs/ANALYST-WORKFLOW.md",
+            include_bytes!("../docs/ANALYST-WORKFLOW.md"),
+        ),
+    ];
+    let manifest = inputs
+        .iter()
+        .map(|(path, bytes)| format!("{}  {path}\n", cqlmatic::sha256_hex(bytes)))
+        .collect::<String>();
+    let revision = cqlmatic::sha256_hex(manifest.as_bytes());
+    assert_eq!(environment::KNOWLEDGE_REVISION, revision);
+    let provenance: serde_json::Value =
+        serde_json::from_str(include_str!("../data/provenance.json")).unwrap();
+    assert_eq!(provenance["knowledge_revision"], revision);
+    assert_eq!(
+        provenance["knowledge_revision_inputs"],
+        serde_json::json!(inputs.iter().map(|(path, _)| path).collect::<Vec<_>>())
+    );
+    let old = historical();
+    assert_eq!(
+        provenance["knowledge_ancestry"]["revision"],
+        old.knowledge_revision
+    );
+    for profile in ["cqlmatic-ngsiem-core-v1", "cqlmatic-ngsiem-core-v2"] {
+        let mut relabeled = old.clone();
+        relabeled.profile_id = profile.into();
+        relabeled.knowledge_revision = revision.clone();
+        relabeled.content_digest = relabeled.digest().unwrap();
+        assert_eq!(relabeled.validate().unwrap_err().code, "PACK_PROFILE");
+    }
+}
+
+#[test]
+fn composite_aggregate_assignments_replace_outputs_and_partition_keeps_retaining_children() {
+    for query in [
+        "stats({count(as=n)|total:=count()})|select(n)",
+        "stats({count(as=n)|count(as=total)})|select(n)",
+        "stats({count(as=n)|renamed:=rename(n)})|select(n)",
+    ] {
+        let result = check(query, true);
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{query}: {result:?}");
+        assert_ne!(
+            result.grounding.basis.get("*:*:n").map(String::as_str),
+            Some("query-produced")
+        );
+    }
+    for query in [
+        "stats({count(as=n)|total:=count()})|select(total)",
+        "stats({count(as=n)|renamed:=rename(n)})|select(renamed)",
+        "count(as=x)|partition(accumulate(count()),condition=test(x==1))|select(x)",
+    ] {
+        let result = check(query, true);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
+    }
+    let reduced = check(
+        "count(as=x)|partition(count(),condition=test(x==1))|select(x)",
+        true,
+    );
+    assert_eq!(reduced.outcome, Outcome::NeedsContext, "{reduced:?}");
+}
+
+#[test]
+fn composite_dynamic_writes_and_retained_removals_cannot_restore_observations() {
+    for query in [
+        "#repo=example|stats({head(1)|drop(user)})|select(user)",
+        "#repo=example|stats({head(1)|renamed:=rename(user)})|select(user)",
+        "stats({count(as=n)|parseJson(field=n)})|select(n)",
+    ] {
+        let result = check(query, true);
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{query}: {result:?}");
+        assert!(
+            result
+                .grounding
+                .basis
+                .values()
+                .any(|value| value.contains("unverified")),
+            "{result:?}"
+        );
+    }
+    for query in [
+        "stats({parseJson()|count(as=n)})|select(n)",
+        "stats({head(1)|drop(user)|count(as=n)})|select(n)",
+        "stats({case{*|parseJson()}|count(as=n)})|select(n)",
+        "stats({parseJson()|case{*|count(as=n)}})|select(n)",
+    ] {
+        let result = check(query, true);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
+        assert_eq!(
+            result.grounding.basis.get("*:*:n").map(String::as_str),
+            Some("query-produced")
+        );
+    }
+}
+
+#[test]
+fn deprecated_finite_name_conversion_keeps_old_name_presence_unqualified() {
+    for query in [
+        "count(as=N)|lowercase(N,include=fields)|select(N)",
+        "stats({count(as=N)|lowercase(N,include=fields)})|select(N)",
+        "stats({count(as=N)|lowercase(N,include=both)})|select(N)",
+    ] {
+        let result = check(query, true);
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "CQL_LOWERCASE_RETENTION")
+        );
+        assert_ne!(
+            result.grounding.basis.get("*:*:N").map(String::as_str),
+            Some("query-produced")
+        );
+        assert_ne!(
+            result.grounding.basis.get("*:*:N").map(String::as_str),
+            Some("not exported by preceding query")
+        );
+    }
 }
 
 #[test]

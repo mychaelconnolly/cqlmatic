@@ -1,0 +1,5017 @@
+{
+  "schema_version": 1,
+  "qualification": "Synthetic offline language-contract examples. Acceptance and typed rendering do not establish backend compilation, resource availability, execution, or result accuracy.",
+  "cases": [
+    {
+      "id": "accumulate",
+      "function": "accumulate",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | accumulate(sum(\"value\", as=\"total\"))",
+      "canonical": "head(10) | accumulate(sum(\"value\", as=\"total\"))"
+    },
+    {
+      "id": "appendAggregation",
+      "function": "appendAggregation",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | appendAggregation({ sum(\"value\", as=\"total\") })",
+      "canonical": "head(10) | appendAggregation({ sum(\"value\", as=\"total\") })"
+    },
+    {
+      "id": "array-append",
+      "function": "array:append",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:append(\"values[]\", values=[1, 2])",
+      "canonical": "array:append(\"values[]\", values=[1, 2])",
+      "inputs": [
+        "values[]"
+      ]
+    },
+    {
+      "id": "array-append-named",
+      "function": "array:append",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "array:append(array=\"values[]\", values=[1, 2])",
+      "canonical": "array:append(array=\"values[]\", values=[1, 2])"
+    },
+    {
+      "id": "array-contains",
+      "function": "array:contains",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:contains(\"values[]\", value=\"a\")",
+      "canonical": "array:contains(\"values[]\", value=\"a\")",
+      "inputs": [
+        "values[]"
+      ]
+    },
+    {
+      "id": "array-contains-named",
+      "function": "array:contains",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "array:contains(array=\"values[]\", value=\"a\")",
+      "canonical": "array:contains(array=\"values[]\", value=\"a\")"
+    },
+    {
+      "id": "array-contains-negated",
+      "function": "array:contains",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!array:contains(\"values[]\", value=\"a\")",
+      "canonical": "!array:contains(\"values[]\", value=\"a\")"
+    },
+    {
+      "id": "array-dedup",
+      "function": "array:dedup",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:dedup(\"values[]\", asArray=\"unique[]\")",
+      "canonical": "array:dedup(\"values[]\", asArray=\"unique[]\")",
+      "inputs": [
+        "values[]"
+      ],
+      "outputs": [
+        "unique[]"
+      ]
+    },
+    {
+      "id": "array-drop",
+      "function": "array:drop",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:drop(\"values[]\")",
+      "canonical": "array:drop(\"values[]\")",
+      "inputs": []
+    },
+    {
+      "id": "array-eval",
+      "function": "array:eval",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "inline-element-transform",
+      "query": "array:eval(\"values[]\", asArray=\"doubled[]\", var=\"item\", function={ doubled := (item * 2) })",
+      "canonical": "array:eval(\"values[]\", asArray=\"doubled[]\", var=\"item\", function={ doubled := (item * 2) })"
+    },
+    {
+      "id": "array-exists",
+      "function": "array:exists",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "inline-element-filter",
+      "query": "array:exists(\"values[]\", var=\"item\", condition=test(item > 0))",
+      "canonical": "array:exists(\"values[]\", var=\"item\", condition=test((item > 0)))"
+    },
+    {
+      "id": "array-exists-negated",
+      "function": "array:exists",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "inline-element-filter",
+      "query": "!array:exists(\"values[]\", var=\"item\", condition=test(item > 0))",
+      "canonical": "!array:exists(\"values[]\", var=\"item\", condition=test((item > 0)))"
+    },
+    {
+      "id": "array-filter",
+      "function": "array:filter",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "inline-element-filter",
+      "query": "array:filter(\"values[]\", asArray=\"positive[]\", var=\"item\", function={ test(item > 0) })",
+      "canonical": "array:filter(\"values[]\", asArray=\"positive[]\", var=\"item\", function={ test((item > 0)) })"
+    },
+    {
+      "id": "array-intersection",
+      "function": "array:intersection",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:intersection(\"values[]\", as=\"common\")",
+      "canonical": "array:intersection(\"values[]\", as=\"common\")",
+      "inputs": [
+        "values[]"
+      ]
+    },
+    {
+      "id": "array-length",
+      "function": "array:length",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:length(\"values[]\", as=\"length\")",
+      "canonical": "array:length(\"values[]\", as=\"length\")",
+      "inputs": [
+        "values[]"
+      ],
+      "outputs": [
+        "length"
+      ]
+    },
+    {
+      "id": "array-length-qualified-assignment",
+      "function": "array:length",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := array:length(\"values[]\")",
+      "canonical": "result := array:length(\"values[]\")"
+    },
+    {
+      "id": "array-reduceAll",
+      "function": "array:reduceAll",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "element-subaggregate",
+      "query": "array:reduceAll(\"values[]\", function=sum(\"item\"), var=\"item\")",
+      "canonical": "array:reduceAll(\"values[]\", function=sum(\"item\"), var=\"item\")"
+    },
+    {
+      "id": "array-reduceAll-named",
+      "function": "array:reduceAll",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "element-subaggregate",
+      "query": "array:reduceAll(array=\"values[]\", function=sum(\"item\"), var=\"item\")",
+      "canonical": "array:reduceAll(array=\"values[]\", function=sum(\"item\"), var=\"item\")"
+    },
+    {
+      "id": "array-reduceColumn",
+      "function": "array:reduceColumn",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "element-subaggregate",
+      "query": "array:reduceColumn(\"values[]\", function=sum(\"item\"), var=\"item\")",
+      "canonical": "array:reduceColumn(\"values[]\", function=sum(\"item\"), var=\"item\")"
+    },
+    {
+      "id": "array-reduceRow",
+      "function": "array:reduceRow",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "element-subaggregate",
+      "query": "array:reduceRow(\"values[]\", function=sum(\"item\"), var=\"item\")",
+      "canonical": "array:reduceRow(\"values[]\", function=sum(\"item\"), var=\"item\")"
+    },
+    {
+      "id": "array-regex",
+      "function": "array:regex",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:regex(\"values[]\", regex=\"^a\")",
+      "canonical": "array:regex(\"values[]\", regex=\"^a\")",
+      "inputs": [
+        "values[]"
+      ]
+    },
+    {
+      "id": "array-regex-negated",
+      "function": "array:regex",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!array:regex(\"values[]\", regex=\"^a\")",
+      "canonical": "!array:regex(\"values[]\", regex=\"^a\")"
+    },
+    {
+      "id": "array-rename",
+      "function": "array:rename",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:rename(\"values[]\", asArray=\"renamed[]\")",
+      "canonical": "array:rename(\"values[]\", asArray=\"renamed[]\")",
+      "inputs": [
+        "values[]"
+      ],
+      "outputs": [
+        "renamed[]"
+      ]
+    },
+    {
+      "id": "array-sort",
+      "function": "array:sort",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:sort(\"values[]\", asArray=\"sorted[]\", order=\"asc\", type=\"number\")",
+      "canonical": "array:sort(\"values[]\", asArray=\"sorted[]\", order=\"asc\", type=\"number\")",
+      "inputs": [
+        "values[]"
+      ],
+      "outputs": [
+        "sorted[]"
+      ]
+    },
+    {
+      "id": "array-union",
+      "function": "array:union",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "array:union(\"values[]\", as=\"unique\")",
+      "canonical": "array:union(\"values[]\", as=\"unique\")",
+      "inputs": [
+        "values[]"
+      ]
+    },
+    {
+      "id": "asn",
+      "function": "asn",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "asn(\"ip\")",
+      "canonical": "asn(\"ip\")",
+      "inputs": [
+        "ip"
+      ],
+      "outputs": [
+        "ip.asn",
+        "ip.org"
+      ]
+    },
+    {
+      "id": "avg",
+      "function": "avg",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "avg(\"value\", as=\"average\")",
+      "canonical": "avg(\"value\", as=\"average\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "average"
+      ]
+    },
+    {
+      "id": "avg-assignment",
+      "function": "avg",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "aggregate-assignment",
+      "query": "result := avg(\"value\")",
+      "canonical": "result := avg(\"value\")"
+    },
+    {
+      "id": "base64Decode",
+      "function": "base64Decode",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "base64Decode(\"message\", as=\"result\")",
+      "canonical": "base64Decode(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "base64Decode-qualified-assignment",
+      "function": "base64Decode",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := base64Decode(\"message\")",
+      "canonical": "result := base64Decode(\"message\")"
+    },
+    {
+      "id": "base64Encode",
+      "function": "base64Encode",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "base64Encode(\"message\", as=\"result\")",
+      "canonical": "base64Encode(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "base64Encode-assignment",
+      "function": "base64Encode",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := base64Encode(\"message\")",
+      "canonical": "result := base64Encode(\"message\")"
+    },
+    {
+      "id": "beta-param",
+      "function": "beta:param",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "beta:param(\"selection\", as=\"parameter\")",
+      "canonical": "beta:param(\"selection\", as=\"parameter\")",
+      "inputs": [],
+      "outputs": [
+        "parameter"
+      ]
+    },
+    {
+      "id": "beta-repeating",
+      "function": "beta:repeating",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "query-modifier",
+      "query": "beta:repeating(\"5m\")",
+      "canonical": "beta:repeating(\"5m\")"
+    },
+    {
+      "id": "bitfield-extractFlags",
+      "function": "bitfield:extractFlags",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "bitfield:extractFlags(field=\"flags\", output=[[0, \"enabled\"], [1, \"visible\"]])",
+      "canonical": "bitfield:extractFlags(field=\"flags\", output=[[0, \"enabled\"], [1, \"visible\"]])",
+      "inputs": [
+        "flags"
+      ],
+      "outputs": [
+        "enabled",
+        "visible"
+      ]
+    },
+    {
+      "id": "bitfield-extractFlagsAsArray",
+      "function": "bitfield:extractFlagsAsArray",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "bitfield:extractFlagsAsArray(field=\"flags\", flagNames=[[0, \"enabled\"], [1, \"visible\"]], asArray=\"labels[]\")",
+      "canonical": "bitfield:extractFlagsAsArray(field=\"flags\", flagNames=[[0, \"enabled\"], [1, \"visible\"]], asArray=\"labels[]\")",
+      "inputs": [
+        "flags"
+      ],
+      "outputs": [
+        "labels[]"
+      ]
+    },
+    {
+      "id": "bitfield-extractFlagsAsString",
+      "function": "bitfield:extractFlagsAsString",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "bitfield:extractFlagsAsString(field=\"flags\", flagNames=[[0, \"enabled\"], [1, \"visible\"]], as=\"labels\")",
+      "canonical": "bitfield:extractFlagsAsString(field=\"flags\", flagNames=[[0, \"enabled\"], [1, \"visible\"]], as=\"labels\")",
+      "inputs": [
+        "flags"
+      ],
+      "outputs": [
+        "labels"
+      ]
+    },
+    {
+      "id": "bucket",
+      "function": "bucket",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-aggregate",
+      "query": "bucket(span=\"1h\", function=count())",
+      "canonical": "bucket(span=\"1h\", function=count())"
+    },
+    {
+      "id": "bucket-omitted-name",
+      "function": "bucket",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "temporal-aggregate",
+      "query": "bucket(\"1h\", function=count())",
+      "canonical": "bucket(\"1h\", function=count())"
+    },
+    {
+      "id": "bucket-coordinates-control",
+      "function": "bucket",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=millis) | bucket(span=\"1m\", timezone=\"UTC\", function=count(as=n)) | test(n > 0) | sort(_bucket, order=asc, type=number, limit=10) | select([_bucket, n])",
+      "canonical": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=\"millis\") | bucket(span=\"1m\", timezone=\"UTC\", function=count(as=\"n\")) | test((n > 0)) | sort(_bucket, order=\"asc\", type=\"number\", limit=10) | select([_bucket, n])"
+    },
+    {
+      "id": "callFunction",
+      "function": "callFunction",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "callFunction(\"sum\", field=\"value\", as=\"total\")",
+      "canonical": "callFunction(\"sum\", field=\"value\", as=\"total\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "total"
+      ]
+    },
+    {
+      "id": "callFunction-assignment",
+      "function": "callFunction",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "aggregate-assignment",
+      "query": "result := callFunction(\"sum\", field=\"value\")",
+      "canonical": "result := callFunction(\"sum\", field=\"value\")"
+    },
+    {
+      "id": "cidr",
+      "function": "cidr",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "inline_subnets"
+      ],
+      "placement": "pipeline",
+      "query": "cidr(field=\"ip\", subnet=[\"192.0.2.0/24\"])",
+      "canonical": "cidr(field=\"ip\", subnet=[\"192.0.2.0/24\"])",
+      "inputs": [
+        "ip"
+      ]
+    },
+    {
+      "id": "cidr-lookup",
+      "function": "cidr",
+      "primary": false,
+      "forms": [
+        "lookup_subnets"
+      ],
+      "placement": "pipeline",
+      "query": "cidr(field=\"ip\", file=\"synthetic-subnets.csv\", column=\"network\")",
+      "canonical": "cidr(field=\"ip\", file=\"synthetic-subnets.csv\", column=\"network\")"
+    },
+    {
+      "id": "cidr-negated",
+      "function": "cidr",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!cidr(field=\"ip\", subnet=[\"192.0.2.0/24\"])",
+      "canonical": "!cidr(field=\"ip\", subnet=[\"192.0.2.0/24\"])"
+    },
+    {
+      "id": "cidr-omitted-name",
+      "function": "cidr",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "cidr(\"ip\", subnet=[\"192.0.2.0/24\"])",
+      "canonical": "cidr(\"ip\", subnet=[\"192.0.2.0/24\"])"
+    },
+    {
+      "id": "coalesce",
+      "function": "coalesce",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "coalesce([message, fallback, \"unknown\"], as=\"result\")",
+      "canonical": "coalesce([message, fallback, \"unknown\"], as=\"result\")",
+      "inputs": [
+        "message",
+        "fallback"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "coalesce-qualified-assignment",
+      "function": "coalesce",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := coalesce([message, \"unknown\"])",
+      "canonical": "result := coalesce([message, \"unknown\"])"
+    },
+    {
+      "id": "collect",
+      "function": "collect",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "collect([\"user\"], limit=10)",
+      "canonical": "collect([\"user\"], limit=10)",
+      "inputs": [
+        "user"
+      ],
+      "outputs": [
+        "user"
+      ]
+    },
+    {
+      "id": "communityId",
+      "function": "communityId",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "communityId(sourceip=\"src_ip\", destinationip=\"dst_ip\", sourceport=\"src_port\", destinationport=\"dst_port\", proto=\"protocol\", as=\"flow_id\")",
+      "canonical": "communityId(sourceip=\"src_ip\", destinationip=\"dst_ip\", sourceport=\"src_port\", destinationport=\"dst_port\", proto=\"protocol\", as=\"flow_id\")",
+      "inputs": [
+        "src_ip",
+        "dst_ip",
+        "src_port",
+        "dst_port",
+        "protocol"
+      ],
+      "outputs": [
+        "flow_id"
+      ]
+    },
+    {
+      "id": "communityId-qualified-assignment",
+      "function": "communityId",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := communityId(sourceip=\"src_ip\", destinationip=\"dst_ip\", sourceport=\"src_port\", destinationport=\"dst_port\", proto=\"protocol\")",
+      "canonical": "result := communityId(sourceip=\"src_ip\", destinationip=\"dst_ip\", sourceport=\"src_port\", destinationport=\"dst_port\", proto=\"protocol\")"
+    },
+    {
+      "id": "concat",
+      "function": "concat",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "concat([\"first\", \"last\"], as=\"name\")",
+      "canonical": "concat([\"first\", \"last\"], as=\"name\")",
+      "inputs": [
+        "first",
+        "last"
+      ],
+      "outputs": [
+        "name"
+      ]
+    },
+    {
+      "id": "concat-qualified-assignment",
+      "function": "concat",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := concat([\"first\", \"last\"])",
+      "canonical": "result := concat([\"first\", \"last\"])"
+    },
+    {
+      "id": "concatArray",
+      "function": "concatArray",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "concatArray(\"values[]\", separator=\",\", as=\"joined\")",
+      "canonical": "concatArray(\"values[]\", separator=\",\", as=\"joined\")",
+      "inputs": [
+        "values[]"
+      ],
+      "outputs": [
+        "joined"
+      ]
+    },
+    {
+      "id": "concatArray-qualified-assignment",
+      "function": "concatArray",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := concatArray(\"values[]\", separator=\",\")",
+      "canonical": "result := concatArray(\"values[]\", separator=\",\")"
+    },
+    {
+      "id": "correlate",
+      "function": "correlate",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "named-independent-queries",
+      "query": "correlate(a: { user = \"a\" }, b: { user = \"b\" }, globalConstraints=[\"user\"])",
+      "canonical": "correlate(a: { user = \"a\" }, b: { user = \"b\" }, globalConstraints=[\"user\"])"
+    },
+    {
+      "id": "count",
+      "function": "count",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "count(as=\"events\")",
+      "canonical": "count(as=\"events\")",
+      "inputs": [],
+      "outputs": [
+        "events"
+      ]
+    },
+    {
+      "id": "count-assignment",
+      "function": "count",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "aggregate-assignment",
+      "query": "result := count()",
+      "canonical": "result := count()"
+    },
+    {
+      "id": "count-omitted-name",
+      "function": "count",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "count(\"value\")",
+      "canonical": "count(\"value\")"
+    },
+    {
+      "id": "counterAsRate",
+      "function": "counterAsRate",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "timeChart(span=\"1h\", function=counterAsRate(\"counter\", as=\"rate\"))",
+      "canonical": "timeChart(span=\"1h\", function=counterAsRate(\"counter\", as=\"rate\"))"
+    },
+    {
+      "id": "counterAsRate-qualified-assignment",
+      "function": "counterAsRate",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "temporal-subaggregate-assignment",
+      "query": "timeChart(span=\"1h\", function={ rate := counterAsRate(\"counter\") })",
+      "canonical": "timeChart(span=\"1h\", function={ rate := counterAsRate(\"counter\") })"
+    },
+    {
+      "id": "createEvents",
+      "function": "createEvents",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "independent-source",
+      "query": "createEvents([\"value=1\", \"value=2\"])",
+      "canonical": "createEvents([\"value=1\", \"value=2\"])",
+      "inputs": [],
+      "outputs": [
+        "@rawstring"
+      ]
+    },
+    {
+      "id": "createEvents-named",
+      "function": "createEvents",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "independent-source",
+      "query": "createEvents(rawstring=[\"value=1\"])",
+      "canonical": "createEvents(rawstring=[\"value=1\"])"
+    },
+    {
+      "id": "crypto-md5",
+      "function": "crypto:md5",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "crypto:md5([\"message\"], as=\"digest\")",
+      "canonical": "crypto:md5([\"message\"], as=\"digest\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "digest"
+      ]
+    },
+    {
+      "id": "crypto-md5-qualified-assignment",
+      "function": "crypto:md5",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := crypto:md5([\"message\"])",
+      "canonical": "result := crypto:md5([\"message\"])"
+    },
+    {
+      "id": "crypto-sha1",
+      "function": "crypto:sha1",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "crypto:sha1([\"message\"], as=\"digest\")",
+      "canonical": "crypto:sha1([\"message\"], as=\"digest\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "digest"
+      ]
+    },
+    {
+      "id": "crypto-sha1-qualified-assignment",
+      "function": "crypto:sha1",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := crypto:sha1([\"message\"])",
+      "canonical": "result := crypto:sha1([\"message\"])"
+    },
+    {
+      "id": "crypto-sha256",
+      "function": "crypto:sha256",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "crypto:sha256([\"message\"], as=\"digest\")",
+      "canonical": "crypto:sha256([\"message\"], as=\"digest\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "digest"
+      ]
+    },
+    {
+      "id": "crypto-sha256-qualified-assignment",
+      "function": "crypto:sha256",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := crypto:sha256([\"message\"])",
+      "canonical": "result := crypto:sha256([\"message\"])"
+    },
+    {
+      "id": "default",
+      "function": "default",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "default(\"unknown\", field=[\"message\"])",
+      "canonical": "default(\"unknown\", field=[\"message\"])",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "default-literal-question",
+      "function": "default",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "default(\"?value\", field=\"message\")",
+      "canonical": "default(\"?value\", field=\"message\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "defineTable",
+      "function": "defineTable",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "live_snapshot"
+      ],
+      "placement": "query-preamble",
+      "query": "defineTable(name=\"t\", query={ select([\"user\"]) }, include=[\"user\"]) | readFile(\"t\")",
+      "canonical": "defineTable(name=\"t\", query={ select([\"user\"]) }, include=[\"user\"]) | readFile(\"t\")"
+    },
+    {
+      "id": "defineTable-omitted-name",
+      "function": "defineTable",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "query-preamble",
+      "query": "defineTable({ select([\"user\"]) }, name=\"t\", include=[\"user\"]) | readFile(\"t\")",
+      "canonical": "defineTable({ select([\"user\"]) }, name=\"t\", include=[\"user\"]) | readFile(\"t\")"
+    },
+    {
+      "id": "drop",
+      "function": "drop",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "drop([\"temporary\"])",
+      "canonical": "drop([\"temporary\"])",
+      "inputs": []
+    },
+    {
+      "id": "dropEvent",
+      "function": "dropEvent",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "dropEvent()",
+      "canonical": "dropEvent()",
+      "inputs": []
+    },
+    {
+      "id": "duration",
+      "function": "duration",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "duration(\"5m\", as=\"duration_ms\")",
+      "canonical": "duration(\"5m\", as=\"duration_ms\")",
+      "inputs": [],
+      "outputs": [
+        "duration_ms"
+      ]
+    },
+    {
+      "id": "duration-assignment",
+      "function": "duration",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := duration(\"5m\")",
+      "canonical": "result := duration(\"5m\")"
+    },
+    {
+      "id": "end",
+      "function": "end",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "end(as=\"end_time\")",
+      "canonical": "end(as=\"end_time\")",
+      "inputs": [],
+      "outputs": [
+        "end_time"
+      ]
+    },
+    {
+      "id": "end-omitted-name",
+      "function": "end",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "end(\"finished\")",
+      "canonical": "end(\"finished\")"
+    },
+    {
+      "id": "end-qualified-assignment",
+      "function": "end",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := end()",
+      "canonical": "result := end()"
+    },
+    {
+      "id": "eval",
+      "function": "eval",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "eval(result=(value + 1))",
+      "canonical": "eval(result=(value + 1))",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "eventFieldCount",
+      "function": "eventFieldCount",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "before-aggregate",
+      "query": "eventFieldCount(as=\"field_count\")",
+      "canonical": "eventFieldCount(as=\"field_count\")",
+      "inputs": [],
+      "outputs": [
+        "field_count"
+      ]
+    },
+    {
+      "id": "eventFieldCount-assignment",
+      "function": "eventFieldCount",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := eventFieldCount()",
+      "canonical": "result := eventFieldCount()"
+    },
+    {
+      "id": "eventInternals",
+      "function": "eventInternals",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "stored-events-before-aggregate",
+      "query": "eventInternals(prefix=\"debug.\")",
+      "canonical": "eventInternals(prefix=\"debug.\")",
+      "inputs": []
+    },
+    {
+      "id": "eventSize",
+      "function": "eventSize",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "before-aggregate",
+      "query": "eventSize(as=\"event_bytes\")",
+      "canonical": "eventSize(as=\"event_bytes\")",
+      "inputs": [],
+      "outputs": [
+        "event_bytes"
+      ]
+    },
+    {
+      "id": "eventSize-assignment",
+      "function": "eventSize",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := eventSize()",
+      "canonical": "result := eventSize()"
+    },
+    {
+      "id": "explain-asTable",
+      "function": "explain:asTable",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "profiling",
+      "query": "explain:asTable()",
+      "canonical": "explain:asTable()",
+      "inputs": []
+    },
+    {
+      "id": "fieldset",
+      "function": "fieldset",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "fieldset()",
+      "canonical": "fieldset()",
+      "inputs": [],
+      "outputs": [
+        "field"
+      ]
+    },
+    {
+      "id": "fieldstats",
+      "function": "fieldstats",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "fieldstats(limit=10)",
+      "canonical": "fieldstats(limit=10)",
+      "inputs": []
+    },
+    {
+      "id": "findTimestamp",
+      "function": "findTimestamp",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "findTimestamp(field=\"message\", timezone=\"UTC\", as=\"timestamp\", timezoneAs=\"zone\")",
+      "canonical": "findTimestamp(field=\"message\", timezone=\"UTC\", as=\"timestamp\", timezoneAs=\"zone\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "timestamp",
+        "zone"
+      ]
+    },
+    {
+      "id": "format",
+      "function": "format",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "format(\"%s:%s\", field=[\"host\", \"user\"], as=\"label\")",
+      "canonical": "format(\"%s:%s\", field=[\"host\", \"user\"], as=\"label\")",
+      "inputs": [
+        "host",
+        "user"
+      ],
+      "outputs": [
+        "label"
+      ]
+    },
+    {
+      "id": "format-qualified-assignment",
+      "function": "format",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := format(\"%s\", field=[\"message\"])",
+      "canonical": "result := format(\"%s\", field=[\"message\"])"
+    },
+    {
+      "id": "formatDuration",
+      "function": "formatDuration",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "formatDuration(\"elapsed\", from=\"ms\", as=\"duration\")",
+      "canonical": "formatDuration(\"elapsed\", from=\"ms\", as=\"duration\")",
+      "inputs": [
+        "elapsed"
+      ],
+      "outputs": [
+        "duration"
+      ]
+    },
+    {
+      "id": "formatDuration-assignment",
+      "function": "formatDuration",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := formatDuration(\"elapsed\", from=\"ms\")",
+      "canonical": "result := formatDuration(\"elapsed\", from=\"ms\")"
+    },
+    {
+      "id": "formatTime",
+      "function": "formatTime",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "formatTime(\"%Y-%m-%d\", field=stamp, as=\"day\")",
+      "canonical": "formatTime(\"%Y-%m-%d\", field=stamp, as=\"day\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "day"
+      ]
+    },
+    {
+      "id": "formatTime-named",
+      "function": "formatTime",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "formatTime(format=\"%Y\", field=stamp, as=\"year\")",
+      "canonical": "formatTime(format=\"%Y\", field=stamp, as=\"year\")"
+    },
+    {
+      "id": "formatTime-qualified-assignment",
+      "function": "formatTime",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := formatTime(\"%Y\", field=stamp)",
+      "canonical": "result := formatTime(\"%Y\", field=stamp)"
+    },
+    {
+      "id": "geography-distance",
+      "function": "geography:distance",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "geography:distance(lat1=\"source_lat\", lon1=\"source_lon\", lat2=\"target_lat\", lon2=\"target_lon\", as=\"distance\")",
+      "canonical": "geography:distance(lat1=\"source_lat\", lon1=\"source_lon\", lat2=\"target_lat\", lon2=\"target_lon\", as=\"distance\")",
+      "inputs": [
+        "source_lat",
+        "source_lon",
+        "target_lat",
+        "target_lon"
+      ],
+      "outputs": [
+        "distance"
+      ]
+    },
+    {
+      "id": "geography-distance-qualified-assignment",
+      "function": "geography:distance",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := geography:distance(lat1=\"source_lat\", lon1=\"source_lon\", lat2=\"target_lat\", lon2=\"target_lon\")",
+      "canonical": "result := geography:distance(lat1=\"source_lat\", lon1=\"source_lon\", lat2=\"target_lat\", lon2=\"target_lon\")"
+    },
+    {
+      "id": "geohash",
+      "function": "geohash",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "geohash(lat=\"latitude\", lon=\"longitude\", as=\"cell\")",
+      "canonical": "geohash(lat=\"latitude\", lon=\"longitude\", as=\"cell\")",
+      "inputs": [
+        "latitude",
+        "longitude"
+      ],
+      "outputs": [
+        "cell"
+      ]
+    },
+    {
+      "id": "geohash-qualified-assignment",
+      "function": "geohash",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := geohash(lat=\"latitude\", lon=\"longitude\")",
+      "canonical": "result := geohash(lat=\"latitude\", lon=\"longitude\")"
+    },
+    {
+      "id": "getField",
+      "function": "getField",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "getField(\"message\", as=\"result\")",
+      "canonical": "getField(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "getField-qualified-assignment",
+      "function": "getField",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := getField(\"message\")",
+      "canonical": "result := getField(\"message\")"
+    },
+    {
+      "id": "groupBy",
+      "function": "groupBy",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "grouped-aggregate",
+      "query": "groupBy([\"user\"], function=count(as=\"events\"), limit=10)",
+      "canonical": "groupBy([\"user\"], function=count(as=\"events\"), limit=10)"
+    },
+    {
+      "id": "groupBy-composite",
+      "function": "groupBy",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "grouped-aggregate",
+      "query": "groupBy([\"user\"], function={ count(as=\"events\") | label := \"group\" }, limit=10)",
+      "canonical": "groupBy([\"user\"], function={ count(as=\"events\") | label := \"group\" }, limit=10)"
+    },
+    {
+      "id": "hash",
+      "function": "hash",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "hash([\"message\"], as=\"digest\")",
+      "canonical": "hash([\"message\"], as=\"digest\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "digest"
+      ]
+    },
+    {
+      "id": "hash-assignment",
+      "function": "hash",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := hash([\"message\"])",
+      "canonical": "result := hash([\"message\"])"
+    },
+    {
+      "id": "hashMatch",
+      "function": "hashMatch",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "hashMatch(\"example\", field=\"digest\", salt=\"synthetic-salt\")",
+      "canonical": "hashMatch(\"example\", field=\"digest\", salt=\"synthetic-salt\")",
+      "inputs": [
+        "digest"
+      ]
+    },
+    {
+      "id": "hashRewrite",
+      "function": "hashRewrite",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "hashRewrite(\"message\", salt=\"synthetic-salt\", as=\"digest\", replaceInRawstring=false)",
+      "canonical": "hashRewrite(\"message\", salt=\"synthetic-salt\", as=\"digest\", replaceInRawstring=false)",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "digest"
+      ]
+    },
+    {
+      "id": "head",
+      "function": "head",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10)",
+      "canonical": "head(10)",
+      "inputs": []
+    },
+    {
+      "id": "if",
+      "function": "if",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "if(value > 0, then=\"positive\", else=\"other\", as=\"category\")",
+      "canonical": "if((value > 0), then=\"positive\", else=\"other\", as=\"category\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "category"
+      ]
+    },
+    {
+      "id": "if-qualified-assignment",
+      "function": "if",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := if((value > 0), then=1, else=0)",
+      "canonical": "result := if((value > 0), then=1, else=0)"
+    },
+    {
+      "id": "in",
+      "function": "in",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "in(\"user\", values=[\"a\", \"b\"])",
+      "canonical": "in(\"user\", values=[\"a\", \"b\"])",
+      "inputs": [
+        "user"
+      ]
+    },
+    {
+      "id": "in-negated",
+      "function": "in",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!in(\"user\", values=[\"a\", \"b\"])",
+      "canonical": "!in(\"user\", values=[\"a\", \"b\"])"
+    },
+    {
+      "id": "ioc-lookup",
+      "function": "ioc:lookup",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "external-enrichment",
+      "query": "ioc:lookup(field=\"ip\", type=\"ip_address\", include=[\"indicator\"], prefix=\"ioc\")",
+      "canonical": "ioc:lookup(field=\"ip\", type=\"ip_address\", include=[\"indicator\"], prefix=\"ioc\")",
+      "inputs": [
+        "ip"
+      ],
+      "outputs": [
+        "ioc.detected",
+        "ioc[].indicator"
+      ]
+    },
+    {
+      "id": "ioc-lookup-omitted-name",
+      "function": "ioc:lookup",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "external-enrichment",
+      "query": "ioc:lookup(\"ip\", type=\"ip_address\")",
+      "canonical": "ioc:lookup(\"ip\", type=\"ip_address\")"
+    },
+    {
+      "id": "ioc-lookup-strict-negated",
+      "function": "ioc:lookup",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "external-filter",
+      "query": "!ioc:lookup(field=\"ip\", type=\"ip_address\", strict=true)",
+      "canonical": "!ioc:lookup(field=\"ip\", type=\"ip_address\", strict=true)"
+    },
+    {
+      "id": "ipLocation",
+      "function": "ipLocation",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "ipLocation(\"ip\")",
+      "canonical": "ipLocation(\"ip\")",
+      "inputs": [
+        "ip"
+      ],
+      "outputs": [
+        "ip.country",
+        "ip.city",
+        "ip.lon",
+        "ip.lat"
+      ]
+    },
+    {
+      "id": "join",
+      "function": "join",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name",
+        "historical"
+      ],
+      "placement": "independent-query-join",
+      "query": "join({ select([\"user\"]) }, field=\"user\", key=\"user\", include=[\"note\"], limit=10)",
+      "canonical": "join({ select([\"user\"]) }, field=\"user\", key=\"user\", include=[\"note\"], limit=10)"
+    },
+    {
+      "id": "join-field-binding",
+      "function": "join",
+      "primary": false,
+      "forms": [
+        "field_binding"
+      ],
+      "placement": "independent-query-join",
+      "query": "user =~ join({ select([\"user\"]) }, key=\"user\", limit=10)",
+      "canonical": "join({ select([\"user\"]) }, key=\"user\", limit=10, field=\"user\")"
+    },
+    {
+      "id": "join-live-repeated",
+      "function": "join",
+      "primary": false,
+      "forms": [
+        "live_repeated"
+      ],
+      "placement": "repeated-query",
+      "query": "beta:repeating(\"5m\") | join({ select([\"user\"]) }, field=\"user\", key=\"user\", live=true, limit=10)",
+      "canonical": "beta:repeating(\"5m\") | join({ select([\"user\"]) }, field=\"user\", key=\"user\", live=true, limit=10)"
+    },
+    {
+      "id": "join-negated",
+      "function": "join",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "independent-query-filter",
+      "query": "!join({ select([\"user\"]) }, field=\"user\", key=\"user\", limit=10)",
+      "canonical": "!join({ select([\"user\"]) }, field=\"user\", key=\"user\", limit=10)"
+    },
+    {
+      "id": "json-prettyPrint",
+      "function": "json:prettyPrint",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "json:prettyPrint(\"message\", as=\"formatted\")",
+      "canonical": "json:prettyPrint(\"message\", as=\"formatted\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "formatted"
+      ]
+    },
+    {
+      "id": "json-prettyPrint-qualified-assignment",
+      "function": "json:prettyPrint",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := json:prettyPrint(\"message\")",
+      "canonical": "result := json:prettyPrint(\"message\")"
+    },
+    {
+      "id": "kvParse",
+      "function": "kvParse",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "kvParse(field=\"message\", as=\"parsed\")",
+      "canonical": "kvParse(field=\"message\", as=\"parsed\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "kvParse-alias",
+      "function": "kvParse",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "kvParse(field=\"message\", prefix=\"parsed\", override=true)",
+      "canonical": "kvParse(field=\"message\", prefix=\"parsed\", override=true)",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "kvParse-omitted-name",
+      "function": "kvParse",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "kvParse(\"message\")",
+      "canonical": "kvParse(\"message\")"
+    },
+    {
+      "id": "length",
+      "function": "length",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "length(\"message\", as=\"result\")",
+      "canonical": "length(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "length-qualified-assignment",
+      "function": "length",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := length(\"message\")",
+      "canonical": "result := length(\"message\")"
+    },
+    {
+      "id": "linReg",
+      "function": "linReg",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "linReg(x=\"input\", y=\"response\", prefix=\"fit.\")",
+      "canonical": "linReg(x=\"input\", y=\"response\", prefix=\"fit.\")",
+      "inputs": [
+        "input",
+        "response"
+      ]
+    },
+    {
+      "id": "lower",
+      "function": "lower",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "lower(\"message\", as=\"result\")",
+      "canonical": "lower(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "lower-assignment",
+      "function": "lower",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := lower(\"message\")",
+      "canonical": "result := lower(\"message\")"
+    },
+    {
+      "id": "lower-named",
+      "function": "lower",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "lower(field=\"message\", as=\"result\")",
+      "canonical": "lower(field=\"message\", as=\"result\")"
+    },
+    {
+      "id": "lowercase",
+      "function": "lowercase",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "lowercase([\"message\"], include=\"values\")",
+      "canonical": "lowercase([\"message\"], include=\"values\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "lowercase-both",
+      "function": "lowercase",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "lowercase([\"Message\"], include=\"both\")",
+      "canonical": "lowercase([\"Message\"], include=\"both\")",
+      "inputs": [
+        "Message"
+      ],
+      "outputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "lowercase-fields",
+      "function": "lowercase",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "lowercase([\"Message\"], include=\"fields\")",
+      "canonical": "lowercase([\"Message\"], include=\"fields\")",
+      "inputs": [
+        "Message"
+      ],
+      "outputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "match",
+      "function": "match",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "lookup_file",
+        "omitted_argument_name"
+      ],
+      "placement": "lookup-resource",
+      "query": "match(\"synthetic.csv\", field=\"user\", column=\"user\", include=[\"note\"])",
+      "canonical": "match(\"synthetic.csv\", field=\"user\", column=\"user\", include=[\"note\"])",
+      "inputs": [
+        "user"
+      ]
+    },
+    {
+      "id": "match-negated",
+      "function": "match",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "lookup-resource-filter",
+      "query": "!match(\"synthetic.csv\", field=\"user\", column=\"user\")",
+      "canonical": "!match(\"synthetic.csv\", field=\"user\", column=\"user\")"
+    },
+    {
+      "id": "match-table",
+      "function": "match",
+      "primary": false,
+      "forms": [
+        "ad_hoc_table"
+      ],
+      "placement": "declared-table-lookup",
+      "query": "defineTable(name=\"t\", query={ select([\"user\", \"note\"]) }, include=[\"user\", \"note\"]) | match(table=\"t\", field=\"user\", include=[\"note\"])",
+      "canonical": "defineTable(name=\"t\", query={ select([\"user\", \"note\"]) }, include=[\"user\", \"note\"]) | match(table=\"t\", field=\"user\", include=[\"note\"])"
+    },
+    {
+      "id": "matchAsArray",
+      "function": "matchAsArray",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "lookup_file",
+        "omitted_argument_name"
+      ],
+      "placement": "lookup-resource",
+      "query": "matchAsArray(\"synthetic.csv\", field=\"user\", column=\"user\", include=[\"note\"], nrows=2, asArray=\"matches[]\")",
+      "canonical": "matchAsArray(\"synthetic.csv\", field=\"user\", column=\"user\", include=[\"note\"], nrows=2, asArray=\"matches[]\")",
+      "inputs": [
+        "user"
+      ]
+    },
+    {
+      "id": "matchAsArray-negated",
+      "function": "matchAsArray",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "lookup-resource-filter",
+      "query": "!matchAsArray(\"synthetic.csv\", field=\"user\", nrows=1, asArray=\"matches[]\")",
+      "canonical": "!matchAsArray(\"synthetic.csv\", field=\"user\", nrows=1, asArray=\"matches[]\")"
+    },
+    {
+      "id": "matchAsArray-table",
+      "function": "matchAsArray",
+      "primary": false,
+      "forms": [
+        "ad_hoc_table"
+      ],
+      "placement": "declared-table-lookup",
+      "query": "defineTable(name=\"t\", query={ select([\"user\", \"note\"]) }, include=[\"user\", \"note\"]) | matchAsArray(file=\"t\", field=\"user\", include=[\"note\"], nrows=2, asArray=\"matches[]\")",
+      "canonical": "defineTable(name=\"t\", query={ select([\"user\", \"note\"]) }, include=[\"user\", \"note\"]) | matchAsArray(file=\"t\", field=\"user\", include=[\"note\"], nrows=2, asArray=\"matches[]\")"
+    },
+    {
+      "id": "math-abs",
+      "function": "math:abs",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:abs(\"value\", as=\"result\")",
+      "canonical": "math:abs(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-arccos",
+      "function": "math:arccos",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:arccos(\"value\", as=\"result\")",
+      "canonical": "math:arccos(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-arcsin",
+      "function": "math:arcsin",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:arcsin(\"value\", as=\"result\")",
+      "canonical": "math:arcsin(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-arctan",
+      "function": "math:arctan",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:arctan(\"value\", as=\"result\")",
+      "canonical": "math:arctan(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-arctan2",
+      "function": "math:arctan2",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "math:arctan2(x=\"x\", y=\"y\", as=\"result\")",
+      "canonical": "math:arctan2(x=\"x\", y=\"y\", as=\"result\")",
+      "inputs": [
+        "x",
+        "y"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-ceil",
+      "function": "math:ceil",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:ceil(\"value\", as=\"result\")",
+      "canonical": "math:ceil(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-cos",
+      "function": "math:cos",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:cos(\"value\", as=\"result\")",
+      "canonical": "math:cos(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-cosh",
+      "function": "math:cosh",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "math:cosh(\"value\", as=\"result\")",
+      "canonical": "math:cosh(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-deg2rad",
+      "function": "math:deg2rad",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:deg2rad(\"value\", as=\"result\")",
+      "canonical": "math:deg2rad(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-exp",
+      "function": "math:exp",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:exp(\"value\", as=\"result\")",
+      "canonical": "math:exp(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-expm1",
+      "function": "math:expm1",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:expm1(\"value\", as=\"result\")",
+      "canonical": "math:expm1(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-floor",
+      "function": "math:floor",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:floor(\"value\", as=\"result\")",
+      "canonical": "math:floor(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-log",
+      "function": "math:log",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:log(\"value\", as=\"result\")",
+      "canonical": "math:log(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-log10",
+      "function": "math:log10",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:log10(\"value\", as=\"result\")",
+      "canonical": "math:log10(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-log1p",
+      "function": "math:log1p",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:log1p(\"value\", as=\"result\")",
+      "canonical": "math:log1p(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-log2",
+      "function": "math:log2",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:log2(\"value\", as=\"result\")",
+      "canonical": "math:log2(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-mod",
+      "function": "math:mod",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:mod(\"value\", divisor=3, as=\"result\")",
+      "canonical": "math:mod(\"value\", divisor=3, as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-mod-two-unnamed",
+      "function": "math:mod",
+      "primary": false,
+      "forms": [
+        "two_unnamed_operands"
+      ],
+      "placement": "pipeline",
+      "query": "math:mod(\"value\", 3, as=\"remainder\")",
+      "canonical": "math:mod(\"value\", 3, as=\"remainder\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "remainder"
+      ]
+    },
+    {
+      "id": "math-pow",
+      "function": "math:pow",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:pow(\"value\", exponent=2, as=\"result\")",
+      "canonical": "math:pow(\"value\", exponent=2, as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-rad2deg",
+      "function": "math:rad2deg",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:rad2deg(\"value\", as=\"result\")",
+      "canonical": "math:rad2deg(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-sin",
+      "function": "math:sin",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:sin(\"value\", as=\"result\")",
+      "canonical": "math:sin(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-sinh",
+      "function": "math:sinh",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:sinh(\"value\", as=\"result\")",
+      "canonical": "math:sinh(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-sqrt",
+      "function": "math:sqrt",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:sqrt(\"value\", as=\"result\")",
+      "canonical": "math:sqrt(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-sqrt-assignment",
+      "function": "math:sqrt",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := math:sqrt(\"value\")",
+      "canonical": "result := math:sqrt(\"value\")"
+    },
+    {
+      "id": "math-sqrt-named",
+      "function": "math:sqrt",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "math:sqrt(field=\"value\", as=\"result\")",
+      "canonical": "math:sqrt(field=\"value\", as=\"result\")"
+    },
+    {
+      "id": "math-tan",
+      "function": "math:tan",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:tan(\"value\", as=\"result\")",
+      "canonical": "math:tan(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "math-tanh",
+      "function": "math:tanh",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "math:tanh(\"value\", as=\"result\")",
+      "canonical": "math:tanh(\"value\", as=\"result\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "max",
+      "function": "max",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "max(\"value\", as=\"maximum\")",
+      "canonical": "max(\"value\", as=\"maximum\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "maximum"
+      ]
+    },
+    {
+      "id": "max-qualified-assignment",
+      "function": "max",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := max(\"value\")",
+      "canonical": "result := max(\"value\")"
+    },
+    {
+      "id": "min",
+      "function": "min",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "min(\"value\", as=\"minimum\")",
+      "canonical": "min(\"value\", as=\"minimum\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "minimum"
+      ]
+    },
+    {
+      "id": "min-qualified-assignment",
+      "function": "min",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := min(\"value\")",
+      "canonical": "result := min(\"value\")"
+    },
+    {
+      "id": "neighbor",
+      "function": "neighbor",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | neighbor([\"value\"], prefix=\"previous\")",
+      "canonical": "head(10) | neighbor([\"value\"], prefix=\"previous\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "previous.value"
+      ]
+    },
+    {
+      "id": "now",
+      "function": "now",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "now(as=\"now_time\")",
+      "canonical": "now(as=\"now_time\")",
+      "inputs": [],
+      "outputs": [
+        "now_time"
+      ]
+    },
+    {
+      "id": "now-omitted-name",
+      "function": "now",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "now(\"current\")",
+      "canonical": "now(\"current\")"
+    },
+    {
+      "id": "now-qualified-assignment",
+      "function": "now",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := now()",
+      "canonical": "result := now()"
+    },
+    {
+      "id": "objectArray-eval",
+      "function": "objectArray:eval",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "inline-element-transform",
+      "query": "objectArray:eval(\"objects[]\", asArray=\"copied[]\", function={ copied := objects.value })",
+      "canonical": "objectArray:eval(\"objects[]\", asArray=\"copied[]\", function={ copied := objects.value })"
+    },
+    {
+      "id": "objectArray-exists",
+      "function": "objectArray:exists",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "inline-element-filter",
+      "query": "objectArray:exists(\"objects[]\", condition={ objects.value = \"a\" })",
+      "canonical": "objectArray:exists(\"objects[]\", condition={ objects.value = \"a\" })"
+    },
+    {
+      "id": "objectArray-exists-negated",
+      "function": "objectArray:exists",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "inline-element-filter",
+      "query": "!objectArray:exists(\"objects[]\", condition={ objects.value = \"a\" })",
+      "canonical": "!objectArray:exists(\"objects[]\", condition={ objects.value = \"a\" })"
+    },
+    {
+      "id": "parseCEF",
+      "function": "parseCEF",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseCEF(field=\"message\")",
+      "canonical": "parseCEF(field=\"message\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "parseCEF-omitted-name",
+      "function": "parseCEF",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseCEF(\"message\")",
+      "canonical": "parseCEF(\"message\")"
+    },
+    {
+      "id": "parseCsv",
+      "function": "parseCsv",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseCsv(\"csv\", columns=[\"user\", \"status\"])",
+      "canonical": "parseCsv(\"csv\", columns=[\"user\", \"status\"])",
+      "inputs": [
+        "csv"
+      ],
+      "outputs": [
+        "user",
+        "status"
+      ]
+    },
+    {
+      "id": "parseCsv-default-input",
+      "function": "parseCsv",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseCsv(columns=[\"user\", \"status\"], trim=true)",
+      "canonical": "parseCsv(columns=[\"user\", \"status\"], trim=true)",
+      "inputs": [
+        "@rawstring"
+      ],
+      "outputs": [
+        "user",
+        "status"
+      ]
+    },
+    {
+      "id": "parseCsv-named",
+      "function": "parseCsv",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseCsv(field=\"csv\", columns=[\"user\", \"status\"])",
+      "canonical": "parseCsv(field=\"csv\", columns=[\"user\", \"status\"])"
+    },
+    {
+      "id": "parseCsv-options",
+      "function": "parseCsv",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseCsv(\"csv\", columns=[\"user\", \"status\"], delimiter=\";\", trim=true, excludeEmpty=true)",
+      "canonical": "parseCsv(\"csv\", columns=[\"user\", \"status\"], delimiter=\";\", trim=true, excludeEmpty=true)",
+      "inputs": [
+        "csv"
+      ],
+      "outputs": [
+        "user",
+        "status"
+      ]
+    },
+    {
+      "id": "parseCsv-csv-named-decoy",
+      "function": "parseCsv",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "createEvents([\"maple,closed\"]) | csv := \"cedar,open\" | parseCsv(field=csv, columns=[name, state]) | select([name, state])",
+      "canonical": "createEvents([\"maple,closed\"]) | csv := \"cedar,open\" | parseCsv(field=csv, columns=[\"name\", \"state\"]) | select([name, state])",
+      "inputs": [
+        "csv"
+      ],
+      "outputs": [
+        "name",
+        "state"
+      ]
+    },
+    {
+      "id": "parseCsv-csv-positional-decoy",
+      "function": "parseCsv",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "createEvents([\"maple,closed\"]) | csv := \"cedar,open\" | parseCsv(csv, columns=[name, state]) | select([name, state])",
+      "canonical": "createEvents([\"maple,closed\"]) | csv := \"cedar,open\" | parseCsv(csv, columns=[\"name\", \"state\"]) | select([name, state])",
+      "inputs": [
+        "csv"
+      ],
+      "outputs": [
+        "name",
+        "state"
+      ]
+    },
+    {
+      "id": "parseCsv-csv-default-control",
+      "function": "parseCsv",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "createEvents([\"cedar,open\"]) | csv := \"maple,closed\" | parseCsv(columns=[name, state]) | select([name, state])",
+      "canonical": "createEvents([\"cedar,open\"]) | csv := \"maple,closed\" | parseCsv(columns=[\"name\", \"state\"]) | select([name, state])",
+      "inputs": [
+        "@rawstring"
+      ],
+      "outputs": [
+        "name",
+        "state"
+      ]
+    },
+    {
+      "id": "parseFixedWidth",
+      "function": "parseFixedWidth",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseFixedWidth(field=\"message\", columns=[\"user\", \"status\"], widths=[4, 2])",
+      "canonical": "parseFixedWidth(field=\"message\", columns=[\"user\", \"status\"], widths=[4, 2])",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "user",
+        "status"
+      ]
+    },
+    {
+      "id": "parseFixedWidth-named",
+      "function": "parseFixedWidth",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseFixedWidth(columns=[\"user\", \"status\"], widths=[4, 2])",
+      "canonical": "parseFixedWidth(columns=[\"user\", \"status\"], widths=[4, 2])"
+    },
+    {
+      "id": "parseFixedWidth-omitted-name",
+      "function": "parseFixedWidth",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseFixedWidth(\"message\", columns=[\"user\", \"status\"], widths=[4, 2])",
+      "canonical": "parseFixedWidth(\"message\", columns=[\"user\", \"status\"], widths=[4, 2])"
+    },
+    {
+      "id": "parseHexString",
+      "function": "parseHexString",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseHexString(\"message\", as=\"result\")",
+      "canonical": "parseHexString(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "parseHexString-qualified-assignment",
+      "function": "parseHexString",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := parseHexString(\"message\")",
+      "canonical": "result := parseHexString(\"message\")"
+    },
+    {
+      "id": "parseInt",
+      "function": "parseInt",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseInt(\"text_number\", radix=16, as=\"number\")",
+      "canonical": "parseInt(\"text_number\", radix=16, as=\"number\")",
+      "inputs": [
+        "text_number"
+      ],
+      "outputs": [
+        "number"
+      ]
+    },
+    {
+      "id": "parseInt-assignment",
+      "function": "parseInt",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := parseInt(\"text_number\", radix=16)",
+      "canonical": "result := parseInt(\"text_number\", radix=16)"
+    },
+    {
+      "id": "parseInt-hex-string-radix",
+      "function": "parseInt",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseInt(\"text_number\", radix=\"16\", endian=\"little\", as=\"number\")",
+      "canonical": "parseInt(\"text_number\", radix=\"16\", endian=\"little\", as=\"number\")",
+      "inputs": [
+        "text_number"
+      ],
+      "outputs": [
+        "number"
+      ]
+    },
+    {
+      "id": "parseJson",
+      "function": "parseJson",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseJson(field=\"message\", prefix=\"parsed.\")",
+      "canonical": "parseJson(field=\"message\", prefix=\"parsed.\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "parseJson-omitted-name",
+      "function": "parseJson",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseJson(\"message\")",
+      "canonical": "parseJson(\"message\")"
+    },
+    {
+      "id": "parseJson-selectors",
+      "function": "parseJson",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseJson(field=\"message\", prefix=\"parsed.\", exclude=[\"parsed.secret\"], include=[\"parsed.secret.public\"])",
+      "canonical": "parseJson(field=\"message\", prefix=\"parsed.\", exclude=[\"parsed.secret\"], include=[\"parsed.secret.public\"])",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "parseLEEF",
+      "function": "parseLEEF",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseLEEF(field=\"message\")",
+      "canonical": "parseLEEF(field=\"message\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "parseLEEF-omitted-name",
+      "function": "parseLEEF",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseLEEF(\"message\")",
+      "canonical": "parseLEEF(\"message\")"
+    },
+    {
+      "id": "parseTimestamp",
+      "function": "parseTimestamp",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseTimestamp(\"seconds\", field=\"time_text\", as=\"timestamp\", timezone=\"UTC\")",
+      "canonical": "parseTimestamp(\"seconds\", field=\"time_text\", as=\"timestamp\", timezone=\"UTC\")",
+      "inputs": [
+        "time_text"
+      ]
+    },
+    {
+      "id": "parseTimestamp-pattern",
+      "function": "parseTimestamp",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "parseTimestamp(\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")",
+      "canonical": "parseTimestamp(\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")"
+    },
+    {
+      "id": "parseUri",
+      "function": "parseUri",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseUri(\"uri\", prefix=\"parsed\")",
+      "canonical": "parseUri(\"uri\", prefix=\"parsed\")",
+      "inputs": [
+        "uri"
+      ]
+    },
+    {
+      "id": "parseUrl",
+      "function": "parseUrl",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseUrl(\"url\", as=\"parsed\")",
+      "canonical": "parseUrl(\"url\", as=\"parsed\")",
+      "inputs": [
+        "url"
+      ]
+    },
+    {
+      "id": "parseUrl-qualified-assignment",
+      "function": "parseUrl",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := parseUrl(\"url\")",
+      "canonical": "result := parseUrl(\"url\")"
+    },
+    {
+      "id": "parseXml",
+      "function": "parseXml",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "parseXml(\"message\", prefix=\"parsed\")",
+      "canonical": "parseXml(\"message\", prefix=\"parsed\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "partition",
+      "function": "partition",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | partition(count(), condition=test(value > 0), split=\"after\")",
+      "canonical": "head(10) | partition(count(), condition=test((value > 0)), split=\"after\")"
+    },
+    {
+      "id": "percentage",
+      "function": "percentage",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "filter-subaggregate",
+      "query": "percentage({ status = \"ok\" }, as=\"percent\")",
+      "canonical": "percentage({ status = \"ok\" }, as=\"percent\")"
+    },
+    {
+      "id": "percentage-qualified-assignment",
+      "function": "percentage",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := percentage({ status = \"ok\" })",
+      "canonical": "result := percentage({ status = \"ok\" })"
+    },
+    {
+      "id": "percentile",
+      "function": "percentile",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "percentile(\"value\", percentiles=[50, 95])",
+      "canonical": "percentile(\"value\", percentiles=[50, 95])",
+      "inputs": [
+        "value"
+      ]
+    },
+    {
+      "id": "percentile-qualified-assignment",
+      "function": "percentile",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := percentile(\"value\", percentiles=[95])",
+      "canonical": "result := percentile(\"value\", percentiles=[95])"
+    },
+    {
+      "id": "range",
+      "function": "range",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "range(\"value\", as=\"range\")",
+      "canonical": "range(\"value\", as=\"range\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "range"
+      ]
+    },
+    {
+      "id": "range-assignment",
+      "function": "range",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "aggregate-assignment",
+      "query": "result := range(\"value\")",
+      "canonical": "result := range(\"value\")"
+    },
+    {
+      "id": "readFile",
+      "function": "readFile",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "lookup_file",
+        "omitted_argument_name"
+      ],
+      "placement": "independent-source",
+      "query": "readFile(\"synthetic.csv\", include=[\"user\"], limit=10)",
+      "canonical": "readFile(\"synthetic.csv\", include=[\"user\"], limit=10)",
+      "inputs": []
+    },
+    {
+      "id": "readFile-multiple-resources",
+      "function": "readFile",
+      "primary": false,
+      "forms": [
+        "multiple_unnamed_resources"
+      ],
+      "placement": "independent-source",
+      "query": "readFile(\"first.csv\", \"second.csv\")",
+      "canonical": "readFile(\"first.csv\", \"second.csv\")"
+    },
+    {
+      "id": "readFile-table",
+      "function": "readFile",
+      "primary": false,
+      "forms": [
+        "ad_hoc_table"
+      ],
+      "placement": "declared-table-source",
+      "query": "defineTable(name=\"t\", query={ select([\"user\"]) }, include=[\"user\"]) | readFile(table=\"t\")",
+      "canonical": "defineTable(name=\"t\", query={ select([\"user\"]) }, include=[\"user\"]) | readFile(table=\"t\")"
+    },
+    {
+      "id": "readPersistedAggregation",
+      "function": "readPersistedAggregation",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "stored_results",
+        "omitted_argument_name"
+      ],
+      "placement": "independent-source",
+      "query": "readPersistedAggregation(\"synthetic-hourly\")",
+      "canonical": "readPersistedAggregation(\"synthetic-hourly\")",
+      "inputs": []
+    },
+    {
+      "id": "readPersistedAggregation-rollup",
+      "function": "readPersistedAggregation",
+      "primary": false,
+      "forms": [
+        "rollup"
+      ],
+      "placement": "independent-source",
+      "query": "readPersistedAggregation(\"synthetic-hourly\", span=\"1h\", timezone=\"UTC\")",
+      "canonical": "readPersistedAggregation(\"synthetic-hourly\", span=\"1h\", timezone=\"UTC\")"
+    },
+    {
+      "id": "regex",
+      "function": "regex",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "regex(\"(?<actor>[a-z]+)\", field=\"message\")",
+      "canonical": "regex(\"(?<actor>[a-z]+)\", field=\"message\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "actor"
+      ]
+    },
+    {
+      "id": "regex-negated",
+      "function": "regex",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!regex(\"(?<actor>[a-z]+)\", field=\"message\")",
+      "canonical": "!regex(\"(?<actor>[a-z]+)\", field=\"message\")"
+    },
+    {
+      "id": "regex-repeat",
+      "function": "regex",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "regex(\"(?<actor>[a-z]+)\", field=\"message\", repeat=true)",
+      "canonical": "regex(\"(?<actor>[a-z]+)\", field=\"message\", repeat=true)"
+    },
+    {
+      "id": "regex-retaining",
+      "function": "regex",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "regex(\"(?<actor>[a-z]+)\", field=\"message\", strict=false)",
+      "canonical": "regex(\"(?<actor>[a-z]+)\", field=\"message\", strict=false)"
+    },
+    {
+      "id": "remoteTable",
+      "function": "remoteTable",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "other_connection"
+      ],
+      "placement": "query-preamble",
+      "query": "remoteTable(connection=\"synthetic-sql\", name=\"t\", query=\"select user from events\") | readFile(\"t\")",
+      "canonical": "remoteTable(connection=\"synthetic-sql\", name=\"t\", query=\"select user from events\") | readFile(\"t\")"
+    },
+    {
+      "id": "remoteTable-cql",
+      "function": "remoteTable",
+      "primary": false,
+      "forms": [
+        "cql_connection"
+      ],
+      "placement": "query-preamble",
+      "query": "remoteTable(connection=\"synthetic-cql\", name=\"t\", query={ select([\"user\"]) }, include=[\"user\"]) | readFile(\"t\")",
+      "canonical": "remoteTable(connection=\"synthetic-cql\", name=\"t\", query={ select([\"user\"]) }, include=[\"user\"]) | readFile(\"t\")"
+    },
+    {
+      "id": "rename",
+      "function": "rename",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "field_pairs",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "rename([[\"old\", \"new\"]])",
+      "canonical": "rename([[\"old\", \"new\"]])",
+      "inputs": [
+        "old"
+      ]
+    },
+    {
+      "id": "rename-qualified-assignment",
+      "function": "rename",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := rename(\"old\")",
+      "canonical": "result := rename(\"old\")"
+    },
+    {
+      "id": "rename-scalar",
+      "function": "rename",
+      "primary": false,
+      "forms": [
+        "single_field"
+      ],
+      "placement": "pipeline",
+      "query": "rename(\"old\", as=\"new\")",
+      "canonical": "rename(\"old\", as=\"new\")"
+    },
+    {
+      "id": "replace",
+      "function": "replace",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "replace(\"a\", with=\"b\", field=\"message\", as=\"result\")",
+      "canonical": "replace(\"a\", with=\"b\", field=\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "replace-qualified-assignment",
+      "function": "replace",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := replace(\"a\", with=\"b\", field=\"message\")",
+      "canonical": "result := replace(\"a\", with=\"b\", field=\"message\")"
+    },
+    {
+      "id": "reverseDns",
+      "function": "reverseDns",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "external-enrichment",
+      "query": "groupBy(ip) | reverseDns(\"ip\", as=\"hostname\")",
+      "canonical": "groupBy(ip) | reverseDns(\"ip\", as=\"hostname\")",
+      "inputs": [
+        "ip"
+      ],
+      "outputs": [
+        "hostname"
+      ]
+    },
+    {
+      "id": "round",
+      "function": "round",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "round(\"value\", as=\"rounded\")",
+      "canonical": "round(\"value\", as=\"rounded\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "rounded"
+      ]
+    },
+    {
+      "id": "round-qualified-assignment",
+      "function": "round",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := round(\"value\")",
+      "canonical": "result := round(\"value\")"
+    },
+    {
+      "id": "sample",
+      "function": "sample",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "sample(10)",
+      "canonical": "sample(10)",
+      "inputs": [
+        "@timestamp"
+      ]
+    },
+    {
+      "id": "sankey",
+      "function": "sankey",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "visual-aggregate",
+      "query": "sankey(source=\"source\", target=\"destination\", weight=count())",
+      "canonical": "sankey(source=\"source\", target=\"destination\", weight=count())"
+    },
+    {
+      "id": "select",
+      "function": "select",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "select([\"user\", \"status\"])",
+      "canonical": "select([\"user\", \"status\"])",
+      "inputs": [
+        "user",
+        "status"
+      ]
+    },
+    {
+      "id": "selectFromMax",
+      "function": "selectFromMax",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "selectFromMax(\"value\", include=[\"user\"])",
+      "canonical": "selectFromMax(\"value\", include=[\"user\"])",
+      "inputs": [
+        "value",
+        "user"
+      ]
+    },
+    {
+      "id": "selectFromMin",
+      "function": "selectFromMin",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "selectFromMin(\"value\", include=[\"user\"])",
+      "canonical": "selectFromMin(\"value\", include=[\"user\"])",
+      "inputs": [
+        "value",
+        "user"
+      ]
+    },
+    {
+      "id": "selectLast",
+      "function": "selectLast",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "selectLast([\"user\"])",
+      "canonical": "selectLast([\"user\"])",
+      "inputs": [
+        "user"
+      ],
+      "outputs": [
+        "user"
+      ]
+    },
+    {
+      "id": "selfJoin",
+      "function": "selfJoin",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name",
+        "historical"
+      ],
+      "placement": "filter-query-array",
+      "query": "selfJoin([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }], collect=[\"status\"], limit=10)",
+      "canonical": "selfJoin([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }], collect=[\"status\"], limit=10)"
+    },
+    {
+      "id": "selfJoin-live-repeating",
+      "function": "selfJoin",
+      "primary": false,
+      "forms": [
+        "live_repeating"
+      ],
+      "placement": "repeated-query",
+      "query": "beta:repeating(\"5m\") | selfJoin([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }], limit=10)",
+      "canonical": "beta:repeating(\"5m\") | selfJoin([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }], limit=10)"
+    },
+    {
+      "id": "selfJoinFilter",
+      "function": "selfJoinFilter",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name",
+        "historical"
+      ],
+      "placement": "filter-query-array",
+      "query": "selfJoinFilter([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }])",
+      "canonical": "selfJoinFilter([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }])"
+    },
+    {
+      "id": "selfJoinFilter-live-repeating",
+      "function": "selfJoinFilter",
+      "primary": false,
+      "forms": [
+        "live_repeating"
+      ],
+      "placement": "repeated-query",
+      "query": "beta:repeating(\"5m\") | selfJoinFilter([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }])",
+      "canonical": "beta:repeating(\"5m\") | selfJoinFilter([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }])"
+    },
+    {
+      "id": "selfJoinFilter-negated",
+      "function": "selfJoinFilter",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "filter-query-array",
+      "query": "!selfJoinFilter([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }])",
+      "canonical": "!selfJoinFilter([\"user\"], where=[{ status = \"a\" }, { status = \"b\" }])"
+    },
+    {
+      "id": "series",
+      "function": "series",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "series([\"user\"], maxpause=\"1m\")",
+      "canonical": "series([\"user\"], maxpause=\"1m\")",
+      "inputs": [
+        "user",
+        "@timestamp"
+      ]
+    },
+    {
+      "id": "session",
+      "function": "session",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "temporal-aggregate",
+      "query": "session(count(), maxpause=\"1m\")",
+      "canonical": "session(count(), maxpause=\"1m\")"
+    },
+    {
+      "id": "setField",
+      "function": "setField",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "setField(target=\"result\", value=value)",
+      "canonical": "setField(target=\"result\", value=value)",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "setTimeInterval",
+      "function": "setTimeInterval",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "query-preamble",
+      "query": "setTimeInterval(start=\"7d\", end=\"1d\") | count()",
+      "canonical": "setTimeInterval(start=\"7d\", end=\"1d\") | count()"
+    },
+    {
+      "id": "setTimeInterval-named",
+      "function": "setTimeInterval",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "query-preamble",
+      "query": "setTimeInterval(start=\"7d\", end=\"1d\", timezone=\"UTC\") | count()",
+      "canonical": "setTimeInterval(start=\"7d\", end=\"1d\", timezone=\"UTC\") | count()"
+    },
+    {
+      "id": "setTimeInterval-omitted-name",
+      "function": "setTimeInterval",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "query-preamble",
+      "query": "setTimeInterval(\"7d\") | count()",
+      "canonical": "setTimeInterval(\"7d\") | count()"
+    },
+    {
+      "id": "shannonEntropy",
+      "function": "shannonEntropy",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "shannonEntropy(\"message\", as=\"result\")",
+      "canonical": "shannonEntropy(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "shannonEntropy-qualified-assignment",
+      "function": "shannonEntropy",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := shannonEntropy(\"message\")",
+      "canonical": "result := shannonEntropy(\"message\")"
+    },
+    {
+      "id": "slidingTimeWindow",
+      "function": "slidingTimeWindow",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | slidingTimeWindow(count(), span=\"5s\")",
+      "canonical": "head(10) | slidingTimeWindow(count(), span=\"5s\")"
+    },
+    {
+      "id": "slidingWindow",
+      "function": "slidingWindow",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | slidingWindow(count(), events=2)",
+      "canonical": "head(10) | slidingWindow(count(), events=2)"
+    },
+    {
+      "id": "slidingWindow-multiple-functions",
+      "function": "slidingWindow",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "ordered-sequence",
+      "query": "head(10) | slidingWindow([count(as=\"events\"), sum(\"value\", as=\"total\")], events=2)",
+      "canonical": "head(10) | slidingWindow([count(as=\"events\"), sum(\"value\", as=\"total\")], events=2)"
+    },
+    {
+      "id": "sort",
+      "function": "sort",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "sort([\"value\"], order=\"asc\", type=\"number\", limit=10)",
+      "canonical": "sort([\"value\"], order=\"asc\", type=\"number\", limit=10)",
+      "inputs": [
+        "value"
+      ]
+    },
+    {
+      "id": "split",
+      "function": "split",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "split(\"values\")",
+      "canonical": "split(\"values\")",
+      "inputs": [
+        "values"
+      ]
+    },
+    {
+      "id": "splitString",
+      "function": "splitString",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "splitString(\"message\", by=\",\", as=\"parts\")",
+      "canonical": "splitString(\"message\", by=\",\", as=\"parts\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "parts[]"
+      ]
+    },
+    {
+      "id": "splitString-qualified-assignment",
+      "function": "splitString",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := splitString(\"message\", by=\",\")",
+      "canonical": "result := splitString(\"message\", by=\",\")"
+    },
+    {
+      "id": "start",
+      "function": "start",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "start(as=\"start_time\")",
+      "canonical": "start(as=\"start_time\")",
+      "inputs": [],
+      "outputs": [
+        "start_time"
+      ]
+    },
+    {
+      "id": "start-omitted-name",
+      "function": "start",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "start(\"started\")",
+      "canonical": "start(\"started\")"
+    },
+    {
+      "id": "start-qualified-assignment",
+      "function": "start",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := start()",
+      "canonical": "result := start()"
+    },
+    {
+      "id": "stats",
+      "function": "stats",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "stats(count(as=\"events\"))",
+      "canonical": "stats(count(as=\"events\"))",
+      "inputs": [],
+      "outputs": [
+        "events"
+      ]
+    },
+    {
+      "id": "stats-shorthand",
+      "function": "stats",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "stats(count)",
+      "canonical": "stats(count())"
+    },
+    {
+      "id": "stdDev",
+      "function": "stdDev",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "stdDev(\"value\", as=\"deviation\")",
+      "canonical": "stdDev(\"value\", as=\"deviation\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "deviation"
+      ]
+    },
+    {
+      "id": "stdDev-assignment",
+      "function": "stdDev",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "aggregate-assignment",
+      "query": "result := stdDev(\"value\")",
+      "canonical": "result := stdDev(\"value\")"
+    },
+    {
+      "id": "stripAnsiCodes",
+      "function": "stripAnsiCodes",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "stripAnsiCodes(\"message\", as=\"result\")",
+      "canonical": "stripAnsiCodes(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "stripAnsiCodes-qualified-assignment",
+      "function": "stripAnsiCodes",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := stripAnsiCodes(\"message\")",
+      "canonical": "result := stripAnsiCodes(\"message\")"
+    },
+    {
+      "id": "subnet",
+      "function": "subnet",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "subnet(\"ip\", bits=24, as=\"network\")",
+      "canonical": "subnet(\"ip\", bits=24, as=\"network\")",
+      "inputs": [
+        "ip"
+      ],
+      "outputs": [
+        "network"
+      ]
+    },
+    {
+      "id": "subnet-qualified-assignment",
+      "function": "subnet",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := subnet(\"ip\", bits=24)",
+      "canonical": "result := subnet(\"ip\", bits=24)"
+    },
+    {
+      "id": "sum",
+      "function": "sum",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "sum(\"value\", as=\"total\")",
+      "canonical": "sum(\"value\", as=\"total\")",
+      "inputs": [
+        "value"
+      ],
+      "outputs": [
+        "total"
+      ]
+    },
+    {
+      "id": "sum-assignment",
+      "function": "sum",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "aggregate-assignment",
+      "query": "result := sum(\"value\")",
+      "canonical": "result := sum(\"value\")"
+    },
+    {
+      "id": "table",
+      "function": "table",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "table([\"user\"], limit=10)",
+      "canonical": "table([\"user\"], limit=10)",
+      "inputs": [
+        "user"
+      ],
+      "outputs": [
+        "user"
+      ]
+    },
+    {
+      "id": "tail",
+      "function": "tail",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "ordered-sequence",
+      "query": "tail(10)",
+      "canonical": "tail(10)",
+      "inputs": []
+    },
+    {
+      "id": "test",
+      "function": "test",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "test(value > 0)",
+      "canonical": "test((value > 0))",
+      "inputs": [
+        "value"
+      ]
+    },
+    {
+      "id": "test-negated",
+      "function": "test",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!test(value > 0)",
+      "canonical": "!test((value > 0))"
+    },
+    {
+      "id": "text-contains",
+      "function": "text:contains",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:contains(message, substring=\"a\")",
+      "canonical": "text:contains(message, substring=\"a\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "text-contains-negated",
+      "function": "text:contains",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!text:contains(message, substring=\"a\")",
+      "canonical": "!text:contains(message, substring=\"a\")"
+    },
+    {
+      "id": "text-editDistance",
+      "function": "text:editDistance",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "text:editDistance(target=message, reference=\"example\", maxDistance=5, as=\"distance\")",
+      "canonical": "text:editDistance(target=message, reference=\"example\", maxDistance=5, as=\"distance\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "distance"
+      ]
+    },
+    {
+      "id": "text-editDistanceAsArray",
+      "function": "text:editDistanceAsArray",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances\")",
+      "canonical": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "distances[].reference",
+        "distances[].distance"
+      ]
+    },
+    {
+      "id": "text-endsWith",
+      "function": "text:endsWith",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:endsWith(message, substring=\"a\")",
+      "canonical": "text:endsWith(message, substring=\"a\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "text-endsWith-negated",
+      "function": "text:endsWith",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!text:endsWith(message, substring=\"a\")",
+      "canonical": "!text:endsWith(message, substring=\"a\")"
+    },
+    {
+      "id": "text-length",
+      "function": "text:length",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:length(message, as=\"length\")",
+      "canonical": "text:length(message, as=\"length\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "length"
+      ]
+    },
+    {
+      "id": "text-length-assignment",
+      "function": "text:length",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := text:length(message)",
+      "canonical": "result := text:length(message)"
+    },
+    {
+      "id": "text-positionOf",
+      "function": "text:positionOf",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:positionOf(message, character=\"@\", as=\"position\")",
+      "canonical": "text:positionOf(message, character=\"@\", as=\"position\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "position"
+      ]
+    },
+    {
+      "id": "text-startsWith",
+      "function": "text:startsWith",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:startsWith(message, substring=\"a\")",
+      "canonical": "text:startsWith(message, substring=\"a\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "text-startsWith-negated",
+      "function": "text:startsWith",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!text:startsWith(message, substring=\"a\")",
+      "canonical": "!text:startsWith(message, substring=\"a\")"
+    },
+    {
+      "id": "text-substring",
+      "function": "text:substring",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:substring(message, begin=0, end=2, as=\"part\")",
+      "canonical": "text:substring(message, begin=0, end=2, as=\"part\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "part"
+      ]
+    },
+    {
+      "id": "text-trim",
+      "function": "text:trim",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "text:trim(message, as=\"trimmed\")",
+      "canonical": "text:trim(message, as=\"trimmed\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "trimmed"
+      ]
+    },
+    {
+      "id": "time-dayOfMonth",
+      "function": "time:dayOfMonth",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:dayOfMonth(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:dayOfMonth(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-dayOfWeek",
+      "function": "time:dayOfWeek",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:dayOfWeek(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:dayOfWeek(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-dayOfWeekName",
+      "function": "time:dayOfWeekName",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:dayOfWeekName(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:dayOfWeekName(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-dayOfYear",
+      "function": "time:dayOfYear",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:dayOfYear(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:dayOfYear(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-hour",
+      "function": "time:hour",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:hour(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:hour(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-hour-assignment",
+      "function": "time:hour",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := time:hour(\"stamp\", timezone=\"UTC\")",
+      "canonical": "result := time:hour(\"stamp\", timezone=\"UTC\")"
+    },
+    {
+      "id": "time-millisecond",
+      "function": "time:millisecond",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:millisecond(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:millisecond(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-minute",
+      "function": "time:minute",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:minute(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:minute(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-month",
+      "function": "time:month",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:month(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:month(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-monthName",
+      "function": "time:monthName",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:monthName(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:monthName(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-second",
+      "function": "time:second",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:second(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:second(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-weekOfYear",
+      "function": "time:weekOfYear",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:weekOfYear(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:weekOfYear(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "time-year",
+      "function": "time:year",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "time:year(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "canonical": "time:year(\"stamp\", timezone=\"UTC\", as=\"component\")",
+      "inputs": [
+        "stamp"
+      ],
+      "outputs": [
+        "component"
+      ]
+    },
+    {
+      "id": "timeChart",
+      "function": "timeChart",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-aggregate",
+      "query": "timeChart(span=\"1h\", function=count())",
+      "canonical": "timeChart(span=\"1h\", function=count())"
+    },
+    {
+      "id": "timeChart-omitted-name",
+      "function": "timeChart",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "temporal-aggregate",
+      "query": "timeChart(\"user\", span=\"1h\", function=count())",
+      "canonical": "timeChart(\"user\", span=\"1h\", function=count())"
+    },
+    {
+      "id": "timeChart-coordinates-control",
+      "function": "timeChart",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "pipeline",
+      "query": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=millis) | timeChart(span=\"1m\", timezone=\"UTC\", function=count(as=n)) | test(n > 0) | sort(_bucket, order=asc, type=number, limit=10) | select([_bucket, n])",
+      "canonical": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=\"millis\") | timeChart(span=\"1m\", timezone=\"UTC\", function=count(as=\"n\")) | test((n > 0)) | sort(_bucket, order=\"asc\", type=\"number\", limit=10) | select([_bucket, n])"
+    },
+    {
+      "id": "tokenHash",
+      "function": "tokenHash",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "tokenHash(\"message\", as=\"result\")",
+      "canonical": "tokenHash(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "tokenHash-qualified-assignment",
+      "function": "tokenHash",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := tokenHash(\"message\")",
+      "canonical": "result := tokenHash(\"message\")"
+    },
+    {
+      "id": "top",
+      "function": "top",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "top(\"user\", limit=10, as=\"events\")",
+      "canonical": "top(\"user\", limit=10, as=\"events\")",
+      "inputs": [
+        "user"
+      ],
+      "outputs": [
+        "user",
+        "events"
+      ]
+    },
+    {
+      "id": "transpose",
+      "function": "transpose",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "after-aggregate",
+      "query": "groupBy([\"status\"], limit=10) | transpose()",
+      "canonical": "groupBy([\"status\"], limit=10) | transpose()"
+    },
+    {
+      "id": "transpose-omitted-name",
+      "function": "transpose",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "after-aggregate",
+      "query": "groupBy([\"status\"], limit=10) | transpose(\"status\")",
+      "canonical": "groupBy([\"status\"], limit=10) | transpose(\"status\")"
+    },
+    {
+      "id": "unit-convert",
+      "function": "unit:convert",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "unit:convert(\"bytes\", from=\"B\", to=\"kB\", as=\"kilobytes\")",
+      "canonical": "unit:convert(\"bytes\", from=\"B\", to=\"kB\", as=\"kilobytes\")",
+      "inputs": [
+        "bytes"
+      ],
+      "outputs": [
+        "kilobytes"
+      ]
+    },
+    {
+      "id": "unit-convert-qualified-assignment",
+      "function": "unit:convert",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := unit:convert(\"bytes\", from=\"B\", to=\"kB\")",
+      "canonical": "result := unit:convert(\"bytes\", from=\"B\", to=\"kB\")"
+    },
+    {
+      "id": "upper",
+      "function": "upper",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "upper(\"message\", as=\"result\")",
+      "canonical": "upper(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "upper-qualified-assignment",
+      "function": "upper",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := upper(\"message\")",
+      "canonical": "result := upper(\"message\")"
+    },
+    {
+      "id": "urlDecode",
+      "function": "urlDecode",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "urlDecode(\"message\", as=\"result\")",
+      "canonical": "urlDecode(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "urlDecode-qualified-assignment",
+      "function": "urlDecode",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := urlDecode(\"message\")",
+      "canonical": "result := urlDecode(\"message\")"
+    },
+    {
+      "id": "urlEncode",
+      "function": "urlEncode",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "urlEncode(\"message\", as=\"result\")",
+      "canonical": "urlEncode(\"message\", as=\"result\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "result"
+      ]
+    },
+    {
+      "id": "urlEncode-assignment",
+      "function": "urlEncode",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := urlEncode(\"message\")",
+      "canonical": "result := urlEncode(\"message\")"
+    },
+    {
+      "id": "wildcard",
+      "function": "wildcard",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "filter",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "wildcard(\"a*\", field=\"message\")",
+      "canonical": "wildcard(\"a*\", field=\"message\")",
+      "inputs": [
+        "message"
+      ]
+    },
+    {
+      "id": "wildcard-expression",
+      "function": "wildcard",
+      "primary": false,
+      "forms": [
+        "expression"
+      ],
+      "placement": "scalar-predicate",
+      "query": "matched := wildcard(\"a*\", field=\"message\")",
+      "canonical": "matched := wildcard(\"a*\", field=\"message\")"
+    },
+    {
+      "id": "wildcard-negated",
+      "function": "wildcard",
+      "primary": false,
+      "forms": [
+        "negated"
+      ],
+      "placement": "pipeline",
+      "query": "!wildcard(\"a*\", field=\"message\")",
+      "canonical": "!wildcard(\"a*\", field=\"message\")"
+    },
+    {
+      "id": "window",
+      "function": "window",
+      "primary": true,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "timeChart(span=\"1h\", function=window(function=avg(\"value\"), buckets=3))",
+      "canonical": "timeChart(span=\"1h\", function=window(function=avg(\"value\"), buckets=3))"
+    },
+    {
+      "id": "window-bucket-span",
+      "function": "window",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "bucket(span=\"1m\", function=window(function=sum(\"value\"), span=\"5m\"))",
+      "canonical": "bucket(span=\"1m\", function=window(function=sum(\"value\"), span=\"5m\"))"
+    },
+    {
+      "id": "window-omitted-name",
+      "function": "window",
+      "primary": false,
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "timeChart(span=\"1h\", function=window(avg(\"value\"), buckets=3))",
+      "canonical": "timeChart(span=\"1h\", function=window(avg(\"value\"), buckets=3))"
+    },
+    {
+      "id": "window-bucket-width-1",
+      "function": "window",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=millis) | bucket(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=current), window(function=sum(value, as=previous), buckets=1)]) | _bucket=\"1735732920000\" | select([current, previous])",
+      "canonical": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=\"millis\") | bucket(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=\"current\"), window(function=sum(value, as=\"previous\"), buckets=1)]) | _bucket = \"1735732920000\" | select([current, previous])"
+    },
+    {
+      "id": "window-bucket-width-2",
+      "function": "window",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\", \"{\\\"ts\\\":\\\"1735733010000\\\",\\\"value\\\":30}\"]) | parseJson() | parseTimestamp(field=ts, format=millis) | bucket(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=current), window(function=sum(value, as=previous), buckets=2)]) | _bucket=\"1735732980000\" | select([current, previous])",
+      "canonical": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\", \"{\\\"ts\\\":\\\"1735733010000\\\",\\\"value\\\":30}\"]) | parseJson() | parseTimestamp(field=ts, format=\"millis\") | bucket(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=\"current\"), window(function=sum(value, as=\"previous\"), buckets=2)]) | _bucket = \"1735732980000\" | select([current, previous])"
+    },
+    {
+      "id": "window-timeChart-width-1",
+      "function": "window",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=millis) | timeChart(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=current), window(function=sum(value, as=previous), buckets=1)]) | _bucket=\"1735732920000\" | select([current, previous])",
+      "canonical": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\"]) | parseJson() | parseTimestamp(field=ts, format=\"millis\") | timeChart(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=\"current\"), window(function=sum(value, as=\"previous\"), buckets=1)]) | _bucket = \"1735732920000\" | select([current, previous])"
+    },
+    {
+      "id": "window-timeChart-width-2",
+      "function": "window",
+      "primary": false,
+      "forms": [
+        "documented_signature"
+      ],
+      "placement": "temporal-subaggregate",
+      "query": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\", \"{\\\"ts\\\":\\\"1735733010000\\\",\\\"value\\\":30}\"]) | parseJson() | parseTimestamp(field=ts, format=millis) | timeChart(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=current), window(function=sum(value, as=previous), buckets=2)]) | _bucket=\"1735732980000\" | select([current, previous])",
+      "canonical": "createEvents([\"{\\\"ts\\\":\\\"1735732830000\\\",\\\"value\\\":3}\", \"{\\\"ts\\\":\\\"1735732890000\\\",\\\"value\\\":11}\", \"{\\\"ts\\\":\\\"1735732950000\\\",\\\"value\\\":7}\", \"{\\\"ts\\\":\\\"1735733010000\\\",\\\"value\\\":30}\"]) | parseJson() | parseTimestamp(field=ts, format=\"millis\") | timeChart(span=\"1m\", timezone=\"UTC\", function=[sum(value, as=\"current\"), window(function=sum(value, as=\"previous\"), buckets=2)]) | _bucket = \"1735732980000\" | select([current, previous])"
+    },
+    {
+      "id": "worldMap",
+      "function": "worldMap",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "coordinate_input"
+      ],
+      "placement": "visual-aggregate",
+      "query": "worldMap(lat=\"latitude\", lon=\"longitude\")",
+      "canonical": "worldMap(lat=\"latitude\", lon=\"longitude\")",
+      "inputs": [
+        "latitude",
+        "longitude"
+      ]
+    },
+    {
+      "id": "worldMap-ip",
+      "function": "worldMap",
+      "primary": false,
+      "forms": [
+        "ip_input"
+      ],
+      "placement": "visual-aggregate",
+      "query": "worldMap(ip=\"ip\")",
+      "canonical": "worldMap(ip=\"ip\")"
+    },
+    {
+      "id": "writeJson",
+      "function": "writeJson",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "writeJson([\"user\", \"status\"], as=\"serialized\")",
+      "canonical": "writeJson([\"user\", \"status\"], as=\"serialized\")",
+      "inputs": [
+        "user",
+        "status"
+      ],
+      "outputs": [
+        "serialized"
+      ]
+    },
+    {
+      "id": "writeJson-assignment",
+      "function": "writeJson",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := writeJson([\"user\", \"status\"])",
+      "canonical": "result := writeJson([\"user\", \"status\"])"
+    },
+    {
+      "id": "xml-prettyPrint",
+      "function": "xml:prettyPrint",
+      "primary": true,
+      "forms": [
+        "documented_signature",
+        "omitted_argument_name"
+      ],
+      "placement": "pipeline",
+      "query": "xml:prettyPrint(\"message\", as=\"formatted\")",
+      "canonical": "xml:prettyPrint(\"message\", as=\"formatted\")",
+      "inputs": [
+        "message"
+      ],
+      "outputs": [
+        "formatted"
+      ]
+    },
+    {
+      "id": "xml-prettyPrint-qualified-assignment",
+      "function": "xml:prettyPrint",
+      "primary": false,
+      "forms": [
+        "output_assignment"
+      ],
+      "placement": "scalar-assignment",
+      "query": "result := xml:prettyPrint(\"message\")",
+      "canonical": "result := xml:prettyPrint(\"message\")"
+    }
+  ],
+  "controls": [
+    {
+      "id": "missing-field",
+      "query": "math:sqrt()",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_REQUIRED"
+    },
+    {
+      "id": "field-is-number",
+      "query": "math:sqrt(4)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_TYPE"
+    },
+    {
+      "id": "numeric-expression-type",
+      "query": "math:pow(\"value\", exponent=\"bad\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_TYPE"
+    },
+    {
+      "id": "immutable-output",
+      "query": "lower(\"message\", as=\"#tag\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_OUTPUT_FIELD"
+    },
+    {
+      "id": "unknown-option",
+      "query": "lower(\"message\", unknown=true)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_UNKNOWN"
+    },
+    {
+      "id": "duplicate-alias",
+      "query": "kvParse(as=\"a\", prefix=\"b\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_DUPLICATE_ARGUMENT"
+    },
+    {
+      "id": "array-expression-list-shape",
+      "query": "array:append(\"values[]\", values=\"a\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_TYPE"
+    },
+    {
+      "id": "bit-index-range",
+      "query": "bitfield:extractFlags(field=\"flags\", output=[[64, \"too_high\"]])",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_TYPE"
+    },
+    {
+      "id": "bit-output-tag",
+      "query": "bitfield:extractFlags(field=\"flags\", output=[[0, \"#tag\"]])",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_OUTPUT_FIELD"
+    },
+    {
+      "id": "csv-required-columns",
+      "query": "parseCsv(field=\"@rawstring\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_REQUIRED"
+    },
+    {
+      "id": "csv-delimiter",
+      "query": "parseCsv(\"csv\", columns=[\"user\"], delimiter=\"::\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_VALUE"
+    },
+    {
+      "id": "fixed-width-shape",
+      "query": "parseFixedWidth(columns=[\"user\", \"status\"], widths=[4])",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_COUNT"
+    },
+    {
+      "id": "fixed-width-element-type",
+      "query": "parseFixedWidth(columns=[\"user\"], widths=[\"wide\"])",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_TYPE"
+    },
+    {
+      "id": "lookup-row-bound",
+      "query": "matchAsArray(\"synthetic.csv\", field=\"user\", nrows=11)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_RANGE"
+    },
+    {
+      "id": "parse-radix-bound",
+      "query": "parseInt(\"text_number\", radix=1)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_RANGE"
+    },
+    {
+      "id": "window-placement",
+      "query": "window(function=count(), buckets=2)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_WINDOW_PLACEMENT"
+    },
+    {
+      "id": "window-width",
+      "query": "timeChart(span=\"1m\", function=window(function=count()))",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_WINDOW_WIDTH"
+    },
+    {
+      "id": "sequence-placement",
+      "query": "slidingWindow(count(), events=2)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_SEQUENCE_PLACEMENT"
+    },
+    {
+      "id": "sequence-window-bound",
+      "query": "head(10) | slidingWindow(count(), events=10001)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_ARGUMENT_RANGE"
+    },
+    {
+      "id": "late-definition",
+      "query": "head(10) | remoteTable(connection=\"synthetic-sql\", name=\"t\", query=\"select 1\")",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_TABLE_PLACEMENT"
+    },
+    {
+      "id": "nested-time-preamble",
+      "query": "join({ setTimeInterval(start=\"1d\") | count() }, field=\"user\")",
+      "outcome": "invalid",
+      "typed": true
+    },
+    {
+      "id": "late-time-preamble",
+      "query": "count() | setTimeInterval(start=\"1d\")",
+      "outcome": "invalid",
+      "typed": true
+    },
+    {
+      "id": "metadata-after-aggregate",
+      "query": "count() | eventSize()",
+      "outcome": "invalid",
+      "typed": true
+    },
+    {
+      "id": "source-inside-inline",
+      "query": "array:filter(\"values[]\", function={ createEvents([\"a\"]) })",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_INLINE_EFFECT"
+    },
+    {
+      "id": "immutable-dynamic-target",
+      "query": "setField(target=\"#tag\", value=1)",
+      "outcome": "invalid",
+      "typed": true,
+      "diagnostic": "CQL_OUTPUT_FIELD"
+    },
+    {
+      "id": "computed-field-target",
+      "query": "setField(target=target, value=1)",
+      "outcome": "unsupported",
+      "typed": true,
+      "diagnostic": "CQL_UNSUPPORTED_DYNAMIC_OUTPUT"
+    },
+    {
+      "id": "wildcard-renaming",
+      "query": "lowercase([\"*\"], include=\"both\")",
+      "outcome": "unsupported",
+      "typed": true,
+      "diagnostic": "CQL_UNSUPPORTED_DYNAMIC_OUTPUT"
+    },
+    {
+      "id": "computed-aggregate-selector",
+      "query": "callFunction(function=(selector + \"\"), field=\"value\")",
+      "outcome": "unsupported",
+      "typed": true,
+      "diagnostic": "CQL_UNSUPPORTED_ARGUMENT_EXPRESSION"
+    },
+    {
+      "id": "unresolved-parameter",
+      "query": "beta:param(parameter=?selection, as=\"value\")",
+      "outcome": "unsupported",
+      "typed": false,
+      "diagnostic": "CQL_UNSUPPORTED_PARAMETER"
+    },
+    {
+      "id": "unresolved-resource",
+      "query": "readFile(file=?resource)",
+      "outcome": "unsupported",
+      "typed": false,
+      "diagnostic": "CQL_UNSUPPORTED_PARAMETER"
+    },
+    {
+      "id": "saved-helper",
+      "query": "$synthetic/helper()",
+      "outcome": "unsupported",
+      "typed": false,
+      "diagnostic": "CQL_UNSUPPORTED_SYNTAX"
+    },
+    {
+      "id": "not-yet-available",
+      "query": "math:spherical2cartesian(azimuth=\"azimuth\", polar=\"polar\", radius=\"radius\")",
+      "outcome": "unsupported",
+      "typed": false,
+      "diagnostic": "CQL_UNSUPPORTED_FUNCTION"
+    },
+    {
+      "id": "transform-scalar-context",
+      "query": "result := parseJson()",
+      "outcome": "unsupported",
+      "typed": true,
+      "diagnostic": "CQL_UNSUPPORTED_SCALAR_FUNCTION"
+    },
+    {
+      "id": "logical-array-assignment",
+      "function": "array:reduceColumn",
+      "forms": [
+        "output_assignment"
+      ],
+      "query": "result := array:reduceColumn(\"values[]\", function=avg(\"item\"), var=\"item\")",
+      "outcome": "unsupported",
+      "typed": true
+    },
+    {
+      "id": "retaining-match-array-negation",
+      "function": "matchAsArray",
+      "forms": [
+        "negated"
+      ],
+      "query": "!matchAsArray(\"synthetic.csv\", field=\"user\", nrows=1, asArray=\"matches[]\", strict=false)",
+      "outcome": "unsupported",
+      "typed": true
+    }
+  ]
+}

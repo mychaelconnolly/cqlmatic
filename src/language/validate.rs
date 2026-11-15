@@ -3,7 +3,10 @@ use crate::{
     catalog::{self, Effect},
     contracts::*,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 #[derive(Debug)]
 pub struct Report {
@@ -17,6 +20,8 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         query,
         diagnostics: vec![],
         fields: BTreeSet::new(),
+        reads: BTreeSet::new(),
+        projected_input: None,
         nodes: 0,
         bindings: vec![],
         nesting: 0,
@@ -27,6 +32,11 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         table_columns: BTreeMap::new(),
         correlation_columns: BTreeMap::new(),
         narrowed: false,
+        aggregate_input: false,
+        ordered_input: false,
+        aggregate_parents: vec![],
+        stored_input: true,
+        time_interval_seen: false,
     };
     checker.pipeline(pipeline, QueryContext::Plain, &mut BTreeSet::new());
     if checker.definitions > 0 && checker.joins {
@@ -73,6 +83,7 @@ enum QueryContext {
     Continuing,
     Mandatory,
     Aggregation,
+    Subaggregate,
 }
 
 #[derive(Clone, Default)]
@@ -113,6 +124,8 @@ struct Checker<'a> {
     query: &'a str,
     diagnostics: Vec<Diagnostic>,
     fields: BTreeSet<String>,
+    reads: BTreeSet<String>,
+    projected_input: Option<BTreeSet<String>>,
     nodes: usize,
     bindings: Vec<(String, bool)>,
     nesting: usize,
@@ -123,6 +136,11 @@ struct Checker<'a> {
     table_columns: BTreeMap<String, Option<BTreeSet<String>>>,
     correlation_columns: BTreeMap<usize, Option<BTreeSet<String>>>,
     narrowed: bool,
+    aggregate_input: bool,
+    ordered_input: bool,
+    aggregate_parents: Vec<&'static str>,
+    stored_input: bool,
+    time_interval_seen: bool,
 }
 impl Checker<'_> {
     fn emit(&mut self, code: &str, message: impl Into<String>, call: Option<&Call>, warning: bool) {
@@ -161,6 +179,49 @@ impl Checker<'_> {
     }
     fn field(&mut self, f: &str) {
         self.fields.insert(f.into());
+        if self.local_binding(f).is_none() {
+            self.reads.insert(f.into());
+        }
+    }
+    fn local_binding(&self, field: &str) -> Option<&(String, bool)> {
+        let contains = |binding: &str, structured: bool, field: &str| {
+            field == binding
+                || structured
+                    && field
+                        .strip_prefix(binding)
+                        .is_some_and(|tail| tail.starts_with('.') || tail.starts_with('['))
+        };
+        self.bindings
+            .iter()
+            .enumerate()
+            .filter(|(index, (binding, structured))| {
+                contains(binding, *structured, field)
+                    && !self.bindings[index + 1..]
+                        .iter()
+                        .any(|(later, structured)| contains(later, *structured, binding))
+            })
+            .map(|(_, binding)| binding)
+            .max_by_key(|(binding, _)| binding.len())
+    }
+    fn projected_reads(
+        &mut self,
+        previous: BTreeSet<String>,
+        available: Option<&BTreeSet<String>>,
+        call: Option<&Call>,
+    ) {
+        let fields = std::mem::replace(&mut self.fields, previous);
+        self.fields.extend(fields);
+        let reads = std::mem::take(&mut self.reads);
+        if let Some(available) = available {
+            for field in reads.iter().filter(|field| !available.contains(*field)) {
+                self.emit(
+                    "CQL_DROPPED_FIELD",
+                    format!("'{field}' is not among the known projected/aggregate outputs."),
+                    call,
+                    true,
+                );
+            }
+        }
     }
     fn pipeline(&mut self, p: &Pipeline, context: QueryContext, tables: &mut BTreeSet<String>) {
         self.pipeline_state(
@@ -169,6 +230,11 @@ impl Checker<'_> {
             tables,
             &mut PipelineState {
                 narrowed: context == QueryContext::Continuing && self.narrowed,
+                projected: if context == QueryContext::Continuing {
+                    self.projected_input.clone()
+                } else {
+                    None
+                },
                 ..PipelineState::default()
             },
         );
@@ -204,6 +270,9 @@ impl Checker<'_> {
     ) {
         self.nesting += 1;
         let enclosing_narrowed = self.narrowed;
+        let enclosing_input = (self.aggregate_input, self.ordered_input, self.stored_input);
+        let enclosing_reads = std::mem::take(&mut self.reads);
+        let enclosing_projection = self.projected_input.take();
         let PipelineState {
             mut has_input,
             mut aggregated,
@@ -216,7 +285,12 @@ impl Checker<'_> {
         } = state.clone();
         let mut mandatory_link = false;
         for step in &p.steps {
+            self.reads.clear();
+            self.projected_input = projected.clone();
             self.narrowed = narrowed;
+            self.aggregate_input = aggregated;
+            self.ordered_input = ordered;
+            self.stored_input = !synthetic && !replaced;
             if context == QueryContext::Mandatory
                 && mandatory_link
                 && !matches!(step, Step::Link { .. })
@@ -234,13 +308,40 @@ impl Checker<'_> {
                 );
                 break;
             }
+            if matches!(
+                context,
+                QueryContext::Mandatory | QueryContext::Aggregation | QueryContext::Subaggregate
+            ) {
+                let call = match step {
+                    Step::Call(call)
+                    | Step::Assign {
+                        value: Value::Call(call),
+                        ..
+                    } => Some(call),
+                    _ => None,
+                };
+                if let Some(call) = call
+                    && let Some(resolved) = catalog::resolve(call)
+                    && (matches!(
+                        resolved.function.resolved_effect(&resolved.arguments),
+                        Effect::Source | Effect::Definition | Effect::Correlation
+                    ) || context == QueryContext::Mandatory
+                        && resolved.function.resolved_effect(&resolved.arguments)
+                            == Effect::Aggregate)
+                {
+                    self.emit(
+                        "CQL_CORRELATION_BRANCH",
+                        "Mandatory correlation queries cannot aggregate or replace the stream; aggregation queries cannot replace or nest correlation.",
+                        Some(call),
+                        false,
+                    );
+                }
+            }
             match step {
                 Step::Filter(f) => {
                     let previous = std::mem::take(&mut self.fields);
                     self.filter(f, tables, false);
                     narrowed |= narrowing_filter(f);
-                    let reads = self.fields.clone();
-                    self.fields.extend(previous);
                     if let Some(available) = &mut projected {
                         for pattern in positive_regexes(f) {
                             available.extend(regex_captures(pattern));
@@ -249,29 +350,54 @@ impl Checker<'_> {
                     if synthetic && !extracted && has_non_raw_comparison(f) {
                         self.emit("CQL_SYNTHETIC_FIELD_BEFORE_PARSE","createEvents emits raw strings. Parse before filtering extracted fields.",None,true);
                     }
-                    if let Some(available) = &projected {
-                        for f in reads
-                            .iter()
-                            .filter(|f| !available.contains(*f))
-                            .cloned()
-                            .collect::<Vec<_>>()
-                        {
-                            self.emit(
-                                "CQL_DROPPED_FIELD",
-                                format!(
-                                    "'{f}' is not among the known projected/aggregate outputs."
-                                ),
-                                None,
-                                true,
-                            );
-                        }
-                    }
+                    self.projected_reads(previous, projected.as_ref(), None);
                 }
                 Step::Assign { field, value } => {
-                    self.field(field);
+                    self.fields.insert(field.clone());
                     self.output_field(field, None);
-                    self.scalar_value(value, tables);
-                    if let Some(xs) = &mut projected {
+                    let previous = std::mem::take(&mut self.fields);
+                    if let Value::Call(call) = value
+                        && call
+                            .args
+                            .iter()
+                            .any(|arg| arg.name.as_deref() == Some("as"))
+                    {
+                        self.emit("CQL_ASSIGN_ALIAS", "Direct assignment and an explicit as argument cannot be combined; choose one output name.", Some(call), false);
+                    }
+                    if let Some(call) = catalog::aliased_call(field, value) {
+                        let args = self.function(&call, tables, false, false, false);
+                        self.projected_reads(previous, projected.as_ref(), Some(&call));
+                        if let Some(fields) = &mut projected {
+                            if let Some(writes) = catalog::output_writes(&call) {
+                                fields.extend(writes.fields);
+                            }
+                            for (old, new) in catalog::rename_bindings(&args) {
+                                fields.remove(old);
+                                fields.insert(new.into());
+                            }
+                        }
+                    } else if let Some(call) = catalog::assigned_aggregate(value) {
+                        self.function(call, tables, false, false, false);
+                        self.projected_reads(previous, projected.as_ref(), Some(call));
+                        projected = Some(BTreeSet::from([field.clone()]));
+                        aggregated = true;
+                        ordered = false;
+                        has_input = true;
+                    } else {
+                        self.scalar_value(value, tables);
+                        self.projected_reads(
+                            previous,
+                            projected.as_ref(),
+                            if let Value::Call(call) = value {
+                                Some(call)
+                            } else {
+                                None
+                            },
+                        );
+                    }
+                    if catalog::aliased_call(field, value).is_none()
+                        && let Some(xs) = &mut projected
+                    {
                         xs.insert(field.clone());
                     }
                 }
@@ -300,6 +426,7 @@ impl Checker<'_> {
                     projected = merged.projected;
                 }
                 Step::Match { field, arms } => {
+                    let previous = std::mem::take(&mut self.fields);
                     self.field(field);
                     if !narrowed
                         && field == "@rawstring"
@@ -310,6 +437,7 @@ impl Checker<'_> {
                     for (pattern, _) in arms {
                         self.pattern(pattern);
                     }
+                    self.projected_reads(previous, projected.as_ref(), None);
                     let merged = self.branches(
                         arms.iter().map(|(_, p)| p).collect(),
                         context,
@@ -370,25 +498,16 @@ impl Checker<'_> {
                         );
                         continue;
                     };
-                    if spec.effect == Effect::Definition && (self.nesting != 1 || has_input) {
+                    if spec.effect == Effect::Definition
+                        && spec.name != "setTimeInterval"
+                        && (self.nesting != 1 || has_input)
+                    {
                         self.emit("CQL_TABLE_PLACEMENT", "defineTable declarations must form a top-level preamble before other operations.", Some(c), false);
                     }
                     let previous = std::mem::take(&mut self.fields);
-                    let args = self.function(c, tables, false, false);
-                    let reads = self.fields.clone();
-                    self.fields.extend(previous);
-                    if let Some(available) = &projected {
-                        for field in reads.iter().filter(|field| !available.contains(*field)) {
-                            self.emit(
-                                "CQL_DROPPED_FIELD",
-                                format!(
-                                    "'{field}' is not among the known projected/aggregate outputs."
-                                ),
-                                Some(c),
-                                true,
-                            );
-                        }
-                    }
+                    let preamble = self.nesting == 1 && !has_input && self.definitions == 0;
+                    let args = self.function(c, tables, false, false, preamble);
+                    self.projected_reads(previous, projected.as_ref(), Some(c));
                     let effect = spec.resolved_effect(&args);
                     if spec.name == "correlate" {
                         let resolved = catalog::resolve(c).expect("known function");
@@ -416,19 +535,6 @@ impl Checker<'_> {
                                 false,
                             );
                         }
-                    }
-                    if matches!(context, QueryContext::Mandatory | QueryContext::Aggregation)
-                        && (matches!(
-                            effect,
-                            Effect::Source | Effect::Definition | Effect::Correlation
-                        ) || context == QueryContext::Mandatory && effect == Effect::Aggregate)
-                    {
-                        self.emit(
-                            "CQL_CORRELATION_BRANCH",
-                            "Mandatory correlation queries cannot aggregate or replace the stream; aggregation queries cannot replace or nest correlation.",
-                            Some(c),
-                            false,
-                        );
                     }
                     if effect == Effect::Source {
                         if has_input {
@@ -500,8 +606,11 @@ impl Checker<'_> {
                                 self.emit("CQL_NEIGHBOR_UNORDERED", "The preceding aggregate has no qualified row order. Sort explicitly when the neighbor relationship depends on order.", Some(c), true);
                             }
                         }
-                        "definetable" => {
-                            if let Some(n) = args.get("name").and_then(|v| v.text())
+                        "definetable" | "remotetable" => {
+                            if let Some(n) = args
+                                .get("name")
+                                .filter(|value| !has_parameter(value))
+                                .and_then(|v| v.text())
                                 && !tables.insert(n.into())
                             {
                                 self.emit(
@@ -549,10 +658,9 @@ impl Checker<'_> {
                                 .filter(|fields| !fields.contains("*"));
                             if !args.contains_key("include") {
                                 let mut columns = BTreeSet::new();
-                                let names = args
-                                    .get("file")
-                                    .map(|v| catalog::fields(v))
-                                    .unwrap_or_default();
+                                let names = catalog::resolve(c)
+                                    .expect("known function")
+                                    .resource_names();
                                 let known = !names.is_empty()
                                     && names.iter().all(|name| {
                                         if let Some(Some(fields)) = self.table_columns.get(name) {
@@ -603,8 +711,17 @@ impl Checker<'_> {
                     }
                     if matches!(effect, Effect::Aggregate | Effect::Correlation) {
                         aggregated = true;
-                        ordered =
-                            matches!(name.as_str(), "head" | "tail" | "sort" | "table" | "top");
+                        if !matches!(
+                            name.as_str(),
+                            "accumulate"
+                                | "neighbor"
+                                | "partition"
+                                | "slidingwindow"
+                                | "slidingtimewindow"
+                        ) {
+                            ordered =
+                                matches!(name.as_str(), "head" | "tail" | "sort" | "table" | "top");
+                        }
                     }
                     if effect != Effect::Definition {
                         has_input = true;
@@ -618,6 +735,9 @@ impl Checker<'_> {
         }
         self.nesting -= 1;
         self.narrowed = enclosing_narrowed;
+        (self.aggregate_input, self.ordered_input, self.stored_input) = enclosing_input;
+        self.reads = enclosing_reads;
+        self.projected_input = enclosing_projection;
         *state = PipelineState {
             has_input,
             aggregated,
@@ -646,6 +766,7 @@ impl Checker<'_> {
                 self.field(field);
                 self.pattern(value);
                 if matches!(op.as_str(), ">" | ">=" | "<" | "<=")
+                    && !matches!(value, Pattern::Parameter(_))
                     && !matches!(value,Pattern::Text(s) if s.parse::<serde_json::Number>().is_ok())
                 {
                     self.emit(
@@ -682,7 +803,9 @@ impl Checker<'_> {
                 if let Some(resolved) = catalog::resolve(c)
                     && resolved.function.resolved_effect(&resolved.arguments) != Effect::Filter
                 {
-                    if resolved.function.effect == Effect::Filter {
+                    if resolved.function.effect == Effect::Filter
+                        || resolved.function.name == "matchAsArray"
+                    {
                         self.unsupported(
                             "CQL_UNSUPPORTED_PREDICATE_EFFECT",
                             "This retaining argument form is not qualified in predicate context.",
@@ -698,7 +821,7 @@ impl Checker<'_> {
                         );
                     }
                 }
-                self.function(c, tables, false, negated);
+                self.function(c, tables, false, negated, false);
             }
             Filter::Text(p) => self.pattern(p),
             Filter::Bool(_) => {}
@@ -713,7 +836,7 @@ impl Checker<'_> {
     fn value(&mut self, v: &Value, tables: &mut BTreeSet<String>) {
         match v {
             Value::Call(c) => {
-                self.function(c, tables, false, false);
+                self.function(c, tables, false, false, false);
             }
             Value::Array(xs) => {
                 for x in xs {
@@ -737,17 +860,30 @@ impl Checker<'_> {
             _ => {}
         }
     }
+    fn parameters(&mut self, value: &Value, tables: &mut BTreeSet<String>) {
+        match value {
+            Value::Parameter(_) => self.value(value, tables),
+            Value::Array(values) => {
+                for value in values {
+                    self.parameters(value, tables);
+                }
+            }
+            Value::Call(call) => {
+                for arg in &call.args {
+                    self.parameters(&arg.value, tables);
+                }
+            }
+            Value::Binary { left, right, .. } => {
+                self.parameters(left, tables);
+                self.parameters(right, tables);
+            }
+            Value::Unary { value, .. } => self.parameters(value, tables),
+            _ => {}
+        }
+    }
     fn mutation(&mut self, field: &str, call: Option<&Call>) {
         if self
-            .bindings
-            .iter()
-            .rev()
-            .find(|(binding, _)| {
-                field == binding
-                    || field
-                        .strip_prefix(binding)
-                        .is_some_and(|tail| tail.starts_with('.') || tail.starts_with('['))
-            })
+            .local_binding(field)
             .is_some_and(|(binding, structured)| *structured && field != binding)
         {
             self.unsupported(
@@ -787,7 +923,7 @@ impl Checker<'_> {
                 if catalog::function(&c.name).is_some_and(|f| !f.scalar_computation()) {
                     self.unsupported("CQL_UNSUPPORTED_SCALAR_FUNCTION", "This function is not qualified as a scalar computation in the current profile.", Some(c), false);
                 }
-                self.function(c, tables, true, false);
+                self.function(c, tables, true, false, false);
             }
             Value::Binary { left, right, .. } => {
                 self.scalar_value(left, tables);
@@ -809,6 +945,7 @@ impl Checker<'_> {
         tables: &mut BTreeSet<String>,
         scalar: bool,
         negated: bool,
+        preamble: bool,
     ) -> BTreeMap<String, &'a Value> {
         let Some(resolved) = catalog::resolve(c) else {
             self.unsupported(
@@ -820,12 +957,336 @@ impl Checker<'_> {
             return BTreeMap::new();
         };
         let spec = resolved.function;
+        if spec.name == "readFile" {
+            for (_, value) in resolved
+                .ordered
+                .iter()
+                .filter(|(name, _)| name == "file")
+                .skip(1)
+            {
+                if has_parameter(value) {
+                    self.parameters(value, tables);
+                } else if !argument_type(value, "S") {
+                    self.emit(
+                        "CQL_ARGUMENT_TYPE",
+                        "readFile resource arguments must be file/table names or lists of names.",
+                        Some(c),
+                        false,
+                    );
+                }
+            }
+        }
         for mut diagnostic in resolved.diagnostics {
             diagnostic.span = Some(Box::new(span(self.query, c.start, c.end)));
             diagnostic.reference = Some(spec.reference_id.into());
             self.diagnostics.push(diagnostic);
         }
         let args = resolved.arguments;
+        let known_args: BTreeMap<_, _> = args
+            .iter()
+            .filter(|(_, value)| !has_parameter(value))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
+        if matches!(
+            spec.name,
+            "eventSize" | "eventFieldCount" | "eventInternals"
+        ) && (self.aggregate_input || !self.stored_input)
+        {
+            self.emit(
+                "CQL_STORED_EVENT_PLACEMENT",
+                "Stored-event inspection must precede aggregation and source replacement.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "reverseDns"
+            && (self.nesting != 1 || !self.aggregate_input || !self.aggregate_parents.is_empty())
+        {
+            self.emit(
+                "CQL_REVERSE_DNS_PLACEMENT",
+                "reverseDns requires a preceding aggregate in the top-level result pipeline.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "parseInt"
+            && let Some(value) = known_args.get("radix")
+            && value
+                .text()
+                .and_then(|v| v.parse::<u32>().ok())
+                .is_none_or(|n| !(2..=36).contains(&n))
+        {
+            self.emit(
+                "CQL_ARGUMENT_RANGE",
+                "Integer radix must be from 2 through 36.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "setTimeInterval" {
+            if !preamble || self.time_interval_seen {
+                self.emit("CQL_TIME_INTERVAL_PLACEMENT", "setTimeInterval must appear once at the beginning of the top-level query, before filters and table declarations.", Some(c), false);
+            }
+            self.time_interval_seen = true;
+            self.emit("CQL_QUERY_TIME_OVERRIDE", "This declaration overrides the API/UI time interval. Authorize and verify its effective start/end before execution.", Some(c), true);
+        }
+        if matches!(
+            spec.name,
+            "setTimeInterval" | "join" | "defineTable" | "remoteTable" | "readPersistedAggregation"
+        ) {
+            for name in ["start", "end"] {
+                if let Some(value) = known_args.get(name)
+                    && argument_type(value, spec.argument_kind(name).expect("interval argument"))
+                    && interval_value(value).is_none()
+                {
+                    self.unsupported(
+                        "CQL_UNSUPPORTED_DURATION",
+                        format!("'{name}' is outside the supported now, positive fixed-duration, signed offset, epoch-millisecond integer or offset-qualified RFC3339 forms."),
+                        Some(c),
+                        false,
+                    );
+                }
+            }
+        }
+        if matches!(
+            spec.name,
+            "setTimeInterval" | "join" | "defineTable" | "remoteTable" | "readPersistedAggregation"
+        ) && let Some(start) = known_args
+            .get("start")
+            .and_then(|value| interval_value(value))
+        {
+            let end = known_args
+                .get("end")
+                .and_then(|value| interval_value(value))
+                .or_else(|| {
+                    (spec.name == "setTimeInterval" && !args.contains_key("end"))
+                        .then_some(IntervalValue::Relative(0))
+                });
+            if matches!(
+                (start, end),
+                (IntervalValue::Relative(start), Some(IntervalValue::Relative(end)))
+                    | (IntervalValue::Absolute(start), Some(IntervalValue::Absolute(end)))
+                    if start > end
+            ) {
+                self.emit(
+                    "CQL_TIME_INTERVAL_ORDER",
+                    "The start of the interval must not follow its end.",
+                    Some(c),
+                    false,
+                );
+            }
+        }
+        if spec.name == "slidingTimeWindow"
+            && let Some(value) = known_args.get("span")
+            && !value.text().is_some_and(super::plan::duration)
+            && !long_literal(value).is_some_and(|n| n > 0)
+        {
+            self.unsupported(
+                "CQL_UNSUPPORTED_DURATION",
+                "The sliding time span is outside the supported positive fixed-duration or millisecond-integer forms.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "remoteTable"
+            && matches!(args.get("query"), Some(Value::Query { .. }))
+            && !args.contains_key("include")
+        {
+            self.emit(
+                "CQL_ARGUMENT_REQUIRED",
+                "The CQL remoteTable form requires include.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "window" {
+            if !self
+                .aggregate_parents
+                .last()
+                .is_some_and(|name| matches!(*name, "bucket" | "timeChart"))
+            {
+                self.emit(
+                    "CQL_WINDOW_PLACEMENT",
+                    "window is only supported as the aggregate function of bucket or timeChart.",
+                    Some(c),
+                    false,
+                );
+            }
+            if args.contains_key("span") == args.contains_key("buckets") {
+                self.emit(
+                    "CQL_WINDOW_WIDTH",
+                    "Specify exactly one of window span or buckets.",
+                    Some(c),
+                    false,
+                );
+            }
+        }
+        if matches!(
+            spec.name,
+            "accumulate" | "slidingWindow" | "slidingTimeWindow" | "partition"
+        ) {
+            if !self.aggregate_input {
+                self.emit("CQL_SEQUENCE_PLACEMENT", "Sequence functions require a preceding aggregation that establishes the input stream order.", Some(c), false);
+            } else if !self.ordered_input {
+                self.emit("CQL_SEQUENCE_ORDER", "The preceding aggregate has no statically established row order; verify ordering before sequence analysis.", Some(c), true);
+            }
+        }
+        if matches!(
+            spec.name,
+            "accumulate" | "slidingWindow" | "slidingTimeWindow"
+        ) && let Some(function) = known_args.get("function")
+            && !single_aggregate(function)
+        {
+            self.emit(
+                "CQL_SEQUENCE_AGGREGATE_ROWS",
+                "This sequence function requires sub-aggregations that output at most one event.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "array:reduceRow"
+            && let Some(function) = known_args.get("function")
+            && (!single_aggregate(function)
+                || catalog::aggregate_value_outputs(function)
+                    .is_none_or(|(fields, _)| fields.len() != 1))
+        {
+            self.unsupported(
+                "CQL_UNSUPPORTED_REDUCER_OUTPUT",
+                "Row reduction requires a qualified single-event, single-field aggregate.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "stats"
+            && let Some(value) = known_args.get("function")
+        {
+            let functions = match *value {
+                Value::Array(xs) => xs.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            if functions.iter().enumerate().any(|(i, function)| {
+                contains_sequence(function)
+                    && functions
+                        .iter()
+                        .enumerate()
+                        .any(|(j, sibling)| i != j && !single_aggregate(sibling))
+            }) {
+                self.emit("CQL_SEQUENCE_STATS", "A sequence function cannot share stats with another function that can output multiple events.", Some(c), false);
+            }
+        }
+        if spec.name == "setField" && !args.get("target").is_some_and(|v| has_parameter(v)) {
+            match args.get("target") {
+                Some(Value::String(field)) => self.output_field(field, Some(c)),
+                Some(_) => self.unsupported("CQL_UNSUPPORTED_DYNAMIC_OUTPUT", "A computed output name cannot be proven to preserve immutable tag fields; use a literal data-field target.", Some(c), false),
+                None => {}
+            }
+        }
+        if spec.name == "parseUri" && known_args.get("prefix").and_then(|v| v.text()) == Some("") {
+            self.emit(
+                "CQL_ARGUMENT_VALUE",
+                "parseUri prefix cannot be empty.",
+                Some(c),
+                false,
+            );
+        }
+        if spec.name == "percentile" {
+            if known_args.get("accuracy").is_some_and(|value| {
+                compare_numeric_literal(value, 0.0).is_some_and(|order| order != Ordering::Greater)
+                    || compare_numeric_literal(value, 1.0)
+                        .is_some_and(|order| order != Ordering::Less)
+                    || numeric_literal(value).is_some_and(|number| number <= 0.0 || number >= 1.0)
+            }) {
+                self.emit(
+                    "CQL_ARGUMENT_RANGE",
+                    "Percentile accuracy must be greater than zero and less than one.",
+                    Some(c),
+                    false,
+                );
+            }
+            self.emit("CQL_APPROXIMATE_PERCENTILE", "Percentiles are estimates over non-negative inputs; verify error tolerance and execution completeness.", Some(c), true);
+        }
+        if matches!(spec.name, "hashMatch" | "hashRewrite")
+            && known_args
+                .get("bits")
+                .and_then(|v| long_literal(v))
+                .is_some_and(|n| n % 8 != 0)
+        {
+            self.emit(
+                "CQL_ARGUMENT_RANGE",
+                "Hash bits must be a multiple of eight.",
+                Some(c),
+                false,
+            );
+        }
+        if matches!(spec.name, "parseCsv" | "parseFixedWidth") {
+            if let Some(columns) = args.get("columns") {
+                for field in catalog::fields(columns) {
+                    self.output_field(&field, Some(c));
+                }
+            }
+            if spec.name == "parseCsv"
+                && known_args
+                    .get("delimiter")
+                    .and_then(|v| v.text())
+                    .is_some_and(|value| value.chars().count() != 1)
+            {
+                self.emit(
+                    "CQL_ARGUMENT_VALUE",
+                    "CSV delimiter must be one character.",
+                    Some(c),
+                    false,
+                );
+            }
+            if spec.name == "parseFixedWidth"
+                && let (Some(Value::Array(columns)), Some(Value::Array(widths))) =
+                    (args.get("columns"), args.get("widths"))
+                && columns.len() != widths.len()
+            {
+                self.emit(
+                    "CQL_ARGUMENT_COUNT",
+                    "Fixed-width columns and widths must have the same length.",
+                    Some(c),
+                    false,
+                );
+            }
+        }
+        if spec.name == "bitfield:extractFlags"
+            && let Some(Value::Array(pairs)) = args.get("output")
+        {
+            for pair in pairs {
+                if let Value::Array(pair) = pair
+                    && let Some(field) = pair
+                        .get(1)
+                        .filter(|value| !has_parameter(value))
+                        .and_then(|v| v.text())
+                {
+                    self.output_field(field, Some(c));
+                }
+            }
+        }
+        if spec.name == "lowercase"
+            && let Some(value) = args.get("field")
+        {
+            let rename = known_args
+                .get("include")
+                .and_then(|v| v.text())
+                .is_some_and(|v| matches!(v, "fields" | "both"));
+            if rename {
+                self.emit("CQL_LOWERCASE_RETENTION", "The reference examples do not establish consistent old-name retention for finite field-name conversion. Verify target behavior before relying on the original names.", Some(c), true);
+            }
+            for field in catalog::fields(value) {
+                if field.contains(['*', '?']) {
+                    self.unsupported(
+                        "CQL_UNSUPPORTED_DYNAMIC_OUTPUT",
+                        "Wildcard mutation cannot establish a fixed set of mutable data fields.",
+                        Some(c),
+                        false,
+                    );
+                } else {
+                    self.output_field(&if rename { field.to_lowercase() } else { field }, Some(c));
+                }
+            }
+        }
         if !self.narrowed
             && matches!(spec.name, "regex" | "wildcard")
             && raw_scan_field(spec.name, &args)
@@ -833,7 +1294,7 @@ impl Checker<'_> {
             self.raw_scan_warning(Some(c));
         }
         let mut query_projection = None;
-        if spec.name == "defineTable" {
+        if matches!(spec.name, "defineTable" | "remoteTable") {
             if matches!(args.get("include"), Some(Value::Array(xs)) if xs.iter().any(catalog::all_columns))
             {
                 self.unsupported("CQL_UNSUPPORTED_ALL_COLUMNS", "Use the scalar * selector for all table columns; wildcard entries inside a list are unsupported.", Some(c), false);
@@ -851,7 +1312,7 @@ impl Checker<'_> {
         self.joins |= matches!(spec.name, "join" | "selfJoinFilter");
         self.join_seen |= spec.name == "join";
         self.correlation_seen |= spec.name == "correlate";
-        if matches!(spec.name, "match" | "readFile")
+        if matches!(spec.name, "match" | "matchAsArray" | "readFile")
             && c.args.iter().any(|a| a.name.as_deref() == Some("table"))
         {
             for table in args
@@ -869,9 +1330,12 @@ impl Checker<'_> {
                 }
             }
         }
-        if matches!(spec.name, "join" | "match") {
+        if matches!(spec.name, "join" | "match" | "matchAsArray") {
             let other = if spec.name == "join" { "key" } else { "column" };
-            if let Some(field) = args.get("field") {
+            if let Some(field) = args.get("field")
+                && !has_parameter(field)
+                && args.get(other).is_none_or(|value| !has_parameter(value))
+            {
                 let fields = catalog::fields(field);
                 let keys = args.get(other).map(|v| catalog::fields(v));
                 // Count positional slots, including repeated field names.
@@ -894,7 +1358,7 @@ impl Checker<'_> {
         }
         if spec.name == "match" {
             let glob = args.get("glob").copied() == Some(&Value::Bool(true))
-                || args.get("mode").and_then(|v| v.text()) == Some("glob");
+                || known_args.get("mode").and_then(|v| v.text()) == Some("glob");
             if glob
                 && ["field", "column"]
                     .iter()
@@ -917,9 +1381,12 @@ impl Checker<'_> {
             }
             self.emit("CQL_LOOKUP_COMPLETENESS", "Verify lookup/table availability, matching mode, row caps and duplicate cardinality; omitted include imports all non-key columns.", Some(c), true);
         }
-        if let Some((outputs, _)) = spec.named_outputs(&args) {
+        if let Some((outputs, members)) = spec.named_outputs(&known_args) {
             for output in outputs {
                 self.output_field(&output, Some(c));
+            }
+            for member in members {
+                self.output_field(&member, Some(c));
             }
             if spec.name == "ioc:lookup"
                 && args
@@ -959,6 +1426,7 @@ impl Checker<'_> {
             _ => &[],
         } {
             if let Some(value) = args.get(*key)
+                && !has_parameter(value)
                 && value
                     .text()
                     .is_some_and(|v| v.parse::<u64>().is_ok_and(|n| n == 0 || n > *maximum))
@@ -975,13 +1443,18 @@ impl Checker<'_> {
         }
         if matches!(spec.name, "bucket" | "timeChart") {
             for key in ["span", "minSpan"] {
-                if let Some(value) = args.get(key).and_then(|v| v.text())
+                if let Some(value) = known_args.get(key).and_then(|v| v.text())
                     && !(super::plan::duration(value) || key == "span" && value == "auto")
                 {
                     self.unsupported("CQL_UNSUPPORTED_BUCKET_SPAN", "Use auto for span or a positive fixed duration. Calendar, anchored and numeric minSpan forms are not qualified.", Some(c), false);
                 }
             }
-            if let Some(Value::Array(units)) = args.get("unit") {
+            if let Some(Value::Array(units)) = args.get("unit")
+                && !units.iter().any(has_parameter)
+                && args
+                    .get("function")
+                    .is_none_or(|value| !has_parameter(value))
+            {
                 let functions = match args.get("function") {
                     Some(Value::Array(xs)) => xs.len(),
                     _ => 1,
@@ -1004,7 +1477,7 @@ impl Checker<'_> {
             self.emit("CQL_TEMPORAL_STREAM", "Transactions depend on event timestamps, stream order, key scope and memory limits; partial end sequences can survive. A single synthetic batch does not prove production gap or ordering behavior.", Some(c), true);
         }
         if spec.name == "series"
-            && let Some(value) = args.get("memlimit").and_then(|v| v.text())
+            && let Some(value) = known_args.get("memlimit").and_then(|v| v.text())
         {
             let boundary = value
                 .find(|c: char| !c.is_ascii_digit())
@@ -1025,6 +1498,63 @@ impl Checker<'_> {
         }
         if spec.name == "formatTime" && !scalar && !args.contains_key("as") {
             self.emit("CQL_ARGUMENT_REQUIRED", "Standalone formatTime requires as; an assignment supplies its scalar output context.", Some(c), false);
+        }
+        if matches!(spec.name, "math:mod" | "math:pow") {
+            let name = if spec.name == "math:mod" {
+                "divisor"
+            } else {
+                "exponent"
+            };
+            if let Some(value) = known_args.get(name) {
+                if !numeric_expression(value) {
+                    self.emit(
+                        "CQL_ARGUMENT_TYPE",
+                        format!("Argument '{name}' requires a numeric expression."),
+                        Some(c),
+                        false,
+                    );
+                } else if long_literal(value).is_none() {
+                    self.emit("CQL_MATH_PARAMETER_CONTRACT", "The parameter table specifies integer, while examples describe decimal or field values; verify numeric conversion on the target.", Some(c), true);
+                }
+            }
+        }
+        if matches!(spec.name, "text:editDistance" | "text:editDistanceAsArray") {
+            if known_args
+                .get("maxDistance")
+                .and_then(|v| v.text())
+                .and_then(|v| v.parse::<u64>().ok())
+                .is_some_and(|v| !(1..=100).contains(&v))
+            {
+                self.emit(
+                    "CQL_ARGUMENT_RANGE",
+                    "maxDistance must be from 1 through 100.",
+                    Some(c),
+                    false,
+                );
+            }
+            if let Some(Value::Array(references)) = args.get("references")
+                && !(1..=100).contains(&references.len())
+            {
+                self.emit(
+                    "CQL_ARGUMENT_RANGE",
+                    "references must contain from 1 through 100 expressions.",
+                    Some(c),
+                    false,
+                );
+            }
+            if spec.name == "text:editDistanceAsArray"
+                && let Some(prefix) = known_args.get("asArray").and_then(|v| v.text())
+            {
+                self.output_field(prefix, Some(c));
+                if prefix.contains("[]") {
+                    self.unsupported(
+                        "CQL_UNSUPPORTED_ARRAY_NAME",
+                        "Empty-index patterns in an edit-distance output prefix are unsupported.",
+                        Some(c),
+                        false,
+                    );
+                }
+            }
         }
         if spec.name == "count" && args.get("distinct").copied() == Some(&Value::Bool(true)) {
             if !args.contains_key("field") {
@@ -1053,7 +1583,7 @@ impl Checker<'_> {
             }
         }
         if spec.name == "formatTime"
-            && args
+            && known_args
                 .get("unit")
                 .and_then(|v| v.text())
                 .is_some_and(|unit| matches!(unit, "seconds" | "milliseconds"))
@@ -1089,7 +1619,7 @@ impl Checker<'_> {
         }
         if !scalar
             && !args.contains_key("as")
-            && let Some(output) = spec.default_output(&args)
+            && let Some(output) = spec.default_output(&known_args)
         {
             self.output_field(&output, Some(c));
         }
@@ -1109,6 +1639,18 @@ impl Checker<'_> {
             let Some(kind) = spec.argument_kind(name) else {
                 continue;
             };
+            if matches!(value, Value::Parameter(_)) {
+                self.value(value, tables);
+                continue;
+            }
+            if has_parameter(value)
+                && (!matches!(kind, "g" | "u" | "e" | "p" | "e[]") || !argument_type(value, kind))
+            {
+                self.parameters(value, tables);
+                if argument_type(value, kind) {
+                    continue;
+                }
+            }
             if kind == "y" && value.text().is_some_and(|s| s.contains('`')) {
                 self.unsupported(
                     "CQL_UNSUPPORTED_ARRAY_NAME",
@@ -1118,7 +1660,17 @@ impl Checker<'_> {
                 );
                 continue;
             }
-            if !argument_type(value, kind) {
+            // Boolean tokens also spell the two string choices of top.rest.
+            let boolean_string = kind == "s"
+                && matches!(value, Value::Bool(_))
+                && catalog::parameter_rules(spec.name)
+                    .iter()
+                    .any(|rule| rule.name == *name && rule.choices == ["false", "true"]);
+            if !argument_type(value, kind) && !boolean_string {
+                if kind == "s[]" && argument_type(value, "s") {
+                    self.unsupported("CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON", "The references disagree about singleton string-array forms; use an explicit bracketed array until the target form is confirmed.", Some(c), false);
+                    continue;
+                }
                 if kind == "d" && value.text().is_some() {
                     self.unsupported("CQL_UNSUPPORTED_DURATION", "Only positive whole-number fixed durations are supported; other relative-time spellings and explicit zero are unsupported.", Some(c), false);
                     continue;
@@ -1175,8 +1727,11 @@ impl Checker<'_> {
                 }
             }
             if matches!(kind, "f" | "F" | "A")
-                && spec.argument_role(name) != catalog::ArgumentRole::ForeignField
+                && spec.argument_role(name) == catalog::ArgumentRole::InputField
                 && spec.name != "correlate"
+                && !(spec.name.starts_with("time:")
+                    && name == "timezoneField"
+                    && args.contains_key("timezone"))
             {
                 for f in arg_fields(Some(value)) {
                     self.field(&f);
@@ -1186,6 +1741,12 @@ impl Checker<'_> {
                 && let Some(field) = value.text()
             {
                 self.output_field(field, Some(c));
+            }
+            if spec.name != "concatArray"
+                && matches!(name.as_str(), "prefix" | "headerprefix" | "labelprefix")
+                && let Some(prefix) = value.text().filter(|s| !s.is_empty())
+            {
+                self.output_field(prefix, Some(c));
             }
             if name == "asArray"
                 && let Some(array) = value.text().and_then(|s| s.strip_suffix("[]"))
@@ -1229,7 +1790,21 @@ impl Checker<'_> {
                 self.regex(pattern, flags, Some(c));
             }
             if kind == "g" {
-                self.aggregates(value, c);
+                let element_scope =
+                    spec.argument_scope(name) == catalog::ArgumentScope::ElementAggregate;
+                let binding = element_scope
+                    .then(|| args.get("var").and_then(|v| v.text()))
+                    .flatten();
+                if let Some(binding) = binding {
+                    self.bindings.push((binding.into(), false));
+                }
+                self.aggregate_parents.push(spec.name);
+                self.aggregates(value, c, tables);
+                self.aggregate_parents.pop();
+                if binding.is_some() {
+                    self.bindings.pop();
+                }
+                continue;
             }
             if kind == "u" {
                 let binding = args
@@ -1288,8 +1863,8 @@ impl Checker<'_> {
                 self.value(value, tables);
             }
         }
-        if spec.name == "defineTable"
-            && let Some(name) = args.get("name").and_then(|v| v.text())
+        if matches!(spec.name, "defineTable" | "remoteTable")
+            && let Some(name) = known_args.get("name").and_then(|v| v.text())
         {
             let columns = if args.get("include").is_some_and(|v| catalog::all_columns(v)) {
                 query_projection
@@ -1314,7 +1889,7 @@ impl Checker<'_> {
                 }
                 self.emit("CQL_ARRAY_OUTPUT_REUSE", "Use a fresh output-array namespace or verify explicit cleanup. Old indexed fields beyond a gap can survive reuse; no cleanup is inserted.", Some(c), true);
             }
-            if let Some(binding) = args.get("var").and_then(|v| v.text())
+            if let Some(binding) = known_args.get("var").and_then(|v| v.text())
                 && (!super::ast::bare_field(binding) || binding.contains(['.', '[', ']', '@', '#']))
             {
                 self.emit(
@@ -1325,6 +1900,10 @@ impl Checker<'_> {
                 );
             }
             if spec.name == "objectArray:eval"
+                && args.get("array").is_none_or(|value| !has_parameter(value))
+                && args
+                    .get("asArray")
+                    .is_none_or(|value| !has_parameter(value))
                 && args.get("array").and_then(|v| v.text())
                     == args.get("asArray").and_then(|v| v.text())
             {
@@ -1350,7 +1929,8 @@ impl Checker<'_> {
         }
         for key in ["limit", "max", "maxPerRoot"] {
             if matches!(spec.argument_kind(key), Some("i" | "l"))
-                && let Some(v) = args.get(key)
+                && !(key == "limit" && matches!(spec.name, "head" | "tail"))
+                && let Some(v) = known_args.get(key)
                 && v.text()
                     .is_some_and(|s| s != "max" && s.parse::<u64>().is_ok_and(|n| n == 0))
             {
@@ -1362,52 +1942,58 @@ impl Checker<'_> {
                 );
             }
         }
-        for (key, value) in &args {
-            let choices: &[&str] = match (spec.name, key.as_str()) {
-                ("sort" | "table", "order") => &["asc", "desc"],
-                ("sort" | "table", "type") => &["number", "string"],
-                ("join", "mode") => &["inner", "left"],
-                ("round", "how") => &["round", "ceil", "floor"],
-                ("neighbor", "direction") => &["preceding", "succeeding"],
-                ("formatTime", "unit") => &["auto", "milliseconds", "seconds"],
-                ("match", "mode") => &["string", "glob", "cidr"],
-                ("ioc:lookup", "type") => &["domain", "ip_address", "url"],
-                ("ioc:lookup", "confidenceThreshold") => &["unverified", "low", "medium", "high"],
-                ("ioc:lookup", "include") => &[
-                    "indicator",
-                    "labels",
-                    "last_updated",
-                    "malicious_confidence",
-                    "published_date",
-                    "type",
-                ],
-                ("base64Decode", "charset") => &["UTF-8", "UTF-16LE", "UTF-16BE", "ISO-8859-1"],
-                ("kvParse", "onDuplicate") => &["keepFirst", "keepLast"],
-                ("kvParse", "separatorPadding") => &["yes", "no", "unknown"],
-                _ => &[],
-            };
-            if choices.is_empty() {
+        for rule in catalog::parameter_rules(spec.name) {
+            let Some(value) = args.get(&rule.name) else {
                 continue;
+            };
+            let kind = spec.argument_kind(&rule.name).unwrap_or("");
+            let values = match *value {
+                Value::Array(values) => values.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            if !rule.choices.is_empty() && matches!(kind, "s" | "S" | "s[]") {
+                for value in values {
+                    if !has_parameter(value)
+                        && let Some(choice) = value.text()
+                        && !rule.choices.iter().any(|allowed| allowed == choice)
+                    {
+                        self.emit(
+                            "CQL_ARGUMENT_VALUE",
+                            format!(
+                                "'{}' must be one of {}.",
+                                rule.name,
+                                rule.choices.join(", ")
+                            ),
+                            Some(c),
+                            false,
+                        );
+                    }
+                }
             }
-            for choice in match value {
-                Value::Array(xs) => xs.iter().filter_map(Value::text).collect::<Vec<_>>(),
-                _ => value.text().into_iter().collect(),
-            } {
-                if !choices.contains(&choice) {
-                    self.emit(
-                        "CQL_ARGUMENT_VALUE",
-                        format!(
-                            "'{key}' must be one of {} in this profile.",
-                            choices.join(", ")
-                        ),
-                        Some(c),
-                        false,
-                    );
+            if matches!(kind, "i" | "j" | "l" | "n" | "N") {
+                for value in values {
+                    if !has_parameter(value)
+                        && (rule.minimum.is_some_and(|minimum| {
+                            compare_numeric_literal(value, minimum) == Some(Ordering::Less)
+                        }) || rule.maximum.is_some_and(|maximum| {
+                            compare_numeric_literal(value, maximum) == Some(Ordering::Greater)
+                        }) || numeric_literal(value).is_some_and(|number| {
+                            rule.minimum.is_some_and(|minimum| number < minimum)
+                                || rule.maximum.is_some_and(|maximum| number > maximum)
+                        }))
+                    {
+                        self.emit(
+                            "CQL_ARGUMENT_RANGE",
+                            format!("'{}' is outside its documented bounds.", rule.name),
+                            Some(c),
+                            false,
+                        );
+                    }
                 }
             }
         }
         if spec.name == "kvParse"
-            && args
+            && known_args
                 .get("separator")
                 .and_then(|v| v.text())
                 .is_some_and(|separator| separator.chars().count() != 1)
@@ -1434,18 +2020,25 @@ impl Checker<'_> {
                 for pair in pairs {
                     if let Value::Array(pair) = pair
                         && pair.len() == 2
-                        && let (Some(old), Some(new)) = (pair[0].text(), pair[1].text())
                     {
-                        inputs.insert(old);
-                        if !outputs.insert(new) {
-                            self.emit(
-                                "CQL_RENAME_FORM",
-                                "Rename targets must be unique.",
-                                Some(c),
-                                false,
-                            );
+                        if !has_parameter(&pair[0])
+                            && let Some(old) = pair[0].text()
+                        {
+                            inputs.insert(old);
                         }
-                        self.output_field(new, Some(c));
+                        if !has_parameter(&pair[1])
+                            && let Some(new) = pair[1].text()
+                        {
+                            if !outputs.insert(new) {
+                                self.emit(
+                                    "CQL_RENAME_FORM",
+                                    "Rename targets must be unique.",
+                                    Some(c),
+                                    false,
+                                );
+                            }
+                            self.output_field(new, Some(c));
+                        }
                     }
                 }
                 if inputs.intersection(&outputs).next().is_some() {
@@ -1456,7 +2049,9 @@ impl Checker<'_> {
                         false,
                     );
                 }
-            } else if !args.contains_key("as") {
+            } else if !args.contains_key("as")
+                && args.get("field").is_none_or(|value| !has_parameter(value))
+            {
                 self.emit(
                     "CQL_ARGUMENT_REQUIRED",
                     "Scalar rename requires as.",
@@ -1509,7 +2104,7 @@ impl Checker<'_> {
                 }
             })
             .collect::<BTreeSet<_>>();
-        if names.is_empty() {
+        if names.is_empty() && args.get("query").is_none_or(|value| !has_parameter(value)) {
             self.emit(
                 "CQL_CORRELATION_BINDINGS",
                 "Correlation requires at least one mandatory named query.",
@@ -1521,11 +2116,15 @@ impl Checker<'_> {
         let mut projections = BTreeMap::new();
         let mut has_link = false;
         let sequence = args.get("sequence").copied() == Some(&Value::Bool(true));
+        let unresolved_sequence = args
+            .get("sequence")
+            .is_some_and(|value| has_parameter(value));
         let within = args
             .get("within")
+            .filter(|value| !has_parameter(value))
             .and_then(|v| v.text())
             .and_then(super::plan::duration_millis);
-        if args.contains_key("sequenceBy") && !sequence {
+        if args.contains_key("sequenceBy") && !sequence && !unresolved_sequence {
             self.emit(
                 "CQL_SEQUENCE_REQUIRED",
                 "sequenceBy requires sequence=true.",
@@ -1534,7 +2133,7 @@ impl Checker<'_> {
             );
         }
         if args.contains_key("jitterTolerance") {
-            if !sequence {
+            if !sequence && !unresolved_sequence {
                 self.emit(
                     "CQL_SEQUENCE_REQUIRED",
                     "jitterTolerance requires sequence=true.",
@@ -1544,6 +2143,7 @@ impl Checker<'_> {
             }
             if let (Some(jitter), Some(within)) = (
                 args.get("jitterTolerance")
+                    .filter(|value| !has_parameter(value))
                     .and_then(|v| v.text())
                     .and_then(super::plan::duration_millis),
                 within,
@@ -1557,7 +2157,10 @@ impl Checker<'_> {
                 );
             }
         }
-        if let Some(root) = args.get("root").and_then(|v| v.text())
+        if let Some(root) = args
+            .get("root")
+            .filter(|value| !has_parameter(value))
+            .and_then(|v| v.text())
             && !names.contains(root)
         {
             self.emit(
@@ -1569,6 +2172,7 @@ impl Checker<'_> {
         }
         if args
             .get("iterationLimit")
+            .filter(|value| !has_parameter(value))
             .and_then(|v| v.text())
             .and_then(|v| v.parse::<u64>().ok())
             .is_some_and(|n| n == 0 || n > 10)
@@ -1602,6 +2206,10 @@ impl Checker<'_> {
                 );
             }
             for attr in attributes {
+                if has_parameter(&attr.value) {
+                    self.value(&attr.value, &mut tables.clone());
+                    continue;
+                }
                 match attr.name.as_deref() {
                     Some("include") if !aggregation => {
                         if !catalog::query_all_fields(&attr.value) && !argument_type(&attr.value,"A") { self.emit("CQL_QUERY_INCLUDE","Query include requires a field list or explicit *.",Some(call),false); }
@@ -1612,10 +2220,9 @@ impl Checker<'_> {
                 }
             }
             let mut anchors = BTreeMap::new();
-            for attr in attributes
-                .iter()
-                .filter(|a| matches!(a.name.as_deref(), Some("after" | "before")))
-            {
+            for attr in attributes.iter().filter(|a| {
+                matches!(a.name.as_deref(), Some("after" | "before")) && !has_parameter(&a.value)
+            }) {
                 if let Some((reference, offset)) = time_anchor(&attr.value) {
                     if !names.contains(reference) {
                         self.emit(
@@ -1814,7 +2421,11 @@ impl Checker<'_> {
     fn nonaggregate(&mut self, pipeline: &Pipeline) {
         for step in &pipeline.steps {
             match step {
-                Step::Call(call) => {
+                Step::Call(call)
+                | Step::Assign {
+                    value: Value::Call(call),
+                    ..
+                } => {
                     if let Some(resolved) = catalog::resolve(call)
                         && matches!(
                             resolved.function.resolved_effect(&resolved.arguments),
@@ -1841,29 +2452,72 @@ impl Checker<'_> {
             }
         }
     }
-    fn aggregates(&mut self, v: &Value, c: &Call) {
+    fn aggregates(&mut self, v: &Value, c: &Call, tables: &mut BTreeSet<String>) {
         match v {
+            Value::Parameter(_) => self.value(v, tables),
             Value::Array(xs) => {
                 for x in xs {
-                    self.aggregates(x, c)
+                    self.aggregates(x, c, tables)
                 }
             }
             Value::Call(f)
-                if catalog::function(&f.name).is_some_and(|s| s.effect == Effect::Aggregate) => {}
-            Value::Call(f) if catalog::function(&f.name).is_none() => {}
-            _ => self.emit(
-                "CQL_AGGREGATE_REQUIRED",
-                "This argument requires aggregate functions.",
-                Some(c),
-                false,
-            ),
+                if catalog::function(&f.name).is_some_and(|s| s.effect == Effect::Aggregate) =>
+            {
+                self.function(f, tables, false, false, false);
+            }
+            Value::Call(f) if catalog::function(&f.name).is_none() => {
+                self.function(f, tables, false, false, false);
+            }
+            Value::Word(name)
+                if catalog::function(name)
+                    .is_some_and(|s| s.effect == Effect::Aggregate && s.required.is_empty()) =>
+            {
+                self.function(&Call::new(name, vec![]), tables, false, false, false);
+            }
+            Value::Query {
+                label: None,
+                pipeline,
+                attributes,
+            } if attributes.is_empty() => {
+                let mut state = PipelineState {
+                    aggregated: self.aggregate_input,
+                    ordered: self.ordered_input,
+                    replaced: !self.stored_input,
+                    narrowed: self.narrowed,
+                    projected: self.projected_input.clone(),
+                    ..PipelineState::default()
+                };
+                self.pipeline_state(
+                    pipeline,
+                    QueryContext::Subaggregate,
+                    &mut tables.clone(),
+                    &mut state,
+                );
+                if !pipeline_aggregates(pipeline, false) {
+                    self.emit(
+                        "CQL_AGGREGATE_REQUIRED",
+                        "A composite aggregate pipeline must aggregate its input.",
+                        Some(c),
+                        false,
+                    );
+                }
+            }
+            _ => {
+                self.emit(
+                    "CQL_AGGREGATE_REQUIRED",
+                    "This argument requires aggregate functions.",
+                    Some(c),
+                    false,
+                );
+                self.parameters(v, tables);
+            }
         }
     }
     fn regex(&mut self, pattern: &str, flags: &str, c: Option<&Call>) {
-        if flags.chars().any(|c| !"imd".contains(c))
+        if flags.chars().any(|c| !"imdF".contains(c))
             || flags.chars().collect::<BTreeSet<_>>().len() != flags.len()
         {
-            self.unsupported("CQL_UNSUPPORTED_REGEX_FLAGS","Only distinct i, m, d suffix flags are covered; inline i, m, s modifiers are checked separately.",c,false);
+            self.unsupported("CQL_UNSUPPORTED_REGEX_FLAGS","Only distinct i, m, d, F flags are covered; inline i, m, s modifiers are checked separately.",c,false);
         }
         if flags.contains('i') && !pattern.is_ascii() {
             self.unsupported(
@@ -1913,7 +2567,13 @@ fn inline_writes(value: &Value, output: &str, initial: bool) -> bool {
 fn pipeline_writes(pipeline: &Pipeline, output: &str, mut written: bool) -> bool {
     for step in &pipeline.steps {
         match step {
-            Step::Assign { field, .. } if field == output => written = true,
+            Step::Assign { field, value } => {
+                if let Some(call) = catalog::aliased_call(field, value) {
+                    written = call_writes(&call, output, written);
+                } else if field == output {
+                    written = true;
+                }
+            }
             Step::Call(call) => written = call_writes(call, output, written),
             Step::Case(branches) => {
                 written = branches.iter().all(|p| pipeline_writes(p, output, written))
@@ -2076,19 +2736,88 @@ fn time_anchor(value: &Value) -> Option<(&str, i128)> {
     ))
 }
 
-fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
-    fn aggregate(value: &Value) -> bool {
-        match value {
-            Value::Call(call) => bounded_single(
-                &Pipeline {
-                    steps: vec![Step::Call(call.clone())],
-                },
-                false,
-            ),
-            Value::Array(xs) => !xs.is_empty() && xs.iter().all(aggregate),
+fn contains_sequence(value: &Value) -> bool {
+    match value {
+        Value::Call(call) => {
+            catalog::function(&call.name).is_some_and(|function| {
+                matches!(
+                    function.name,
+                    "accumulate" | "neighbor" | "partition" | "slidingWindow" | "slidingTimeWindow"
+                )
+            }) || call.args.iter().any(|arg| contains_sequence(&arg.value))
+        }
+        Value::Array(values) => values.iter().any(contains_sequence),
+        Value::Query { pipeline, .. } => pipeline.steps.iter().any(|step| match step {
+            Step::Call(call) => contains_sequence(&Value::Call(call.clone())),
+            Step::Assign { value, .. } => contains_sequence(value),
+            Step::Case(branches) => branches.iter().any(|pipeline| {
+                contains_sequence(&Value::Query {
+                    label: None,
+                    pipeline: pipeline.clone(),
+                    attributes: vec![],
+                })
+            }),
+            Step::Match { arms, .. } => arms.iter().any(|(_, pipeline)| {
+                contains_sequence(&Value::Query {
+                    label: None,
+                    pipeline: pipeline.clone(),
+                    attributes: vec![],
+                })
+            }),
             _ => false,
+        }),
+        _ => false,
+    }
+}
+
+fn pipeline_aggregates(pipeline: &Pipeline, mut aggregated: bool) -> bool {
+    for step in &pipeline.steps {
+        match step {
+            Step::Call(call) => {
+                aggregated |=
+                    catalog::function(&call.name).is_some_and(|f| f.effect == Effect::Aggregate)
+            }
+            Step::Assign { value, .. } => {
+                aggregated |= catalog::assigned_aggregate(value).is_some()
+            }
+            Step::Case(branches) => {
+                aggregated = branches.iter().all(|p| pipeline_aggregates(p, aggregated))
+            }
+            Step::Match { arms, .. } => {
+                aggregated = arms.iter().all(|(_, p)| pipeline_aggregates(p, aggregated))
+            }
+            _ => {}
         }
     }
+    aggregated
+}
+
+pub(crate) fn single_aggregate(value: &Value) -> bool {
+    match value {
+        Value::Call(call) => bounded_single(
+            &Pipeline {
+                steps: vec![Step::Call(call.clone())],
+            },
+            false,
+        ),
+        Value::Word(name)
+            if catalog::function(name)
+                .is_some_and(|f| f.effect == Effect::Aggregate && f.required.is_empty()) =>
+        {
+            bounded_single(
+                &Pipeline {
+                    steps: vec![Step::Call(Call::new(name, vec![]))],
+                },
+                false,
+            )
+        }
+        Value::Query { pipeline, .. } => bounded_single(pipeline, false),
+        Value::Array(xs) => !xs.is_empty() && xs.iter().all(single_aggregate),
+        _ => false,
+    }
+}
+
+fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
     for step in &pipeline.steps {
         match step {
             Step::Call(call) => {
@@ -2098,11 +2827,15 @@ fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
                 let args = &resolved.arguments;
                 match resolved.function.name {
                     "count" | "sum" | "avg" | "min" | "max" | "selectFromMax" | "selectFromMin"
-                    | "selectLast" => single = true,
+                    | "selectLast" | "array:union" | "array:intersection" | "callFunction"
+                    | "counterAsRate" | "linReg" | "percentage" | "percentile" | "range"
+                    | "stdDev" => single = true,
                     "collect" => {
                         single = args.get("multival").copied() != Some(&Value::Bool(false))
                     }
-                    "stats" => single = args.get("function").is_none_or(|v| aggregate(v)),
+                    "stats" | "array:reduceAll" => {
+                        single = args.get("function").is_none_or(|v| single_aggregate(v))
+                    }
                     "head" | "tail" | "sort" | "table" => {
                         single |= args
                             .get("limit")
@@ -2126,6 +2859,9 @@ fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
                     _ => {}
                 }
             }
+            Step::Assign { value, .. } if catalog::assigned_aggregate(value).is_some() => {
+                single = single_aggregate(value);
+            }
             Step::Case(branches) => single &= branches.iter().all(|p| bounded_single(p, single)),
             Step::Match { arms, .. } => {
                 single &= arms.iter().all(|(_, p)| bounded_single(p, single))
@@ -2136,7 +2872,187 @@ fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
     single
 }
 
+fn has_parameter(value: &Value) -> bool {
+    match value {
+        Value::Parameter(_) => true,
+        Value::Array(values) => values.iter().any(has_parameter),
+        Value::Call(call) => call.args.iter().any(|arg| has_parameter(&arg.value)),
+        Value::Binary { left, right, .. } => has_parameter(left) || has_parameter(right),
+        Value::Unary { value, .. } => has_parameter(value),
+        _ => false,
+    }
+}
+
+fn numeric_literal(value: &Value) -> Option<f64> {
+    let number = match value {
+        Value::Number(number) => number.parse::<f64>().ok()?,
+        Value::Unary { op, value } if matches!(op.as_str(), "+" | "-") => {
+            numeric_literal(value)? * if op == "-" { -1.0 } else { 1.0 }
+        }
+        _ => return None,
+    };
+    number.is_finite().then_some(number)
+}
+
+fn compare_numeric_literal(value: &Value, bound: f64) -> Option<Ordering> {
+    numeric_literal(value)?;
+    if !bound.is_finite() {
+        return None;
+    }
+    fn decimal(text: &str) -> (bool, Vec<u8>, i128) {
+        let negative = text.starts_with('-');
+        let text = text.trim_start_matches(['+', '-']);
+        let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
+        // Exponents beyond this range already exceed every finite catalog bound.
+        let exponent = exponent
+            .parse::<i128>()
+            .unwrap_or(if exponent.starts_with('-') {
+                i128::MIN
+            } else {
+                i128::MAX
+            });
+        let fraction = mantissa
+            .split_once('.')
+            .map_or(0, |(_, fraction)| fraction.len());
+        let digits = mantissa
+            .bytes()
+            .filter(|byte| *byte != b'.')
+            .skip_while(|byte| *byte == b'0')
+            .collect::<Vec<_>>();
+        let order = exponent
+            .saturating_sub(fraction as i128)
+            .saturating_add(digits.len() as i128);
+        (negative, digits, order)
+    }
+    let mut value = value;
+    let mut negative = false;
+    let text = loop {
+        match value {
+            Value::Number(text) => break text,
+            Value::Unary { op, value: inner } if matches!(op.as_str(), "+" | "-") => {
+                negative ^= op == "-";
+                value = inner;
+            }
+            _ => return None,
+        }
+    };
+    let (sign, left, left_order) = decimal(text);
+    negative = (negative ^ sign) && !left.is_empty();
+    let (sign, right, right_order) = decimal(&bound.to_string());
+    let right_negative = sign && !right.is_empty();
+    if negative != right_negative {
+        return Some(if negative {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        });
+    }
+    let magnitude = match (left.is_empty(), right.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => left_order.cmp(&right_order).then_with(|| {
+            let width = left.len().max(right.len());
+            left.into_iter()
+                .chain(std::iter::repeat(b'0'))
+                .take(width)
+                .cmp(right.into_iter().chain(std::iter::repeat(b'0')).take(width))
+        }),
+    };
+    Some(if negative {
+        magnitude.reverse()
+    } else {
+        magnitude
+    })
+}
+
+enum IntervalValue {
+    Absolute(i128),
+    Relative(i128),
+}
+
+fn interval_value(value: &Value) -> Option<IntervalValue> {
+    if let Some(epoch) = long_literal(value) {
+        return Some(IntervalValue::Absolute(i128::from(epoch) * 1_000_000));
+    }
+    match value {
+        Value::String(text) | Value::Word(text) => {
+            if text == "now" {
+                Some(IntervalValue::Relative(0))
+            } else if let Ok(epoch) = text.parse::<i64>() {
+                Some(IntervalValue::Absolute(i128::from(epoch) * 1_000_000))
+            } else if let Some(duration) =
+                super::plan::duration_millis(text).filter(|duration| *duration > 0)
+            {
+                Some(IntervalValue::Relative(-i128::from(duration) * 1_000_000))
+            } else if let Some(duration) =
+                super::plan::signed_duration(text).filter(|duration| *duration != 0)
+            {
+                Some(IntervalValue::Relative(duration * 1_000_000))
+            } else {
+                crate::environment::parse_time(text)
+                    .ok()
+                    .map(|time| IntervalValue::Absolute(time.unix_timestamp_nanos()))
+            }
+        }
+        Value::Unary { op, value } if matches!(op.as_str(), "+" | "-") => {
+            let Value::Word(text) = value.as_ref() else {
+                return None;
+            };
+            let duration =
+                i128::from(super::plan::duration_millis(text).filter(|duration| *duration > 0)?)
+                    * 1_000_000;
+            Some(IntervalValue::Relative(if op == "-" {
+                -duration
+            } else {
+                duration
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn finite_number_literals(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => numeric_literal(value).is_some(),
+        Value::Array(values) => values.iter().all(finite_number_literals),
+        Value::Call(call) => call
+            .args
+            .iter()
+            .all(|arg| finite_number_literals(&arg.value)),
+        Value::Unary { value, .. } => finite_number_literals(value),
+        Value::Binary { left, right, .. } => {
+            finite_number_literals(left) && finite_number_literals(right)
+        }
+        _ => true,
+    }
+}
+
+fn numeric_expression(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => numeric_literal(value).is_some(),
+        Value::Word(_) => true,
+        Value::Call(_) => finite_number_literals(value),
+        Value::String(s) => s.parse::<f64>().is_ok_and(f64::is_finite),
+        Value::Unary { op, value } => matches!(op.as_str(), "+" | "-") && numeric_expression(value),
+        Value::Binary { op, left, right } => {
+            matches!(op.as_str(), "+" | "-" | "*" | "/" | "%")
+                && numeric_expression(left)
+                && numeric_expression(right)
+        }
+        _ => false,
+    }
+}
+
 fn argument_type(v: &Value, kind: &str) -> bool {
+    if matches!(v, Value::Parameter(_))
+        || matches!(
+            v,
+            Value::Call(_) | Value::Binary { .. } | Value::Unary { .. }
+        ) && has_parameter(v)
+    {
+        return true;
+    }
     match kind {
         "e" => !matches!(
             v,
@@ -2162,18 +3078,32 @@ fn argument_type(v: &Value, kind: &str) -> bool {
         }
         "P" => {
             argument_type(v, "f")
-                || matches!(v,Value::Array(xs) if xs.iter().all(|x| matches!(x,Value::Array(pair) if pair.len()==2 && pair.iter().all(|x| argument_type(x,"f")))))
+                || matches!(v,Value::Array(xs) if xs.iter().all(|x| matches!(x, Value::Parameter(_)) || matches!(x,Value::Array(pair) if pair.len()==2 && pair.iter().all(|x| argument_type(x,"f")))))
         }
         "j" => signed_integer(v).is_some(),
-        "r" => matches!(v, Value::String(_)),
+        "r" => matches!(v, Value::String(_) | Value::Word(_)),
         "b" => matches!(v, Value::Bool(_)),
-        "n" => matches!(v, Value::Number(_)),
+        "n" => matches!(v, Value::Number(_)) && numeric_literal(v).is_some(),
         "i" => matches!(v,Value::Number(s)if s.parse::<u64>().is_ok()),
         "l" => argument_type(v, "i") || matches!(v,Value::Word(s)|Value::String(s)if s=="max"),
         "a" => matches!(v, Value::Array(_)),
         "y" => {
             matches!(v,Value::String(s)|Value::Word(s) if s.strip_suffix("[]").is_some_and(super::ast::bare_field))
         }
+        "z" => {
+            matches!(v, Value::String(s) | Value::Word(s) if super::ast::bare_field(s.strip_suffix("[]").unwrap_or(s)))
+        }
+        "N" => {
+            matches!(v, Value::Array(xs) if xs.iter().all(|x| matches!(x, Value::Parameter(_)) || numeric_literal(x).is_some()))
+        }
+        "B" => {
+            matches!(v, Value::Array(xs) if xs.iter().all(|x| matches!(x, Value::Parameter(_)) || matches!(x, Value::Array(pair) if pair.len() == 2 && (matches!(pair[0], Value::Parameter(_)) || long_literal(&pair[0]).is_some_and(|n| (0..64).contains(&n))) && argument_type(&pair[1], "s"))))
+        }
+        "t" => {
+            matches!(v, Value::String(_) | Value::Word(_) | Value::Number(_))
+                || matches!(v, Value::Unary { op, value } if matches!(op.as_str(), "+" | "-") && matches!(value.as_ref(), Value::Number(_) | Value::Word(_)))
+        }
+        "R" => argument_type(v, "q") || argument_type(v, "s"),
         "u" => matches!(v, Value::Call(_)) || argument_type(v, "q"),
         "q" => matches!(v, Value::Query { label: None, attributes, .. } if attributes.is_empty()),
         "Q" => matches!(v, Value::Query { label: Some(_), .. }),
@@ -2181,7 +3111,12 @@ fn argument_type(v: &Value, kind: &str) -> bool {
             matches!(v,Value::Array(xs) if xs.iter().all(|v|argument_type(v,"Q")))
         }
         "q[]" => matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"q"))),
-        "g" => matches!(v, Value::Call(_) | Value::Array(_)),
+        "g" => {
+            matches!(
+                v,
+                Value::Call(_) | Value::Array(_) | Value::Query { label: None, .. }
+            ) || matches!(v, Value::Word(name) if catalog::function(name).is_some_and(|f| f.effect == Effect::Aggregate && f.required.is_empty()))
+        }
         _ => false,
     }
 }
@@ -2605,6 +3540,52 @@ mod tests {
     use super::*;
     fn check(q: &str) -> Report {
         validate(&super::super::parser::parse(q).unwrap(), q)
+    }
+    #[test]
+    fn decimal_literal_comparison_preserves_boundaries_and_signs() {
+        for (text, bound, expected) in [
+            ("100.0000000000000001", 100.0, Ordering::Greater),
+            ("99.9999999999999999", 100.0, Ordering::Less),
+            ("100.000", 100.0, Ordering::Equal),
+            ("1e2", 100.0, Ordering::Equal),
+            ("-0.1", 0.0, Ordering::Less),
+            ("-100.0000000000000001", -100.0, Ordering::Less),
+            ("-99.9999999999999999", -100.0, Ordering::Greater),
+            ("-0.0", 0.0, Ordering::Equal),
+            ("0.99999999999999999", 1.0, Ordering::Less),
+            ("1e-400", 0.0, Ordering::Greater),
+            ("1.0e-9223372036854775808", 0.0, Ordering::Greater),
+            (
+                "1e-999999999999999999999999999999999999999999",
+                1.0,
+                Ordering::Less,
+            ),
+            (
+                "0e999999999999999999999999999999999999999999",
+                0.0,
+                Ordering::Equal,
+            ),
+        ] {
+            let value = Value::Number(text.into());
+            assert_eq!(
+                compare_numeric_literal(&value, bound),
+                Some(expected),
+                "{text}"
+            );
+            let negative = Value::Unary {
+                op: "-".into(),
+                value: Box::new(value),
+            };
+            assert_eq!(
+                compare_numeric_literal(&negative, -bound),
+                Some(expected.reverse()),
+                "-{text}"
+            );
+        }
+        assert_eq!(
+            compare_numeric_literal(&Value::Number("1e400".into()), 100.0),
+            None
+        );
     }
     #[test]
     fn signature_checks_are_not_parse_checks() {

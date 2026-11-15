@@ -1,6 +1,6 @@
 # CQLmatic command reference
 
-This reference describes CQLmatic **0.1.6**. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
+This reference describes the current source profile, `cqlmatic-ngsiem-core-v3`. Published **0.1.6** packages retain their shipped behavior; inspect `cqlmatic catalog --profile` and command-specific help before using newer source features. Start with the [documentation index](docs/README.md), [setup](docs/SETUP.md), and [inventory](docs/INVENTORY.md). Machine callers should also read the [contracts reference](docs/CONTRACTS.md); query authors should use the [query reference](docs/QUERY-REFERENCE.md).
 
 Commands below use `cqlmatic` as shorthand for your executable path or `npx cqlmatic@0.1.6` (a [supported, patched Node.js release](README.md#try-v016), macOS Apple silicon or Linux x86_64). Run `npx` outside the CQLmatic source checkout. Windows x64 users can use the [release ZIP](docs/SETUP.md#install-on-windows) after verifying its checksum. From a source build use `./target/release/cqlmatic`; on Windows it is `.\target\release\cqlmatic.exe`. See [development](docs/DEVELOPMENT.md) for the pinned Rust 1.99.1 build. Runtime use needs no Rust installation or model API key. CQLmatic makes no internal model calls. Relative file paths resolve from your current directory; save example inputs locally or extract the source release before using `examples/` paths.
 
@@ -59,6 +59,33 @@ Full-mode inventory scouting emits MCP `repository:"search-all"`, even when its 
 
 At the start of an authorized environment session, inspect `status --json --brief` once for pending attempts, `refresh_reminder` and work notices. Automatic startup refresh is unavailable. Manual **Refresh** in `cqlmatic env inventory` and Settings prepares an action without executing MCP calls. A due 30-day reminder offers **Run** or **Remind me in 30 days**; agents present its hint before acknowledging the exact cycle, and status reads never acknowledge it. Manual refresh requires protected proof of a provider-enforced lifetime of 1–600 seconds for the exact session, target and authorized window. An advertised default or client wait timeout is insufficient. Reserve, save, settle and import the exact single call; unresolved attempts block another refresh. The 24h/7d/14d/30d census lookback is separate from the fixed reminder interval. New work can be reviewed now or deferred with **Settings \*** retained. See [session entry](docs/MCP-COMPANION.md#when-an-environment-session-begins) for authorization, exact-target and separate reminder/work-notice handling.
 
+### Optional function capability checks
+
+Once a field pack is active, run `cqlmatic env inventory` and select **capabilities (optional)** to review the fixed checks. They are off by default. Empty input or **later** returns without preparing a run, and the activated field pack stays available. `status --json` reports retained case outcomes separately from field discovery; status reads do not execute a check.
+
+The case IDs are `array-union`, `array-intersection`, `array-reduce-row`, `array-reduce-column` and `math-sqrt`. Interactive preparation defaults to the four array cases only after choosing **prepare**; scripted preparation supplies a nonempty, distinct `case_ids` list. Review the displayed fixed queries and authorize a separate finite attempt/time allowance before relaying searches.
+
+Scripted actions use the normal inventory request and state selection:
+
+```sh
+cqlmatic env inventory --state .local/inventory.json --request .local/capability-action.json --json
+cqlmatic status --state .local/inventory.json --json
+```
+
+| `action.kind` | Required action fields | Effect |
+| --- | --- | --- |
+| `prepare-capabilities` | `execution_context_id`, `session_id`, `case_ids`, `host_evidence_file`, `max_queries`, `max_seconds` | Retains the reviewed case revisions, target and original allowance; requires an activated field pack and protected provider-enforced search-lifetime evidence. |
+| `dispatch-capability` | `run_id`, `case_id`, `execution_context_id`, `session_id` | Reserves one exact attempt and returns its MCP arguments. It does not execute the search. |
+| `submit-capability` | `run_id`, `attempt_id`, `execution_context_id`, `settlement_file`, `retrieved_at`; optional `result_file` | Imports the full protected capture and exact-attempt terminal settlement. A completed attempt requires its matching result. |
+| `pause-capabilities` | `run_id` | Pauses safely settled work; unresolved termination keeps its active budget running. |
+| `resume-capabilities` | `run_id`, `execution_context_id` | Resumes the retained run with its original remaining allowance. |
+
+The host evidence uses the confirmed environment/session and a provider-enforced finite search lifetime; a client wait timeout is insufficient. Execute each reservation once through that authorized host, save the entire response and exact settlement, then submit them. Failures and retries consume attempts. A lost response or unresolved termination blocks subsequent inventory dispatch until the same attempt is reconciled; no cancellation is inferred.
+
+Evidence qualifies only the current case revision, argument shape, resource binding, exact environment/CID/view and caller-attested authorization context. The current reduction cases cover `sum(var)` forms, and the current fixed cases use no external resource binding. A different aggregate, omitted/extra argument, target or context does not inherit the observation. Positive results expire 30 days after retrieval; a newer unknown result within that same scope supersedes an older positive. Another authorization context neither inherits nor revokes it. Timeouts, errors and unexpected output stay unknown. No-op success or a beta marker does not verify capability behavior.
+
+Use the matching `--execution-context-id` on generation/checking, or `context.execution_context_id` in a full request, to qualify that evidence. It does not replace field grounding or make every function form available. See [scope and limits](docs/COVERAGE.md#optional-target-capability-checks).
+
 ## Generate
 
 Choose exactly one input mode:
@@ -89,6 +116,7 @@ cqlmatic generate --jsonl < examples/requests.jsonl
 | `--jsonl` | Off | Read versioned requests from stdin; continue after record errors. |
 | `--pack FILE` | Matching inventory's active pack, when available | Select and validate a primary snapshot explicitly; a matching inventory's active pack and query ledger still supply safeguards. Never triggers discovery. |
 | `--inventory-state FILE` | Local inventory state | Reuse a protected inventory's confirmed target, active pack and query-observation ledger in Full or Quick mode. Both modes can queue bounded unverified source/input-field hints; existing Quick leads are retained. |
+| `--execution-context-id ID` | None | Caller-attested current authorization context for exact capability observations; never inferred from CID. When supplied, overrides the request's `context.execution_context_id`. |
 | `--require-observed` | False | Require qualifying current pack or saved-query field evidence for referenced deployment fields; without either, strict grounding needs context. |
 | `--accept-partial-coverage` | False | In strict mode, accept current positive partial source/field observations with a warning. Stale, absent and ambiguous evidence still blocks. |
 | `--fail-on-warning` | False | Return `1` on warning diagnostics even when `outcome` remains `ready`; informational diagnostics do not trigger it. |
@@ -103,6 +131,8 @@ Human generation prints the query only when ready; on other outcomes stdout can 
 ## Bounded English
 
 English is a deterministic adapter, not unrestricted intent interpretation. It does not infer fields, exclusions, source mapping, or time windows. See the [full grammar and examples](docs/QUERY-REFERENCE.md#bounded-english). For requests outside the grammar, use a recipe or typed plan. Matching, missing-field policy, exactness, and Boolean grouping remain explicit.
+
+Typed input also has bounded forms: it does not bind unresolved dashboard/user parameters, saved-query helpers or parser macros. Those remain unsupported rather than being substituted from ambient state.
 
 ## Check and lint CQL
 
@@ -138,7 +168,7 @@ Save the entire unedited MCP result and the exact executed query bytes. The comm
 cqlmatic catalog cql:workflow:analyst --full --limit 1
 cqlmatic catalog join --full --limit 3
 cqlmatic catalog --functions regex
-cqlmatic catalog --functions --limit 100
+cqlmatic catalog --functions --limit 250
 cqlmatic catalog --recipes
 cqlmatic catalog --profile
 cqlmatic catalog --standard cps event
@@ -148,14 +178,18 @@ cqlmatic catalog --standard ecs process.name
 | Argument/flag | Default | Meaning |
 | --- | --- | --- |
 | `TERM` | Empty | Case-insensitive search. Ordinary lookup searches IDs, titles, bodies; an exact ID takes priority. Function lookup uses a function-name substring. |
-| `--functions` | Off | Executable function metadata; includes required/positional/named arguments, type codes, effects, placement, and scalar-computation flag. |
+| `--functions` | Off | Bounded executable contracts; includes required/positional/named arguments, type codes, effects, placement, scalar-computation flag and target prerequisites. |
 | `--recipes` | Off | All nine recipe IDs and descriptions. |
 | `--profile` | Off | Profile ID, knowledge revision, assurance statement, inventory counts, parser budgets, span convention. |
 | `--standard cps\|ecs` | None | Standard field-name leads, not tenant observations. |
 | `--full` | Off | Full ordinary knowledge records, including bodies and sources; does not expand function metadata into prose. |
-| `--limit N` | 10 | 1–100 matches for ordinary/functions/standard lookup. Recipe/profile modes emit their complete object/list. |
+| `--limit N` | 10 | 1–250 matches for ordinary/functions/standard lookup. Recipe/profile modes emit their complete object/list. |
 
 At most one of `--functions`, `--recipes`, `--profile`, and `--standard` may be selected. All modes are offline JSON output. Compact ordinary records include `supported`, which describes the associated local reference coverage; it is not execution proof. Broader knowledge can describe syntax outside the checker. See the [function/catalog reference](docs/QUERY-REFERENCE.md#function-contracts).
+
+The current source profile is `cqlmatic-ngsiem-core-v3`: 194 Query candidate names, comprising 193 current candidates and deprecated `lowercase`. The [official-page ledger](data/function-scope.json) separately excludes parser-only `copyEvent` and unreleased `math:spherical2cartesian`. This is name membership with bounded contracts, not confirmation of every documented form or full vendor-compiler coverage. `catalog --profile` reports the actual binary's profile and knowledge revision; pack compatibility uses their explicit metadata binding.
+
+Raw checking accepts the conservative regex subset with distinct `i/m/d/F` flags; `F` requests the vendor engine without proving its runtime behavior. `g` remains unsupported; qualified repeated capture uses `regex(repeat=true)`. Saved calls and unresolved parameters have no substitution interface. Lookup, typed lowering, raw parsing, static acceptance, grounding and saved-result assessment remain distinct from live execution.
 
 ## Environment commands
 
@@ -201,7 +235,7 @@ Required flags are `--from FILE_OR_DIRECTORY` and `--out FILE`. Native files mus
 | MCP cancel/resume | `--mcp --state FILE --cancel` or `--resume` | Retain accepted captures; settle any in-flight call before resuming. |
 | MCP cancellation settlement | `--mcp --state FILE --settle-cancelled PROBE_ID=FILE` | Protected exact caller-attested terminal cleanup report; does not itself stop a hosted job. |
 
-New MCP initialization uses durable format 3. Dispatch exactly one emitted probe before the host call, then submit its entire original result with the matching ID. Accepted captures replay locally; retries consume attempts and safely paused time does not renew the original allowance. `--cancel`, `--resume`, `--dispatch` and `--settle-cancelled` are separate saved-state controls: do not combine them with initialization or answers. Format-2 checkpoints retain their legacy behavior. See [cancellation and settlement](docs/ENVIRONMENT.md#cancel-and-resume-discovery) for strict host evidence, native Ctrl-C/owner limits and cleanup-pending recovery. Native execution without `--state` keeps its final-receipt workflow.
+New MCP initialization uses durable format 3. Dispatch exactly one emitted probe before the host call, then submit its entire original result with the matching ID. Accepted captures replay locally; retries consume attempts and safely paused time does not renew the original allowance. `--cancel`, `--resume`, `--dispatch` and `--settle-cancelled` are separate saved-state controls: do not combine them with initialization or answers. Inventory-owned checkpoints use the inventory lifecycle actions with optional `run_index`; direct `--resume` and `--dispatch` reject them. Direct pause, answer and settlement controls remain available for cleanup. Format-2 checkpoints retain their legacy behavior. See [cancellation and settlement](docs/ENVIRONMENT.md#cancel-and-resume-discovery) for strict host evidence, native Ctrl-C/owner limits and cleanup-pending recovery. Native execution without `--state` keeps its final-receipt workflow.
 
 ```sh
 cqlmatic env discover --request examples/discover.request.json

@@ -354,9 +354,10 @@ const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 #[path = "discovery_session.rs"]
 mod session;
 pub use session::{
-    Transport, dispatch, has_in_flight, init_resumable, is_resumable, pause,
-    recover_native_cleanup, resumable_info, resumable_request, resume, run_native,
-    settle_cancelled, step_resumable,
+    Transport, bind_inventory_owner, dispatch, dispatch_inventory, has_in_flight,
+    init_inventory_resumable, init_resumable, inspect_inventory_owner, is_resumable, pause,
+    recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
+    run_native, settle_cancelled, step_resumable,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -759,14 +760,30 @@ fn optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, Diagnostic> {
 }
 fn read_state(path: &Path) -> Result<State, Diagnostic> {
     let state = inspect_state(path)?;
-    if state.producer_version != env!("CARGO_PKG_VERSION") {
-        return Err(tampered());
-    }
+    require_current_producer(&state)?;
     Ok(state)
+}
+
+/// Refuse lifecycle changes to inspected history from another producing version.
+pub fn require_current_producer(state: &State) -> Result<(), Diagnostic> {
+    if state.producer_version != env!("CARGO_PKG_VERSION") {
+        return Err(Diagnostic::error(
+            "MCP_STATE_PRODUCER",
+            format!(
+                "Discovery checkpoint was written by CQLmatic {}, but this build is {}. Preserve the inventory and checkpoint files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. Use the producing release's standalone checkpoint workflow for an unowned run. For paused unowned resumable MCP runs, use env discover --mcp --state CHECKPOINT --resume, then --dispatch PROBE_ID and --answer PROBE_ID=RESULT_FILE for each authorized emitted search. Runs bound to inventory require their producing release with compatible inventory, or a tested recovery build. Standalone completion does not register inventory completion.",
+                state.producer_version,
+                env!("CARGO_PKG_VERSION")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Verify protected lifecycle history without granting execution or resume compatibility.
 pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
+    inspect_state_for_producer(path, env!("CARGO_PKG_VERSION"))
+}
+fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diagnostic> {
     let bytes = storage::read_bytes(path, MAX_PACK_BYTES)?;
     let header: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
@@ -787,19 +804,23 @@ pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
     }
     let state: State = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
+    // Producer compatibility permits inspection, never cross-version lifecycle changes.
+    let compatible_history = match state.schema_version {
+        STATE_SCHEMA_VERSION => {
+            state.session.is_none()
+                && matches!(
+                    state.producer_version.as_str(),
+                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6"
+                )
+        }
+        3 => state.producer_version == "0.1.6",
+        _ => false,
+    };
     if state.format != "cqlmatic-mcp-state"
         || ![STATE_SCHEMA_VERSION, 3].contains(&state.schema_version)
         || (state.schema_version == 3) != state.session.is_some()
         || state.discovery_algorithm != DISCOVERY_ALGORITHM
-        || (state.producer_version != env!("CARGO_PKG_VERSION")
-            && !(state.schema_version == STATE_SCHEMA_VERSION
-                && state.session.is_none()
-                && state.status == "activated"
-                // These released producers share the format-2 activation contract.
-                && matches!(
-                    state.producer_version.as_str(),
-                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5"
-                )))
+        || (state.producer_version != producer && !compatible_history)
         || !matches!(
             state.status.as_str(),
             "needs-probes"
@@ -1613,6 +1634,12 @@ mod recovery_tests {
         drop(held);
         run
     }
+    fn mark_previous_producer(run: &Run) {
+        let mut state = read_state(&run.state).unwrap();
+        state.producer_version = "0.1.6".into();
+        let writer = storage::Writer::acquire(&run.state).unwrap();
+        store(&writer, &state).unwrap();
+    }
     fn interrupt(run: &Run, stage: &'static str) {
         ACTIVATION_FAULT.with(|fault| fault.set(Some(stage)));
         assert_eq!(step(&run.state, &[]).unwrap_err().code, "TEST_INTERRUPTED");
@@ -1701,9 +1728,263 @@ mod recovery_tests {
                 run_native(&run.state, &mut NoSearch),
                 recover_native_cleanup(&run.state, &mut NoSearch),
             ] {
-                assert_eq!(result.unwrap_err().code, "MCP_STATE_TAMPERED");
+                assert_eq!(result.unwrap_err().code, "MCP_STATE_PRODUCER");
                 assert_eq!(fs::read(&run.state).unwrap(), before);
             }
+        }
+    }
+
+    #[test]
+    fn released_legacy_completion_is_readable_after_an_upgrade() {
+        let run = ready(false);
+        assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        mark_previous_producer(&run);
+        let before = fs::read(&run.state).unwrap();
+        let history = inspect_state_for_producer(&run.state, "0.1.7").unwrap();
+        assert_eq!(history.producer_version, "0.1.6");
+        assert_eq!(history.schema_version, 2);
+        assert_eq!(history.status, "activated");
+        assert!(fs::read(&run.state).unwrap() == before);
+    }
+
+    #[test]
+    fn released_resumable_completion_is_readable_after_an_upgrade() {
+        let run = ready_kind(false, true);
+        assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        mark_previous_producer(&run);
+        let before = fs::read(&run.state).unwrap();
+        let history = inspect_state_for_producer(&run.state, "0.1.7").unwrap();
+        assert_eq!(history.producer_version, "0.1.6");
+        assert_eq!(history.status, "activated");
+        assert!(!has_in_flight(&history));
+        assert_eq!(fs::read(&run.state).unwrap(), before);
+    }
+
+    #[test]
+    fn released_resumable_history_retains_its_owner_binding_after_an_upgrade() {
+        let run = ready_kind(false, true);
+        assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        mark_previous_producer(&run);
+        let before = fs::read(&run.state).unwrap();
+        let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
+        let writer = storage::Writer::acquire(&run.state).unwrap();
+        session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.7").unwrap();
+        assert!(fs::read(&run.state).unwrap() == before);
+        drop(writer);
+        let writer = storage::Writer::acquire(&run.state).unwrap();
+        session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.6").unwrap();
+        let bound = fs::read(&run.state).unwrap();
+        session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.7").unwrap();
+        assert!(fs::read(&run.state).unwrap() == bound);
+        let other = storage::Writer::acquire(&run.directory.join("other-inventory.json")).unwrap();
+        assert_eq!(
+            session::bind_inventory_owner_for_producer(&writer, &other, "0.1.7")
+                .unwrap_err()
+                .code,
+            "DISCOVERY_INVENTORY_OWNER"
+        );
+        assert!(fs::read(&run.state).unwrap() == bound);
+    }
+
+    #[test]
+    fn released_resumable_settled_failure_is_readable_after_an_upgrade() {
+        let run = ready_kind(false, true);
+        let mut state = read_state(&run.state).unwrap();
+        state.status = "failed".into();
+        state.failure = Some(Diagnostic::error(
+            "DISCOVERY_BUDGET",
+            "Discovery allowance exhausted.",
+        ));
+        storage::Writer::acquire(&run.state)
+            .unwrap()
+            .commit_bytes(&state_bytes(&state).unwrap(), MAX_PACK_BYTES)
+            .unwrap();
+        mark_previous_producer(&run);
+        let current = inspect_state(&run.state).unwrap();
+        assert_eq!(current.status, "failed");
+        assert!(!has_in_flight(&current));
+        let before = fs::read(&run.state).unwrap();
+        let history = inspect_state_for_producer(&run.state, "0.1.7").unwrap();
+        assert_eq!(history.status, "failed");
+        assert!(!has_in_flight(&history));
+        let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
+        let writer = storage::Writer::acquire(&run.state).unwrap();
+        session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.7").unwrap();
+        assert!(fs::read(&run.state).unwrap() == before);
+    }
+
+    #[test]
+    fn settled_attempts_cannot_claim_pending_cleanup() {
+        let run = ready_kind(false, true);
+        let original: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
+        for status in ["cancel-requested", "cleanup-pending"] {
+            let mut edited = original.clone();
+            edited["status"] = json!(status);
+            fs::write(&run.state, serde_json::to_vec(&edited).unwrap()).unwrap();
+            assert!(
+                matches!(inspect_state(&run.state), Err(diagnostic) if diagnostic.code == "MCP_STATE_TAMPERED"),
+                "{status} requires an unresolved attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn released_resumable_history_inspects_states_without_weakening_validation() {
+        let run = ready_kind(false, true);
+        mark_previous_producer(&run);
+        let original: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
+        for status in ["needs-probes", "activation-blocked", "paused"] {
+            let mut checkpoint = original.clone();
+            checkpoint["status"] = json!(status);
+            fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+            assert_eq!(inspect_state(&run.state).unwrap().status, status);
+            let before = fs::read(&run.state).unwrap();
+            assert_eq!(
+                inspect_state_for_producer(&run.state, "0.1.7")
+                    .unwrap()
+                    .status,
+                status,
+                "{status}"
+            );
+            assert!(fs::read(&run.state).unwrap() == before);
+        }
+        let mut checkpoint = original;
+        checkpoint["status"] = json!("failed");
+        checkpoint["failure"] = serde_json::to_value(Diagnostic::error(
+            "MCP_TOOL_ERROR",
+            "Search termination is uncertain.",
+        ))
+        .unwrap();
+        let attempt = checkpoint["session"]["attempts"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        let probe: Probe = serde_json::from_value(attempt["probe"].clone()).unwrap();
+        let id = discovery::probe_id(
+            checkpoint["request"]["environment"]["view"]
+                .as_str()
+                .unwrap(),
+            &probe,
+        );
+        let answer = checkpoint["answers"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&id)
+            .unwrap();
+        let attempt = checkpoint["session"]["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap();
+        attempt["outcome"] = json!("failed");
+        attempt["terminal"] = json!({"file":run.directory.join("result.json"),"raw_hex":answer["raw_hex"],"raw_sha256":answer["raw_sha256"]});
+        fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        let before = fs::read(&run.state).unwrap();
+        assert_eq!(
+            inspect_state(&run.state).unwrap_err().code,
+            "MCP_STATE_TAMPERED"
+        );
+        assert_eq!(
+            inspect_state_for_producer(&run.state, "0.1.7")
+                .unwrap_err()
+                .code,
+            "MCP_STATE_TAMPERED"
+        );
+        assert!(fs::read(&run.state).unwrap() == before);
+    }
+
+    #[test]
+    fn released_resumable_history_rejects_incompatible_or_damaged_checkpoints() {
+        let run = ready_kind(false, true);
+        assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        mark_previous_producer(&run);
+        let original: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
+        let pack = fs::read(&run.pack).unwrap();
+        let receipt = fs::read(&run.receipt).unwrap();
+        for problem in [
+            "future-producer",
+            "unknown-producer",
+            "older-format-producer",
+            "format",
+            "schema",
+            "algorithm",
+            "request",
+            "binding",
+            "raw-capture",
+            "activation",
+            "pack",
+            "receipt",
+        ] {
+            let mut checkpoint = original.clone();
+            let expected = match problem {
+                "future-producer" => {
+                    checkpoint["producer_version"] = json!("0.1.8");
+                    "MCP_STATE_TAMPERED"
+                }
+                "unknown-producer" => {
+                    checkpoint["producer_version"] = json!("0.1.6-custom");
+                    "MCP_STATE_TAMPERED"
+                }
+                "older-format-producer" => {
+                    checkpoint["producer_version"] = json!("0.1.5");
+                    "MCP_STATE_TAMPERED"
+                }
+                "format" => {
+                    checkpoint["format"] = json!("unknown-state");
+                    "MCP_STATE_TAMPERED"
+                }
+                "schema" => {
+                    checkpoint["schema_version"] = json!(4);
+                    "MCP_STATE_RESTART"
+                }
+                "algorithm" => {
+                    checkpoint["discovery_algorithm"] = json!("unknown");
+                    "MCP_STATE_RESTART"
+                }
+                "request" => {
+                    checkpoint["request"]["environment"]["view"] = json!("other-view");
+                    "MCP_STATE_TAMPERED"
+                }
+                "binding" => {
+                    checkpoint["session"]["binding_sha256"] = json!("0".repeat(64));
+                    "MCP_STATE_TAMPERED"
+                }
+                "raw-capture" => {
+                    checkpoint["answers"]
+                        .as_object_mut()
+                        .unwrap()
+                        .values_mut()
+                        .next()
+                        .unwrap()["raw_hex"] = json!("00");
+                    "MCP_STATE_TAMPERED"
+                }
+                "activation" => {
+                    checkpoint["activation"]["run_id"] = json!("changed");
+                    "MCP_STATE_TAMPERED"
+                }
+                "pack" => {
+                    fs::write(&run.pack, b"{}").unwrap();
+                    "MCP_STATE_TAMPERED"
+                }
+                "receipt" => {
+                    fs::write(&run.receipt, b"{}").unwrap();
+                    "MCP_STATE_TAMPERED"
+                }
+                _ => unreachable!(),
+            };
+            fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+            let before = fs::read(&run.state).unwrap();
+            assert_eq!(
+                inspect_state_for_producer(&run.state, "0.1.7")
+                    .unwrap_err()
+                    .code,
+                expected,
+                "{problem}"
+            );
+            assert!(fs::read(&run.state).unwrap() == before);
+            fs::write(&run.pack, &pack).unwrap();
+            fs::write(&run.receipt, &receipt).unwrap();
         }
     }
 

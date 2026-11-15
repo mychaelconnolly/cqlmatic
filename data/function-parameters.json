@@ -1,0 +1,6613 @@
+{
+  "schema_version": 1,
+  "functions": [
+    {
+      "name": "accumulate",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-accumulate.html",
+      "parameters": [
+        {
+          "name": "current",
+          "choices": [
+            "exclude",
+            "include"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "include",
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "appendAggregation",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-appendaggregation.html",
+      "parameters": [
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "array:append",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-append.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "values",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:contains",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-contains.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "value",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:dedup",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-dedup.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:drop",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-drop.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "array:eval",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-eval.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "value passed to the array parameter",
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array name",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:exists",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-exists.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "condition",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array name.",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:filter",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-filter.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array name",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:intersection",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-intersection.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_intersection",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:length",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-length.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_length",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:reduceAll",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-reduceall.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:reduceColumn",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-reducecolumn.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_reduceColumn",
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:reduceRow",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-reducerow.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_reduceRow",
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:regex",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-regex.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "flags",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "regex",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:rename",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-rename.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:sort",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-sort.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array",
+          "omittable_name": false
+        },
+        {
+          "name": "order",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "asc",
+          "omittable_name": false
+        },
+        {
+          "name": "type",
+          "choices": [
+            "number",
+            "string"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "string",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "array:union",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-array-union.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_union",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "asn",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-asn.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "(input field)",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "ip",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "avg",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-avg.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_avg",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "base64Decode",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-base64decode.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_base64Decode",
+          "omittable_name": false
+        },
+        {
+          "name": "charset",
+          "choices": [
+            "ISO-8859-1",
+            "UTF-16BE",
+            "UTF-16LE",
+            "UTF-8"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "UTF-8",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "base64Encode",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-base64encode.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_base64Encode",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "beta:param",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-beta-param.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "parameter",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "beta:repeating",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-beta-repeating.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "interval",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "bitfield:extractFlags",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-bitfield-extractflags.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "onlyTrue",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "output",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "bitfield:extractFlagsAsArray",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-bitfield-extractflagsasarray.html",
+      "parameters": [
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_flags[]",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "flagNames",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "bitfield:extractFlagsAsString",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-bitfield-extractflagsasstring.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_flags",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "flagNames",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "separator",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "(space)",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "bucket",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-bucket.html",
+      "parameters": [
+        {
+          "name": "buckets",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": null,
+          "maximum": 500,
+          "default": "10",
+          "omittable_name": false
+        },
+        {
+          "name": "minSpan",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "span",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "auto",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "unit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "callFunction",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-callfunction.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_function",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [
+            "avg",
+            "count",
+            "max",
+            "min",
+            "range",
+            "sum"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "cidr",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-cidr.html",
+      "parameters": [
+        {
+          "name": "column",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "file",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "negate",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "subnet",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "coalesce",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-coalesce.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_coalesce",
+          "omittable_name": false
+        },
+        {
+          "name": "expressions",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "ignoreEmpty",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "collect",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-collect.html",
+      "parameters": [
+        {
+          "name": "fields",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": null,
+          "default": "2000",
+          "omittable_name": false
+        },
+        {
+          "name": "multival",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "separator",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "\\n",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "communityId",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-communityid.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_community_id",
+          "omittable_name": false
+        },
+        {
+          "name": "destinationip",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "destinationport",
+          "choices": [],
+          "minimum": 0,
+          "maximum": 65535,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "icmpcode",
+          "choices": [],
+          "minimum": 0,
+          "maximum": 65535,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "icmptype",
+          "choices": [],
+          "minimum": 0,
+          "maximum": 65535,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "proto",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "seed",
+          "choices": [],
+          "minimum": 0,
+          "maximum": 65535,
+          "default": "0",
+          "omittable_name": false
+        },
+        {
+          "name": "sourceip",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "sourceport",
+          "choices": [],
+          "minimum": 0,
+          "maximum": 65535,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "concat",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-concat.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_concat",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "concatArray",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-concatarray.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_concatArray",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "from",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "0",
+          "omittable_name": false
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "separator",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "suffix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "to",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "correlate",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-correlate.html",
+      "parameters": [
+        {
+          "name": "aggregation",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "globalConstraints",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "includeConstraintValues",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "includeMatchesOnceOnly",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "iterationLimit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "5",
+          "omittable_name": false
+        },
+        {
+          "name": "jitterTolerance",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "maxPerRoot",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "1",
+          "omittable_name": false
+        },
+        {
+          "name": "query",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "root",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "first query",
+          "omittable_name": false
+        },
+        {
+          "name": "sequence",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "sequenceBy",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "within",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "count",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-count.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_count",
+          "omittable_name": false
+        },
+        {
+          "name": "distinct",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "counterAsRate",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-counterasrate.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_rate",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "createEvents",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-createevents.html",
+      "parameters": [
+        {
+          "name": "rawstring",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "crypto:md5",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-crypto-md5.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_md5",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "crypto:sha1",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-crypto-sha1.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_sha1",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "crypto:sha256",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-crypto-sha256.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_sha256",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "default",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-default.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "replaceEmpty",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "value",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "defineTable",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-definetable.html",
+      "parameters": [
+        {
+          "name": "end",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "same as primary query",
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "name",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "query",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "start",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "same as primary query",
+          "omittable_name": false
+        },
+        {
+          "name": "view",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "same as primary query",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "drop",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-drop.html",
+      "parameters": [
+        {
+          "name": "fields",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "dropEvent",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-dropevent.html",
+      "parameters": []
+    },
+    {
+      "name": "duration",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-duration.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_duration",
+          "omittable_name": false
+        },
+        {
+          "name": "duration",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "end",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-end.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_end",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "eval",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-eval.html",
+      "parameters": []
+    },
+    {
+      "name": "eventFieldCount",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-eventfieldcount.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_eventFieldCount",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "eventInternals",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-eventinternals.html",
+      "parameters": [
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "eventSize",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-eventsize.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_eventSize",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "explain:asTable",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-explain-astable.html",
+      "parameters": [
+        {
+          "name": "showPrefilters",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "fieldset",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-fieldset.html",
+      "parameters": []
+    },
+    {
+      "name": "fieldstats",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-fieldstats.html",
+      "parameters": [
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 10000,
+          "default": "200",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "findTimestamp",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-findtimestamp.html",
+      "parameters": [
+        {
+          "name": "addErrors",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": false
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneAs",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "format",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-format.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_format",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "format",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "formatDuration",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-formatduration.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "from",
+          "choices": [
+            "d",
+            "h",
+            "m",
+            "ms",
+            "ns",
+            "s",
+            "us"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "ms",
+          "omittable_name": false
+        },
+        {
+          "name": "precision",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "0",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "formatTime",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-formattime.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": false
+        },
+        {
+          "name": "format",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "locale",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "UTC",
+          "omittable_name": false
+        },
+        {
+          "name": "unit",
+          "choices": [
+            "auto",
+            "milliseconds",
+            "seconds"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "auto",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "geography:distance",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-geography-distance.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_distance",
+          "omittable_name": false
+        },
+        {
+          "name": "lat1",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "lat2",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "lon1",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "lon2",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "geohash",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-geohash.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_geohash",
+          "omittable_name": false
+        },
+        {
+          "name": "lat",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "ip.lat",
+          "omittable_name": false
+        },
+        {
+          "name": "lon",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "ip.lon",
+          "omittable_name": false
+        },
+        {
+          "name": "precision",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "12",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "getField",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-getfield.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_getField",
+          "omittable_name": false
+        },
+        {
+          "name": "source",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "groupBy",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-groupby.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [
+            "max"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "20,000",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "hash",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-hash.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_hash",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "seed",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "hashMatch",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-hashmatch.html",
+      "parameters": [
+        {
+          "name": "bits",
+          "choices": [],
+          "minimum": 8,
+          "maximum": 256,
+          "default": "256",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "hash",
+          "choices": [
+            "sha256",
+            "sha512"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "sha256",
+          "omittable_name": false
+        },
+        {
+          "name": "input",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "salt",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "hashRewrite",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-hashrewrite.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "bits",
+          "choices": [],
+          "minimum": 8,
+          "maximum": 256,
+          "default": "256",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "hash",
+          "choices": [
+            "sha256",
+            "sha512"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "sha256",
+          "omittable_name": false
+        },
+        {
+          "name": "replaceInRawstring",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "salt",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "head",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-head.html",
+      "parameters": [
+        {
+          "name": "limit",
+          "choices": [
+            "max"
+          ],
+          "minimum": 0,
+          "maximum": null,
+          "default": "200",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "if",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-if.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_if",
+          "omittable_name": false
+        },
+        {
+          "name": "condition",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "else",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "then",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "in",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-in.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "ignoreCase",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "values",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "ioc:lookup",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-ioc-lookup.html",
+      "parameters": [
+        {
+          "name": "confidenceThreshold",
+          "choices": [
+            "unverified",
+            "low",
+            "medium",
+            "high"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "high",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "include",
+          "choices": [
+            "indicator",
+            "labels",
+            "last_updated",
+            "malicious_confidence",
+            "published_date",
+            "type"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "All columns",
+          "omittable_name": false
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "ioc",
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "type",
+          "choices": [
+            "domain",
+            "ip_address",
+            "url"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "ipLocation",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-iplocation.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "ip",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "join",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-join.html",
+      "parameters": [
+        {
+          "name": "end",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "End of main query",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "none",
+          "omittable_name": false
+        },
+        {
+          "name": "key",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 200000,
+          "default": "100000",
+          "omittable_name": false
+        },
+        {
+          "name": "live",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "Same as main query",
+          "omittable_name": false
+        },
+        {
+          "name": "max",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "1",
+          "omittable_name": false
+        },
+        {
+          "name": "mode",
+          "choices": [
+            "inner",
+            "left"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "inner",
+          "omittable_name": false
+        },
+        {
+          "name": "query",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "repo",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Repo of main query",
+          "omittable_name": false
+        },
+        {
+          "name": "start",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Start of main query",
+          "omittable_name": false
+        },
+        {
+          "name": "view",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "View of main query",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "json:prettyPrint",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-json-prettyprint.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "step",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "2",
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "kvParse",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-kvparse.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "excludeEmpty",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "onDuplicate",
+          "choices": [
+            "keepFirst",
+            "keepLast"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "keepLast",
+          "omittable_name": false
+        },
+        {
+          "name": "override",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "separator",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "=",
+          "omittable_name": false
+        },
+        {
+          "name": "separatorPadding",
+          "choices": [
+            "no",
+            "unknown",
+            "yes"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "unknown",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "length",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-length.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_length",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "linReg",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-linreg.html",
+      "parameters": [
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_",
+          "omittable_name": false
+        },
+        {
+          "name": "x",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "y",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "lower",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-lower.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_lower",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "locale",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "system locale",
+          "omittable_name": false
+        },
+        {
+          "name": "type",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "lowercase",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-lowercase.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "include",
+          "choices": [
+            "both",
+            "fields",
+            "values"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "values",
+          "omittable_name": false
+        },
+        {
+          "name": "locale",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "match",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-match.html",
+      "parameters": [
+        {
+          "name": "column",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "field parameter",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "file",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "glob",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "ignoreCase",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "mode",
+          "choices": [
+            "cidr",
+            "glob",
+            "string"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "string",
+          "omittable_name": false
+        },
+        {
+          "name": "nrows",
+          "choices": [
+            "max"
+          ],
+          "minimum": null,
+          "maximum": 500,
+          "default": "1",
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "matchAsArray",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-matchasarray.html",
+      "parameters": [
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "column",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "field parameter",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "file",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "ignoreCase",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "nrows",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 10,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "math:abs",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-abs.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_abs",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:arccos",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-arccos.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_arccos",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:arcsin",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-arcsin.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_arcsin",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:arctan",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-arctan.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_arctan",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:arctan2",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-arctan2.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_arctan2",
+          "omittable_name": false
+        },
+        {
+          "name": "x",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "y",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "math:ceil",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-ceil.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_ceil",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:cos",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-cos.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_cos",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:cosh",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-cosh.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_cosh",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "math:deg2rad",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-deg2rad.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_deg2rad",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:exp",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-exp.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_exp",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:expm1",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-expm1.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_expm1",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:floor",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-floor.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_floor",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:log",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-log.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_log",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:log10",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-log10.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_log10",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:log1p",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-log1p.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_log1p",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:log2",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-log2.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_log2",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:mod",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-mod.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_mod",
+          "omittable_name": false
+        },
+        {
+          "name": "divisor",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:pow",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-pow.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_pow",
+          "omittable_name": false
+        },
+        {
+          "name": "exponent",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:rad2deg",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-rad2deg.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_rad2deg",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:sin",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-sin.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_sin",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:sinh",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-sinh.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_sinh",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:sqrt",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-sqrt.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_sqrt",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:tan",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-tan.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_tan",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "math:tanh",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-math-tanh.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_tanh",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "max",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-max.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_max",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "min",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-min.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_min",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "neighbor",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-neighbor.html",
+      "parameters": [
+        {
+          "name": "direction",
+          "choices": [
+            "preceding",
+            "succeeding"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "preceding",
+          "omittable_name": false
+        },
+        {
+          "name": "distance",
+          "choices": [],
+          "minimum": null,
+          "maximum": 10000,
+          "default": "1",
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_neighbor",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "now",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-now.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_now",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "objectArray:eval",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-objectarray-eval.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "value passed to the array parameter",
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array name",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "objectArray:exists",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-objectarray-exists.html",
+      "parameters": [
+        {
+          "name": "array",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "condition",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "var",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input array name.",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseCEF",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsecef.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "headerprefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "cef.",
+          "omittable_name": false
+        },
+        {
+          "name": "keeplabels",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "labelprefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "cef.label.",
+          "omittable_name": false
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "cef.ext.",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseCsv",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsecsv.html",
+      "parameters": [
+        {
+          "name": "columns",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "delimiter",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": ",",
+          "omittable_name": false
+        },
+        {
+          "name": "excludeEmpty",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "trim",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseFixedWidth",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsefixedwidth.html",
+      "parameters": [
+        {
+          "name": "columns",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "trim",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "widths",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseHexString",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsehexstring.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_parsehexstring",
+          "omittable_name": false
+        },
+        {
+          "name": "charset",
+          "choices": [
+            "ISO-8859-1",
+            "UTF-16BE",
+            "UTF-16LE",
+            "UTF-8"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "UTF-8",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "parseInt",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parseint.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "endian",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "big",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "radix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "16",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseJson",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsejson.html",
+      "parameters": [
+        {
+          "name": "exclude",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "[]",
+          "omittable_name": false
+        },
+        {
+          "name": "excludeEmpty",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "handleNull",
+          "choices": [
+            "discard",
+            "empty",
+            "keep"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "keep",
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "[]",
+          "omittable_name": false
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "blank",
+          "omittable_name": false
+        },
+        {
+          "name": "removePrefixes",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "[]",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseLEEF",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parseleef.html",
+      "parameters": [
+        {
+          "name": "delimiter",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "headerprefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "leef.",
+          "omittable_name": false
+        },
+        {
+          "name": "keeplabels",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "labelprefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "leef.label",
+          "omittable_name": false
+        },
+        {
+          "name": "parsetime",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "leef.ext.",
+          "omittable_name": false
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Z",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseTimestamp",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsetimestamp.html",
+      "parameters": [
+        {
+          "name": "addErrors",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": false
+        },
+        {
+          "name": "caseSensitive",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "format",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "yyyy-MM-dd'T'HH:mm:ss[.SSSSSSSSS]XXXXX",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneAs",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseUri",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parseuri.html",
+      "parameters": [
+        {
+          "name": "defaultBase",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input field name",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "parseUrl",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parseurl.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "url",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "parseXml",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-parsexml.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "prefix",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "partition",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-partition.html",
+      "parameters": [
+        {
+          "name": "condition",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "split",
+          "choices": [
+            "after",
+            "before"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "before",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "percentage",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-percentage.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_percentage",
+          "omittable_name": false
+        },
+        {
+          "name": "condition",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "percentile",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-percentile.html",
+      "parameters": [
+        {
+          "name": "accuracy",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "0.01",
+          "omittable_name": false
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "percentiles",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "[50, 75, 99]",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "range",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-range.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_range",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "readFile",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-readfile.html",
+      "parameters": [
+        {
+          "name": "file",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "readPersistedAggregation",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-readpersistedaggregation.html",
+      "parameters": [
+        {
+          "name": "end",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Same as the primary query",
+          "omittable_name": false
+        },
+        {
+          "name": "span",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "start",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Same as the primary query",
+          "omittable_name": false
+        },
+        {
+          "name": "tag",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "view",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Same as the primary query",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "regex",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-regex.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": false
+        },
+        {
+          "name": "flags",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "m",
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "100",
+          "omittable_name": false
+        },
+        {
+          "name": "regex",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "repeat",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "remoteTable",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-remotetable.html",
+      "parameters": [
+        {
+          "name": "connection",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "end",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "same as primary query",
+          "omittable_name": false
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "name",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "start",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "same as primary query",
+          "omittable_name": false
+        },
+        {
+          "name": "query",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "rename",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-rename.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "replace",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-replace.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "input field",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": false
+        },
+        {
+          "name": "flags",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "m",
+          "omittable_name": false
+        },
+        {
+          "name": "regex",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "replacement",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "\"\"",
+          "omittable_name": false
+        },
+        {
+          "name": "with",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "\"\"",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "reverseDns",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-reversedns.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_hostname",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "ReverseDnsDefaultLimit",
+          "omittable_name": false
+        },
+        {
+          "name": "server",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "round",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-round.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Same name as input field",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "how",
+          "choices": [
+            "ceil",
+            "floor",
+            "round"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "round",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "sample",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-sample.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": false
+        },
+        {
+          "name": "percentage",
+          "choices": [],
+          "minimum": null,
+          "maximum": 100,
+          "default": "1",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "sankey",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-sankey.html",
+      "parameters": [
+        {
+          "name": "source",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "target",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "weight",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "select",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-select.html",
+      "parameters": [
+        {
+          "name": "fields",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "selectFromMax",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-selectfrommax.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "selectFromMin",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-selectfrommin.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "include",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "selectLast",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-selectlast.html",
+      "parameters": [
+        {
+          "name": "fields",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "selfJoin",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-selfjoin.html",
+      "parameters": [
+        {
+          "name": "collect",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "(none)",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": null,
+          "default": "20000",
+          "omittable_name": false
+        },
+        {
+          "name": "postfilter",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "prefilter",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "select",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "(none)",
+          "omittable_name": false
+        },
+        {
+          "name": "where",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "selfJoinFilter",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-selfjoinfilter.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "prefilter",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "where",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "series",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-series.html",
+      "parameters": [
+        {
+          "name": "collect",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "endmatch",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "maxduration",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "maxpause",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "memlimit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "1KiB",
+          "omittable_name": false
+        },
+        {
+          "name": "separator",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "\\n",
+          "omittable_name": false
+        },
+        {
+          "name": "startmatch",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "session",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-session.html",
+      "parameters": [
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": true
+        },
+        {
+          "name": "maxpause",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "15m",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "setField",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-setfield.html",
+      "parameters": [
+        {
+          "name": "target",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "__setField",
+          "omittable_name": false
+        },
+        {
+          "name": "value",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "setTimeInterval",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-settimeinterval.html",
+      "parameters": [
+        {
+          "name": "end",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "now",
+          "omittable_name": false
+        },
+        {
+          "name": "start",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "shannonEntropy",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-shannonentropy.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_shannonentropy",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "slidingTimeWindow",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-slidingtimewindow.html",
+      "parameters": [
+        {
+          "name": "current",
+          "choices": [
+            "exclude",
+            "include"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "include",
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "span",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timestampfield",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "Either @timestamp or @ingestTimestamp depending on what is selected for the query.",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "slidingWindow",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-slidingwindow.html",
+      "parameters": [
+        {
+          "name": "current",
+          "choices": [
+            "exclude",
+            "include"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "include",
+          "omittable_name": false
+        },
+        {
+          "name": "events",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 10000,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "sort",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-sort.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_count",
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [
+            "max"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "200",
+          "omittable_name": false
+        },
+        {
+          "name": "order",
+          "choices": [
+            "asc",
+            "desc"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "desc",
+          "omittable_name": false
+        },
+        {
+          "name": "reverse",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "type",
+          "choices": [
+            "hex",
+            "number",
+            "string"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "number",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "split",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-split.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_events",
+          "omittable_name": true
+        },
+        {
+          "name": "strip",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "splitString",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-splitstring.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_splitstring",
+          "omittable_name": false
+        },
+        {
+          "name": "by",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "index",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "start",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-start.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_start",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "stats",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-stats.html",
+      "parameters": [
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "stdDev",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-stddev.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_stddev",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "stripAnsiCodes",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-stripansicodes.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "subnet",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-subnet.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_subnet",
+          "omittable_name": false
+        },
+        {
+          "name": "bits",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "sum",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-sum.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_sum",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "table",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-table.html",
+      "parameters": [
+        {
+          "name": "fields",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [
+            "max"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "200",
+          "omittable_name": false
+        },
+        {
+          "name": "order",
+          "choices": [
+            "asc",
+            "desc"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "desc",
+          "omittable_name": false
+        },
+        {
+          "name": "reverse",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "sortby",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": false
+        },
+        {
+          "name": "type",
+          "choices": [
+            "any",
+            "hex",
+            "number",
+            "string"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "number",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "tail",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-tail.html",
+      "parameters": [
+        {
+          "name": "limit",
+          "choices": [
+            "max"
+          ],
+          "minimum": 1,
+          "maximum": null,
+          "default": "200",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "test",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-test.html",
+      "parameters": [
+        {
+          "name": "expression",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "text:contains",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-contains.html",
+      "parameters": [
+        {
+          "name": "string",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "substring",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "text:editDistance",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-editdistance.html",
+      "parameters": [
+        {
+          "name": "allowTranspositions",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_distance",
+          "omittable_name": false
+        },
+        {
+          "name": "ignoreCase",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "maxDistance",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 100,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "reference",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "target",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "text:editDistanceAsArray",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-editdistanceasarray.html",
+      "parameters": [
+        {
+          "name": "allowTranspositions",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "true",
+          "omittable_name": false
+        },
+        {
+          "name": "asArray",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_distance",
+          "omittable_name": false
+        },
+        {
+          "name": "ignoreCase",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "maxDistance",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 100,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "references",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "target",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "text:endsWith",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-endswith.html",
+      "parameters": [
+        {
+          "name": "string",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "substring",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "text:length",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-length.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_length",
+          "omittable_name": false
+        },
+        {
+          "name": "string",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "text:positionOf",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-positionof.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_position",
+          "omittable_name": false
+        },
+        {
+          "name": "begin",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "0",
+          "omittable_name": false
+        },
+        {
+          "name": "character",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "occurrence",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "1",
+          "omittable_name": false
+        },
+        {
+          "name": "string",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "text:startsWith",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-startswith.html",
+      "parameters": [
+        {
+          "name": "string",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "substring",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "text:substring",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-substring.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_string",
+          "omittable_name": false
+        },
+        {
+          "name": "begin",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "0",
+          "omittable_name": false
+        },
+        {
+          "name": "end",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "string",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "text:trim",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-text-trim.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_trim",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "mode",
+          "choices": [
+            "both",
+            "end",
+            "start"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "both",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:dayOfMonth",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofmonth.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_dayOfMonth",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:dayOfWeek",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofweek.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_dayOfWeek",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:dayOfWeekName",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofweekname.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_dayOfWeekName",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:dayOfYear",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofyear.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_dayOfYear",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:hour",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-hour.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_hour",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:millisecond",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-millisecond.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_millisecond",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:minute",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-minute.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_minute",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:month",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-month.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_month",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:monthName",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-monthname.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_monthName",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:second",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-second.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_second",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:weekOfYear",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-weekofyear.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_weekOfYear",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "time:year",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-time-year.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_year",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timestamp",
+          "omittable_name": true
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "timezoneField",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@timezone",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "timeChart",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-timechart.html",
+      "parameters": [
+        {
+          "name": "buckets",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 1500,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count()",
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": null,
+          "maximum": 500,
+          "default": "10",
+          "omittable_name": false
+        },
+        {
+          "name": "minSpan",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "series",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "span",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "auto",
+          "omittable_name": false
+        },
+        {
+          "name": "timezone",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "unit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "No conversion",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "tokenHash",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-tokenhash.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_tokenHash",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "top",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-top.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_count or _sum",
+          "omittable_name": false
+        },
+        {
+          "name": "error",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "5",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": null,
+          "default": "10",
+          "omittable_name": false
+        },
+        {
+          "name": "max",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "percent",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "rest",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "sum",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "transpose",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-transpose.html",
+      "parameters": [
+        {
+          "name": "column",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "column",
+          "omittable_name": false
+        },
+        {
+          "name": "header",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "limit",
+          "choices": [],
+          "minimum": 1,
+          "maximum": 1000,
+          "default": "5",
+          "omittable_name": false
+        },
+        {
+          "name": "pivot",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "unit:convert",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-unit-convert.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "binary",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "from",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "keepUnit",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "to",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "unit",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "upper",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-upper.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_upper",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        },
+        {
+          "name": "locale",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "system locale",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "urlDecode",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-urldecode.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_urldecode",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "urlEncode",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-urlencode.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_urlencode",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "wildcard",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-wildcard.html",
+      "parameters": [
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "ignoreCase",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "includeEverythingOnAsterisk",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "pattern",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "window",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-window.html",
+      "parameters": [
+        {
+          "name": "buckets",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "function",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": true
+        },
+        {
+          "name": "span",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "worldMap",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-worldmap.html",
+      "parameters": [
+        {
+          "name": "ip",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "lat",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "lon",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "magnitude",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "count(as=_count)",
+          "omittable_name": false
+        },
+        {
+          "name": "precision",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "4",
+          "omittable_name": false
+        }
+      ]
+    },
+    {
+      "name": "writeJson",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-writejson.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "_json",
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        }
+      ]
+    },
+    {
+      "name": "xml:prettyPrint",
+      "official_url": "https://library.humio.com/crowdstrike-query-language/functions-xml-prettyprint.html",
+      "parameters": [
+        {
+          "name": "as",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": null,
+          "omittable_name": false
+        },
+        {
+          "name": "field",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "@rawstring",
+          "omittable_name": true
+        },
+        {
+          "name": "step",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "2",
+          "omittable_name": false
+        },
+        {
+          "name": "strict",
+          "choices": [
+            "false",
+            "true"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "default": "false",
+          "omittable_name": false
+        },
+        {
+          "name": "width",
+          "choices": [],
+          "minimum": null,
+          "maximum": null,
+          "default": "80",
+          "omittable_name": false
+        }
+      ]
+    }
+  ]
+}

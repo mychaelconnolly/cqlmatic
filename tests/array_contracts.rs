@@ -110,7 +110,14 @@ fn checked_string_arrays_require_string_elements() {
             );
         }
         let scalar = format!("{function}({prefix}\"alice\")");
-        assert_eq!(check(&scalar).outcome, Outcome::Invalid, "{scalar}");
+        let result = check(&scalar);
+        assert_eq!(result.outcome, Outcome::Unsupported, "{scalar}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON")
+        );
     }
     assert_eq!(
         check(

@@ -4,12 +4,12 @@ CQLmatic maps a CrowdStrike NG-SIEM environment into a reusable local snapshot a
 
 Read these guides at [docs.cqlmatic.dev](https://docs.cqlmatic.dev/), visit the [project page](https://cqlmatic.dev/), or use the Markdown files offline with a release archive.
 
-This manual describes **CQLmatic 0.1.6**, JSON contracts **v1**, and executable profile **`cqlmatic-ngsiem-core-v2`**. Use `cqlmatic catalog --profile` for the running binary's knowledge revision and limits. These identifiers do not attest to a tenant, execution, completeness, or unrestricted-English accuracy.
+This manual describes the current source profile **`cqlmatic-ngsiem-core-v3`** and JSON contracts **v1**. Published **CQLmatic 0.1.6** packages retain their shipped behavior and installation links. Use `cqlmatic catalog --profile` and command-specific help for the running binary's profile, knowledge revision and limits. The source catalog covers 194 Query candidate names with bounded contracts; these identifiers do not attest to a tenant, execution, completeness, or unrestricted-English accuracy.
 
 ## Start as an operator
 
 1. Read [the project README](../README.md) for prerequisites and executable/source-build instructions, then [setup and authentication](SETUP.md).
-2. Follow [inventory and status](INVENTORY.md): scout visible sources, confirm the target/context, inventory and review parsers, measure fields, and reconcile evidence. Review costs and budgets first.
+2. Follow [inventory and status](INVENTORY.md): scout visible sources, confirm the target/context, inventory and review parsers, measure fields, and reconcile evidence. Review costs and budgets first. Function capability checks are a separate optional phase after a field pack is active; leaving them unselected preserves the map.
 3. Read [environment packs](ENVIRONMENT.md) to inspect/import/refresh evidence and understand its limits.
 4. Use [query construction](QUERY-REFERENCE.md), [the command reference](../USAGE.md), and [result assessment](RESULT-ASSESSMENT.md) for the question at hand.
 5. Use [troubleshooting](TROUBLESHOOTING.md) to decide whether to fix input, resume, or start a new bounded run.
@@ -46,7 +46,7 @@ This manual describes **CQLmatic 0.1.6**, JSON contracts **v1**, and executable 
 | Generate/check, catalog, schemas, assess, inspect, status | Offline; no Falcon/model key needed. | Read explicit inputs/state; emit assessments. |
 | No-request `setup --json` | Offline; no native capability/config probing. | Read saved setup status without creating state. |
 | Setup detect/select/preview/apply/import | Native capability probes are local; Codex apply can open browser consent. Copilot file writes and Claude add do not authenticate. External selection and report import do not connect to Falcon. | Save setup state and caller-supplied report hash; preview/backup and reviewed local configuration for named hosts. |
-| Inventory actions | Most are local; parser fetch uses a separate protected Falcon API client; emitted scout/discovery probes are run by the host's authorized MCP connection. | Save sensitive workflow evidence, snapshots, parser review and cumulative active pack. |
+| Inventory actions | Most are local; parser fetch uses a separate protected Falcon API client; emitted scout/discovery probes and separately opted-in fixed capability cases are run by the host's authorized MCP connection. | Save sensitive workflow evidence, snapshots, parser review, cumulative active pack and separate capability observations. |
 | `env identity` | Reads credentials, no network. | Emit local account binding; not a provider-verified CID. |
 | `env import` | Offline. | Validate and create/explicitly replace a protected pack. |
 | `env discover` without execution/relay flags | Offline plan. | Print initial probes/deferred stages; no credentials or searches. |

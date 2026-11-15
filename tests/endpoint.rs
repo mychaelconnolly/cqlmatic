@@ -134,6 +134,7 @@ fn endpoint_signatures_accept_supported_forms_and_reject_invalid_arguments() {
         "urlDecode(user)",
         "shannonEntropy(user)",
         "splitString(user,by=\" \",index=-1)",
+        "x:=splitString(user,by=\" \")",
         "coalesce([getField(\"host-name\"),user,\"none\"])",
         "replace(\"x\",field=user)",
         "replace(\"x\",replacement=\"\",field=user)",
@@ -165,7 +166,6 @@ fn endpoint_signatures_accept_supported_forms_and_reject_invalid_arguments() {
         "rename(user)",
         "rename([[user,\"#type\"]])",
         "default(field=user,value=count())",
-        "x:=splitString(user,by=\" \")",
         "x:=regex(\"x\",strict=false)",
     ] {
         assert_ne!(check(q, false).outcome, Outcome::Ready, "{q}");
