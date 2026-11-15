@@ -305,12 +305,14 @@ fn private_directory_error() -> Diagnostic {
         "Setup storage or its parent path is accessible or replaceable by another user. Choose a fresh --state path under trusted private ancestry. Setup does not change permissions on existing arbitrary directories.",
     )
 }
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const WINDOWS_ACL_CHECK: &str = r#"
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $p=$env:CQLMATIC_SETUP_PATH
 $mode=$env:CQLMATIC_SETUP_ACL_MODE
+$combined=$mode -eq 'directory-file'
+if($combined -or $mode -eq 'input-directory'){$p=$env:CQLMATIC_SETUP_PARENT; $mode='directory'}
 $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
 function Fail($at,$who,$right,$reason){
   @{path=[string]$at;sid=[string]$who;right=[string]$right;reason=[string]$reason} | ConvertTo-Json -Compress
@@ -380,6 +382,11 @@ if($mode -ne 'file'){
 }
 Check-Private
 if($mode -ne 'file'){Check-Ancestors}
+if($combined){
+  $p=$env:CQLMATIC_SETUP_PATH
+  $mode='file'
+  Check-Private
+}
 "#;
 #[cfg(any(windows, test))]
 #[derive(Deserialize)]
@@ -421,7 +428,10 @@ fn windows_acl_failure(output: &[u8]) -> Diagnostic {
 }
 #[cfg(windows)]
 fn check_windows_acl(path: &Path, mode: &str) -> Result<(), Diagnostic> {
-    let mut command = powershell()?;
+    check_windows_acl_with_parent(path, mode, None)
+}
+#[cfg(any(windows, test))]
+fn configure_windows_acl(command: &mut Command, path: &Path, mode: &str, parent: Option<&Path>) {
     command
         .args([
             "-NoLogo",
@@ -432,6 +442,18 @@ fn check_windows_acl(path: &Path, mode: &str) -> Result<(), Diagnostic> {
         ])
         .env("CQLMATIC_SETUP_PATH", path)
         .env("CQLMATIC_SETUP_ACL_MODE", mode);
+    if let Some(parent) = parent {
+        command.env("CQLMATIC_SETUP_PARENT", parent);
+    }
+}
+#[cfg(windows)]
+fn check_windows_acl_with_parent(
+    path: &Path,
+    mode: &str,
+    parent: Option<&Path>,
+) -> Result<(), Diagnostic> {
+    let mut command = powershell()?;
+    configure_windows_acl(&mut command, path, mode, parent);
     let output = run_bounded_command(command, false, 20, 32 * 1024).map_err(|_| err(
         "SETUP_PROTECTION",
         "The fixed Windows ACL helper timed out, exceeded its output budget, or could not be read. No unsafe path is cleaned up automatically.",
@@ -489,13 +511,56 @@ pub(crate) fn private_input_exists(path: &Path) -> Result<bool, Diagnostic> {
     reject_links(path)?;
     match fs::symlink_metadata(path) {
         Ok(_) => {
-            verify_directory(parent(path)?)?;
-            verify_private_file(path)?;
+            #[cfg(windows)]
+            verify_windows_private_input(path)?;
+            #[cfg(not(windows))]
+            {
+                verify_directory(parent(path)?)?;
+                verify_private_file(path)?;
+            }
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(err("SETUP_PROTECTION", "Cannot inspect protected input.")),
     }
+}
+#[cfg(windows)]
+fn verify_windows_private_input(path: &Path) -> Result<(), Diagnostic> {
+    let directory = parent(path)?;
+    reject_links(directory)?;
+    fs::symlink_metadata(directory)
+        .map_err(|_| err("SETUP_STORAGE", "Cannot inspect private setup directory."))?;
+    // Preserve directory ACL failure priority while preparing the single launch.
+    let remaining_checks = (|| {
+        if !directory.is_dir() {
+            return Err(err(
+                "SETUP_STORAGE",
+                "Private setup storage must be a directory.",
+            ));
+        }
+        reject_links(directory)?;
+        reject_links(path)?;
+        if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
+            return Err(err(
+                "SETUP_PROTECTION",
+                "Protected setup input must be a regular file.",
+            ));
+        }
+        Ok(())
+    })();
+    check_windows_acl_with_parent(
+        path,
+        if remaining_checks.is_ok() {
+            "directory-file"
+        } else {
+            "input-directory"
+        },
+        Some(directory),
+    )?;
+    remaining_checks?;
+    // Links that appeared while the helper ran are still refused.
+    reject_links(directory)?;
+    reject_links(path)
 }
 fn load_state(path: &Path) -> Result<SetupState, Diagnostic> {
     reject_links(path)?;
@@ -3134,6 +3199,47 @@ mod tests {
         }
     }
     #[test]
+    fn setup_windows_acl_command_uses_fixed_script_and_explicit_paths() {
+        use std::{collections::BTreeMap, ffi::OsStr};
+        let path = Path::new(r"C:\private space ' ; $()\state.json");
+        let directory = Path::new(r"D:\explicit parent");
+        for mode in [
+            "directory",
+            "create-directory",
+            "file",
+            "directory-file",
+            "input-directory",
+        ] {
+            let parent = matches!(mode, "directory-file" | "input-directory").then_some(directory);
+            let mut command = Command::new("synthetic");
+            configure_windows_acl(&mut command, path, mode, parent);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_ACL_CHECK,
+                ]
+                .map(OsStr::new)
+            );
+            let environment = command.get_envs().collect::<BTreeMap<_, _>>();
+            assert_eq!(
+                environment.get(OsStr::new("CQLMATIC_SETUP_PATH")),
+                Some(&Some(path.as_os_str()))
+            );
+            assert_eq!(
+                environment.get(OsStr::new("CQLMATIC_SETUP_ACL_MODE")),
+                Some(&Some(OsStr::new(mode)))
+            );
+            assert_eq!(
+                environment.get(OsStr::new("CQLMATIC_SETUP_PARENT")),
+                parent.map(|path| Some(path.as_os_str())).as_ref()
+            );
+        }
+    }
+    #[test]
     fn setup_interactive_action_errors_resume_but_invalid_state_is_fatal() {
         assert!(fatal_interactive_error("SETUP_PLAN_INTEGRITY"));
         assert!(!fatal_interactive_error("SETUP_DISCOVERY_INPUT"));
@@ -4609,6 +4715,104 @@ mod tests {
         assert!(verify_directory(&missing).is_err());
         assert!(!private_input_exists(&missing.join("state.json")).unwrap());
         assert!(!temp.0.join("missing").exists());
+    }
+
+    #[cfg(windows)]
+    fn allow_windows_users_read(path: &Path) {
+        let output = Command::new("icacls")
+            .arg(path)
+            .args(["/grant", "*S-1-5-32-545:R"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_private_input_matches_separate_acl_checks() {
+        for (unsafe_parent, unsafe_file) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let temp = Temp::new();
+            let directory = temp.0.join("private space ' ; $()");
+            protect_directory(&directory).unwrap();
+            let path = directory.join("state.json");
+            fs::write(&path, b"synthetic").unwrap();
+            if unsafe_parent {
+                allow_windows_users_read(&directory);
+                assert!(verify_directory(&directory).is_err());
+            } else {
+                verify_directory(&directory).unwrap();
+            }
+            if unsafe_file {
+                allow_windows_users_read(&path);
+                assert!(verify_private_file(&path).is_err());
+            } else {
+                verify_private_file(&path).unwrap();
+            }
+            let expected = verify_directory(parent(&path).unwrap())
+                .and_then(|()| verify_private_file(&path))
+                .map(|()| true);
+            let actual = private_input_exists(&path);
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap(),
+                "unsafe parent: {unsafe_parent}; unsafe file: {unsafe_file}"
+            );
+            if unsafe_parent || unsafe_file {
+                let diagnostic = actual.unwrap_err();
+                let failing_path = if unsafe_parent { &directory } else { &path };
+                assert_eq!(diagnostic.code, "SETUP_PROTECTION");
+                assert!(
+                    diagnostic
+                        .message
+                        .contains(&format!("{:?}", failing_path.to_string_lossy()))
+                );
+                assert!(diagnostic.message.contains("S-1-5-32-545"));
+                assert!(diagnostic.message.contains("check allow"));
+            } else {
+                assert!(actual.unwrap());
+            }
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_private_input_preserves_nonregular_file_diagnostics() {
+        for unsafe_parent in [false, true] {
+            let temp = Temp::new();
+            let directory = temp.0.join("private");
+            protect_directory(&directory).unwrap();
+            let path = directory.join("not-a-file");
+            fs::create_dir(&path).unwrap();
+            if unsafe_parent {
+                allow_windows_users_read(&directory);
+            }
+            let expected = verify_directory(parent(&path).unwrap())
+                .and_then(|()| verify_private_file(&path))
+                .unwrap_err();
+            let actual = private_input_exists(&path).unwrap_err();
+            assert_eq!(
+                serde_json::to_value(&actual).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            if !unsafe_parent {
+                assert_eq!(
+                    actual.message,
+                    "Protected setup input must be a regular file."
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_missing_private_input_does_not_verify_unsafe_parent() {
+        let temp = Temp::new();
+        let directory = temp.0.join("private");
+        protect_directory(&directory).unwrap();
+        allow_windows_users_read(&directory);
+        assert!(verify_directory(&directory).is_err());
+        let missing = directory.join("missing.json");
+        assert!(!private_input_exists(&missing).unwrap());
+        assert!(!missing.exists());
     }
 
     #[cfg(windows)]
