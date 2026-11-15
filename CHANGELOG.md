@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.7
 
 - The executable profile is `cqlmatic-ngsiem-core-v3` with a new knowledge revision. Raw checking and typed function calls cover 194 Query candidate function names with bounded contracts, up from 67: 193 current candidates and deprecated `lowercase`, which remains distinct from `lower`. The bundled function ledger lists parser-only `copyEvent` and unreleased `math:spherical2cartesian` as excluded.
 - `catalog --limit` accepts 1–250 for ordinary, function and standard lookup. `catalog --functions` entries add `requirements`, `parameters` and `scope`, and the `readFile` entry adds `variadic_argument`.
@@ -108,7 +108,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v016).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v017).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

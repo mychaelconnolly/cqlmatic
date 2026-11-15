@@ -35,7 +35,7 @@ OLD_IDS = {"cqlmatic-docs": "11111111-1111-1111-1111-111111111111", "cqlmatic": 
 NEW_IDS = {"cqlmatic-docs": "33333333-3333-3333-3333-333333333333", "cqlmatic": "44444444-4444-4444-4444-444444444444"}
 
 
-def site_files(source=SOURCE, version="0.1.6"):
+def site_files(source=SOURCE, version="0.1.7"):
     files = {"landing/index.html": b"<h1>CQLmatic</h1>", "docs/index.html": b"<h1>Documentation</h1>",
              "landing/404.html": b"<h1>Not found</h1>", "docs/404.html": b"<h1>Not found</h1>",
              "landing/_headers": b"/*\n  X-Content-Type-Options: nosniff\n",
