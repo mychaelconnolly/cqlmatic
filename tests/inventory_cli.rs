@@ -3817,7 +3817,7 @@ fn cumulative_pack_covers_multiple_sources_and_declared_field_batches() {
     for batch in [json!(["first"]), json!(["second", "quiet"])] {
         let prepared = call(
             &dir.0,
-            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[first],"population_fields":[{"source":{"repo":"synthetic"},"fields":batch}],"max_queries":30,"max_seconds":300}),
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[first],"population_fields":[{"source":{"repo":"synthetic"},"fields":batch}],"max_queries":30,"max_seconds":3600}),
         );
         assert!(
             prepared["action"]["warning"]
@@ -3832,7 +3832,7 @@ fn cumulative_pack_covers_multiple_sources_and_declared_field_batches() {
     }
     let prepared = call(
         &dir.0,
-        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[other],"max_queries":30,"max_seconds":300}),
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[other],"max_queries":30,"max_seconds":3600}),
     );
     let completed = relay(&dir.0, prepared, &["peer"], &[], None);
     let quiet = completed["status"]["sources"]
@@ -3938,7 +3938,7 @@ fn native_fieldset_batches_keep_unselected_fields_pending() {
     for selected in ["a", "b"] {
         let prepared = call(
             &dir.0,
-            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[source],"population_fields":[{"source":{"repo":"synthetic"},"fields":[selected]}],"max_queries":30,"max_seconds":300}),
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[source],"population_fields":[{"source":{"repo":"synthetic"},"fields":[selected]}],"max_queries":30,"max_seconds":3600}),
         );
         let completed = relay(&dir.0, prepared, &["a", "b"], &[], Some(&[selected]));
         let active = completed["status"]["active_pack"]["path"].as_str().unwrap();
