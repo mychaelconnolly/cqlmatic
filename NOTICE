@@ -1,7 +1,7 @@
 CQLmatic is licensed under the Apache License 2.0 (see LICENSE).
 
-CQLmatic contains an independent Rust implementation of its parser, semantic
-planner, checker, linter, storage, and Falcon API client.
+CQLmatic's parser, semantic planner, checker, linter, storage, and Falcon API
+client are implemented in Rust in this repository.
 
 Bundled reference material and standards records derive from:
   NG-SIEM Query Engine, Michael Connolly
