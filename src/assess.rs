@@ -1814,8 +1814,9 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
             None => (spec.default, CapKind::Silent, None),
             Some(Some("max")) => (0, CapKind::Unverified, spec.max_setting),
             // A negative, parameterized or otherwise non-literal limit has no known value.
-            Some(text) => text
-                .and_then(|text| text.parse().ok())
+            Some(_) => limit
+                .and_then(|value| value.unsigned_integer())
+                .and_then(|value| usize::try_from(value).ok())
                 .map_or((0, CapKind::Unverified, None), |cap| {
                     (cap, spec.numeric, None)
                 }),

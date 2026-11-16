@@ -3972,8 +3972,8 @@
         "documented_signature"
       ],
       "placement": "pipeline",
-      "query": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances\")",
-      "canonical": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances\")",
+      "query": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances[]\")",
+      "canonical": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances[]\")",
       "inputs": [
         "message"
       ],
@@ -5011,8 +5011,9 @@
         "negated"
       ],
       "query": "!matchAsArray(\"synthetic.csv\", field=\"user\", nrows=1, asArray=\"matches[]\", strict=false)",
-      "outcome": "unsupported",
-      "typed": true
+      "outcome": "ready",
+      "typed": true,
+      "diagnostic": "CQL_NEGATION_NO_EFFECT"
     },
     {
       "id": "math:mod-unnamed-argument",

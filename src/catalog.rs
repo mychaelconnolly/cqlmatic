@@ -194,7 +194,10 @@ pub fn correlation_outputs(
             fields.extend(self::fields(&include.value));
         }
         if !*aggregation
-            && args.get("includeConstraintValues").copied() != Some(&Value::Bool(false))
+            && args
+                .get("includeConstraintValues")
+                .and_then(|v| v.boolean())
+                != Some(false)
         {
             if let Some(globals) = args.get("globalConstraints") {
                 fields.extend(self::fields(globals));
@@ -206,7 +209,10 @@ pub fn correlation_outputs(
                 }
             }
         } else if *aggregation
-            && args.get("includeConstraintValues").copied() != Some(&Value::Bool(false))
+            && args
+                .get("includeConstraintValues")
+                .and_then(|v| v.boolean())
+                != Some(false)
         {
             for (_, target, _) in correlation_links(pipeline) {
                 if let Some((other, key)) = target.split_once('.') {
@@ -457,14 +463,14 @@ impl Function {
     }
     pub fn resolved_effect(&self, args: &BTreeMap<String, &Value>) -> Effect {
         if self.name == "matchAsArray" {
-            return if args.get("strict").copied() == Some(&Value::Bool(false)) {
+            return if args.get("strict").and_then(|v| v.boolean()) == Some(false) {
                 Effect::Transform
             } else {
                 Effect::Filter
             };
         }
         if self.name == "ioc:lookup" {
-            return if args.get("strict").copied() == Some(&Value::Bool(true)) {
+            return if args.get("strict").and_then(|v| v.boolean()) == Some(true) {
                 Effect::Filter
             } else {
                 Effect::Transform
@@ -477,7 +483,7 @@ impl Function {
             return Effect::Transform;
         }
         if matches!(self.name, "regex" | "match")
-            && args.get("strict").copied() == Some(&Value::Bool(false))
+            && args.get("strict").and_then(|v| v.boolean()) == Some(false)
         {
             Effect::Transform
         } else {
@@ -731,7 +737,8 @@ impl Function {
             let prefix = args
                 .get("asArray")
                 .and_then(|v| v.text())
-                .unwrap_or("_distance");
+                .unwrap_or("_distance[]");
+            let prefix = prefix.strip_suffix("[]").unwrap_or(prefix);
             return Some((
                 vec![],
                 ["distance", "reference"]
@@ -1008,7 +1015,7 @@ pub fn output_writes(call: &Call) -> Option<OutputWrites> {
             }
         }
         "hashRewrite" => {
-            if args.get("replaceInRawstring").copied() != Some(&Value::Bool(false)) {
+            if args.get("replaceInRawstring").and_then(|v| v.boolean()) != Some(false) {
                 writes.fields.insert("@rawstring".into());
             }
         }
@@ -1039,12 +1046,13 @@ pub fn output_writes(call: &Call) -> Option<OutputWrites> {
                 .and_then(|v| v.text())
                 .unwrap_or("_events");
             writes.fields.insert("_index".into());
-            writes.dynamic_prefix =
-                Some(if args.get("strip").copied() == Some(&Value::Bool(true)) {
+            writes.dynamic_prefix = Some(
+                if args.get("strip").and_then(|v| v.boolean()) == Some(true) {
                     String::new()
                 } else {
                     prefix.into()
-                });
+                },
+            );
         }
         "eval" => writes.required.extend(args.keys().cloned()),
         "default" => {
@@ -1056,7 +1064,7 @@ pub fn output_writes(call: &Call) -> Option<OutputWrites> {
             if let Some(pattern) = args.get("regex").and_then(|v| v.text())
                 && let Ok(info) = crate::language::validate::regex_analysis(pattern)
             {
-                if args.get("repeat").copied() == Some(&Value::Bool(true)) {
+                if args.get("repeat").and_then(|v| v.boolean()) == Some(true) {
                     writes
                         .fields
                         .extend(info.captures.into_iter().map(|field| format!("{field}[]")));
@@ -1079,8 +1087,8 @@ pub fn output_writes(call: &Call) -> Option<OutputWrites> {
                 .unwrap_or("")
                 .into(),
             );
-            writes.preserves_existing =
-                spec.name == "kvParse" && args.get("override").copied() != Some(&Value::Bool(true));
+            writes.preserves_existing = spec.name == "kvParse"
+                && args.get("override").and_then(|v| v.boolean()) != Some(true);
         }
         "array:eval" | "array:filter" | "objectArray:eval" => {
             if let Some(array) = args.get("asArray").or_else(|| args.get("array")) {
@@ -1257,7 +1265,7 @@ pub fn aggregate_outputs(call: &Call) -> Option<(BTreeSet<String>, bool)> {
                     .unwrap_or(default)
                     .into(),
             );
-            if args.get("percent").copied() == Some(&Value::Bool(true)) {
+            if args.get("percent").and_then(|v| v.boolean()) == Some(true) {
                 outputs.insert("percent".into());
             }
         }
@@ -1607,7 +1615,7 @@ pub static FUNCTIONS: &[Function] = &[
     function!("text:endsWith", Filter, ["string"], ["string","substring"], ["string":"e","substring":"e"]),
     function!("text:startsWith", Filter, ["string"], ["string","substring"], ["string":"e","substring":"e"]),
     function!("text:editDistance", Transform, [], ["maxDistance","reference","target"], ["allowTranspositions":"b","as":"s","ignoreCase":"b","maxDistance":"i","reference":"e","target":"e"]),
-    function!("text:editDistanceAsArray", Transform, [], ["maxDistance","references","target"], ["allowTranspositions":"b","asArray":"s","ignoreCase":"b","maxDistance":"i","references":"e[]","target":"e"]),
+    function!("text:editDistanceAsArray", Transform, [], ["maxDistance","references","target"], ["allowTranspositions":"b","asArray":"y","ignoreCase":"b","maxDistance":"i","references":"e[]","target":"e"]),
     function!("text:length", Transform, ["string"], ["string"], ["string":"e","as":"s"]),
     function!("text:positionOf", Transform, ["string"], ["string","character"], ["string":"e","character":"e","begin":"e","occurrence":"e","as":"s"]),
     function!("text:substring", Transform, ["string"], ["string"], ["string":"e","begin":"e","end":"e","as":"s"]),

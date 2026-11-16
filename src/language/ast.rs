@@ -152,6 +152,28 @@ pub fn field(s: &str) -> String {
 }
 
 impl Value {
+    pub fn boolean(&self) -> Option<bool> {
+        if let Self::Bool(value) = self {
+            return Some(*value);
+        }
+        match self.text()? {
+            text if text.eq_ignore_ascii_case("true") => Some(true),
+            text if text.eq_ignore_ascii_case("false") => Some(false),
+            _ => None,
+        }
+    }
+    pub fn unsigned_integer(&self) -> Option<u64> {
+        let text = self.text()?;
+        let whole = if let Some((whole, fraction)) = text.split_once('.') {
+            if fraction.is_empty() || !fraction.chars().all(|c| c == '0') {
+                return None;
+            }
+            whole
+        } else {
+            text
+        };
+        whole.parse().ok()
+    }
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Word(s) | Self::String(s) | Self::Number(s) | Self::Parameter(s) => Some(s),

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_PACK_BYTES: u64 = 67_108_864;
 const MAX_MEASURED_FIELDS: usize = 4000;
 pub const KNOWLEDGE_REVISION: &str =
-    "ea26314912962ed3b1d59ca51749bbace69b233f9020bae2ebfadf0db4eb3de8";
+    "eb4e9618b8915610acfd96af91348f6b6c0de2571df316deaaa526422910137d";
 const LEGACY_KNOWLEDGE_REVISION: &str = "2158f99fc529e234d5fd6fd4d4af899d7d83a848";
 const COMPATIBLE_PACKS: &[(u32, &str, &str)] = &[
     (1, "cqlmatic-ngsiem-core-v1", LEGACY_KNOWLEDGE_REVISION),

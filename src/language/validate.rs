@@ -18,7 +18,7 @@ pub struct Report {
 pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
     let mut checker = Checker {
         query,
-        diagnostics: vec![],
+        diagnostics: super::parser::lexical_diagnostics(query),
         fields: BTreeSet::new(),
         reads: BTreeSet::new(),
         projected_input: None,
@@ -331,7 +331,22 @@ impl Checker<'_> {
             mut projected,
         } = state.clone();
         let mut mandatory_link = false;
-        for step in &p.steps {
+        for original_step in &p.steps {
+            let transformed;
+            let step = if let Step::Filter(filter) = original_step
+                && let Some(call) = negated_transform(filter)
+            {
+                self.emit(
+                    "CQL_NEGATION_NO_EFFECT",
+                    "Negation has no effect on this transform; the transform still runs.",
+                    Some(call),
+                    true,
+                );
+                transformed = Step::Call(call.clone());
+                &transformed
+            } else {
+                original_step
+            };
             self.reads.clear();
             self.projected_input = projected.clone();
             self.narrowed = narrowed;
@@ -573,6 +588,13 @@ impl Checker<'_> {
                     }
                     let previous = std::mem::take(&mut self.fields);
                     let preamble = self.nesting == 1 && !has_input && self.definitions == 0;
+                    if spec.name == "tail"
+                        && projected
+                            .as_ref()
+                            .is_some_and(|fields| !fields.contains("@timestamp"))
+                    {
+                        self.emit("CQL_TAIL_WITHOUT_TIMESTAMP", "tail requires @timestamp; the preceding steps removed it, so tail returns no events.", Some(c), true);
+                    }
                     let args = self.function(c, tables, false, false, preamble);
                     self.projected_reads(previous, projected.as_ref(), Some(c));
                     let effect = spec.resolved_effect(&args);
@@ -993,7 +1015,8 @@ impl Checker<'_> {
                     let retaining_filter = resolved.function.effect == Effect::Filter
                         && resolved.function.resolved_effect(&resolved.arguments) != Effect::Filter;
                     let extracting_regex = resolved.function.name == "regex"
-                        && (resolved.arguments.get("repeat").copied() == Some(&Value::Bool(true))
+                        && (resolved.arguments.get("repeat").and_then(|v| v.boolean())
+                            == Some(true)
                             || resolved
                                 .arguments
                                 .get("regex")
@@ -1445,7 +1468,7 @@ impl Checker<'_> {
             }
         }
         if spec.name == "match" {
-            let glob = args.get("glob").copied() == Some(&Value::Bool(true))
+            let glob = args.get("glob").and_then(|v| v.boolean()) == Some(true)
                 || known_args.get("mode").and_then(|v| v.text()) == Some("glob");
             if glob
                 && ["field", "column"]
@@ -1516,8 +1539,8 @@ impl Checker<'_> {
             if let Some(value) = args.get(*key)
                 && !has_parameter(value)
                 && value
-                    .text()
-                    .is_some_and(|v| v.parse::<u64>().is_ok_and(|n| n == 0 || n > *maximum))
+                    .unsigned_integer()
+                    .is_some_and(|n| n == 0 || n > *maximum)
             {
                 self.emit(
                     "CQL_ARGUMENT_RANGE",
@@ -1609,8 +1632,7 @@ impl Checker<'_> {
         if matches!(spec.name, "text:editDistance" | "text:editDistanceAsArray") {
             if known_args
                 .get("maxDistance")
-                .and_then(|v| v.text())
-                .and_then(|v| v.parse::<u64>().ok())
+                .and_then(|v| v.unsigned_integer())
                 .is_some_and(|v| !(1..=100).contains(&v))
             {
                 self.emit(
@@ -1630,21 +1652,8 @@ impl Checker<'_> {
                     false,
                 );
             }
-            if spec.name == "text:editDistanceAsArray"
-                && let Some(prefix) = known_args.get("asArray").and_then(|v| v.text())
-            {
-                self.output_field(prefix, Some(c));
-                if prefix.contains("[]") {
-                    self.unsupported(
-                        "CQL_UNSUPPORTED_ARRAY_NAME",
-                        "Empty-index patterns in an edit-distance output prefix are unsupported.",
-                        Some(c),
-                        false,
-                    );
-                }
-            }
         }
-        if spec.name == "count" && args.get("distinct").copied() == Some(&Value::Bool(true)) {
+        if spec.name == "count" && args.get("distinct").and_then(|v| v.boolean()) == Some(true) {
             if !args.contains_key("field") {
                 self.emit(
                     "CQL_ARGUMENT_REQUIRED",
@@ -1755,10 +1764,6 @@ impl Checker<'_> {
                     .iter()
                     .any(|rule| rule.name == *name && rule.choices == ["false", "true"]);
             if !argument_type(value, kind) && !boolean_string {
-                if kind == "s[]" && argument_type(value, "s") {
-                    self.unsupported("CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON", "The references disagree about singleton string-array forms; use an explicit bracketed array until the target form is confirmed.", Some(c), false);
-                    continue;
-                }
                 if kind == "d" && value.text().is_some() {
                     self.unsupported("CQL_UNSUPPORTED_DURATION", "Only positive whole-number fixed durations are supported; other relative-time spellings and explicit zero are unsupported.", Some(c), false);
                     continue;
@@ -2019,8 +2024,7 @@ impl Checker<'_> {
             if matches!(spec.argument_kind(key), Some("i" | "l"))
                 && !(key == "limit" && matches!(spec.name, "head" | "tail"))
                 && let Some(v) = known_args.get(key)
-                && v.text()
-                    .is_some_and(|s| s != "max" && s.parse::<u64>().is_ok_and(|n| n == 0))
+                && v.unsigned_integer() == Some(0)
             {
                 self.emit(
                     "CQL_ARGUMENT_RANGE",
@@ -2046,7 +2050,13 @@ impl Checker<'_> {
                             .text()
                             .map(str::to_owned)
                             .or_else(|| numeric_literal(value).map(|_| value.render()))
-                        && !rule.choices.iter().any(|allowed| allowed == &choice)
+                            .or_else(|| matches!(value, Value::Bool(_)).then(|| value.render()))
+                        && !(if rule.name == "order" {
+                            ["asc", "desc", "ascending", "descending"]
+                                .contains(&choice.to_ascii_lowercase().as_str())
+                        } else {
+                            rule.choices.iter().any(|allowed| allowed == &choice)
+                        })
                     {
                         self.emit(
                             "CQL_ARGUMENT_VALUE",
@@ -2063,6 +2073,15 @@ impl Checker<'_> {
             }
             if matches!(kind, "i" | "j" | "l" | "n" | "N") {
                 for value in values {
+                    let converted;
+                    let value = if matches!(kind, "i" | "j" | "l")
+                        && let Value::String(text) = value
+                    {
+                        converted = Value::Number(text.clone());
+                        &converted
+                    } else {
+                        value
+                    };
                     if !has_parameter(value)
                         && (rule.minimum.is_some_and(|minimum| {
                             compare_numeric_literal(value, minimum) == Some(Ordering::Less)
@@ -2206,7 +2225,7 @@ impl Checker<'_> {
         let mut unique = BTreeSet::new();
         let mut projections = BTreeMap::new();
         let mut has_link = false;
-        let sequence = args.get("sequence").copied() == Some(&Value::Bool(true));
+        let sequence = args.get("sequence").and_then(|v| v.boolean()) == Some(true);
         let unresolved_sequence = args
             .get("sequence")
             .is_some_and(|value| has_parameter(value));
@@ -2264,8 +2283,7 @@ impl Checker<'_> {
         if args
             .get("iterationLimit")
             .filter(|value| !has_parameter(value))
-            .and_then(|v| v.text())
-            .and_then(|v| v.parse::<u64>().ok())
+            .and_then(|v| v.unsigned_integer())
             .is_some_and(|n| n == 0 || n > 10)
         {
             self.emit(
@@ -2601,10 +2619,24 @@ impl Checker<'_> {
         }
     }
     fn regex(&mut self, pattern: &str, flags: &str, c: Option<&Call>) {
-        if flags.chars().any(|c| !"imdF".contains(c))
+        if c.is_none() {
+            if flags.chars().any(|flag| !"gmidF".contains(flag)) {
+                self.emit(
+                    "CQL_REGEX_FLAGS",
+                    "Regex literal flags must be g, m, i, d or F.",
+                    c,
+                    false,
+                );
+            }
+        } else if flags.chars().any(|flag| !"imdF".contains(flag))
             || flags.chars().collect::<BTreeSet<_>>().len() != flags.len()
         {
-            self.unsupported("CQL_UNSUPPORTED_REGEX_FLAGS","Only distinct i, m, d, F flags are covered; inline i, m, s modifiers are checked separately.",c,false);
+            self.unsupported(
+                "CQL_UNSUPPORTED_REGEX_FLAGS",
+                "Function regex flags must be distinct i, m, d or F.",
+                c,
+                false,
+            );
         }
         if flags.contains('i') && !pattern.is_ascii() {
             self.unsupported(
@@ -2791,10 +2823,20 @@ fn long_literal(value: &Value) -> Option<i64> {
 
 fn signed_integer(value: &Value) -> Option<i64> {
     match value {
-        Value::Number(number) => number.parse().ok(),
+        Value::Number(number) | Value::String(number) => {
+            let whole = if let Some((whole, fraction)) = number.split_once('.') {
+                if fraction.is_empty() || !fraction.chars().all(|c| c == '0') {
+                    return None;
+                }
+                whole
+            } else {
+                number
+            };
+            whole.parse().ok()
+        }
         Value::Unary { op, value } if op == "-" => {
             if let Value::Number(number) = value.as_ref() {
-                format!("-{number}").parse().ok()
+                signed_integer(&Value::String(format!("-{number}")))
             } else {
                 None
             }
@@ -2918,22 +2960,18 @@ fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
                     | "counterAsRate" | "linReg" | "percentage" | "percentile" | "range"
                     | "stdDev" => single = true,
                     "collect" => {
-                        single = args.get("multival").copied() != Some(&Value::Bool(false))
+                        single = args.get("multival").and_then(|v| v.boolean()) != Some(false)
                     }
                     "stats" | "array:reduceAll" => {
                         single = args.get("function").is_none_or(|v| single_aggregate(v))
                     }
                     "head" | "tail" | "sort" | "table" => {
-                        single |= args
-                            .get("limit")
-                            .and_then(|v| v.text())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            == Some(1)
+                        single |= args.get("limit").and_then(|v| v.unsigned_integer()) == Some(1)
                     }
                     "join" => single &= args.get("max").is_none_or(|v| v.text() == Some("1")),
                     "match" => single &= args.get("nrows").is_none_or(|v| v.text() == Some("1")),
                     "split" => single = false,
-                    "regex" if args.get("repeat").copied() == Some(&Value::Bool(true)) => {
+                    "regex" if args.get("repeat").and_then(|v| v.boolean()) == Some(true) => {
                         single = false
                     }
                     _ if matches!(
@@ -3156,13 +3194,17 @@ fn argument_type(v: &Value, kind: &str) -> bool {
         "f" => matches!(v,Value::String(s)|Value::Word(s)if super::plan::checked_field(s).is_ok()),
         "F" => argument_type(v, "f") || argument_type(v, "A"),
         "A" => matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"f"))),
-        "s" => matches!(v, Value::String(_) | Value::Word(_)),
+        "s" => {
+            matches!(v, Value::String(_) | Value::Word(_) | Value::Number(_))
+                || numeric_literal(v).is_some()
+        }
         "S" => {
             argument_type(v, "s")
                 || matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"s")))
         }
         "s[]" => {
-            matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"s") || matches!(x, Value::Number(_)) || matches!(x, Value::Unary { op, value } if op == "-" && matches!(value.as_ref(), Value::Number(_)))))
+            argument_type(v, "s")
+                || matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"s") || matches!(x, Value::Bool(_)) || matches!(x, Value::Unary { op, value } if op == "-" && matches!(value.as_ref(), Value::Number(_)))))
         }
         "d" => v.text().is_some_and(super::plan::duration),
         "p" => argument_type(v, "e"),
@@ -3178,10 +3220,10 @@ fn argument_type(v: &Value, kind: &str) -> bool {
                 || matches!(v,Value::Array(xs) if xs.iter().all(|x| matches!(x, Value::Parameter(_)) || matches!(x,Value::Array(pair) if pair.len()==2 && pair.iter().all(|x| argument_type(x,"f")))))
         }
         "j" => signed_integer(v).is_some(),
-        "r" => matches!(v, Value::String(_) | Value::Word(_)),
-        "b" => matches!(v, Value::Bool(_)),
+        "r" => argument_type(v, "s"),
+        "b" => v.boolean().is_some(),
         "n" => matches!(v, Value::Number(_)) && numeric_literal(v).is_some(),
-        "i" => matches!(v,Value::Number(s)if s.parse::<u64>().is_ok()),
+        "i" => v.unsigned_integer().is_some(),
         "l" => argument_type(v, "i") || matches!(v,Value::Word(s)|Value::String(s)if s=="max"),
         "a" => matches!(v, Value::Array(_)),
         "y" => {
@@ -3628,6 +3670,23 @@ pub fn regex_analysis(pattern: &str) -> std::result::Result<RegexAnalysis, (bool
         guaranteed: facts.guaranteed,
         case_insensitive: rx.case_insensitive,
     })
+}
+
+fn negated_transform(filter: &Filter) -> Option<&Call> {
+    let Filter::Not(inner) = filter else {
+        return None;
+    };
+    match inner.as_ref() {
+        Filter::Not(_) => negated_transform(inner),
+        Filter::Call(call)
+            if catalog::function(&call.name).is_some_and(|spec| {
+                spec.effect == Effect::Transform && !matches!(spec.name, "eval" | "ioc:lookup")
+            }) =>
+        {
+            Some(call)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

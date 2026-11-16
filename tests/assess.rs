@@ -2667,7 +2667,7 @@ fn per_column_statistics_and_findings_are_bounded_with_a_summary() {
 fn final_row_limits_exceeded_by_returned_rows_are_inconclusive() {
     for (query, returned) in [
         ("#repo=fw_repo | head(5)", 10),
-        ("head(0)", 10),
+        ("head(1)", 10),
         ("head()", 201),
         ("tail(5)", 6),
         ("sort(x, limit=5)", 6),

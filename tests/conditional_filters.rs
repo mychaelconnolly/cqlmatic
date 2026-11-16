@@ -152,10 +152,7 @@ fn string_arrays_accept_numeric_literals() {
     rejected("in(a, values=[count()])", "CQL_ARGUMENT_TYPE");
     rejected("ioc:lookup(a, include=[3])", "CQL_ARGUMENT_VALUE");
     rejected("ioc:lookup(a, include=[-2])", "CQL_ARGUMENT_VALUE");
-    assert_eq!(
-        check(r#"in(a, values="alice")"#).outcome,
-        Outcome::Unsupported
-    );
+    assert_eq!(check(r#"in(a, values="alice")"#).outcome, Outcome::Ready);
 }
 
 #[test]

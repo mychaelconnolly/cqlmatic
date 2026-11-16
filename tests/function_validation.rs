@@ -304,6 +304,9 @@ fn numeric_bounds_compare_the_unrounded_decimal_literal() {
 #[test]
 fn catalog_numeric_bounds_have_literal_boundary_controls() {
     let templates = BTreeMap::from([
+        (("groupBy", "limit"), "groupBy(a,limit=BOUND)"),
+        (("sort", "limit"), "sort(a,limit=BOUND)"),
+        (("table", "limit"), "table([a],limit=BOUND)"),
         (("bucket", "limit"), "bucket(span=1m,limit=BOUND)"),
         (("collect", "limit"), "collect(user,limit=BOUND)"),
         (
@@ -396,7 +399,7 @@ fn catalog_numeric_bounds_have_literal_boundary_controls() {
         }
     }
     assert_eq!(covered, templates.keys().copied().collect());
-    assert_eq!(covered.len(), 23);
+    assert_eq!(covered.len(), 26);
     assert_eq!(
         runtime_fields,
         BTreeSet::from([
@@ -714,7 +717,7 @@ fn top_rest_accepts_boolean_spellings_of_its_string_choices() {
     ] {
         invalid(query, "CQL_ARGUMENT_VALUE");
     }
-    invalid("top(user,rest=1)", "CQL_ARGUMENT_TYPE");
+    invalid("top(user,rest=1)", "CQL_ARGUMENT_VALUE");
     invalid("lower(user,as=true)", "CQL_ARGUMENT_TYPE");
     invalid("sort(user,order=true)", "CQL_ARGUMENT_TYPE");
 

@@ -154,3 +154,15 @@ A native entry can exist and authenticate while CQLmatic still lacks registratio
 ## Large agent status output
 
 Use `--json --brief` on both status and inventory action calls. `--summary` still grows with source, attempt and pending-work counts. Brief action output does not contain executable probes; consume protected full captures locally and return only bounded status to the agent. A stale notification-snapshot acknowledgement means the eligible set changed: reread brief status and preserve unseen work.
+
+
+| Code | Meaning and action |
+| --- | --- |
+| `CQL_EMPTY_STAGE` | A leading or trailing empty stage has no effect and is usually a typing slip; remove the pipe. |
+| `CQL_RESERVED_WORD` | Use a supported lower-case or upper-case operator spelling, or quote the reserved word to search for text. |
+| `CQL_REGEX_FLAGS` | Literal flags may contain only `g`, `m`, `i`, `d`, `F`; repeats are allowed. Function flags have separate rules. |
+| `CQL_QUOTE` | Use straight double quotes as string delimiters. Quotes inside strings, regex literals and comments are ordinary content. |
+| `CQL_STRING_ESCAPE_CONTROL` | A control escape followed by an ASCII letter/digit may be a path typo; write `\\` for a literal backslash. |
+| `CQL_NEGATION_NO_EFFECT` | Negation does not affect this transform; it still runs and writes its outputs. Remove the negation. |
+| `CQL_TAIL_WITHOUT_TIMESTAMP` | `tail` needs `@timestamp`; retain or restore it before calling `tail`. |
+| `CQL_STRING_ESCAPE` | A hexadecimal string escape is malformed; use four digits after `\u` or eight after `\U`. Brace notation is invalid. |

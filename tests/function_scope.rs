@@ -402,7 +402,15 @@ fn parameter_facts_cover_candidates_without_promoting_open_choices_or_dynamic_li
         100
     );
     for name in ["groupBy", "head", "tail", "sort", "table"] {
-        assert!(parameter(name, "limit")["maximum"].is_null());
+        assert_eq!(parameter(name, "limit")["minimum"], 1);
+        assert_eq!(
+            parameter(name, "limit")["maximum"],
+            if name == "groupBy" {
+                1_000_000
+            } else {
+                200_000
+            }
+        );
     }
     for (name, argument) in [
         ("regex", "flags"),

@@ -81,7 +81,7 @@ fn array_call(function: &str, argument: &str, value: Expression) -> Stage {
 }
 
 #[test]
-fn checked_string_arrays_accept_string_and_numeric_literals() {
+fn checked_string_arrays_accept_literal_elements_and_singletons() {
     for (function, prefix) in [
         ("createEvents", ""),
         ("in", "field=user, values="),
@@ -89,7 +89,7 @@ fn checked_string_arrays_accept_string_and_numeric_literals() {
     ] {
         let valid = format!("{function}({prefix}[\"alice\", bob])");
         assert_eq!(check(&valid).outcome, Outcome::Ready, "{valid}");
-        for element in ["1", "3.5", "-2"] {
+        for element in ["1", "3.5", "-2", "true", "false"] {
             let query = format!("{function}({prefix}[\"valid\", {element}])");
             assert_eq!(check(&query).outcome, Outcome::Ready, "{query}");
         }
@@ -98,7 +98,6 @@ fn checked_string_arrays_accept_string_and_numeric_literals() {
             "count()",
             "1 + 2",
             "[\"nested\"]",
-            "true",
             "A: { user=alice }",
         ] {
             let query = format!("{function}({prefix}[\"valid\", {element}])");
@@ -114,13 +113,7 @@ fn checked_string_arrays_accept_string_and_numeric_literals() {
         }
         let scalar = format!("{function}({prefix}\"alice\")");
         let result = check(&scalar);
-        assert_eq!(result.outcome, Outcome::Unsupported, "{scalar}");
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON")
-        );
+        assert_eq!(result.outcome, Outcome::Ready, "{scalar}");
     }
     assert_eq!(
         check(
@@ -174,7 +167,7 @@ fn create_events_uses_the_documented_named_argument() {
 }
 
 #[test]
-fn typed_string_arrays_cannot_emit_nested_executable_values_or_coercions() {
+fn typed_string_arrays_cannot_emit_nested_executable_values() {
     let malformed = [
         query(vec![call("count", vec![])]),
         Expression::Call {
@@ -188,9 +181,6 @@ fn typed_string_arrays_cannot_emit_nested_executable_values_or_coercions() {
         },
         Expression::Array {
             items: vec![text("nested")],
-        },
-        Expression::Literal {
-            value: Scalar::Boolean(true),
         },
     ];
     for (function, argument) in [

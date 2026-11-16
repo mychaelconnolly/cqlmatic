@@ -210,7 +210,7 @@ fn unresolved_parameters_are_coverage_gaps_in_typed_and_nested_arguments() {
 }
 
 #[test]
-fn parameter_defaults_remain_outside_the_profile() {
+fn parameter_defaults_supply_complete_values() {
     for query in [
         "?{text=\"*\"}",
         "host=?{host=\"alpha\"}",
@@ -219,7 +219,7 @@ fn parameter_defaults_remain_outside_the_profile() {
         let result = check(query);
         assert_eq!(
             result.outcome,
-            Outcome::Unsupported,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
@@ -233,7 +233,6 @@ fn parameters_preserve_independent_errors() {
         ("count(field=?field, unknown=true)", "CQL_ARGUMENT_UNKNOWN"),
         ("in(values=?values)", "CQL_ARGUMENT_REQUIRED"),
         ("sort(field=?field, limit=false)", "CQL_ARGUMENT_TYPE"),
-        ("in(field=host, values=[?value, true])", "CQL_ARGUMENT_TYPE"),
         ("sort(order=[?order, invalid])", "CQL_ARGUMENT_VALUE"),
         (
             "bucket(span=\"1m\",function=window(count(),span=?s,buckets=2))",

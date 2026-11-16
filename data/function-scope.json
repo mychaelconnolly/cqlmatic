@@ -3982,6 +3982,9 @@
               "case_id": "groupBy-composite",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..1,000,000 or max."
           ]
         },
         {
@@ -4220,6 +4223,9 @@
               "case_id": "head",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max."
           ]
         },
         {
@@ -5264,7 +5270,7 @@
           ],
           "assessment_status": "offline_tested",
           "reason": "The linked synthetic cases pass raw checking and public typed lowering with exact canonical rendering.",
-          "qualification": "Only the linked filtering argument shapes are checked. Retaining enrichment forms and unlinked output exports are outside that evidence.",
+          "qualification": "Negation of the transform has no effect; argument, placement and output checks still apply.",
           "assessment_evidence": [
             {
               "kind": "fixture",
@@ -10209,6 +10215,9 @@
               "case_id": "sort",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max."
           ]
         },
         {
@@ -10785,6 +10794,10 @@
               "case_id": "table",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max.",
+            "type accepts hex, number or string."
           ]
         },
         {
@@ -10835,6 +10848,9 @@
               "case_id": "tail",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max."
           ]
         },
         {
@@ -11084,6 +11100,9 @@
               "case_id": "text-editDistanceAsArray",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "asArray must end in [], for example \"distances[]\"."
           ]
         }
       ],

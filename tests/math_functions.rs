@@ -74,7 +74,6 @@ fn every_math_function_has_lookup_and_checks_named_positional_scalar_and_output_
                 format!("{function}({args},unknown=true)"),
                 format!("{function}({args},as=\"#tag\")"),
                 format!("stats({function}({args}))"),
-                format!("!{function}({args})"),
                 format!("{function}()"),
             ] {
                 assert_ne!(check(&query, false).outcome, Outcome::Ready, "{query}");

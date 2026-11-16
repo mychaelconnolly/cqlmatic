@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- One boundary empty stage is accepted with `CQL_EMPTY_STAGE`, for example `x=1 |`; 0.1.7 rejected it. Interior empty stages remain errors.
+- Reserved free-text words and mixed-case operators report `CQL_RESERVED_WORD`, for example `a=1 Or b=2`; 0.1.7 accepted them. Quote reserved text.
+- Row limits are 1..200,000 and group limits 1..1,000,000, or `max`; violations report `CQL_ARGUMENT_RANGE`. `head(0)` and `table([a], type=any)` are rejected; 0.1.7 accepted them.
+- Literal arguments convert to their required types, including `head("2")`, `count(a, distinct="true")` and `in(a, values=1)`; 0.1.7 rejected these forms or reported `CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON`. Sort order accepts ascending/descending and case variants.
+- Regex literals accept repeated `g/m/i/d/F` flags; other flags report `CQL_REGEX_FLAGS`. `a=/x/gi` was unsupported in 0.1.7. Function flags keep their separate rules.
+- Parameter defaults supply values, as in `a=?{p="1"}`; 0.1.7 reported unsupported syntax. Parameters without defaults remain unsupported.
+- Invalid quotation delimiters report `CQL_QUOTE`, as in `a=“1”`; 0.1.7 accepted curly delimiters or reported unsupported syntax for single quotes/backticks.
+- Unknown string escapes retain their backslash, as in `p="a\qb"`; 0.1.7 reported `CQL_STRING_ESCAPE`. Control escapes followed by letters/digits warn with `CQL_STRING_ESCAPE_CONTROL`, as in `p="C:\temp"`; 0.1.7 gave no such warning.
+- Negated transforms still run and report `CQL_NEGATION_NO_EFFECT`, as in `!lower(a)`; 0.1.7 rejected them. Aggregate/source/definition calls and `eval` remain invalid under negation.
+- `tail` after a known removal of `@timestamp` warns with `CQL_TAIL_WITHOUT_TIMESTAMP`, as in `count() | tail(1)`; 0.1.7 gave no such warning.
+- `text:editDistanceAsArray.asArray` requires `[]`, as in `asArray="d[]"`; 0.1.7 accepted the unsuffixed prefix and reported `CQL_UNSUPPORTED_ARRAY_NAME` for the suffixed form.
+
 - Hosted search `result.error` answers report `MCP_DEADLINE` for the hosted cutoff and `MCP_TOOL_ERROR` for start rejection or other failures, regardless of the envelope error flag. Assessment reports `RESULT_TIMEOUT` or `RESULT_ERROR`; discovery still requires settlement.
 - Empty and zero-count assessment messages require a positive control: rerun without the selective filter or field and confirm a non-zero count before concluding no matches.
 

@@ -19,6 +19,15 @@ pub fn parse(input: &str) -> Result<Pipeline> {
             unsupported: false,
         });
     }
+    if let Some(diagnostic) = lexical_diagnostics(input)
+        .into_iter()
+        .find(|d| d.severity == crate::contracts::Severity::Error)
+    {
+        return Err(Failure {
+            diagnostic,
+            unsupported: false,
+        });
+    }
     // Recognize function composition only when the complete query can be parsed.
     parse_pipeline(input, false).or_else(|failure| {
         if failure.unsupported {
@@ -129,13 +138,13 @@ impl Parser<'_> {
     fn keyword(&mut self, s: &str) -> bool {
         self.space();
         let tail = self.rest();
-        if tail
-            .get(..s.len())
-            .is_some_and(|x| x.eq_ignore_ascii_case(s))
-            && tail[s.len()..]
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric() && !"_.[".contains(c))
+        if tail.get(..s.len()).is_some_and(|x| {
+            x == s.to_ascii_lowercase()
+                || (s != "like" && s != "true" && s != "false" && x == s.to_ascii_uppercase())
+        }) && tail[s.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && !"_.[".contains(c))
         {
             self.pos += s.len();
             true
@@ -155,12 +164,12 @@ impl Parser<'_> {
         while let Some(c) = self.rest().chars().next() {
             self.pos += c.len_utf8();
             if c == '"' && !escaped {
-                return serde_json::from_str(&self.input[start..self.pos]).map_err(|_| Failure {
+                return decode_string(&self.input[start..self.pos]).map_err(|_| Failure {
                     diagnostic: Diagnostic::error(
                         "CQL_STRING_ESCAPE",
-                        "Unsupported string escape; use JSON-compatible CQL string escapes.",
+                        "Invalid hexadecimal string escape; use four or eight hexadecimal digits.",
                     ),
-                    unsupported: true,
+                    unsupported: false,
                 });
             }
             if c == '\n' || c == '\r' {
@@ -220,6 +229,9 @@ impl Parser<'_> {
             if p.pos == p.input.len() || p.rest().starts_with(['}', ';']) {
                 return Ok(Pipeline { steps });
             }
+            if p.eat("|") && p.ending() {
+                return p.fail("Expected a stage after the leading pipe.", false);
+            }
             loop {
                 steps.push(p.step()?);
                 p.space();
@@ -227,7 +239,10 @@ impl Parser<'_> {
                     break;
                 }
                 if p.ending() {
-                    return p.fail("A pipeline cannot end with '|'.", false);
+                    if p.rest().starts_with('|') {
+                        return p.fail("An interior pipeline stage cannot be empty.", false);
+                    }
+                    break;
                 }
             }
             Ok(Pipeline { steps })
@@ -395,7 +410,11 @@ impl Parser<'_> {
     }
     fn primary_filter(&mut self) -> Result<Filter> {
         self.nested(|p| {
-            if p.keyword("NOT") || p.eat("!") {
+            let word_negation = p.keyword("NOT");
+            if word_negation || p.eat("!") {
+                if word_negation && p.ending() {
+                    return Err(Failure { diagnostic: Diagnostic::error("CQL_RESERVED_WORD", "'not' is reserved; supply a filter to negate, or quote it to search for text."), unsupported: false });
+                }
                 return Ok(Filter::Not(Box::new(p.primary_filter()?)));
             }
             if p.eat("(") {
@@ -438,6 +457,11 @@ impl Parser<'_> {
             }
             let quoted = p.rest().starts_with('"');
             let pattern = p.pattern()?;
+            if !quoted && let Pattern::Text(word) = &pattern
+                && ["and", "or", "not", "like", "in", "match", "case", "true", "false"].contains(&word.to_ascii_lowercase().as_str())
+            {
+                return Err(Failure { diagnostic: Diagnostic::error("CQL_RESERVED_WORD", format!("'{word}' is reserved; use the lower-case or upper-case operator spelling where supported, or quote it to search for text.")), unsupported: false });
+            }
             Ok(Filter::Text(if !quoted && matches!(&pattern, Pattern::Text(text) if text == "*") {
                 Pattern::Any
             } else {
@@ -452,6 +476,13 @@ impl Parser<'_> {
             return Ok(Pattern::Text(self.string()?));
         }
         if self.eat("?") {
+            if self.eat("{") {
+                self.identifier()?;
+                self.expect("=")?;
+                let value = self.pattern()?;
+                self.expect("}")?;
+                return Ok(value);
+            }
             return Ok(Pattern::Parameter(self.identifier()?));
         }
         if self.rest().starts_with('/') {
@@ -750,7 +781,15 @@ impl Parser<'_> {
             } else if p.rest().starts_with('"') {
                 Value::String(p.string()?)
             } else if p.eat("?") {
-                Value::Parameter(p.identifier()?)
+                if p.eat("{") {
+                    p.identifier()?;
+                    p.expect("=")?;
+                    let value = p.expression(0)?;
+                    p.expect("}")?;
+                    value
+                } else {
+                    Value::Parameter(p.identifier()?)
+                }
             } else if let Some(number) = p.number_atom() {
                 number
             } else {
@@ -883,6 +922,112 @@ fn pipeline_depth(pipeline: &Pipeline) -> usize {
         })
         .max()
         .unwrap_or(0)
+}
+
+fn decode_string(raw: &str) -> std::result::Result<String, ()> {
+    let mut json = String::from("\"");
+    let mut chars = raw[1..raw.len() - 1].chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            json.push(c);
+            continue;
+        }
+        let next = chars.next().ok_or(())?;
+        if next == 'U' {
+            let digits: String = chars.by_ref().take(8).collect();
+            if digits.len() != 8 {
+                return Err(());
+            }
+            let ch = u32::from_str_radix(&digits, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or(())?;
+            let encoded = serde_json::to_string(&ch.to_string()).map_err(|_| ())?;
+            json.push_str(&encoded[1..encoded.len() - 1]);
+        } else if "tnrbf\\\"u".contains(next) {
+            json.push('\\');
+            json.push(next);
+        } else {
+            json.push_str("\\\\");
+            json.push(next);
+        }
+    }
+    json.push('"');
+    serde_json::from_str(&json).map_err(|_| ())
+}
+
+pub(super) fn lexical_diagnostics(input: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut previous = None;
+    while i < chars.len() {
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+        } else if chars[i] == '"' || chars[i] == '/' {
+            let delimiter = chars[i];
+            i += 1;
+            while i < chars.len() && chars[i] != delimiter {
+                if chars[i] == '\\' {
+                    if delimiter == '"'
+                        && let Some(escape) = chars.get(i + 1)
+                        && "tnrbf".contains(*escape)
+                        && chars.get(i + 2).is_some_and(char::is_ascii_alphanumeric)
+                    {
+                        let name = match escape {
+                            't' => "tab",
+                            'n' => "newline",
+                            'r' => "carriage return",
+                            'b' => "backspace",
+                            _ => "form feed",
+                        };
+                        out.push(Diagnostic::warning("CQL_STRING_ESCAPE_CONTROL", format!("The escape is a {name} control character and will not match a literal backslash; write \\\\ for a backslash.")));
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            previous = Some('v');
+        } else {
+            let c = chars[i];
+            let boundary =
+                i == 0 || chars[i - 1].is_whitespace() || "=([{,;|<>!".contains(chars[i - 1]);
+            if c == '`' || (boundary && "'‘’“”".contains(c)) {
+                out.push(Diagnostic::error(
+                    "CQL_QUOTE",
+                    format!("'{c}' is not a string delimiter; use straight double quotes."),
+                ));
+            }
+            if !c.is_whitespace() {
+                if (c == '|' && matches!(previous, None | Some('{' | ';')))
+                    || (matches!(c, '}' | ';') && previous == Some('|'))
+                {
+                    out.push(Diagnostic::warning(
+                        "CQL_EMPTY_STAGE",
+                        "The empty stage has no effect and is usually a typing slip.",
+                    ));
+                }
+                previous = Some(c);
+            }
+            i += 1;
+        }
+    }
+    if previous == Some('|') {
+        out.push(Diagnostic::warning(
+            "CQL_EMPTY_STAGE",
+            "The empty stage has no effect and is usually a typing slip.",
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

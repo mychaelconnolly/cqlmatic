@@ -60,7 +60,6 @@ fn argument_types_and_context_do_not_silently_widen() {
         "round(user,how=ceil,as=rounded)",
         "sort(user,limit=max,type=hex)",
         "table([user],type=hex)",
-        "head(0)",
     ] {
         assert_eq!(
             check(query, false).outcome,
@@ -70,6 +69,7 @@ fn argument_types_and_context_do_not_silently_widen() {
         );
     }
     for query in [
+        "head(0)",
         "collect(field=user)",
         "collect([user],as=names)",
         "collect([user],limit=max)",

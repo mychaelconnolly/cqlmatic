@@ -117,9 +117,9 @@ fn raw_function_calls_cannot_be_joined_with_boolean_operators() {
         ("lower(y) OR", Acceptance::Unknown),
         ("lower(y) AND", Acceptance::Unknown),
         ("lower(y) OR z=", Acceptance::Unknown),
-        ("lower(y) OR z=2 |", Acceptance::Unknown),
+        ("lower(y) OR z=2 |", Acceptance::Rejected),
         ("lower(y) OR $helper()", Acceptance::Unknown),
-        ("lower(y) OR `unsupported`", Acceptance::Unknown),
+        ("lower(y) OR `unsupported`", Acceptance::Rejected),
         ("lower(y) OR z=2 | lower(x) extra", Acceptance::Unknown),
     ] {
         let result = app::check(
