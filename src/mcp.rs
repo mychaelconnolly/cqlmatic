@@ -940,10 +940,10 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
             state.session.is_none()
                 && matches!(
                     state.producer_version.as_str(),
-                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6"
+                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
                 )
         }
-        3 => state.producer_version == "0.1.6",
+        3 => matches!(state.producer_version.as_str(), "0.1.6" | "0.1.7"),
         _ => false,
     };
     if state.format != "cqlmatic-mcp-state"

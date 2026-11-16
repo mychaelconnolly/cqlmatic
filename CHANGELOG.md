@@ -1,40 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.1.8
 
-- Pause hosted discovery attempts on recognized final answers while retaining charged terminal proof; enforce the historical `top()` limit ceiling and unquoted `$` and query-parameter rules.
-
-- `CQL_BARE_FUNCTION_NAME`: A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text.
-- `CQL_BARE_COMMAND_WORD`: The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text.
-- `CQL_OPERATOR_TEXT`: Bare `&&` is searched as text. Use `and` or a space between terms.
-- `CQL_OR_PRECEDENCE`: Information: `or` binds tighter than explicit or implied `and`. Add parentheses to make intent explicit. See [operators](https://library.humio.com/crowdstrike-query-language/syntax-operators.html).
-- `CQL_NULL_TEXT`: Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence.
-
-- One boundary empty stage is accepted with `CQL_EMPTY_STAGE`, for example `x=1 |`; 0.1.7 rejected it. Interior empty stages remain errors.
-- Reserved free-text words and mixed-case operators report `CQL_RESERVED_WORD`, for example `a=1 Or b=2`; 0.1.7 accepted them. Quote reserved text.
-- Row limits are 1..200,000 and group limits 1..1,000,000, or `max`; violations report `CQL_ARGUMENT_RANGE`. `head(0)` and `table([a], type=any)` are rejected; 0.1.7 accepted them.
-- Literal arguments convert to their required types, including `head("2")`, `count(a, distinct="true")` and `in(a, values=1)`; 0.1.7 rejected these forms or reported `CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON`. Sort order accepts ascending/descending and case variants.
-- Regex literals accept repeated `g/m/i/d/F` flags; other flags report `CQL_REGEX_FLAGS`. `a=/x/gi` was unsupported in 0.1.7. Function flags keep their separate rules.
-- Parameter defaults supply values, as in `a=?{p="1"}`; 0.1.7 reported unsupported syntax. Parameters without defaults remain unsupported.
-- Invalid quotation delimiters report `CQL_QUOTE`, as in `a=“1”`; 0.1.7 accepted curly delimiters or reported unsupported syntax for single quotes/backticks.
-- Unknown string escapes retain their backslash, as in `p="a\qb"`; 0.1.7 reported `CQL_STRING_ESCAPE`. Control escapes followed by letters/digits warn with `CQL_STRING_ESCAPE_CONTROL`, as in `p="C:\temp"`; 0.1.7 gave no such warning.
-- Negated transforms still run and report `CQL_NEGATION_NO_EFFECT`, as in `!lower(a)`; 0.1.7 rejected them. Aggregate/source/definition calls and `eval` remain invalid under negation.
-- `tail` after a known removal of `@timestamp` warns with `CQL_TAIL_WITHOUT_TIMESTAMP`, as in `count() | tail(1)`; 0.1.7 gave no such warning.
-- `text:editDistanceAsArray.asArray` requires `[]`, as in `asArray="d[]"`; 0.1.7 accepted the unsuffixed prefix and reported `CQL_UNSUPPORTED_ARRAY_NAME` for the suffixed form.
-
-- Hosted search `result.error` answers report `MCP_DEADLINE` for the hosted cutoff and `MCP_TOOL_ERROR` for start rejection or other failures, regardless of the envelope error flag. Assessment reports `RESULT_TIMEOUT` or `RESULT_ERROR`; discovery still requires settlement.
-- Empty and zero-count assessment messages require a positive control: rerun without the selective filter or field and confirm a non-zero count before concluding no matches.
-
-- `setTimeInterval` requires `start` by name; unnamed endpoints report `CQL_ARGUMENT_COUNT`. Write `setTimeInterval(start=1d) | count()`.
-- `check` rejects aggregates and joins inside `case` alternatives and `match` arms with `CQL_BRANCH_FUNCTION`, including `case { count(); * }`. 0.1.7 accepted these calls in branches; aggregate or join before or after the conditional.
-- Quoted `"*"` is free text: `count() | "*"` reports `CQL_FREE_TEXT_AFTER_AGGREGATE`. Bare `*` remains match-all. 0.1.7 accepted the quoted form after aggregation.
-- `math:mod` accepts one unnamed argument (`field`); `math:mod(y, 3)` reports `CQL_ARGUMENT_COUNT`. Write `math:mod(y, divisor=3)`. 0.1.7 accepted two unnamed arguments.
-- String-array arguments accept numeric literals, as in `in(a, values=[3, 6])`, while parameter choices still apply. 0.1.7 reported `CQL_ARGUMENT_TYPE` for numeric elements.
-- `check` rejects free text after the first aggregate with `CQL_FREE_TEXT_AFTER_AGGREGATE`: bare words, quoted strings, standalone regex literals and `wildcard()` without `field`, at any depth and inside `case` and `match` branches. For example, `groupBy(y) | head 10` was accepted in 0.1.7; write `groupBy(y) | head(10)`. Field comparisons and the match-all term `*` remain valid after aggregation, and `join` and `defineTable` subqueries start fresh. `createEvents`, `readFile`, `readPersistedAggregation` and `correlate` count as aggregates for this rule.
-- Function arguments must be calls. `stats(count)`, `stats([count])` and `groupBy(k, function=count)` report `CQL_ARGUMENT_TYPE`; write `count()`. 0.1.7 accepted bare aggregate names here.
-- Direct assignment `field := f(...)` requires a function with an `as` parameter. `v := collect(user)` and `v := table([a])` report `CQL_ASSIGN_ALIAS`, as does an `as` argument given by name or position next to the assignment.
-- `parseTimestamp` binds its unnamed argument to `format` and requires `field` by name, as in `parseTimestamp("millis", field=timestamp)`. `parseTimestamp(timestamp)` reports `CQL_ARGUMENT_REQUIRED`.
-- A function call joined to another term with `AND` or `OR`, such as `lower(y) OR z=2`, is rejected with `CQL_FUNCTION_FILTER_COMPOSITION` instead of returning an unknown result. Use a pipe for conjunctions or `case` for alternatives.
+- Free text after an aggregate reports `CQL_FREE_TEXT_AFTER_AGGREGATE`, including quoted strings, standalone regexes and fieldless `wildcard()` at nested depths. For example, `groupBy(y) | head 10` and `count() | "*"` were accepted in 0.1.7; use `head(10)` or bare match-all `*`. Field comparisons remain valid; `join` and `defineTable` subqueries start fresh. `createEvents`, `readFile`, `readPersistedAggregation` and `correlate` count as aggregates for this rule.
+- Function-valued arguments require calls: `stats(count)` reports `CQL_ARGUMENT_TYPE`; write `stats(count())`. 0.1.7 accepted bare aggregate names, including in lists and `groupBy` function arguments.
+- Direct assignment requires a function with an `as` parameter: `v := collect(user)` reports `CQL_ASSIGN_ALIAS`. An explicit `as` next to assignment is also rejected. 0.1.7 accepted assignment to functions without `as`.
+- Aggregates and joins in conditional branches report `CQL_BRANCH_FUNCTION`, as in `case { count(); * }`. 0.1.7 accepted them; place aggregation or joins outside `case` and `match` branches.
+- Argument binding is stricter: `parseTimestamp(timestamp)` reports `CQL_ARGUMENT_REQUIRED` because its unnamed argument is `format` and `field` must be named; `math:mod(y, 3)` and `setTimeInterval(1d)` report `CQL_ARGUMENT_COUNT`. Use `parseTimestamp("millis", field=timestamp)`, `math:mod(y, divisor=3)` and `setTimeInterval(start=1d) | count()`. 0.1.7 used different unnamed-argument rules.
+- Reserved free-text words and mixed-case operators report `CQL_RESERVED_WORD`, as in `a=1 Or b=2`; 0.1.7 accepted them. Invalid quotation delimiters report `CQL_QUOTE`, as in `a=“1”`; 0.1.7 accepted curly delimiters or reported unsupported syntax for single quotes/backticks. Unquoted `$` reports `CQL_SYNTAX`, as in `a=$x`; quote literal text.
+- Row limits are 1..200,000 and group limits 1..1,000,000, or `max`; out-of-range numbers report `CQL_ARGUMENT_RANGE`. `head(0)` and `table([a], type=any)` are rejected; 0.1.7 accepted them. `top(a, limit=24577)` reports `CQL_ARGUMENT_RANGE`; its ceiling is 24,576 rather than the larger ceiling accepted in 0.1.7.
+- Calls combined with Boolean operators report `CQL_FUNCTION_FILTER_COMPOSITION`, as in `lower(y) OR z=2`; 0.1.7 returned an unknown result. Use pipes for conjunctions or `case` for alternatives.
+- Literal arguments convert to required types: `head("2")`, `count(a, distinct="true")`, `in(a, values=1)` and `in(a, values=[3, 6])` are accepted. 0.1.7 rejected these forms or reported `CQL_UNSUPPORTED_STRING_ARRAY_SINGLETON`. Parameter choices still apply; sort order accepts ascending/descending and case variants.
+- Regex literals accept repeated `g/m/i/d/F` flags; other flags report `CQL_REGEX_FLAGS`. `a=/x/gi` was unsupported in 0.1.7. Function flags keep separate rules. Parameter defaults supply values, as in `a=?{p="1"}`; 0.1.7 reported unsupported syntax. Parameters without defaults remain unsupported.
+- One leading or trailing empty stage is accepted with `CQL_EMPTY_STAGE`, as in `x=1 |`; 0.1.7 rejected it. Interior empty stages remain errors. Unknown string escapes retain their backslash, as in `p="a\qb"`; 0.1.7 reported `CQL_STRING_ESCAPE`.
+- `text:editDistanceAsArray` requires an array suffix, as in `text:editDistanceAsArray(target=b, references=["a","b"], maxDistance=2, asArray="d[]")`; 0.1.7 accepted the unsuffixed prefix and reported `CQL_UNSUPPORTED_ARRAY_NAME` for the suffixed form.
+- Accepted text filters gain warnings: `x=1 | count` reports `CQL_BARE_FUNCTION_NAME`, `where a=1` reports `CQL_BARE_COMMAND_WORD`, `a=1 && b=2` reports `CQL_OPERATOR_TEXT`, and `a=null` reports `CQL_NULL_TEXT`. 0.1.7 gave none of these warnings. Use parentheses for calls, CQL filters/operators, and presence tests for missing fields, or quote intended text.
+- Mixed `or` and `and` gains informational `CQL_OR_PRECEDENCE`, as in `a=1 or b=2 and c=3`; `or` binds tighter. Control escapes followed by letters/digits warn with `CQL_STRING_ESCAPE_CONTROL`, as in `p="C:\temp"`. 0.1.7 gave neither diagnostic.
+- Negated transforms are accepted with `CQL_NEGATION_NO_EFFECT`, as in `!lower(a)`; 0.1.7 rejected them. Aggregate/source/definition calls and `eval` remain invalid under negation. `tail` after a known removal of `@timestamp` warns with `CQL_TAIL_WITHOUT_TIMESTAMP`, as in `count() | tail(1)`; 0.1.7 gave no such warning.
+- Hosted error answers such as `{"result":{"error":"Search failed"}}` report `MCP_TOOL_ERROR`; recognized hosted cutoffs report `MCP_DEADLINE`, regardless of the envelope error flag. 0.1.7 reported `MCP_SHAPE`. Resumable discovery now ends attempts on recognized final answers, including unusable completed results: the attempt remains charged, the run pauses, and explicit resume retries as a new attempt. Lost responses still require settlement; 0.1.7 left these attempts blocked.
+- Saved-result assessment reports `RESULT_TIMEOUT` or `RESULT_ERROR` for hosted error answers instead of the unsupported-shape verdict in 0.1.7. Empty and zero-count answers, such as `{"result":[{"_count":0}]}`, ask for a positive control: rerun without the selective filter or field and confirm a non-zero count before concluding no matches. 0.1.7 did not ask for that control.
+- The profile remains `cqlmatic-ngsiem-core-v3` with a new knowledge revision. Core-v3 packs from 0.1.7 remain readable with their original bindings. Checkpoint inspection admits 0.1.7 alongside earlier supported producers; lifecycle actions still require the producing release. For example, selecting a 0.1.7 run for resume in 0.1.8 reports `MCP_STATE_PRODUCER`. Request, status, pack and inventory versions are unchanged from 0.1.7.
 
 ## 0.1.7
 
@@ -144,7 +129,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v017).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v018).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.
