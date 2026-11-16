@@ -84,6 +84,14 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
                 return Err(shape("Nested MCP text envelopes are not supported"));
             }
             if hosted && inner.get("result").is_some_and(Value::is_object) {
+                if object
+                    .get("structuredContent")
+                    .is_some_and(|value| value != &Value::Object(inner.clone()))
+                {
+                    return Err(shape(
+                        "MCP structuredContent does not match the text content",
+                    ));
+                }
                 return Err(hosted_result_error(&inner)
                     .unwrap_or_else(|| shape("MCP search result must have a result array")));
             }
@@ -219,14 +227,93 @@ fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Di
     })
 }
 
+/// Recognize the hosted search tool's final error answer from its exact decoded shape.
+pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
+    if raw.len() > MAX_RESULT_BYTES {
+        return None;
+    }
+    let mut value = parse_repeated_json(raw, "Invalid hosted answer").ok()?;
+    if value.as_object()?.contains_key("content") {
+        let object = value.as_object()?;
+        if object
+            .keys()
+            .any(|k| !matches!(k.as_str(), "content" | "isError" | "structuredContent"))
+            || object.get("isError").is_some_and(|v| !v.is_boolean())
+        {
+            return None;
+        }
+        let content = object.get("content")?.as_array()?;
+        if content.len() != 1 {
+            return None;
+        }
+        let item = content[0].as_object()?;
+        if item.len() != 2 || item.get("type")?.as_str()? != "text" {
+            return None;
+        }
+        let body = parse_repeated_json(
+            item.get("text")?.as_str()?.as_bytes(),
+            "Invalid hosted answer",
+        )
+        .ok()?;
+        if object.get("structuredContent").is_some_and(|v| *v != body) {
+            return None;
+        }
+        value = body;
+    }
+    hosted_body_ending(value.as_object()?)
+}
+
+fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
+    if object
+        .keys()
+        .any(|k| !matches!(k.as_str(), "result" | "trace_id"))
+        || object.get("trace_id").is_some_and(|v| !v.is_string())
+    {
+        return None;
+    }
+    let result = object.get("result")?.as_object()?;
+    let text = result.get("error")?.as_str()?;
+    let details = result.get("details")?.as_object()?;
+    if result.len() == 3
+        && result.get("operation")?.as_str()? == "GetSearchStatusV1"
+        && text.starts_with("NGSIEM search timed out after ")
+        && details.len() == 2
+    {
+        let id = details.get("job_id")?.as_str()?;
+        if !id.is_empty()
+            && id.chars().count() <= 256
+            && !id.chars().any(char::is_control)
+            && details.get("timeout_seconds")?.as_u64()? >= 1
+        {
+            return Some("timed-out");
+        }
+    }
+    if result.len() != 2 || details.len() != 2 || !details.get("body")?.is_object() {
+        return None;
+    }
+    match details.get("status_code")?.as_i64()? {
+        0 if text
+            .starts_with("Failed to start NGSIEM search: Request failed with status code 0 ")
+            && text.contains("MsaspecResponseFields")
+            && text.contains("TextConsumer") =>
+        {
+            Some("not-started")
+        }
+        400 if text.starts_with("Failed to poll NGSIEM search status:") => {
+            Some("failed-after-start")
+        }
+        _ => None,
+    }
+}
+
 fn hosted_result_error(object: &Map<String, Value>) -> Option<Diagnostic> {
     let text = object.get("result")?.as_object()?.get("error")?.as_str()?;
     if text.trim().is_empty() {
         return None;
     }
-    let prefix = if text.starts_with("Failed to start") {
+    let prefix = if hosted_body_ending(object) == Some("not-started") {
         "The hosted search was rejected at start and did not run"
-    } else if text.starts_with("NGSIEM search timed out") {
+    } else if hosted_body_ending(object) == Some("timed-out") {
         return Some(Diagnostic::error(
             "MCP_DEADLINE",
             "The hosted search was accepted and cut off before completion; no rows were returned.",

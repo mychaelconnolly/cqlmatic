@@ -30,8 +30,8 @@ and absolute-deadline behavior; they do not gain pause/resume allowances.
 Exit `3` and `needs-probes` means continue; exit `3` and `activation-blocked`
 means inspect the diagnostic and retry without answers after resolving it.
 The pack may already be visible while receipt/final-state recovery remains pending.
-Exit `0` means completed activation with its matching receipt. A format-3 rejected
-result (including a client timeout or tool error) retains exact bytes/hash and
+Exit `0` means completed activation with its matching receipt. A format-3 unrecognized rejected
+result retains exact bytes/hash and
 returns `cleanup-pending` with exit `3`; it does not prove remote termination.
 Resolve the same attempt with its acceptable original successful result or exact
 bound host cleanup settlement before resuming. Do not bypass it with new paths.
@@ -60,3 +60,5 @@ MCP output.
 See [the MCP workflow](../../docs/MCP-COMPANION.md),
 [discovery options](../../docs/ENVIRONMENT.md), [contracts](../../docs/CONTRACTS.md)
 and [result assessment](../../docs/RESULT-ASSESSMENT.md).
+
+Recognized final answers from the hosted search tool end a format-3 MCP attempt as `timed-out`, `not-started` or `failed-after-start`; a completed list that cannot supply the required measurement ends it as `completed-unusable`. Exact terminal bytes and their hash are retained separately from accepted evidence. The run pauses, the attempt stays charged, and an explicit resume is required before another dispatch. Resume emits the same unaccepted probe. A cutoff does not prove the remote job stopped: at most one leftover job per cut-off attempt may overlap later searches. A missing answer or client wait without a tool answer keeps the attempt unresolved and blocks further dispatch. An unrecognized error shape or wording, malformed or incomplete response leaves it in `cleanup-pending`. Resolve that same attempt with an acceptable original successful result or exact bound cancellation report before resuming. Earlier-release checkpoints retain their blocking behavior and refuse lifecycle changes; native attempts and format-2 runs retain their existing rules. See [hosted search outcomes](../../docs/MCP-COMPANION.md).

@@ -1481,7 +1481,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
-            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value and stays unresolved."}));
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value: use unresolved, then lifetime-expired once the retained provider lifetime has elapsed."}));
     } else if blocker == "awaiting-host-settlement" {
         notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
             "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
@@ -3987,7 +3987,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         .iter()
         .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
     {
-        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value and stays unresolved.".into());
+        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value: use unresolved, then lifetime-expired once the retained provider lifetime has elapsed.".into());
     }
     let prepared = state
         .refresh_attempts

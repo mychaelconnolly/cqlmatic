@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Pause hosted discovery attempts on recognized final answers while retaining charged terminal proof; enforce the historical `top()` limit ceiling and unquoted `$` and query-parameter rules.
+
 - `CQL_BARE_FUNCTION_NAME`: A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text.
 - `CQL_BARE_COMMAND_WORD`: The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text.
 - `CQL_OPERATOR_TEXT`: Bare `&&` is searched as text. Use `and` or a space between terms.

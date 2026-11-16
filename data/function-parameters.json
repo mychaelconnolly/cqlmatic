@@ -6193,7 +6193,7 @@
           "name": "limit",
           "choices": [],
           "minimum": 1,
-          "maximum": null,
+          "maximum": 24576,
           "default": "10",
           "omittable_name": false
         },

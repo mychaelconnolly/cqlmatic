@@ -1422,18 +1422,6 @@ fn rejected_mcp_results_remain_in_flight_until_exact_cleanup_and_charged_retry()
     network::CANCELLED.store(false, Ordering::Relaxed);
     for (raw, code) in [
         (
-            include_bytes!("fixtures/mcp/hosted-timeout.json").as_slice(),
-            "MCP_DEADLINE",
-        ),
-        (
-            include_bytes!("fixtures/mcp/hosted-rejected.json").as_slice(),
-            "MCP_TOOL_ERROR",
-        ),
-        (
-            include_bytes!("fixtures/mcp/hosted-poll-failed.json").as_slice(),
-            "MCP_TOOL_ERROR",
-        ),
-        (
             br#"{"isError":true,"content":[{"type":"text","text":"request timed out"}]}"#
                 .as_slice(),
             "MCP_DEADLINE",
@@ -1857,7 +1845,19 @@ fn late_rejected_originals_still_need_exact_cleanup() {
         let file = run.directory.join("rejected.json");
         fs::write(&file, raw).unwrap();
         let output = mcp::step_resumable(&run.state, &[(id.clone(), file)]).unwrap();
-        assert_eq!(output.status, "cleanup-pending");
+        let ended = mcp::normalize(raw).is_ok();
+        assert_eq!(
+            output.status,
+            if ended { "failed" } else { "cleanup-pending" }
+        );
+        if ended {
+            assert!(output.terminal_failure);
+            assert!(!mcp::has_in_flight(
+                &mcp::inspect_state(&run.state).unwrap()
+            ));
+            assert!(output.diagnostics.iter().any(|d| d.code == "MCP_DEADLINE"));
+            continue;
+        }
         assert!(!output.terminal_failure);
         assert_eq!(output.answered, 0);
         assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
@@ -2055,6 +2055,17 @@ fn hosted_error_checkpoint(resumable: bool, raw: &[u8]) -> Run {
     let file = run.directory.join("hosted-error.json");
     fs::write(&file, raw).unwrap();
     mcp::step(&run.state, &[(id, file)]).unwrap();
+    if resumable {
+        let mut saved = run.saved();
+        let evidence = saved["session"]["attempts"][0]["terminal"].take();
+        saved["session"]["attempts"][0]["outcome"] = json!("cleanup-pending");
+        saved["session"]["attempts"][0]["rejected_results"] = json!([{
+            "evidence":evidence,"diagnostic":mcp::normalize(raw).unwrap_err()
+        }]);
+        saved["status"] = json!("cleanup-pending");
+        saved["session"]["periods"][0]["end"] = Value::Null;
+        run.save(&saved);
+    }
     run
 }
 
@@ -2094,6 +2105,18 @@ fn earlier_hosted_error_checkpoints_preserve_the_original_shape_diagnostic() {
             run.save(&saved);
             assert!(mcp::inspect_state(&run.state).is_ok());
             assert_eq!(run.saved(), saved);
+            if resumable {
+                assert!(mcp::has_in_flight(&mcp::inspect_state(&run.state).unwrap()));
+                assert_eq!(
+                    mcp::resume(&run.state).unwrap_err().code,
+                    "MCP_STATE_PRODUCER"
+                );
+                assert_eq!(
+                    mcp::pause(&run.state).unwrap_err().code,
+                    "MCP_STATE_PRODUCER"
+                );
+                assert_eq!(run.saved(), saved);
+            }
         }
     }
 }
@@ -2194,7 +2217,20 @@ fn current_hosted_error_checkpoints_store_the_new_diagnostic() {
                 "MCP_TOOL_ERROR",
             ),
         ] {
-            let run = hosted_error_checkpoint(resumable, raw);
+            let run = if resumable {
+                let run = Run::new(Transport::Mcp, 3);
+                let id = run.probe();
+                mcp::dispatch(&run.state, &id).unwrap();
+                let file = run.directory.join("answer.json");
+                fs::write(&file, raw).unwrap();
+                let output = mcp::step_resumable(&run.state, &[(id, file)]).unwrap();
+                assert_eq!(output.status, "paused");
+                assert_eq!(output.diagnostics[0].code, code);
+                assert!(mcp::inspect_state(&run.state).is_ok());
+                continue;
+            } else {
+                hosted_error_checkpoint(false, raw)
+            };
             let saved = run.saved();
             assert_eq!(
                 saved.pointer(&diagnostic_pointer(&saved)).unwrap()["code"],
@@ -2203,4 +2239,217 @@ fn current_hosted_error_checkpoints_store_the_new_diagnostic() {
             assert!(mcp::inspect_state(&run.state).is_ok());
         }
     }
+}
+
+fn ending_answers() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (
+            "timed-out",
+            include_bytes!("fixtures/mcp/hosted-timeout.json").to_vec(),
+        ),
+        (
+            "not-started",
+            include_bytes!("fixtures/mcp/hosted-rejected.json").to_vec(),
+        ),
+        (
+            "failed-after-start",
+            include_bytes!("fixtures/mcp/hosted-poll-failed.json").to_vec(),
+        ),
+        ("completed-unusable", br#"{"result":[]}"#.to_vec()),
+        (
+            "completed-unusable",
+            serde_json::to_vec(&json!({"result":vec![json!({"events":"1"});10000]})).unwrap(),
+        ),
+    ]
+}
+
+#[test]
+fn final_answers_pause_charged_attempts_and_resume_the_same_probe() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for (label, raw) in ending_answers() {
+        for phase in ["needs-probes", "cancel-requested", "cleanup-pending"] {
+            let run = Run::new(Transport::Mcp, 4);
+            let id = run.probe();
+            mcp::dispatch(&run.state, &id).unwrap();
+            let file = run.directory.join("final.json");
+            if phase == "cancel-requested" {
+                mcp::pause(&run.state).unwrap();
+            }
+            if phase == "cleanup-pending" {
+                fs::write(&file, br#"{"unexpected":1}"#).unwrap();
+                mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]).unwrap();
+            }
+            fs::write(&file, &raw).unwrap();
+            let output = mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]).unwrap();
+            assert_eq!(output.status, "paused");
+            assert_eq!(output.exit_code(), 3);
+            assert_eq!(output.answered, 0);
+            assert_eq!(output.diagnostics[1].code, "DISCOVERY_ATTEMPT_ENDED");
+            let saved = run.saved();
+            let attempt = &saved["session"]["attempts"][0];
+            assert_eq!(attempt["outcome"], label);
+            assert_eq!(attempt["terminal"]["raw_sha256"], sha256_hex(&raw));
+            assert_eq!(
+                attempt["rejected_results"].as_array().map_or(0, Vec::len),
+                usize::from(phase == "cleanup-pending")
+            );
+            assert!(saved["session"]["periods"][0]["end"].is_string());
+            assert_eq!(mcp::resumable_info(&run.state).unwrap()["attempts"], 1);
+            assert!(!mcp::has_in_flight(
+                &mcp::inspect_state(&run.state).unwrap()
+            ));
+            assert!(mcp::dispatch(&run.state, &id).is_err());
+            assert!(mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]).is_err());
+            assert!(
+                mcp::settle_cancelled(&run.state, &id, &cancellation_proof(&run, &id)).is_err()
+            );
+            let resumed = mcp::resume(&run.state).unwrap();
+            assert_eq!(resumed.probes[0]["probe_id"], id);
+            mcp::dispatch(&run.state, &id).unwrap();
+            let before = fs::read(&run.state).unwrap();
+            assert_eq!(
+                mcp::step_resumable(&run.state, &[(id.clone(), file.clone())])
+                    .unwrap_err()
+                    .code,
+                "MCP_RESULT_REUSED"
+            );
+            assert_eq!(fs::read(&run.state).unwrap(), before);
+            let next = run.answer(&id);
+            let other = next.probes[0]["probe_id"].as_str().unwrap();
+            mcp::dispatch(&run.state, other).unwrap();
+            assert_eq!(run.answer(other).status, "complete");
+            assert_eq!(run.saved()["session"]["attempts"][0], *attempt);
+        }
+    }
+}
+
+#[test]
+fn final_answer_proofs_reject_tampering_and_enforce_budgets() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for (label, raw) in ending_answers() {
+        let run = Run::new(Transport::Mcp, 1);
+        let id = run.probe();
+        mcp::dispatch(&run.state, &id).unwrap();
+        let file = run.directory.join("final.json");
+        fs::write(&file, &raw).unwrap();
+        mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]).unwrap();
+        let saved = run.saved();
+        for change in [
+            "label",
+            "terminal",
+            "bytes",
+            "hash",
+            "producer",
+            "native",
+            "unrecognized",
+        ] {
+            let mut edited = saved.clone();
+            match change {
+                "label" => {
+                    edited["session"]["attempts"][0]["outcome"] = json!(if label == "timed-out" {
+                        "not-started"
+                    } else {
+                        "timed-out"
+                    })
+                }
+                "terminal" => edited["session"]["attempts"][0]["terminal"] = Value::Null,
+                "bytes" => edited["session"]["attempts"][0]["terminal"]["raw_hex"] = json!("00"),
+                "hash" => edited["session"]["attempts"][0]["terminal"]["raw_sha256"] = json!("bad"),
+                "producer" => edited["producer_version"] = json!("0.1.6"),
+                "native" => edited["session"]["transport"] = json!("native"),
+                _ => {
+                    edited["session"]["attempts"][0]["terminal"]["raw_hex"] = json!("7b7d");
+                    edited["session"]["attempts"][0]["terminal"]["raw_sha256"] =
+                        json!(sha256_hex(b"{}"));
+                }
+            }
+            run.save(&edited);
+            assert_eq!(
+                mcp::inspect_state(&run.state).unwrap_err().code,
+                "MCP_STATE_TAMPERED",
+                "{change}"
+            );
+        }
+        run.save(&saved);
+        assert_eq!(mcp::resume(&run.state).unwrap().status, "failed");
+        let late = Run::new(Transport::Mcp, 2);
+        let id = late.probe();
+        mcp::dispatch(&late.state, &id).unwrap();
+        age_checkpoint(&late, None);
+        let file = late.directory.join("late.json");
+        fs::write(&file, &raw).unwrap();
+        let output = mcp::step_resumable(&late.state, &[(id, file)]).unwrap();
+        assert_eq!(output.status, "failed");
+        assert_eq!(output.exit_code(), 2);
+        assert!(output.diagnostics.iter().any(|d| d.code == "MCP_DEADLINE"));
+        assert!(mcp::inspect_state(&late.state).is_ok());
+    }
+}
+
+#[test]
+fn zero_population_total_ends_without_accepting_the_measurement() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let seed = Run::new(Transport::Mcp, 20);
+    let mut request = seed.saved()["request"].clone();
+    request["depth"] = json!("full");
+    let run = Run::with_request(Transport::Mcp, serde_json::from_value(request).unwrap());
+    loop {
+        let output = mcp::step_resumable(&run.state, &[]).unwrap();
+        let probe = &output.probes[0];
+        let id = probe["probe_id"].as_str().unwrap();
+        mcp::dispatch(&run.state, id).unwrap();
+        let kind = probe["kind"].as_str().unwrap();
+        let rows = match kind {
+            "volume" => json!([{"events":10}]),
+            "fieldset" => json!([{"field":"user"}]),
+            "dataset-facet" => json!([]),
+            "tag-detect" => json!([{"events":0}]),
+            "population" => json!([{"total":0,"c0":0}]),
+            other => panic!("Unexpected {other}"),
+        };
+        let file = run.directory.join("population.json");
+        fs::write(&file, serde_json::to_vec(&json!({"result":rows})).unwrap()).unwrap();
+        let output = mcp::step_resumable(&run.state, &[(id.into(), file)]).unwrap();
+        if kind == "population" {
+            assert_eq!(output.status, "paused");
+            assert_eq!(
+                run.saved()["session"]["attempts"]
+                    .as_array()
+                    .unwrap()
+                    .last()
+                    .unwrap()["outcome"],
+                "completed-unusable"
+            );
+            assert!(mcp::inspect_state(&run.state).is_ok());
+            break;
+        }
+    }
+}
+
+#[test]
+fn copied_final_proof_cannot_settle_a_later_attempt_on_load() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = Run::new(Transport::Mcp, 4);
+    let id = run.probe();
+    let file = run.directory.join("final.json");
+    mcp::dispatch(&run.state, &id).unwrap();
+    fs::write(&file, include_bytes!("fixtures/mcp/hosted-timeout.json")).unwrap();
+    mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]).unwrap();
+    mcp::resume(&run.state).unwrap();
+    mcp::dispatch(&run.state, &id).unwrap();
+    fs::write(&file, include_bytes!("fixtures/mcp/hosted-rejected.json")).unwrap();
+    mcp::step_resumable(&run.state, &[(id, file)]).unwrap();
+    let mut saved = run.saved();
+    saved["session"]["attempts"][1]["terminal"] =
+        saved["session"]["attempts"][0]["terminal"].clone();
+    saved["session"]["attempts"][1]["outcome"] = json!("timed-out");
+    run.save(&saved);
+    assert_eq!(
+        mcp::inspect_state(&run.state).unwrap_err().code,
+        "MCP_STATE_TAMPERED"
+    );
 }

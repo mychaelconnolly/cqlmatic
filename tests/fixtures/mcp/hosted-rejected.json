@@ -1,6 +1,16 @@
 {
   "result": {
-    "error": "Failed to start NGSIEM search: Request failed with status code 0 API said: MsaspecResponseFields TextConsumer Trace ID: synthetic-id"
+    "details": {
+      "body": {
+        "errors": [
+          {
+            "message": "&{[] <nil>} (*models.MsaspecResponseFields) is not supported by the TextConsumer, can be resolved by supporting TextUnmarshaler interface"
+          }
+        ]
+      },
+      "status_code": 0
+    },
+    "error": "Failed to start NGSIEM search: Request failed with status code 0 API said: &{[] <nil>} (*models.MsaspecResponseFields) is not supported by the TextConsumer, can be resolved by supporting TextUnmarshaler interface. Trace ID: "
   },
-  "trace_id": "synthetic-id"
+  "trace_id": "00000000-0000-0000-0000-000000000000"
 }

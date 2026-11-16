@@ -129,6 +129,17 @@ fn dollar_text_in_patterns_strings_regex_and_comments_remains_supported() {
         "$100",
         "message=$helper",
         "message=$falcon/helper:saved",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.outcome,
+            Outcome::Invalid,
+            "{query}: {:?}",
+            result.diagnostics
+        );
+        assert!(result.diagnostics.iter().any(|d| d.code == "CQL_SYNTAX"));
+    }
+    for query in [
         "\"$helper()\"",
         "message=\"$falcon/helper:notAFunction(field=ProductType)\"",
         "result := \"$helper()\"",
@@ -148,10 +159,17 @@ fn dollar_text_in_patterns_strings_regex_and_comments_remains_supported() {
 
 #[test]
 fn unresolved_parameters_are_coverage_gaps_in_typed_and_nested_arguments() {
+    let quoted_name = check("message=?\"Search Text\"");
+    assert_eq!(quoted_name.outcome, Outcome::Invalid);
+    assert!(
+        quoted_name
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_SYNTAX")
+    );
     for query in [
         "host=?host",
         "size > ?threshold",
-        "message=?\"Search Text\"",
         "result := ?value + 1",
         "count(field=?field)",
         "count(distinct=?distinct)",

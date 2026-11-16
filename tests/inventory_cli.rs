@@ -4517,3 +4517,79 @@ fn invalid_empty_parser_import_and_exclusion_replay_preserve_reconciliation() {
     assert_eq!(repeated["status"]["reconciliation"], "done");
     assert_eq!(fs::read(&state_path).unwrap(), before);
 }
+
+#[test]
+fn final_hosted_answer_pauses_inventory_and_clears_the_brief_blocker() {
+    for name in ["timeout", "rejected", "poll-failed"] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let prepared = prepare_source_run(&dir.0);
+        let body: Value = serde_json::from_slice(
+            &fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join(format!("tests/fixtures/mcp/hosted-{name}.json")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let ended = call(&dir.0, volume_answer(&dir.0, &prepared, body));
+        assert_eq!(ended["action"]["relay"]["status"], "paused");
+        assert_eq!(ended["status"]["discovery_runs"][0]["status"], "paused");
+        let brief = brief_value(
+            Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+                .args(["status", "--json", "--brief", "--state"])
+                .arg(dir.0.join("workflow/state.json"))
+                .output()
+                .unwrap(),
+        );
+        assert_ne!(
+            brief["refresh"]["blocker"],
+            "recorded-discovery-recovery-required"
+        );
+        assert_rejected(
+            &dir.0,
+            source_run_request(4),
+            "identical discovery request is safely paused",
+        );
+        let mut different = source_run_request(4);
+        different["start"] = json!("2026-01-01T12:00:00Z");
+        let next = call(&dir.0, different);
+        assert_eq!(next["action"]["relay"]["status"], "needs-probes");
+    }
+}
+
+#[test]
+fn missing_and_unrecognized_answers_keep_all_nine_inventory_routes_blocked() {
+    for answer in [None, Some(json!({"result":[],"error":"synthetic timeout"}))] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        relay(&dir.0, prepare_source_run(&dir.0), &[], &[], None);
+        let prepared = call(&dir.0, source_run_request(5));
+        let id = &prepared["action"]["relay"]["probes"][0]["probe_id"];
+        call(&dir.0, json!({"kind":"dispatch-discovery","probe_id":id}));
+        if let Some(body) = answer {
+            let file = fixture(&dir.0, "unrecognized.json", body);
+            call(
+                &dir.0,
+                json!({"kind":"discovery-step","answers":[{"probe_id":id,"result_file":file}]}),
+            );
+        }
+        let state_path = dir.0.join("workflow/state.json");
+        let before = fs::read(&state_path).unwrap();
+        for action in [
+            capability_request(&dir.0),
+            json!({"kind":"dispatch-capability","run_id":"missing","case_id":"array-union","execution_context_id":"synthetic-auth","session_id":"synthetic-session"}),
+            json!({"kind":"resume-capabilities","run_id":"missing","execution_context_id":"synthetic-auth"}),
+            json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":refresh_host(&dir.0),"automatic":false}),
+            json!({"kind":"dispatch-refresh","attempt_id":"missing","session_id":"synthetic-session"}),
+            json!({"kind":"prepare-scout","environment":environment(),"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_seconds":60}),
+            source_run_request(6),
+            json!({"kind":"dispatch-discovery","probe_id":id}),
+            json!({"kind":"resume-discovery"}),
+        ] {
+            let output = inventory_command(&dir.0, action).output().unwrap();
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+        }
+    }
+}

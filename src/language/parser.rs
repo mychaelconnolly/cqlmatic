@@ -547,16 +547,6 @@ impl Parser<'_> {
         if self.rest().starts_with('"') {
             return Ok(Pattern::Text(self.string()?));
         }
-        if self.eat("?") {
-            if self.eat("{") {
-                self.identifier()?;
-                self.expect("=")?;
-                let value = self.pattern()?;
-                self.expect("}")?;
-                return Ok(value);
-            }
-            return Ok(Pattern::Parameter(self.identifier()?));
-        }
         if self.rest().starts_with('/') {
             self.pos += 1;
             let start = self.pos;
@@ -586,8 +576,41 @@ impl Parser<'_> {
             }
             return self.fail("Unterminated regular expression.", false);
         }
-        let start = self.pos;
+        let mut text = String::new();
         while let Some(c) = self.rest().chars().next() {
+            if c == '$' {
+                return self.fail("Put values containing $ in double quotes.", false);
+            }
+            if c == '?' {
+                self.pos += 1;
+                if self.rest().starts_with('{') {
+                    self.pos += 1;
+                    self.identifier()?;
+                    self.expect("=")?;
+                    let value = self.pattern()?;
+                    self.expect("}")?;
+                    match value {
+                        Pattern::Text(default) => text.push_str(&default),
+                        Pattern::Parameter(name) => return Ok(Pattern::Parameter(name)),
+                        other if text.is_empty() => return Ok(other),
+                        _ => {
+                            return self.fail("Put the parameter default in double quotes.", false);
+                        }
+                    }
+                    continue;
+                }
+                let start = self.pos;
+                while self
+                    .rest()
+                    .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    self.pos += 1;
+                }
+                if self.pos == start {
+                    return self.fail("Put values containing ? in double quotes.", false);
+                }
+                return Ok(Pattern::Parameter(self.input[start..self.pos].into()));
+            }
             if c.is_whitespace() || "|(){},;<>!=\"".contains(c) {
                 break;
             }
@@ -598,18 +621,18 @@ impl Parser<'_> {
                 );
             }
             self.pos += c.len_utf8();
+            text.push(c);
         }
-        if self.pos == start {
+        if text.is_empty() {
             return self.fail("Expected a filter value.", false);
         }
-        let text = &self.input[start..self.pos];
         if text.ends_with("//") {
             return self.fail(
                 "Ambiguous slash syntax is outside this profile; quote the pattern.",
                 true,
             );
         }
-        Ok(Pattern::Text(text.into()))
+        Ok(Pattern::Text(text))
     }
     fn saved_call(&mut self) -> Result<()> {
         self.space();

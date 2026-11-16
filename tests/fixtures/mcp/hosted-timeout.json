@@ -3,9 +3,9 @@
     "error": "NGSIEM search timed out after 20 seconds. Try narrowing your query or reducing the time range.",
     "operation": "GetSearchStatusV1",
     "details": {
-      "job_id": "synthetic-id",
+      "job_id": "synthetic-job-id",
       "timeout_seconds": 20
     }
   },
-  "trace_id": "synthetic-id"
+  "trace_id": "00000000-0000-0000-0000-000000000000"
 }

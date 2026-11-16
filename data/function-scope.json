@@ -12532,7 +12532,7 @@
           "conditions": [],
           "assessment_status": "offline_tested",
           "reason": "The linked synthetic cases pass raw checking and public typed lowering with exact canonical rendering.",
-          "qualification": "Only the argument values, nesting and placement of the linked synthetic cases are exercised; other optional-argument combinations and overloads are not implied.",
+          "qualification": "The limit is an integer from 1 to 24576. Only the argument values, nesting and placement of the linked synthetic cases are exercised; other optional-argument combinations and overloads are not implied.",
           "assessment_evidence": [
             {
               "kind": "fixture",

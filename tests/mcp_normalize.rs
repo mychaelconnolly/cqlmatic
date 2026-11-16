@@ -747,7 +747,7 @@ fn hosted_error_classification_ignores_detail_keys_and_bounds_text() {
         mcp::normalize(rejected.to_string().as_bytes())
             .unwrap_err()
             .message
-            .contains("rejected at start and did not run")
+            .contains("MCP search tool error")
     );
     for error in [json!(""), json!("  "), Value::Null, json!(true), json!({})] {
         let body = json!({"result":{"error":error}});
@@ -756,4 +756,125 @@ fn hosted_error_classification_ignores_detail_keys_and_bounds_text() {
             assert_code(&envelope(&body.to_string(), flag), "MCP_SHAPE");
         }
     }
+}
+
+#[test]
+fn exact_hosted_endings_accept_envelopes_and_repeats() {
+    for (name, label) in [
+        ("timeout", "timed-out"),
+        ("rejected", "not-started"),
+        ("poll-failed", "failed-after-start"),
+    ] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp");
+        let raw = std::fs::read(root.join(format!("hosted-{name}.json"))).unwrap();
+        assert_eq!(mcp::hosted_attempt_ending(&raw), Some(label));
+        let mut without_trace: Value = serde_json::from_slice(&raw).unwrap();
+        without_trace.as_object_mut().unwrap().remove("trace_id");
+        assert_eq!(
+            mcp::hosted_attempt_ending(without_trace.to_string().as_bytes()),
+            Some(label)
+        );
+        let repeat = [raw.as_slice(), b"\n", raw.as_slice()].concat();
+        assert_eq!(mcp::hosted_attempt_ending(&repeat), Some(label));
+        for suffix in ["error-envelope", "success-envelope", "text-envelope"] {
+            let wrapped = std::fs::read(root.join(format!("hosted-{name}-{suffix}.json"))).unwrap();
+            assert_eq!(mcp::hosted_attempt_ending(&wrapped), Some(label));
+            let repeated = [wrapped.as_slice(), b"\n", wrapped.as_slice()].concat();
+            assert_eq!(mcp::hosted_attempt_ending(&repeated), Some(label));
+        }
+    }
+}
+
+#[test]
+fn hosted_ending_near_misses_remain_unrecognized() {
+    let timeout: Value =
+        serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-timeout.json")).unwrap();
+    let rejected: Value =
+        serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-rejected.json")).unwrap();
+    let poll: Value =
+        serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-poll-failed.json")).unwrap();
+    for original in [&timeout, &rejected, &poll] {
+        for (pointer, value) in [
+            ("/result/extra", json!(1)),
+            ("/extra", json!(1)),
+            ("/error", json!("error")),
+            ("/partial", json!(false)),
+            ("/trace_id", Value::Null),
+        ] {
+            let mut body = original.clone();
+            if let Some(key) = pointer.strip_prefix("/result/") {
+                body["result"][key] = value;
+            } else {
+                body[&pointer[1..]] = value;
+            }
+            assert_eq!(
+                mcp::hosted_attempt_ending(body.to_string().as_bytes()),
+                None
+            );
+        }
+        let mut missing = original.clone();
+        missing["result"].as_object_mut().unwrap().remove("details");
+        assert_eq!(
+            mcp::hosted_attempt_ending(missing.to_string().as_bytes()),
+            None
+        );
+        let mismatch = json!({"content":[{"type":"text","text":original.to_string()}],"isError":true,"structuredContent":{}});
+        assert_eq!(
+            mcp::hosted_attempt_ending(mismatch.to_string().as_bytes()),
+            None
+        );
+        assert_code(mismatch.to_string().as_bytes(), "MCP_SHAPE");
+        let differing = format!("{}\n{{}}", original);
+        assert_eq!(mcp::hosted_attempt_ending(differing.as_bytes()), None);
+    }
+    for (original, pointer, values) in [
+        (&timeout, "/result/operation", vec![json!("Other")]),
+        (
+            &timeout,
+            "/result/details/job_id",
+            vec![json!(""), Value::Null, json!("x\n"), json!("x".repeat(257))],
+        ),
+        (
+            &timeout,
+            "/result/details/timeout_seconds",
+            vec![json!(0), json!(1.5), json!("20")],
+        ),
+        (
+            &rejected,
+            "/result/error",
+            vec![json!("Failed to start NGSIEM search")],
+        ),
+        (
+            &rejected,
+            "/result/details/status_code",
+            vec![json!(400), json!("0")],
+        ),
+        (
+            &poll,
+            "/result/details/status_code",
+            vec![json!(503), json!(404), json!("400")],
+        ),
+    ] {
+        for value in values {
+            let mut body = original.clone();
+            *body.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(
+                mcp::hosted_attempt_ending(body.to_string().as_bytes()),
+                None,
+                "{pointer}"
+            );
+        }
+    }
+    for raw in [
+        b"{}".as_slice(),
+        br#"{"result":[],"result":[]}"#,
+        b"invalid",
+        br#"{"content":[{"type":"text","text":"request timed out"}],"isError":true}"#,
+    ] {
+        assert_eq!(mcp::hosted_attempt_ending(raw), None);
+    }
+    assert_eq!(
+        mcp::hosted_attempt_ending(&vec![b' '; mcp::MAX_RESULT_BYTES + 1]),
+        None
+    );
 }
