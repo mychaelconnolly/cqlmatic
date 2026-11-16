@@ -1564,7 +1564,7 @@ fn assigned_aggregates_use_the_assignment_name_for_outputs_and_counts() {
     );
     assert_eq!(replaced.outcome, AssessOutcome::NoFindings);
     assert!(!replaced.columns.contains_key("old"));
-    let shorthand = assess_accepted("stats(count)", json!({"result":[{"_count":0}]}));
+    let shorthand = assess_accepted("stats(count())", json!({"result":[{"_count":0}]}));
     finding(&shorthand, "RESULT_ZERO_COUNT", Severity::Warning);
 }
 
@@ -3305,9 +3305,9 @@ fn rows_beyond_an_explicit_limit_after_unproven_stages_are_inconclusive() {
 }
 
 #[test]
-fn assigned_row_limits_bound_the_result_like_their_call_forms() {
+fn row_limits_bound_projection_filters_and_assigned_renames() {
     let rows = |n: usize| json!({"result": (0..n).map(|i| json!({"a": format!("x{i}")})).collect::<Vec<_>>()});
-    let exceeded = assess("a := table([a], limit=1) | select(a)", rows(2));
+    let exceeded = assess("table([a], limit=1) | select(a)", rows(2));
     assert_eq!(
         exceeded.outcome,
         AssessOutcome::Inconclusive,
@@ -3322,7 +3322,7 @@ fn assigned_row_limits_bound_the_result_like_their_call_forms() {
         "{:?}",
         exceeded.findings
     );
-    let unproven = assess("a := table([a], limit=1) | in(a, values=[x0, x1])", rows(2));
+    let unproven = assess("table([a], limit=1) | in(a, values=[x0, x1])", rows(2));
     assert_eq!(
         unproven.outcome,
         AssessOutcome::Inconclusive,
@@ -3346,10 +3346,10 @@ fn assigned_row_limits_bound_the_result_like_their_call_forms() {
             result.findings
         );
     }
-    // The final assigned form and results within the limit keep their earlier behaviour.
-    let final_form = assess("a := table([a], limit=1)", rows(2));
+    // Final calls and results within the limit retain their bounds.
+    let final_form = assess("table([a], limit=1)", rows(2));
     finding(&final_form, "RESULT_CAP_EXCEEDED", Severity::Warning);
-    let within = assess("a := table([a], limit=2) | select(a)", rows(2));
+    let within = assess("table([a], limit=2) | select(a)", rows(2));
     assert!(
         within
             .findings

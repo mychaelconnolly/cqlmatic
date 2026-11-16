@@ -103,7 +103,7 @@ fn default_and_neighbor_use_documented_binding_and_prefix() {
 fn composite_sequences_inherit_order_and_enforce_child_cardinality() {
     for query in [
         "head(10)|groupBy(host,function={accumulate(sum(value,as=running))})",
-        "head(10)|accumulate(count)",
+        "head(10)|accumulate(count())",
         "head(10)|stats([accumulate(sum(value)),count()])",
     ] {
         let result = check(query, false);
@@ -155,7 +155,7 @@ fn foreign_tables_do_not_borrow_observations_and_prefixes_preserve_tag_immutabil
         Outcome::Unsupported
     );
     assert_eq!(
-        check("x:=eventInternals()", false).outcome,
+        check("x:=eventInternals()+1", false).outcome,
         Outcome::Unsupported
     );
 }
@@ -307,7 +307,7 @@ fn assigned_aggregates_establish_single_row_bounds_in_sequence_and_reduce_childr
     }
     for query in [
         "head(10)|accumulate({n:=count()|split(n)})",
-        "head(10)|slidingWindow({n:=collect(user,multival=false)},events=2)",
+        "head(10)|slidingWindow({collect(user,multival=false)},events=2)",
     ] {
         let result = check(query, false);
         assert_eq!(result.outcome, Outcome::Invalid, "{query}: {result:?}");
@@ -354,12 +354,26 @@ fn sequence_stats_checks_descend_into_assigned_child_functions() {
                 "count()"
             };
             let raw = format!(
-                "head(10)|stats([{{{}{raw_function}}},{raw_sibling}])",
-                if assigned { "n:=" } else { "" }
+                "head(10)|stats([{{{}{}}},{raw_sibling}])",
+                if assigned && !sequence { "n:=" } else { "" },
+                if assigned && sequence {
+                    "partition(function={n:=sum(value)},condition=test(value>0))"
+                } else {
+                    raw_function
+                }
             );
-            let step = if assigned {
+            let step = if assigned && !sequence {
                 json!({"op":"assign","field":"n","expression":expression})
             } else {
+                let mut expression = expression.clone();
+                if assigned && sequence {
+                    let child = expression["args"][0]["value"].take();
+                    expression["args"][0]["value"] = json!({
+                        "kind":"query","plan":{"source":{},"steps":[
+                            {"op":"assign","field":"n","expression":child}
+                        ]}
+                    });
+                }
                 json!({"op":"call","function":expression["function"],"args":expression["args"]})
             };
             let typed = generate(json!({"source":{},"steps":[{"op":"head","limit":10},

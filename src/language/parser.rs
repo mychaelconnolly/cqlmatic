@@ -19,11 +19,23 @@ pub fn parse(input: &str) -> Result<Pipeline> {
             unsupported: false,
         });
     }
+    // Recognize function composition only when the complete query can be parsed.
+    parse_pipeline(input, false).or_else(|failure| {
+        if failure.unsupported {
+            parse_pipeline(input, true).map_err(|_| failure)
+        } else {
+            Err(failure)
+        }
+    })
+}
+
+fn parse_pipeline(input: &str, function_composition: bool) -> Result<Pipeline> {
     let mut p = Parser {
         input,
         pos: 0,
         depth: 0,
         nodes: 0,
+        function_composition,
     };
     let result = p.pipeline()?;
     if pipeline_depth(&result) > MAX_DEPTH {
@@ -41,6 +53,7 @@ struct Parser<'a> {
     pos: usize,
     depth: usize,
     nodes: usize,
+    function_composition: bool,
 }
 impl Parser<'_> {
     fn fail<T>(&self, message: &str, unsupported: bool) -> Result<T> {
@@ -305,7 +318,18 @@ impl Parser<'_> {
             if !name.eq_ignore_ascii_case("not") && self.eat("(") {
                 self.pos = start;
                 let name = self.identifier()?;
-                return Ok(Step::Call(self.call(name, start)?));
+                let call = self.call(name, start)?;
+                let end = self.pos;
+                let composition =
+                    self.function_composition && (self.keyword("AND") || self.keyword("OR"));
+                self.pos = end;
+                if composition {
+                    return self.nested(|p| {
+                        let first = p.or_tail(Filter::Call(call))?;
+                        Ok(Step::Filter(p.and_tail(first)?))
+                    });
+                }
+                return Ok(Step::Call(call));
             }
         }
         self.pos = start;
@@ -333,25 +357,33 @@ impl Parser<'_> {
     }
     fn and(&mut self) -> Result<Filter> {
         self.nested(|p| {
-            let mut xs = vec![p.or()?];
-            loop {
-                if p.keyword("AND") {
-                    xs.push(p.or()?);
-                } else if p.ending() {
-                    break;
-                } else {
-                    xs.push(p.or()?);
-                }
-            }
-            Ok(if xs.len() == 1 {
-                xs.remove(0)
+            let first = p.or()?;
+            p.and_tail(first)
+        })
+    }
+    fn and_tail(&mut self, first: Filter) -> Result<Filter> {
+        let mut xs = vec![first];
+        loop {
+            if self.keyword("AND") {
+                xs.push(self.or()?);
+            } else if self.ending() {
+                break;
             } else {
-                Filter::And(xs)
-            })
+                xs.push(self.or()?);
+            }
+        }
+        Ok(if xs.len() == 1 {
+            xs.remove(0)
+        } else {
+            Filter::And(xs)
         })
     }
     fn or(&mut self) -> Result<Filter> {
-        let mut xs = vec![self.primary_filter()?];
+        let first = self.primary_filter()?;
+        self.or_tail(first)
+    }
+    fn or_tail(&mut self, first: Filter) -> Result<Filter> {
+        let mut xs = vec![first];
         while self.keyword("OR") {
             xs.push(self.primary_filter()?);
         }

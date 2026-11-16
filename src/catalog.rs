@@ -76,15 +76,6 @@ pub fn resolve(call: &Call) -> Option<ResolvedCall<'_>> {
         }
         let name = if let Some(name) = &arg.name {
             name.as_str()
-        } else if function.name == "parseTimestamp"
-            && position == 0
-            && call
-                .args
-                .iter()
-                .any(|arg| arg.name.as_deref() == Some("field"))
-        {
-            position += 1;
-            "format"
         } else if function.name == "readFile" && position > 0 {
             position += 1;
             "file"
@@ -1558,7 +1549,7 @@ pub static FUNCTIONS: &[Function] = &[
     function!("parseHexString", Transform, ["field"], ["field"], ["as":"s","charset":"s","field":"f"]),
     function!("parseInt", Transform, ["field"], ["field"], ["as":"s","endian":"s","field":"f","radix":"v"]),
     function!("parseLEEF", Transform, ["field"], [], ["delimiter":"s","field":"f","headerprefix":"s","keeplabels":"b","labelprefix":"s","parsetime":"b","prefix":"s","timezone":"s"]),
-    function!("parseTimestamp", Transform, ["field"], ["field"], ["addErrors":"b","as":"s","caseSensitive":"b","field":"f","format":"s","timezone":"s","timezoneAs":"s","timezoneField":"f"]),
+    function!("parseTimestamp", Transform, ["format"], ["field"], ["addErrors":"b","as":"s","caseSensitive":"b","field":"f","format":"s","timezone":"s","timezoneAs":"s","timezoneField":"f"]),
     function!("parseUri", Transform, ["field"], ["field"], ["defaultBase":"s","field":"f","prefix":"s"]),
     function!("parseUrl", Transform, ["field"], [], ["as":"s","field":"f"]),
     function!("parseXml", Transform, ["field"], [], ["field":"f","prefix":"s","strict":"b"]),

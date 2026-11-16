@@ -35,7 +35,7 @@ fn raw_regex_and_wildcard_forms_warn_without_changing_acceptance() {
         "wildcard(\"needle*\",field=@rawstring)",
         "wildcard(\"needle*\",field=[user,@rawstring])",
         "wildcard(\"needle*\",field=[])",
-        "x:=regex(\"needle\")",
+        "x:=if(regex(\"needle\"),then=true,else=false)",
         "@rawstring match { /needle/ => x:=1; * => x:=2 }",
     ] {
         assert_eq!(raw_scan_warnings(query), 1, "{query}");
@@ -77,7 +77,7 @@ fn only_guaranteed_prior_narrowing_suppresses_the_advisory() {
         "case { #repo=one | x:=1; #repo=two | x:=2 } | regex(\"needle\")",
         "#repo=example | case { host=one | x:=1; * | x:=2 } | regex(\"needle\")",
         "#repo=example | objectArray:exists(\"items[]\",var=x,condition={regex(\"needle\")})",
-        "#repo=example | array:eval(\"items[]\",asArray=\"out[]\",var=x,function={out:=regex(\"needle\")})",
+        "#repo=example | array:eval(\"items[]\",asArray=\"out[]\",var=x,function={out:=if(regex(\"needle\"),then=true,else=false)})",
     ] {
         assert_eq!(raw_scan_warnings(query), 0, "{query}");
     }

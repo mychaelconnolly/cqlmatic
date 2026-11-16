@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- `check` rejects free text after the first aggregate with `CQL_FREE_TEXT_AFTER_AGGREGATE`: bare words, quoted strings, standalone regex literals and `wildcard()` without `field`, at any depth and inside `case` and `match` branches. For example, `groupBy(y) | head 10` was accepted in 0.1.7; write `groupBy(y) | head(10)`. Field comparisons and the match-all term `*` remain valid after aggregation, and `join` and `defineTable` subqueries start fresh. `createEvents`, `readFile`, `readPersistedAggregation` and `correlate` count as aggregates for this rule.
+- Function arguments must be calls. `stats(count)`, `stats([count])` and `groupBy(k, function=count)` report `CQL_ARGUMENT_TYPE`; write `count()`. 0.1.7 accepted bare aggregate names here.
+- Direct assignment `field := f(...)` requires a function with an `as` parameter. `v := collect(user)` and `v := table([a])` report `CQL_ASSIGN_ALIAS`, as does an `as` argument given by name or position next to the assignment.
+- `parseTimestamp` binds its unnamed argument to `format` and requires `field` by name, as in `parseTimestamp("millis", field=timestamp)`. `parseTimestamp(timestamp)` reports `CQL_ARGUMENT_REQUIRED`.
+- A function call joined to another term with `AND` or `OR`, such as `lower(y) OR z=2`, is rejected with `CQL_FUNCTION_FILTER_COMPOSITION` instead of returning an unknown result. Use a pipe for conjunctions or `case` for alternatives.
+
 ## 0.1.7
 
 - The executable profile is `cqlmatic-ngsiem-core-v3` with a new knowledge revision. Raw checking and typed function calls cover 194 Query candidate function names with bounded contracts, up from 67: 193 current candidates and deprecated `lowercase`, which remains distinct from `lower`. The bundled function ledger lists parser-only `copyEvent` and unreleased `math:spherical2cartesian` as excluded.

@@ -77,7 +77,13 @@ fn text_filters_keep_expression_inputs_and_filter_only_contexts() {
             check(&format!(r#"x := {function}(user, substring="a")"#)),
             generate(&function, args.clone(), true),
         ] {
-            assert_eq!(result.outcome, Outcome::Unsupported, "{result:?}");
+            assert_eq!(result.outcome, Outcome::Invalid, "{result:?}");
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "CQL_ASSIGN_ALIAS")
+            );
             assert!(
                 result
                     .diagnostics
@@ -187,9 +193,13 @@ fn object_array_distances_have_bounded_expression_lists_and_no_scalar_result() {
     ready(check(
         r#"text:editDistanceAsArray(target=user,references=["alice",text:trim(other)],maxDistance=5,asArray=distances,ignoreCase=true,allowTranspositions=false) | distances[0].distance=*"#,
     ));
-    assert_eq!(
-        generate("text:editDistanceAsArray", args, true).outcome,
-        Outcome::Unsupported
+    let scalar = generate("text:editDistanceAsArray", args, true);
+    assert_eq!(scalar.outcome, Outcome::Invalid, "{scalar:?}");
+    assert!(
+        scalar
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_ASSIGN_ALIAS")
     );
     for references in ["[]", "[{}]", "[[\"alice\"]]", "\"alice\""] {
         assert_ne!(

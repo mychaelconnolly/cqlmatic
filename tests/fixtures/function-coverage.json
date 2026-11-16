@@ -2933,8 +2933,8 @@
         "documented_signature"
       ],
       "placement": "pipeline",
-      "query": "parseTimestamp(\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")",
-      "canonical": "parseTimestamp(\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")"
+      "query": "parseTimestamp(field=\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")",
+      "canonical": "parseTimestamp(field=\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")"
     },
     {
       "id": "parseUri",
@@ -3744,7 +3744,7 @@
         "documented_signature"
       ],
       "placement": "pipeline",
-      "query": "stats(count)",
+      "query": "stats(count())",
       "canonical": "stats(count())"
     },
     {
@@ -4586,8 +4586,8 @@
         "expression"
       ],
       "placement": "scalar-predicate",
-      "query": "matched := wildcard(\"a*\", field=\"message\")",
-      "canonical": "matched := wildcard(\"a*\", field=\"message\")"
+      "query": "matched := if(wildcard(\"a*\", field=\"message\"), then=true, else=false)",
+      "canonical": "matched := if(wildcard(\"a*\", field=\"message\"), then=true, else=false)"
     },
     {
       "id": "wildcard-negated",
@@ -4988,7 +4988,7 @@
     },
     {
       "id": "transform-scalar-context",
-      "query": "result := parseJson()",
+      "query": "result := 1 + parseJson()",
       "outcome": "unsupported",
       "typed": true,
       "diagnostic": "CQL_UNSUPPORTED_SCALAR_FUNCTION"

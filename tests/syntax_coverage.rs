@@ -13,6 +13,77 @@ fn check(query: &str) -> Analysis {
 }
 
 #[test]
+fn free_text_must_precede_the_first_aggregate() {
+    for query in [
+        r#""Lorem ipsum dolor" | tail(200) | "sit amet, consectetur""#,
+        "x=1 | groupBy(y) | head 10",
+        "x=1 | groupBy(y) | sort -_count | head 10",
+        "x=1 | count() | foo",
+        "x=1 | sort(y) | foo",
+        "x=1 | table([a]) | foo",
+        "x=1 | groupBy(y) | /foo/",
+        "x=1 | groupBy(y) | NOT foo",
+        "x=1 | groupBy(y) | a=1 OR foo",
+        r#"x=1 | count() | wildcard("a*")"#,
+        "groupBy(k) | case { foo; * }",
+        "head(1) | series(user, startmatch={foo})",
+        r#"createEvents(["a=1"]) | foo"#,
+        "count() | a=1 AND (b=2 OR NOT /foo/)",
+        "count() | k match { a => foo; * => * }",
+        "case { a=1 | count(); * } | foo",
+        "k match { a => count(); * => * } | foo",
+        r#"readFile("lookup.csv") | foo"#,
+        r#"readPersistedAggregation("hourly") | foo"#,
+        "correlate(A: { x=1 }) | foo",
+        "n := count() | foo",
+        "count() | wildcard(\"a*\", field=y) | foo",
+        "count() | selfJoinFilter(field=k, where=[{foo}])",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Rejected,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "CQL_FREE_TEXT_AFTER_AGGREGATE"
+                    && diagnostic.severity == Severity::Error
+                    && diagnostic.message.contains("Free-text")
+            }),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    for query in [
+        r#""Lorem ipsum dolor" | "sit amet" | tail(200)"#,
+        "x=1 | eval(z=1) | foo",
+        "x=1 | tail(200) | y=2",
+        "count() | *",
+        "count() | _count=*",
+        "count() | case { _count>1; * }",
+        "x=1 | groupBy(y) | @rawstring=/foo/",
+        "groupBy(k) | join({foo}, field=k)",
+        r#"x=1 | count() | wildcard("a*", field=y)"#,
+        r#"count() | wildcard("a*", field=[])"#,
+        "foo | groupBy(k)",
+        r#"wildcard("a*") | count()"#,
+        r#"createEvents(["a=1"]) | a=1"#,
+        "case { a=1 | count(); foo } | _count=*",
+        "defineTable(name=t, query={foo | count()}, include=[_count]) | foo",
+        "groupBy(k) | join({foo}, field=k) | _count=*",
+        "head(1) | series(user, startmatch={user=*})",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn saved_query_calls_require_resource_resolution() {
     for query in [
         "$helper()",

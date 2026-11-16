@@ -411,6 +411,7 @@ fn raw_boolean_composition_cannot_embed_filter_function_calls() {
     for query in [
         r#"user=alice AND in(user, values=["alice"])"#,
         r#"user=bob OR in(user, values=["alice"])"#,
+        r#"in(user, values=["alice"]) OR user=bob"#,
         r#"user=alice in(user, values=["alice"])"#,
         r#"user=alice AND not in(user, values=["bob"])"#,
         r#"selfJoinFilter(user, where=[{ user=alice OR in(user, values=["alice"]) }])"#,
@@ -436,10 +437,6 @@ fn raw_boolean_composition_cannot_embed_filter_function_calls() {
     ] {
         assert_eq!(check(query).outcome, Outcome::Ready, "{query}");
     }
-    assert_eq!(
-        check(r#"in(user, values=["alice"]) OR user=bob"#).outcome,
-        Outcome::Unsupported
-    );
     assert_eq!(
         check(r#"! (user=alice OR in(user, values=["alice"]))"#).outcome,
         Outcome::Invalid
