@@ -283,7 +283,7 @@ fn array_paths_and_scope_resets_preserve_only_current_uncertainty() {
     for q in [
         r#"#repo=example | select(user) | splitString(user,by=",",as=items) | split(items) | select(user) | items.k:=user | items.k=*"#,
         r#"#repo=example | select(user) | splitString(user,by=",",as=items) | split(items) | stats() | items.k:=_count | items.k=*"#,
-        r#"#repo=example | select(user) | splitString(user,by=",",as=items) | split(items,strip=true) | count() | default(k,value=1) | k=*"#,
+        r#"#repo=example | select(user) | splitString(user,by=",",as=items) | split(items,strip=true) | count() | default(field=k,value=1) | k=*"#,
         r#"#repo=example | user.k:=1 | array:eval("items[]",asArray="out[]",var=user,function={out:=user.k})"#,
         r#"#repo=example | select(user) | "a[0].v[0]":=1 | array:eval("a[0].v[]",asArray="out[]",var=x,function={out:=x})"#,
         r#"#repo=example | select(user) | "outer[0].items[0]":=1 | array:length("outer[0].items[]",as=n)"#,

@@ -16,16 +16,16 @@ The same engine powers the **"THIS IS CQL"** agent, where those mechanics were u
 
 CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crowdstrike.com/en-us/blog/five-lessons-from-agentworks-hackathon/) recognized the agent as a notable runner-up in the AgentWorks Hackathon. Judges at [CrowdStrike and NVIDIA](https://www.crowdstrike.com/en-us/platform/charlotte-ai/agentworks-hackathon/) highlighted its reproducible tests and willingness to return inconclusive verdicts.
 
-**CQLmatic v0.1.6 is available for testing. Testers and feedback are welcome.** Try it in your environment and share setup, discovery, and query-writing gaps using sanitized examples.
+**CQLmatic v0.1.7 is available for testing. Testers and feedback are welcome.** Try it in your environment and share setup, discovery, and query-writing gaps using sanitized examples.
 
-Version `0.1.6` adds manual inventory refresh with 30-day reminders, recovery for partially completed setup, and discovery that can pause and resume. A bounded status response helps assistants track pending work, while measurement and query-field fixes preserve the distinction between hints and evidence.
+Version `0.1.7` widens offline checking: the `cqlmatic-ngsiem-core-v3` profile provides bounded contracts and offline guidance for 194 Query candidate function names, up from 67. It adds optional target capability checks after field-pack activation, keeps discovery history from earlier releases readable after an upgrade, and reports saved results it cannot fully verify as inconclusive. Inspect `cqlmatic catalog --profile` for the profile and knowledge revision in your installed binary; older release packages do not gain these changes automatically.
 
-**[Try v0.1.6](#try-v016)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
+**[Try v0.1.7](#try-v017)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
 
 **Quick start:**
 
 ```sh
-npx cqlmatic@0.1.6 setup
+npx cqlmatic@0.1.7 setup
 ```
 
 Use an assistant with local command access and an authorized CrowdStrike connection. Basic `generate` and `check` work without discovery. Quick inventory scopes a short, authorized scout to a chosen view or `search-all`; full discovery can take substantial time and assistant tokens.
@@ -66,7 +66,7 @@ Use the [tester feedback form](https://github.com/mychaelconnolly/cqlmatic/issue
 
 ## Technical details
 
-### Try v0.1.6
+### Try v0.1.7
 
 Use the latest security patch on a supported Node.js release line: **22.x at 22.23.4 or later, 24.x at 24.22.1 or later, or 26.x at 26.12.1 or later**. These minimums include the [Node2Shell fix in Node.js's October security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). End-of-life lines are excluded.
 
@@ -75,37 +75,37 @@ Run these commands from outside the CQLmatic source checkout. Inside that checko
 Run setup on demand:
 
 ```sh
-npx cqlmatic@0.1.6 setup
-npx cqlmatic@0.1.6 env inventory
-npx cqlmatic@0.1.6 status
+npx cqlmatic@0.1.7 setup
+npx cqlmatic@0.1.7 env inventory
+npx cqlmatic@0.1.7 status
 ```
 
-The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.6` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
+The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.7` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
 
-For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. Version `0.1.6` provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
+For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. Version `0.1.7` provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
 
 Your Falcon account needs the MCP and underlying data permissions for the searches you authorize. Full parser inventory also needs a **separate Falcon API client with NGSIEM Parsers: READ**. Setup, OAuth consent, allowlisting, and Falcon permissions are described in [the setup guide](docs/SETUP.md).
 
-For **Windows x86_64**, use the prebuilt `cqlmatic-v0.1.6-windows-x86_64.zip` from [Release v0.1.6](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.6). It contains `cqlmatic.exe`; Rust and C++ build tools are not required.
+For **Windows x86_64**, use the prebuilt `cqlmatic-v0.1.7-windows-x86_64.zip` from [Release v0.1.7](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.7). It contains `cqlmatic.exe`; Rust and C++ build tools are not required.
 
 1. Download the ZIP and `SHA256SUMS` into the same folder. In PowerShell, change to that folder and compute the ZIP's hash:
 
    ```powershell
-   Get-FileHash .\cqlmatic-v0.1.6-windows-x86_64.zip -Algorithm SHA256
+   Get-FileHash .\cqlmatic-v0.1.7-windows-x86_64.zip -Algorithm SHA256
    ```
 
 2. Compare the hash with the ZIP's entry in `SHA256SUMS`. Continue only if they match. Extract into a new folder under your user profile:
 
    ```powershell
-   Expand-Archive .\cqlmatic-v0.1.6-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.6"
+   Expand-Archive .\cqlmatic-v0.1.7-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.7"
    ```
 
 3. Check the executable, then start setup:
 
    ```powershell
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.6\cqlmatic-v0.1.6\cqlmatic.exe" --version
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.6\cqlmatic-v0.1.6\cqlmatic.exe" --help
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.6\cqlmatic-v0.1.6\cqlmatic.exe" setup
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.7\cqlmatic-v0.1.7\cqlmatic.exe" --version
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.7\cqlmatic-v0.1.7\cqlmatic.exe" --help
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.7\cqlmatic-v0.1.7\cqlmatic.exe" setup
    ```
 
 Administrator access and a global PATH change are unnecessary. See [Windows installation](docs/SETUP.md#install-on-windows) for the full procedure.
@@ -134,6 +134,8 @@ A field name in a reference guide does not tell you whether your data contains i
 
 Every installation starts with a **blank canvas**. Your map is built from your environment and saved locally for later queries. Parser declarations, observed fields, historical evidence, and unfinished work remain distinct. Discovery is limited to the confirmed target, permissions, time windows, and budgets; it cannot reveal telemetry outside your account's visibility.
 
+After a field pack is active, **capabilities (optional)** in `cqlmatic env inventory` offers a separate, finite set of function checks. They are off by default, and choosing Later preserves the completed map. Positive observations apply only to the tested argument shape, current authorization context, environment/view and case revision, and expire after 30 days. They do not confirm every function or feature. See [the exact actions and evidence limits](USAGE.md#optional-function-capability-checks).
+
 ### Write with the saved map
 
 Generation, checking, and saved-result assessment reuse the confirmed local inventory's active pack in both Full and Quick modes. Use `status` to inspect its target, path, and remaining gaps:
@@ -161,6 +163,8 @@ Initial discovery is extensive. It uses multiple searches and may take substanti
 Recipes, typed plans, and bounded English share one deterministic construction pipeline. Typed plans support joins and linked searches.
 
 Bundled CQL guidance and CPS/ECS field references are also searchable offline through the [catalog](USAGE.md#look-up-syntax-and-fields).
+
+The source profile covers 193 current Query candidates plus deprecated `lowercase`; the [reference ledger](data/function-scope.json) separately excludes parser-only `copyEvent` and unreleased `math:spherical2cartesian`. Reference lookup, typed construction and raw checking each have bounded coverage. Unresolved dashboard parameters and saved-query helpers have no binding/substitution interface and remain unsupported.
 
 Use `--require-observed` to require qualifying snapshot evidence for referenced deployment fields. Keep matching modes, missing-field choices, and exact versus estimated distinct counts explicit. Supported hazards include grouping ceilings even with `limit=max`.
 

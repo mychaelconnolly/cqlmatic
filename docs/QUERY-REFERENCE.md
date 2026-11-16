@@ -1,6 +1,6 @@
 # Query authoring reference
 
-This is the executable authoring surface of profile `cqlmatic-ngsiem-core-v2`, schema version 1. It describes construction and offline checks, not the entire CrowdStrike Query Language (CQL). Start with [the workflow](FLOW.md) and [assurance boundaries](COVERAGE.md). Use [contracts](CONTRACTS.md) for command framing and [result assessment](RESULT-ASSESSMENT.md) after execution. A `ready` result means the implemented checks passed; execution is still `not-run`. It does not establish field meaning, vendor compiler parity, target capability, execution completeness, or the accuracy of unrestricted English interpretation.
+This is the executable authoring surface of profile `cqlmatic-ngsiem-core-v3`, schema version 1. It describes construction and offline checks, not the entire CrowdStrike Query Language (CQL). Start with [the workflow](FLOW.md) and [assurance boundaries](COVERAGE.md). Use [contracts](CONTRACTS.md) for command framing and [result assessment](RESULT-ASSESSMENT.md) after execution. A `ready` result means the implemented checks passed; execution is still `not-run`. It does not establish field meaning, vendor compiler parity, target capability, execution completeness, or the accuracy of unrestricted English interpretation.
 
 The owning definitions are [contracts.rs](../src/contracts.rs), [plan lowering](../src/language/plan.rs), [bounded English](../src/language/english.rs), [raw parser](../src/language/parser.rs), [static checks](../src/language/validate.rs), and [function resolution](../src/catalog.rs). [GenerateRequest JSON schema](../schemas/generate.json) is the machine-readable contract. Unknown fields are rejected in request/plan objects; JSON `null` is not a scalar literal.
 
@@ -20,7 +20,7 @@ A full request has `schema_version: 1`, `input`, optional `id` (default absent),
 - `{"mode":"recipe","request":{"recipe": ID,"params": PARAMS}}`.
 - `{"mode":"english","text": TEXT,"source": SCOPE}`.
 
-Context supports optional `environment`, `confirmed_fields: []`, `require_observed: false`, `accept_mixed_record_kinds: false`, and `accept_partial_coverage: false`. The CLI merges `--require-observed`, `--accept-mixed-record-kinds`, and `--accept-partial-coverage` with request context; `grounding.policy` reports the effective values on every analysis outcome. Confirmed fields record caller-supplied context, not observations. Use the environment/grounding workflow for strict evidence; do not add confirmations merely to clear a diagnostic. CLI target selection for API or MCP execution is separate from query source scope: `#repo` filters rows inside the selected API/MCP target; it does not choose that target, switch tenants, authorize access, or establish repository availability.
+Context supports optional `environment`, `execution_context_id`, `confirmed_fields: []`, `require_observed: false`, `accept_mixed_record_kinds: false`, and `accept_partial_coverage: false`. The CLI merges `--require-observed`, `--accept-mixed-record-kinds`, and `--accept-partial-coverage` with request context; `grounding.policy` reports the effective values on every analysis outcome. Confirmed fields record caller-supplied context, not observations. Use the environment/grounding workflow for strict evidence; do not add confirmations merely to clear a diagnostic. CLI target selection for API or MCP execution is separate from query source scope: `#repo` filters rows inside the selected API/MCP target; it does not choose that target, switch tenants, authorize access, or establish repository availability.
 
 Strict grounding normally requires qualifying source and field provenance with `complete`, `observed-only`, or `reconciled` coverage. `--accept-partial-coverage` also accepts positive, current source/field observations whose deployment provenance is marked `partial`; `CQL_PARTIAL_COVERAGE` retains the affected field, retrieval date and observation window (or identifies an unrecorded window). It does not accept stale, absent, nonobserved, ambiguous-source or mixed-record-kind evidence. With strict grounding disabled, `CQL_GROUNDING_LENIENT` warns only when a ready assessment relies on weak deployment evidence. Fully observed fields, built-ins and query-produced values do not produce that warning. Both advisories retain `ready`; `--fail-on-warning` returns exit 1.
 
@@ -58,7 +58,7 @@ Positive regex extraction can produce named capture fields; optional captures or
 
 ### Expressions and arguments
 
-An argument is `{"value": EXPRESSION}` for a positional argument or `{"name":"ARG","value":EXPRESSION}` for a named argument. `name` defaults to absent. Argument order is retained; duplicate resolved names, excess positional arguments, unknown arguments, and missing required arguments are diagnosed. Prefer named arguments when multiple roles could be confused.
+An argument is `{"value": EXPRESSION}` for a positional argument or `{"name":"ARG","value":EXPRESSION}` for a named argument. `name` defaults to absent. Argument order is retained; duplicate resolved names, excess positional arguments, unknown arguments, and missing required arguments are diagnosed. Prefer named arguments when multiple roles could be confused. Documented exceptions are explicit: `readFile` combines multiple unnamed resources in order, and `math:mod` accepts its two unnamed operands. An array-valued parameter does not imply arbitrary variadic support for other functions.
 
 Every expression uses `kind`:
 
@@ -102,7 +102,7 @@ A `group` aggregate uses `function`: `count`, `sum`, `avg`, `min`, or `max`. Cou
 
 A standalone exact distinct count first excludes missing values, then groups the field with `limit=max`, then counts groups. This avoids an estimator but is exact only if execution preserves all relevant groups; memory/group ceilings still apply. Estimated mode emits `count(field=...,distinct=true)` and `CQL_APPROXIMATE_DISTINCT`. `groupBy(limit=max)` emits informational `CQL_GROUPBY_LIMIT`; omitted/numeric limits warn because groups may be discarded before sorting. These are separate from actual execution cap evidence.
 
-Typed `head`/`tail` require a JSON integer. Generic calls and raw CQL additionally accept the literal `max` for `head`, `tail`, and `table` (StateRowLimit, default 200,000); `sort`, `top`, and `collect` remain integer-only. A row cap does not prove complete input processing.
+Dedicated typed `sort`, `head` and `tail` stages require a JSON integer limit. Generic calls and raw CQL additionally accept the literal `max` for `sort`, `head`, `tail` and `table`; it uses the target's configurable `StateRowLimit`, whose documented default is 200,000. `top` and `collect` remain integer-only. A row cap does not prove complete input processing.
 
 `join` stage exposes one field/key pair; generic `call` supports equal-length nonempty field/key arrays for multi-key joins. The generic form also exposes target/window arguments. A typed correlation query is `{"name":"LABEL","plan":PLAN}`; each link is `{"from":"LABEL","field":"FIELD","to":"OTHER","key":"FIELD"}`. Unknown/self links are rejected. For named-query include/anchors and correlation aggregation, use the generic typed `correlate` call.
 
@@ -177,17 +177,28 @@ Raw checking parses an existing query; it does not accept the typed JSON variant
 - Empty input, whitespace-only input and `*` are match-all inputs. Pipes separate stages and cannot trail the query.
 - Whitespace, `//` line comments and closed `/* ... */` comments are consumed between tokens. Block comments are not nested. Quote slash-heavy text when it would be ambiguous with comments/regex.
 - Bare identifiers admit alphanumeric characters, `_`, `@`, `#`, `.`, qualified `:` segments, and physical numeric indices such as `items[0].name`. Quote other filter/output names with double quotes. Double-quote assignment field names that start with a NOT, AND or OR segment in any ASCII letter case, such as `"not.user" := "alice"`. Expression fields must be bare-compatible. Backtick/single-quote syntax is outside this subset.
-- Double-quoted strings use JSON escapes and cannot span raw lines. Filter patterns can be quoted/unquoted text, `/REGEX/flags`, or `?parameter`. Unresolved parameters are reported as unsupported; the checker does not substitute them.
+- Double-quoted strings use JSON escapes and cannot span raw lines. Filter patterns can be quoted/unquoted text, `/REGEX/flags`, or `?parameter`. Unresolved parameters are reported as unsupported; the checker does not substitute them. Saved-query/parser macro calls and saved-query argument substitution remain outside this profile. A recognized `beta:param()` call does not add parameter substitution to the parser.
 - Filters support `=`, `!=`, `<`, `<=`, `>`, `>=`, `like`, standalone text/regex, `true`, `false`, `NOT`/`!`, parentheses, explicit AND and implicit whitespace AND. CQL filter **OR binds before AND**: `a=1 AND b=2 OR c=3` means `a=1 AND (b=2 OR c=3)`. Parenthesize intentionally. This differs from bounded English, which rejects mixed operators without grouping.
 - Function calls use comma-separated positional/named arguments. Function lookup is case-insensitive; argument names/accepted value spellings must match their contracts. Assignments use `:=`. Expressions accept unary `!`, `-`, `+`; `* / %`, then `+ -`, then comparisons `== != <= >= < >`; binary operations associate left. Boolean `AND`/`OR` or `&&` are not scalar-expression operators.
 - Arrays use `[VALUE,...]`; an aggregate list as a pipeline stage is parsed as `stats([...])`. Unlabeled subqueries use `{ PIPELINE }`; named queries use `Name: { PIPELINE }`. Named attributes are `include: ...`, `after: ...`, `before: ...`, with the context checks below.
 - Ordered branches use `case { PIPELINE; PIPELINE }` and `FIELD match { PATTERN => PIPELINE; * => PIPELINE }`. A final semicolon is accepted. Links use `FIELD <=> Label.FIELD` in qualified correlation branches.
 
-Regex syntax checks include literals, escaped metacharacters, character classes/ranges, alternation, capturing/noncapturing/named groups, repetition, anchors, common shorthand classes and word boundaries. Literal suffix flags are distinct `i`, `m`, `d`; bounded inline `i/m/s` modifiers are checked. Lookarounds, backreferences, non-ASCII case folding, Unicode property/quoted escapes and engine-switch flags are outside the profile. Function regex arguments are strings and have their own flags argument; omission uses the checked function default (`m` in regex validation). The checker parses syntax without executing a substitute regex engine.
+Regex syntax checks include literals, escaped metacharacters, character classes/ranges, alternation, capturing/noncapturing/named groups, repetition, anchors, common shorthand classes and word boundaries. Literal/function flags are distinct `i`, `m`, `d`, `F`; bounded inline `i/m/s` modifiers are checked. Lookarounds, backreferences, non-ASCII case folding, Unicode property/quoted escapes are outside the profile. Accepting `F` records the requested engine selection; it does not implement or verify that engine on the target. Function regex arguments are strings and have their own flags argument; omission uses the checked function default (`m` in regex validation). The checker parses syntax without executing a substitute regex engine.
 
 ## Function contracts
 
-The index below is the complete 67-function output of `catalog --functions --limit 100`. It describes the bundled contract, not all vendor defaults. Every row's placement metadata is “pipeline; nested use requires the scalar, aggregate or subquery context checked by this profile.” `scalar=yes` is permission for qualified scalar forms, not every argument combination. Use `catalog FUNCTION --full` to find broader attributed knowledge; that knowledge can cover forms outside executable support.
+The executable catalog has bounded contracts for the 194 Query candidate names in [the function scope ledger](../data/function-scope.json). The official page enumeration reviewed on 2026-11-14 contains 196 names: 193 current Query candidates, deprecated Query use of `lowercase`, parser-only `copyEvent`, and unreleased `math:spherical2cartesian`. Deprecation is separate from availability: `lowercase` retains its own contract and is not an alias for `lower`.
+
+```sh
+cqlmatic catalog --functions --limit 250
+cqlmatic catalog 'array:reduceRow' --functions
+cqlmatic catalog 'cql:function:array:reduceRow' --full --limit 1
+cqlmatic catalog --profile
+```
+
+`--functions` reports the current argument names, positional roles, required values, base effect, scalar support and requirements from [the Rust catalog](../src/catalog.rs). [Parameter facts](../data/function-parameters.json) supply qualified documented choices, bounds and defaults; Rust contracts remain the argument-type authority. An empty choice list is not permission for arbitrary semantics, and a deployment-controlled maximum is not made universal by its documented default.
+
+Documentation membership, lookup guidance and executable forms are separate. The scope ledger records additional documented forms and their conditions; it does not certify each form as implemented. Typed calls must lower through the structured plan and pass the same contextual checks as parsed CQL. Bounded English covers only its grammar above. Field grounding, optional target capability observations and result assessment add different evidence; none establishes full vendor-compiler parity or validates unrestricted English interpretation.
 
 Argument type codes:
 
@@ -201,89 +212,41 @@ Argument type codes:
 | `e`, `p`, `e[]` | Scalar expression; predicate expression (same shape check); array of scalar expressions |
 | `r` | Quoted regex-pattern string, checked separately |
 | `d` | Positive whole-number fixed duration |
-| `y` | Bare-compatible array name ending `[]`; no nested empty-index prefix/backtick member syntax |
+| `y`, `z` | Structured array name ending `[]`; documented prefix-style array arguments where that contract permits them; no arbitrary field-pattern expansion |
 | `u` | Nonaggregate inline function or unlabeled pipeline |
 | `q`, `q[]` | Unlabeled query with no attributes; array of filter-only queries |
 | `Q`, `Q[]` | Named query; array of named correlation aggregation queries |
-| `g` | Aggregate call or aggregate-call array, with aggregate context checks |
+| `g` | Aggregate call, qualified aggregate pipeline, or array of these; the nested context must actually aggregate |
 | `P` | Scalar rename source or array of explicit `[old,new]` pairs |
-| `a` | Syntactic array only; unqualified element/execution contract is unsupported |
+| `a`, `N`, `B` | General array where qualified; numeric array; explicit bit-index/name pairs |
+| `R`, `t` | Connection-dependent remote query; qualified time literal |
 
 Fixed durations are whole numbers with `ms/millisecond(s)`, `s/sec/second(s)`, `m/min/minute(s)`, `h/hour(s)`, `d/day(s)`, or `w/week(s)`; spaces before the unit are accepted in quoted values. Zero, fractions, calendar units and anchored duration forms are unsupported. Signed anchor offsets additionally require `+` or `-`; a signed zero offset is syntactically supported but remains subject to interval/dimension checks.
 
-### Complete function contract index
+### Function families
 
-“Required” and “positional” are independent: other listed arguments may be named, and aliases below resolve before duplicate checking. `eval` takes dynamic named expressions, not arbitrary unknown options. All rows also remain subject to the contextual rules after the table.
+This family index covers every candidate name. Use the executable catalog output for the current per-argument contract; a family label does not permit every member in every scalar, aggregate or subquery position.
 
-| Function | Named arguments and type codes | Required | Positional order | Base effect | Scalar |
-| --- | --- | --- | --- | --- | --- |
-| `cidr` | `field:f`, `subnet:S`, `file:s`, `column:f`, `negate:b` | `field` | `field` | filter | yes |
-| `base64Decode` | `field:f`, `as:s`, `charset:s` | `field` | `field` | transform | yes |
-| `urlDecode` | `field:f`, `as:s` | `field` | `field` | transform | yes |
-| `shannonEntropy` | `field:f`, `as:s` | `field` | `field` | transform | yes |
-| `splitString` | `field:f`, `by:r`, `as:s`, `index:j` | `by` | `field` | transform | yes |
-| `coalesce` | `expressions:e[]`, `as:s`, `ignoreEmpty:b` | `expressions` | `expressions` | transform | yes |
-| `getField` | `source:e`, `as:s` | `source` | `source` | transform | yes |
-| `count` | `field:f`, `distinct:b`, `as:s` | — | `field` | aggregate | no |
-| `groupBy` | `field:F`, `function:g`, `limit:l` | `field` | `field` | aggregate | no |
-| `stats` | `function:g` | — | `function` | aggregate | no |
-| `sum` | `field:f`, `as:s` | `field` | `field` | aggregate | no |
-| `avg` | `field:f`, `as:s` | `field` | `field` | aggregate | no |
-| `min` | `field:f`, `as:s` | `field` | `field` | aggregate | no |
-| `max` | `field:f`, `as:s` | `field` | `field` | aggregate | no |
-| `collect` | `fields:F`, `limit:i`, `multival:b`, `separator:s` | `fields` | `fields` | aggregate | no |
-| `selectFromMax` | `field:f`, `include:F` | `field`, `include` | `field` | aggregate | no |
-| `selectFromMin` | `field:f`, `include:F` | `field`, `include` | `field` | aggregate | no |
-| `selectLast` | `fields:A` | `fields` | `fields` | aggregate | no |
-| `top` | `field:F`, `as:s`, `error:n`, `limit:i`, `max:f`, `percent:b`, `rest:s`, `sum:f` | `field` | `field` | aggregate | no |
-| `formatTime` | `format:s`, `as:s`, `field:e`, `locale:s`, `timezone:s`, `unit:s` | `format` | `format` | transform | yes |
-| `select` | `fields:F` | `fields` | `fields` | transform | no |
-| `drop` | `fields:A` | `fields` | `fields` | transform | no |
-| `rename` | `field:P`, `as:s` | `field` | `field` | transform | no |
-| `head` | `limit:l` | — | `limit` | aggregate | no |
-| `tail` | `limit:l` | — | `limit` | aggregate | no |
-| `sort` | `field:F`, `order:S`, `type:S`, `limit:i`, `reverse:b` | — | `field` | aggregate | no |
-| `table` | `fields:F`, `sortby:F`, `order:S`, `type:S`, `limit:l`, `reverse:b` | `fields` | `fields` | aggregate | no |
-| `fieldset` | — | — | — | aggregate | no |
-| `eval` | dynamic named expressions | — | — | transform | no |
-| `test` | `expression:p` | `expression` | `expression` | filter | no |
-| `in` | `field:f`, `values:s[]`, `ignoreCase:b` | `field`, `values` | `field` | filter | yes |
-| `wildcard` | `pattern:s`, `field:F`, `ignoreCase:b`, `includeEverythingOnAsterisk:b` | `pattern` | `pattern` | filter | yes |
-| `regex` | `regex:r`, `field:f`, `flags:s`, `strict:b`, `repeat:b`, `limit:i` | `regex` | `regex` | filter | yes |
-| `parseJson` | `field:f`, `prefix:s`, `exclude:F`, `include:F`, `handleNull:s`, `removePrefixes:s[]`, `excludeEmpty:b` | — | `field` | transform | no |
-| `kvParse` | `field:F`, `as:s`, `prefix:s`, `excludeEmpty:b`, `onDuplicate:s`, `separator:s`, `separatorPadding:s`, `override:b` | — | `field` | transform | no |
-| `lower` | `field:f`, `as:s`, `locale:s`, `type:s` | `field` | `field` | transform | yes |
-| `upper` | `field:f`, `as:s`, `locale:s` | `field` | `field` | transform | yes |
-| `length` | `field:f`, `as:s` | `field` | `field` | transform | yes |
-| `concat` | `field:F`, `as:s` | `field` | `field` | transform | yes |
-| `split` | `field:f`, `strip:b` | — | `field` | transform | no |
-| `replace` | `regex:r`, `with:s`, `field:f`, `as:s`, `flags:s` | `regex` | `regex` | transform | yes |
-| `format` | `format:s`, `field:F`, `as:s`, `timezone:s` | `format`, `field` | `format` | transform | yes |
-| `default` | `field:F`, `value:v`, `replaceEmpty:b` | `field`, `value` | `field` | transform | no |
-| `round` | `field:f`, `as:s`, `how:s` | `field` | `field` | transform | yes |
-| `if` | `condition:e`, `then:e`, `else:e`, `as:s` | `condition`, `then`, `else` | `condition` | transform | yes |
-| `array:contains` | `array:f`, `value:e` | `array`, `value` | `array` | filter | yes |
-| `array:length` | `array:f`, `as:s` | `array` | `array` | transform | yes |
-| `array:eval` | `array:y`, `asArray:y`, `function:u`, `var:s` | `array`, `function` | `array` | transform | no |
-| `array:filter` | `array:y`, `asArray:y`, `function:u`, `var:s` | `array`, `function` | `array` | transform | no |
-| `objectArray:eval` | `array:y`, `asArray:y`, `function:u`, `var:s` | `array`, `asArray`, `function` | `array` | transform | no |
-| `objectArray:exists` | `array:y`, `condition:u`, `var:s` | `array`, `condition` | `array` | filter | yes |
-| `join` | `query:q`, `field:F`, `key:F`, `include:F`, `mode:s`, `limit:i`, `max:i`, `start:s`, `end:s`, `view:s`, `repo:s`, `live:b` | `query`, `field` | `query` | filter | no |
-| `defineTable` | `name:s`, `query:q`, `include:F`, `start:s`, `end:s`, `view:s` | `name`, `query`, `include` | `query` | definition | no |
-| `match` | `file:s`, `table:s`, `field:F`, `column:F`, `include:F`, `strict:b`, `ignoreCase:b`, `nrows:l`, `glob:b`, `mode:s` | `file`, `field` | `file` | filter | no |
-| `asn` | `field:f`, `as:s` | — | `field` | transform | no |
-| `ipLocation` | `field:f`, `as:s` | — | `field` | transform | no |
-| `ioc:lookup` | `field:F`, `type:s`, `confidenceThreshold:s`, `include:s[]`, `prefix:s`, `strict:b` | `field`, `type` | `field` | filter | no |
-| `selfJoinFilter` | `field:F`, `where:q[]`, `prefilter:b` | `field`, `where` | `field` | filter | no |
-| `correlate` | `query:Q`, `sequence:b`, `within:d`, `globalConstraints:F`, `sequenceBy:F`, `root:s`, `maxPerRoot:i`, `iterationLimit:i`, `jitterTolerance:d`, `includeConstraintValues:b`, `includeMatchesOnceOnly:b`, `aggregation:Q[]` | `query` | `query` | correlation | no |
-| `bucket` | `field:F`, `function:g`, `span:s`, `buckets:i`, `limit:i`, `minSpan:s`, `timezone:s`, `unit:S` | — | `span` | aggregate | no |
-| `timeChart` | `series:f`, `function:g`, `span:s`, `buckets:i`, `limit:i`, `minSpan:s`, `timezone:s`, `unit:S` | — | `series` | aggregate | no |
-| `session` | `function:g`, `maxpause:d` | — | `function` | aggregate | no |
-| `series` | `collect:F`, `maxpause:d`, `maxduration:d`, `startmatch:q`, `endmatch:q`, `separator:s`, `memlimit:s` | `collect` | `collect` | aggregate | no |
-| `neighbor` | `include:F`, `direction:s`, `distance:i`, `prefix:s` | `include` | `include` | transform | no |
-| `readFile` | `file:S`, `table:S`, `include:F`, `limit:i` | `file` | `file` | source | no |
-| `findTimestamp` | `addErrors:b`, `as:s`, `field:f`, `timezone:s`, `timezoneField:f`, `timezoneAs:s` | — | — | transform | no |
-| `createEvents` | `rawstring:s[]` | `rawstring` | `rawstring` | source | no |
+| Family | Canonical functions |
+| --- | --- |
+| Numerical aggregation | `avg`, `count`, `sum`, `min`, `max`, `range`, `stdDev`, `percentile`, `percentage`, `counterAsRate`, `callFunction`, `linReg`, `groupBy`, `stats`, `collect`, `selectLast`, `selectFromMax`, `selectFromMin`, `top` |
+| Ordered sequences and sessions | `accumulate`, `appendAggregation`, `neighbor`, `partition`, `slidingTimeWindow`, `slidingWindow`, `series`, `session`, `window` |
+| Time buckets and query time | `bucket`, `timeChart`, `duration`, `now`, `start`, `end`, `setTimeInterval`, `formatTime`, `findTimestamp` |
+| Rows, fields and expressions | `head`, `tail`, `sort`, `table`, `select`, `drop`, `rename`, `eval`, `default`, `if`, `coalesce`, `getField`, `setField`, `split` |
+| Event metadata and profiling | `eventFieldCount`, `eventInternals`, `eventSize`, `fieldset`, `fieldstats`, `explain:asTable` |
+| Filters and regular expressions | `cidr`, `in`, `test`, `wildcard`, `regex`, `replace`, `sample`, `dropEvent` |
+| Parsing | `parseCEF`, `parseCsv`, `parseFixedWidth`, `parseHexString`, `parseInt`, `parseJson`, `parseLEEF`, `parseTimestamp`, `parseUri`, `parseUrl`, `parseXml`, `kvParse` |
+| Text and formatting | `lower`, `upper`, `lowercase`, `length`, `concat`, `concatArray`, `format`, `formatDuration`, `round`, `unit:convert`, `stripAnsiCodes`, `json:prettyPrint`, `xml:prettyPrint`, `writeJson`, `splitString` |
+| Encoding and hashes | `base64Decode`, `base64Encode`, `urlDecode`, `urlEncode`, `hash`, `hashMatch`, `hashRewrite`, `tokenHash`, `shannonEntropy`, `crypto:md5`, `crypto:sha1`, `crypto:sha256` |
+| Network and geography | `communityId`, `subnet`, `asn`, `ipLocation`, `geography:distance`, `geohash`, `reverseDns`, `bitfield:extractFlags`, `bitfield:extractFlagsAsArray`, `bitfield:extractFlagsAsString` |
+| Independent sources, joins and tables | `createEvents`, `readFile`, `defineTable`, `remoteTable`, `readPersistedAggregation`, `join`, `selfJoin`, `selfJoinFilter`, `correlate`, `match`, `matchAsArray`, `ioc:lookup` |
+| Visual output | `sankey`, `worldMap`, `transpose` |
+| Query parameters and repeating mode | `beta:param`, `beta:repeating` |
+| Flat arrays | `array:append`, `array:contains`, `array:dedup`, `array:drop`, `array:eval`, `array:exists`, `array:filter`, `array:intersection`, `array:length`, `array:reduceAll`, `array:reduceColumn`, `array:reduceRow`, `array:regex`, `array:rename`, `array:sort`, `array:union` |
+| Nested arrays | `objectArray:eval`, `objectArray:exists` |
+| Mathematics | `math:abs`, `math:arccos`, `math:arcsin`, `math:arctan`, `math:arctan2`, `math:ceil`, `math:cos`, `math:cosh`, `math:deg2rad`, `math:exp`, `math:expm1`, `math:floor`, `math:log`, `math:log10`, `math:log1p`, `math:log2`, `math:mod`, `math:pow`, `math:rad2deg`, `math:sin`, `math:sinh`, `math:sqrt`, `math:tan`, `math:tanh` |
+| Unicode text and expression predicates | `text:contains`, `text:editDistance`, `text:editDistanceAsArray`, `text:endsWith`, `text:length`, `text:positionOf`, `text:startsWith`, `text:substring`, `text:trim` |
+| Timestamp components | `time:dayOfMonth`, `time:dayOfWeek`, `time:dayOfWeekName`, `time:dayOfYear`, `time:hour`, `time:millisecond`, `time:minute`, `time:month`, `time:monthName`, `time:second`, `time:weekOfYear`, `time:year` |
 
 ### Rules not encoded by a table cell
 
@@ -293,21 +256,27 @@ Effects vary with arguments: `regex`/`match` with `strict=false` retain rows and
 
 Argument roles matter as much as shape: `join.key/include`, `defineTable.include`, `match.column/include`, `readFile.include`, and `cidr.column` refer to foreign/exported fields. `parseJson.include/exclude` are selector values, not input-field reads. `as`, `asArray`, `var`, and `timezoneAs` describe outputs/bindings. `drop.fields` removes fields; `rename.field` records renames. Scalar `field` expressions read fields; a literal string passed to a field-name argument names a field rather than supplying that field's content.
 
-Query arguments normally start independent source/lineage contexts. `series.startmatch/endmatch` and `selfJoinFilter.where` continue the incoming context and must contain filters only. Array `function/condition` arguments establish scoped element bindings and prohibit aggregate/source/definition/correlation effects, including inside branches. Aggregate `function` arguments require aggregate calls, not arbitrary scalar calls. Context checks are recursive; listing a function in this index does not authorize using it in every nested position.
+Query arguments normally start independent source/lineage contexts. `series.startmatch/endmatch` and `selfJoinFilter.where` continue the incoming context and must contain filters only. Non-aggregate array `function/condition` arguments establish scoped element bindings and prohibit aggregate/source/definition/correlation effects, including inside branches. The array reduction family instead permits qualified element aggregation. Aggregate `function` arguments accept aggregate calls, qualified composite pipelines, and arrays of them. A composite may filter, aggregate, then transform/project its result, but it must aggregate; output names and count lineage follow the final nested pipeline rather than every intermediate field. A scalar function by itself is not an aggregate. Context checks are recursive; listing a function in this index does not authorize using it in every nested position.
 
 Default reads, outputs, conditional writes, projection and source replacement are tracked:
 
 - Omitted input reads: regex/replace/parseJson/kvParse/splitString use `@rawstring`; formatTime uses `@timestamp`; asn/ipLocation use `ip`; split uses `_events[]`; temporal aggregates use `@timestamp`. `findTimestamp` also reads `@timezone` unless timezone/timezoneField supplies it. Wildcard with omitted/empty fields reads original event fields, not a caller-created placeholder.
 - Common default scalar output names: `_lower`, `_upper`, `_length` (length/array:length), `_concat`, `_format`, `_if`, `_base64Decode`, `_urldecode`, `_shannonentropy`, `_coalesce`, `_getField`, `_splitstring`. `replace` defaults to rewriting its field or `@rawstring`; `round` defaults to its input field. Explicit `as` overrides the relevant default. Standalone `formatTime` requires `as`; an assignment supplies its output context. `getField` with a dynamic field name cannot prove which deployment field was read.
-- Projection/aggregates retire input columns unless the specific aggregate retains them. Count defaults to `_count`; group/stats/bucket/timeChart/session combine declared keys/functions (default count); bucket/timeChart add `_bucket`; series exports collected fields, `@timestamp`, `_duration`; fieldset exports `field`. Collect/selectLast export their fields; selectors export `include`; head/tail/sort retain inputs. Top exports its key(s), ranking output (`_count`, `_sum`, or `_max`, unless `as`), plus `percent` when requested. Review target runtime values and ties.
+- Projection/aggregates retire input columns unless the specific aggregate retains them. Count defaults to `_count`; `range(field)` is a numeric reducer writing `_range` (maximum minus minimum), not a row-selection operation; group/stats/bucket/timeChart/session combine declared keys/functions (default count); bucket/timeChart add `_bucket`; series exports collected fields, `@timestamp`, `_duration`; fieldset exports `field`. Collect/selectLast export their fields; selectors export `include`; head/tail/sort retain inputs. Top exports its key(s), ranking output (`_count`, `_sum`, or `_max`, unless `as`), plus `percent` when requested. Review target runtime values and ties.
 - `createEvents` emits raw strings; parse before comparing extracted fields. `createEvents`/`readFile` replace the stream, so earlier filters do not constrain replacement rows. `readFile(table=...)` can preserve a known declared export schema, while unknown all-field exports remain unknown. Creating a local field with the same name does not prove ownership of unknown imported members.
-- Nullable parsing, retaining regex, left joins and enrichments may leave incoming values or no value. A query-produced name is not proof of value presence or meaning. Conditional branch writes merge conservatively. Tag namespace mutation remains rejected, including via aliases/imports.
+- `parseJson(handleNull="discard")` removes a null key/value pair, `empty` emits an empty string, and `keep` retains the text `null`; `excludeEmpty` is a separate rule. Nullable parsing, retaining regex, left joins and enrichments may leave incoming values or no value. A query-produced name is not proof of value presence or meaning. Conditional branch writes merge conservatively. Tag namespace mutation remains rejected, including via aliases/imports.
 
 ### Endpoint and aggregation caveats
 
 `base64Decode.charset` accepts UTF-8, UTF-16LE, UTF-16BE, ISO-8859-1. `kvParse.onDuplicate` accepts keepFirst/keepLast; `separatorPadding` yes/no/unknown; separator must be one character. Scalar rename requires `as`; pair renames cannot also use `as`, must have unique targets, and overlapping input/output pairs are unsupported. `round.how` is round/ceil/floor. `lower.type` is accepted with a warning because its distinction from locale is unresolved; verify target behavior.
 
-`sort`/`table` order is asc/desc and type is number/string. `top` cannot combine sum and max ranking; fractional error has a target-support warning. Collect has distinct-value/memory caps and undefined value order. SelectFromMax/Min ties choose an unspecified event; selectLast depends on event time/ties. Standalone formatTime with explicit seconds/milliseconds unit requires an exact signed-long integer timestamp literal, or warns for an unverified runtime expression; auto is also accepted. Formatting is presentation, not proof that its input was correctly interpreted.
+`sort`/`table` order is asc/desc, with the comparison types shown by their current contracts. Defaults apply when arguments are omitted: sort uses `_count`, descending numeric order and 200 rows; named limits and target ceilings are distinct. `top` cannot combine sum and max ranking; fractional error has a target-support warning. Collect has distinct-value/memory caps and undefined value order. SelectFromMax/Min ties choose an unspecified event; selectLast depends on event time/ties. Standalone formatTime with explicit seconds/milliseconds unit requires an exact signed-long integer timestamp literal, or warns for an unverified runtime expression; auto is also accepted. Formatting is presentation, not proof that its input was correctly interpreted.
+
+Numeric parameters require finite literals. Literal bounds are checked against both the exact decimal spelling and the double-precision reading; either reading outside the bounds is rejected. This includes the exclusive zero/one bounds of `percentile.accuracy`. `sample.percentage` has a documented maximum of 100; the bundled parameter facts do not specify a minimum. `top.rest` retains its string choices `"true"`/`"false"`; their unquoted Boolean spellings are also accepted, while arbitrary labels are rejected. Other string parameters retain their own type and choice checks.
+
+Assigned calls and expressions share dropped-field warnings with bare calls. Composite aggregate outputs and array element variables remain local; continuing filter queries retain the incoming event projection for these checks.
+
+`setField` supports a literal mutable data-field target; computed target names are unsupported because immutable tag/read-only fields cannot be ruled out statically. Deprecated `lowercase` can transform a finite field-name set with `include=fields` or `both`; the reference examples leave old-name retention unqualified, so neither presence nor removal of an old name is guaranteed. Wildcard mutation is unsupported. `eventFieldCount`, `eventInternals` and `eventSize` require stored input before aggregation or source replacement. Internal event size is distinct from billed ingestion size. `reverseDns` requires a top-level aggregate result phase and cannot run in a subquery.
 
 ### Arrays
 
@@ -315,11 +284,19 @@ Use physical paths (`items[0].name`) for projection; a logical `items[]` marker 
 
 Eval functions must explicitly write the output base on every surviving inline branch; a later drop or projection can invalidate that proof. `objectArray:eval` requires a different output array. Eval/filter output reuse warns: old physical indices after a gap may survive, and no cleanup is inserted. A fresh prefix reduces collision risk but is not runtime shape proof. Nullable writes and unknown imported array members cannot establish complete ownership. `splitString` without index produces indexed output; scalar assignment requires index. `split` expands physical indices, adds `_index`, can rewrite `@id`, defaults to `_events[]`, and warns about shape/memory; verify strip mappings.
 
+Element pipelines cannot aggregate, replace or define an event stream. These restrictions also apply to assigned calls and calls inside case/match branches.
+
+`array:append`, `dedup`, `drop`, `rename` and `sort` operate on indexed scalar arrays; traversal gaps and destination reuse can change what survives. `array:reduceAll` reduces elements across events, `array:reduceRow` reduces each event's array, and `array:reduceColumn` groups corresponding indices across events. Union/intersection have aggregate set semantics and no promised output ordering. Their feature prerequisites do not apply to every function in the array namespace.
+
 ### Mixed sources, joins and tables
 
 Join/match keys must be nonempty and have equal arity; repeated slots still count. Join mode is inner/left. Join limit is 1..200,000; `max` must be positive. Joining with omitted include imports no extra fields in the profile. Check cardinality and subquery caps; post-join row order is not established. External windows/views remain independent from source selectors and require deployment review.
 
-`defineTable` declarations form a top-level preamble before any input operation, at most ten tables. They cannot coexist with join/selfJoinFilter. For a declaration preamble, leave plan source/filters empty and place source filters after declarations. Includes are explicit exported fields or scalar all-fields `*`; wildcard list entries are unsupported. `match(table=...)`/`readFile(table=...)` require a preceding declaration. All-fields exports preserve unknown shape when the defining query lacks an exact projection; unknown does not prove a column present or absent.
+`setTimeInterval` can appear once, first at the top level before filters or other declarations. It overrides external query time settings and produces `CQL_QUERY_TIME_OVERRIDE`; review the effective interval against the intended API/MCP bounds. `defineTable` and `remoteTable` declarations occupy the following top-level preamble; table count is bounded to ten. A remote query is required in both connection forms, and the CQL subquery form also requires `include`. The declaration rules exclude combination with join/selfJoin/selfJoinFilter. For a declaration preamble, leave plan source/filters empty and place source filters after declarations. Includes are explicit exported fields or scalar all-fields `*`; wildcard list entries are unsupported. `match(table=...)`/`readFile(table=...)` require a preceding declaration. All-fields exports preserve unknown shape when the defining query lacks an exact projection; unknown does not prove a column present or absent.
+
+The profile checks interval endpoints on `setTimeInterval`, `join`, `defineTable`, `remoteTable` and `readPersistedAggregation`: `now`, positive whole-number fixed lookbacks, nonzero signed offsets, signed-long epoch milliseconds and RFC3339 timestamps with an explicit offset. Existing string-typed endpoints require quoted epoch values. Unqualified spellings, including zero durations and strings such as `garbage`, produce `unsupported`, matching the other bounded duration checks. Numeric epoch zero remains supported. `remoteTable` requires named arguments. Catalog name-omission facts retain the parameter-table annotations; finite example-only positional forms for `getField`, `math:cosh` and `math:mod` are explicit exceptions. `parseTimestamp` additionally retains its legacy positional-field form, while format-name omission requires a named `field`.
+
+All five interval functions reject provably reversed endpoints when both endpoints are explicit and within the same time domain: unsigned durations are lookbacks, signed durations are offsets, and absolute timestamps can be compared with epoch values. `setTimeInterval` also checks its omitted `end` as `now`. Equal endpoints and mixed relative/absolute endpoints are retained; their usefulness and effective runtime interval still require review.
 
 Match mode is string/glob/cidr; deprecated `glob` cannot be combined with mode, and glob matching takes one scalar field/column rather than arrays. `nrows` is 1..500 or its supported max sentinel. Omitted include imports all non-key columns (tracked only when table columns are known); explicit include gives a bounded contract. `strict=false` retains unmatched rows. Enrichment capability/data are unverified: asn produces `.asn/.org`, ipLocation `.country/.city/.lon/.lat`, and ioc:lookup produces `.detected` plus nullable indexed members. IOC type is domain/ip_address/url; confidence is unverified/low/medium/high; include is limited to indicator, labels, last_updated, malicious_confidence, published_date, type. Do not interpret stale/incoming retained values as a fresh enrichment hit.
 
@@ -327,11 +304,37 @@ Match mode is string/glob/cidr; deprecated `glob` cannot be combined with mode, 
 
 Bucket/timeChart span accepts auto or positive fixed duration; minSpan supports positive fixed duration, not numeric/calendar/anchored forms. Buckets are 1..1500, series limit 1..500; unit arrays have one element or one per aggregate. Boundaries depend on window/timezone; trailing data and series/memory caps affect completeness. Timestamp detection is nullable and can use current date/year; verify fully dated inputs and epoch values across timezone/DST. Session/series depend on timestamp order, key scope, gaps and memory; series memlimit is 1 byte..1 KiB with B/KB/KiB spelling. Neighbor requires input; direction is preceding/succeeding and distance 1..10,000. Establish order directly before neighbor when required; aggregation can invalidate prior order.
 
+`accumulate`, `neighbor`, `partition`, `slidingWindow` and `slidingTimeWindow` require a preceding aggregate; uncertain ordering carries a sequence-order warning. `window` is a different form: use it only as the aggregate argument of `bucket` or `timeChart`, with exactly one of `span` or `buckets`. It excludes the current bucket, while event/time sliding-window forms include the current event unless configured otherwise.
+
+`slidingTimeWindow.span` supports positive fixed durations and integer millisecond spans. Other spellings, including negative or zero spans, produce `unsupported`.
+
+The bundled `series.memlimit` default is `1KiB`. Saved-result assessment treats both the omitted default and an explicit memory cap as unverified limits; returned rows do not establish whether the cap affected completeness.
+
 Correlation must be top-level in an independent query, cannot follow aggregate/source replacement, and cannot combine with join. Generic correlation can inherit an ordinary prefix context; the specialized typed stage has stricter sole-stage placement. Mandatory queries cannot aggregate/replace/define streams or nest correlation. Aggregation queries can aggregate but cannot replace/define/nest correlation. Labels are unique across both lists. Links target a different mandatory label and bare field; place them directly in named pipelines. Mandatory links are last (only further links may follow); aggregation links precede aggregates. No links/globalConstraints across multiple mandatory queries warns about a Cartesian constellation.
+
+Assigned aggregates obey the same placement rules as bare calls. Correlation input constraints are grounded before the first aggregate, including assigned reducers and conditional aggregate branches.
 
 Mandatory named queries may specify include fields or explicit all-fields. Aggregation queries may specify after/before anchors referring to mandatory names; other attribute/context combinations are unsupported. `sequenceBy` and `jitterTolerance` require sequence=true; jitter must not exceed within. Root names a mandatory query; iterationLimit is 1..10. Temporal offsets cannot use custom non-timestamp sequenceBy dimensions. A single open interval offset must be smaller than within; same-anchor zero/reversed intervals and provably reversed timestamp order are rejected. Different anchors retain a runtime-window warning: actual timestamps determine the interval, and within does not bound a closed interval.
 
 Aggregation queries require a static at-most-one-row proof. Count/scalar reducers, qualified stats and head(1)/tail(1) can establish it; multiplicity-expanding operations can invalidate it. `collect(multival=false)` alone does not prove one row: add a later head(1)/tail(1). A reducer after repeated extraction can restore the bound. Correlation exports fields under `Label.field`, built-in event IDs/timestamps, and enabled constraint values; includeConstraintValues=false removes that implicit export route. Unknown include-all shapes remain unknown, not universal evidence for names below that prefix. Acceptance always retains a target capability/timestamp/runtime warning.
+
+## Availability and optional function observations
+
+The function ledger records minimum versions, feature flags, lifecycle and resource conditions separately from Query applicability.
+
+`CQL_TARGET_REQUIREMENT` warns when a prerequisite has not been confirmed for the selected target; it does not reject supported syntax. Only the exact forms covered by the optional cases below can qualify through automated capability evidence. For other functions and forms, verify the documented prerequisite on the target. `CQL_TARGET_OBSERVED` is informational evidence for a matching form; `CQL_FUNCTION_LIFECYCLE` continues to warn about experimental, beta or deprecated usage independently. Examples of prerequisites include:
+
+- `array:intersection`, `array:union`, `array:reduceRow` and `array:reduceColumn` require `ArrayFunctions`; the latter three carry experimental-use warnings in the reference.
+- `beta:repeating` requires `RepeatingQueries`, is beta, and has no effect on an ordinary historical query. Its presence or a successful no-op does not confirm repeating behavior.
+- `remoteTable` requires Falcon NG-SIEM and an accessible configured federation connection. CQL and other connection languages use different query forms. `readPersistedAggregation` requires an existing tagged aggregation; stored-result support is documented from 1.252 and rollup from 1.263.
+- Lookup files/tables, IOC data, unexpired MaxMind data and DNS resolution are external prerequisites. Syntactic acceptance does not verify availability, permission, data freshness, lookup matches or enrichment output.
+- `explain:asTable` is experimental ad hoc profiling that replaces ordinary results; its reference excludes scheduled searches, triggers and combination with correlate. Two-pass joins, live table snapshots and ordered sequence functions have distinct context restrictions.
+
+After an ordinary field pack is active, inventory offers a separate optional function-check phase. It can be deferred without losing field-discovery progress. The shipped cases cover the four `ArrayFunctions` operations above and `math:sqrt`; they use fixed temporary-event queries and defined expected results. They do not cover all function names, argument forms, resource types, parser contexts or feature flags.
+
+The inventory actions are `prepare-capabilities`, `dispatch-capability`, `submit-capability`, `pause-capabilities` and `resume-capabilities`. Preparation requires the confirmed environment, a caller-attested authorization-context identifier, the verified host session, finite attempt/time allowances and protected evidence of a provider-enforced search lifetime. Dispatch reserves one exact case and returns its tool arguments; it does not call MCP. Relay it only through the authorized host, retain the complete result and exact termination settlement, then submit them. Failed/retried attempts consume the same allowance. Unresolved termination blocks later inventory dispatch; pause/resume retains the original remaining budget.
+
+An observation qualifies only for the exact authorization context, environment/CID and view, case revision and resource binding. The current fixed cases use no external resource binding. A completed result must satisfy its expected-output check; an error, timeout, missing result or different output remains `unknown`. A newer unknown attempt does not inherit an earlier success. Dated positive evidence expires after 30 days and must be refreshed for the same scope. Generation/checking uses `context.execution_context_id` to match that authorization context; the same CID alone is insufficient. This evidence does not change the ordinary field pack or attest general tenant functionality.
 
 ## Runnable examples and expected results
 
@@ -341,4 +344,4 @@ These examples run with no pack and therefore exercise query construction/static
 
 ## Knowledge beyond executable coverage
 
-Use `cqlmatic catalog 'TOPIC' --limit 10` for attributed knowledge, `catalog --functions --limit 100` for executable function contracts, `catalog --recipes` for recipes, and `catalog --profile` for limits. See [bundled knowledge provenance](../data/provenance.json) and the [official CQL documentation](https://library.humio.com/crowdstrike-query-language/) for broader language details. Lookup support does not expand checker coverage. For example, `dedup` remains unsupported; grouping plus projection only answers the narrower unique-key-row request, discards other columns, and still has grouping ceilings.
+Use `cqlmatic catalog 'TOPIC' --limit 10` for attributed knowledge, `catalog --functions --limit 250` for executable function contracts, `catalog --recipes` for recipes, and `catalog --profile` for limits. See [bundled knowledge provenance](../data/provenance.json) and the [official CQL documentation](https://library.humio.com/crowdstrike-query-language/) for broader language details. Lookup support does not expand checker coverage. For example, `dedup` remains unsupported; grouping plus projection only answers the narrower unique-key-row request, discards other columns, and still has grouping ceilings.

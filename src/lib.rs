@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 pub mod app;
 pub mod assess;
+pub mod capability;
 pub mod catalog;
 pub mod contracts;
 pub mod discovery;

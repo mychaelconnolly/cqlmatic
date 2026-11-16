@@ -72,6 +72,12 @@
           ],
           "default": null
         },
+        "execution_context_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "require_observed": {
           "type": "boolean",
           "default": false

@@ -95,6 +95,7 @@ fn checked(
             environment: &environment(),
             active_pack: active,
             query_observations: observations,
+            capabilities: None,
         }),
     )
 }
@@ -144,6 +145,7 @@ fn exact_direct_field_qualifies_without_a_pack_and_supersedes_an_ordered_older_m
             environment: &environment(),
             active_pack: None,
             query_observations: &[observation],
+            capabilities: None,
         }),
     );
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
@@ -189,6 +191,7 @@ fn observation_does_not_qualify_other_fields_sources_targets_or_shapes() {
             environment: &environment(),
             active_pack: None,
             query_observations: &[observation],
+            capabilities: None,
         }),
     );
     assert_eq!(result.outcome, Outcome::NeedsContext);
@@ -727,6 +730,7 @@ fn record_kind_guard_unions_active_and_explicit_evidence_in_both_directions() {
             environment: &environment(),
             active_pack: Some(&mixed),
             query_observations: &[observation],
+            capabilities: None,
         }),
     );
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);

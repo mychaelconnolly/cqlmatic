@@ -173,7 +173,9 @@ pub fn predicate(p: &Predicate, depth: usize) -> Result<Filter> {
             if resolved.function.resolved_effect(&resolved.arguments)
                 != crate::catalog::Effect::Filter
             {
-                if resolved.function.effect == crate::catalog::Effect::Filter {
+                if resolved.function.effect == crate::catalog::Effect::Filter
+                    || resolved.function.name == "matchAsArray"
+                {
                     return Err(Diagnostic::unsupported(
                         "CQL_UNSUPPORTED_PREDICATE_EFFECT",
                         "This retaining argument form is not qualified in predicate context.",

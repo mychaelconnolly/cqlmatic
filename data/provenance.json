@@ -1,104 +1,5 @@
 {
-  "knowledge_repository": "https://github.com/mychaelconnolly/ngsiem-query-engine",
-  "knowledge_revision": "2158f99fc529e234d5fd6fd4d4af899d7d83a848",
-  "source_files": [
-    {
-      "path": "references/cql/aggregation.md",
-      "sha256": "b6ef044c1305144418185a8e3950ace59380499d8b08e7d22aea36d1924b1bd4"
-    },
-    {
-      "path": "references/cql/core.md",
-      "sha256": "c7a50ee9f7e12f694d1ad87b4ce05b55589313c14b612a0fca0ee9c71b7177b9"
-    },
-    {
-      "path": "references/cql/correlation.md",
-      "sha256": "4ddd49e389763662fa5a830d0c8ea01ea41b90f3e47e864801fcec2a90bf7af9"
-    },
-    {
-      "path": "references/cql/detection-logic.md",
-      "sha256": "b5cc921f8ec909baab57b576516c8ba619562d5107f1d78b40ccc960bbd2f8b1"
-    },
-    {
-      "path": "references/cql/enrichment.md",
-      "sha256": "a4b44d337000a2e7c93b4b32ac8307ed2cccd6b7b0ad5818301c8bbf84cb3e73"
-    },
-    {
-      "path": "references/cql/filtering.md",
-      "sha256": "967561eb19447e309a1a027c14d10eff9a261d9e66ef3d04c163045f67f6237a"
-    },
-    {
-      "path": "references/cql/index.md",
-      "sha256": "53a77b7ef5c14524cc70f261da12fdb182f1e88b80e589a28d7192db19d73864"
-    },
-    {
-      "path": "references/cql/joins.md",
-      "sha256": "ad70242b714905c6679ebd6bd6890dd8cc91f5822312afc169ff5e0d327f356a"
-    },
-    {
-      "path": "references/cql/limits.md",
-      "sha256": "7a37310ba6d68a5b33f367984322946cb88e4c153331906ad2350bef683e76a8"
-    },
-    {
-      "path": "references/cql/matching.md",
-      "sha256": "ac94e8514edcc92aa80d0f68d04665bdc81b64f09419dd376dfe9105044ea213"
-    },
-    {
-      "path": "references/cql/misconceptions.md",
-      "sha256": "41bbcc2dee7745d4be52a62b38dcd22ed39ccc8f92f24a7d16dc3b35d5022979"
-    },
-    {
-      "path": "references/cql/parsing.md",
-      "sha256": "66cc2c7067d7c43f3bb9e365cc415d23afc1acd1b253d84c0e27e492b9e71d4e"
-    },
-    {
-      "path": "references/cql/patterns.md",
-      "sha256": "6dbd626184fb39dc65f9029c581073378269debc5c81c38a07b6eb0c7822c4a5"
-    },
-    {
-      "path": "references/cql/performance.md",
-      "sha256": "64896260d4b73f644955df9c09461e915f4530069c63067d7ee6b75cb8ceb111"
-    },
-    {
-      "path": "references/cql/selection.md",
-      "sha256": "266545ed98964b01b717d18cb30dfc3944649f551f55a97fbeebd4e20fff4b50"
-    },
-    {
-      "path": "references/cql/strings.md",
-      "sha256": "a7be980d3c0181ad41a96316f4048d5ad8ebff5f33c697baab24dfad6743f482"
-    },
-    {
-      "path": "references/cql/syntax.md",
-      "sha256": "0d24bec824bb2e8a41f0a564041a705d317f03ee4ae6a3b5cdc9b1a7a97d7a5a"
-    },
-    {
-      "path": "references/cql/testing.md",
-      "sha256": "b502daaa3239037bbdd59bab9eca7a6c1ba3091f7a2466bbfad6ed3b11095370"
-    },
-    {
-      "path": "references/cql/time.md",
-      "sha256": "675d92a7064e28a67a92e77efdeb7be321ef9f1a19cb6ba4e39be806f73dedd3"
-    },
-    {
-      "path": "references/cql/transformation.md",
-      "sha256": "0860827a4b91fa81b0ee2385f24f220fc393dd15b0c27e31a4c52dc90a473475"
-    },
-    {
-      "path": "references/cql/troubleshooting.md",
-      "sha256": "f7ddf936e4365bd76277e13c0af6662395796e40516d653dc3ba422784e483bf"
-    },
-    {
-      "path": "corpus/standards/cps.jsonl",
-      "sha256": "0cea467fe5d61961170abac39d1426c3919aee0501bc9587f16eeec045e71592"
-    },
-    {
-      "path": "corpus/standards/ecs.jsonl",
-      "sha256": "50cca902e4cdb1b30e7be5f6167407f9441ffc8c01dae02e056aa81c04ac34a5"
-    },
-    {
-      "path": "corpus/provenance/standards.jsonl",
-      "sha256": "b4b02d83230a358c5ff63da9fd2138dd7d221577ba2fb9c9a28957df8a6a8c08"
-    }
-  ],
+  "knowledge_revision": "29db942fa5364af3a454e8e6525d20b7d9337075958807280f3d998dc8504357",
   "additional_references": [
     {
       "url": "https://library.humio.com/crowdstrike-query-language/functions-drop.html",
@@ -393,7 +294,2603 @@
       "reviewed_at": "2026-10-30",
       "record_id": "cql:qualification:temporal-v2",
       "kind": "independent factual summary; native multi-pass prefix scope"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-abs.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:abs",
+      "kind": "independent factual summary",
+      "sha256": "95e569970200a86cba84ec78701f349ef2ea968879186eaf859358abaac77ded"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-arccos.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:arccos",
+      "kind": "independent factual summary",
+      "sha256": "c6964b22acd9d81b8e7819169de30968b9b9fd77977c19f8c4e18f8532b89c09"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-arcsin.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:arcsin",
+      "kind": "independent factual summary",
+      "sha256": "5ca21555e185cef356c474c349347abcdc17973410cc56e6dc66ba9e593d279c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-arctan.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:arctan",
+      "kind": "independent factual summary",
+      "sha256": "986cffd3aee7800aab6b65569fbad96d0f73de2c6eb3dfb1db216660e1aa2e84"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-arctan2.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:arctan2",
+      "kind": "independent factual summary",
+      "sha256": "6e643f276d0c2434960e9c5bbfd8b268bb95222ebf21585e10e79c282cc0211b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-ceil.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:ceil",
+      "kind": "independent factual summary",
+      "sha256": "ae67e9ce5e956b9fceecfeb03c621ef380c27922e0a1ddc4bf62721dc8344cad"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-cos.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:cos",
+      "kind": "independent factual summary",
+      "sha256": "c2585a410f26312729ba1bbfb5edc5658cb1f7bc6e7c9143c939f302d8d15d4d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-cosh.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:cosh",
+      "kind": "independent factual summary",
+      "sha256": "78a04ce9ba2971d25315cd220458a56d971e42ae552bf4549e287b02608c37ab"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-deg2rad.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:deg2rad",
+      "kind": "independent factual summary",
+      "sha256": "15b014197bf368b90d9d369b2f84f173f5a0250a12cb62c3a4037a3fdc555c1f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-exp.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:exp",
+      "kind": "independent factual summary",
+      "sha256": "750f9c7decc576bdf2bc2b3c9f1dd5861385931a71348d184fec2bda17bd3508"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-expm1.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:expm1",
+      "kind": "independent factual summary",
+      "sha256": "b6222bde6398ac7bcaac7bc0402ef10eba6befc7bf0f88276f6a245bc9a25429"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-floor.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:floor",
+      "kind": "independent factual summary",
+      "sha256": "905f793aa2117e68d065a3fa114f21ba925d3ea81d2ddf4d1ecc7956e69165ba"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-log.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:log",
+      "kind": "independent factual summary",
+      "sha256": "265ed89c4d81438fb2cd1637810b87210089e7c6a25ac4ceb0be942cbd56b3f2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-log10.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:log10",
+      "kind": "independent factual summary",
+      "sha256": "32726a1c2923090afe5d33e323b669fda6d41fcb5c7a5023df84edcbb7abde31"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-log1p.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:log1p",
+      "kind": "independent factual summary",
+      "sha256": "7a969f9e314e8127206ccd4a212d871ee9995a58b26db7bffbda6bd81881b1a1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-log2.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:log2",
+      "kind": "independent factual summary",
+      "sha256": "c0049c67709bd0fd5de286903ae045c2f5517c47f4857fb68675d7c8bf260b69"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-mod.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:mod",
+      "kind": "independent factual summary",
+      "sha256": "36274e2b7324ee2d6a0b055e62acde2c5c4ce2eb9be103ddaa7a6b5438979646"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-pow.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:pow",
+      "kind": "independent factual summary",
+      "sha256": "30c49840a5e90d6be9067df11eb7ff36102455b9621cbe21da4f221911707bb0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-rad2deg.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:rad2deg",
+      "kind": "independent factual summary",
+      "sha256": "0c9a3f063ebb2c0e63af773479bc79ea4e189bcf0d228c9cd29019b238a8810f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-sin.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:sin",
+      "kind": "independent factual summary",
+      "sha256": "02943c454e9b7435b84e95b6d4f5abbafe696081b373d1c9457d2c311e1d92a5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-sinh.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:sinh",
+      "kind": "independent factual summary",
+      "sha256": "39b096cc303adb76754dada81046b2616824893a80f8b6bc43c3df2816c082ec"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-sqrt.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:sqrt",
+      "kind": "independent factual summary",
+      "sha256": "01e8729904a6d9f0ab6a5c05c96f0429cc08245093e35edaa4acbb443296222b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-tan.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:tan",
+      "kind": "independent factual summary",
+      "sha256": "ace7579a9e0033271df0905aaf273193741cab1937f4469414faf1d837749075"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-tanh.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:math:tanh",
+      "kind": "independent factual summary",
+      "sha256": "8d16c22f21679682c6a93d01c3513fa3490b0f85c666a0ecfeaa76b63ce72ac3"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-contains.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:contains",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "b74823561a369c454ff924f81c776ddaa3a677acdda887f79292d319860a0b05"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-startswith.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:startsWith",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "19ae3588c8b9cd79a763de2fb69cadee6e8e3eb46a574feb99ee94afd6b1b737"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-endswith.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:endsWith",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "f4b38a3c27a6f4d6ffb13832d84b2fdc1236b31a7258a4a51e0edca0e21ec03d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-length.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:length",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "50fecf4ffe12fc7b2122237956bb437e6b83256b52efe6b9a67f0150ffdf8b98"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-positionof.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:positionOf",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "50a4c13547d7638883f3066b709ea33b71ca5271075e29325134829f18d2b2d5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-substring.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:substring",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "642beff6bb6016f40224416458041355b3bfd87431f3ca207467d9c7c69d80ea"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-trim.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:trim",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "bcb095854712bd3b91a86d05acbf7bdeebe82a275684f08ce839a4c36a5e0124"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-editdistance.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:editDistance",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "82095ce2a56a7d1c447da97809da62badfb03653a0dfd672c9726f87d708ed03"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-text-editdistanceasarray.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:text:editDistanceAsArray",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "47853cd7a59a4019adea8abd8f39878ddb29dba95095e0b921d6c5414e22a70b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofmonth.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:dayOfMonth",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "93fcc6ca75ad507d2f56f08468cd3b09b94d1dddb0a5318642e781a9e0c100a5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofweek.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:dayOfWeek",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "07d337c7cd24599eac8494041685b14093f72fb34cbe391cc6844668bf62794a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofweekname.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:dayOfWeekName",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "664c21484406708efe3603882d4bae86d7f9ae5a030290152221109fb0018919"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-dayofyear.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:dayOfYear",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "d637c5600cfe29eda60cde53a79f8f0cfaa9c61a0c464ddc37394f62b76016b4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-hour.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:hour",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "760592f62bd89cc969b31ceb5fe20e299d03cd567c70f5cc46fa22a622513e6f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-millisecond.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:millisecond",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "9e9e8db7929df2e4e852177f19a8d2c0c2bbd187af037db478b7c1fa7c87284d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-minute.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:minute",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "8792ebb2908a1a6f7653c9ebfa071a61dc2d616b3b0a66a3ff6a07017862525c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-month.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:month",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "8c9ffe1d28b4ca2ba2fd572fa880c9406c342b72c1aaf4ca2d82ed95e4e5361c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-monthname.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:monthName",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "46ffce4f3c8850d271a2b1f96c3620b1a28c1bae5b8e45b375b3b9be2aa13b5c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-second.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:second",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "f1b0f6ea8deec48fa9170264e2767d7c042179b10cec8798c2abd3582ed28a77"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-weekofyear.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:weekOfYear",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "32500aa5d99c57e95c48c66e0abb583cac931120790fb0d0a9cdf3fc6dcecc2f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-year.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:time:year",
+      "kind": "independent factual summary of primary function documentation",
+      "sha256": "92c33ae7e1d038b98cd07baa44ee45c48b87495b07c6e57b6b4dc8168071a223"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/cql-datatypes.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2ee4dc05afc09296521ab58bc2dcb0c83b47c70c61b33adbd203f5b5aa8cb387"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/cql.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f69e06390251a16932dbbf2d4c3d574b506488424b455e9fc09c867792136855"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/event-sample.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0da36eb3e24235b21bcf3c241144800ad83583cfc2e0ab34ba8df5e781c27d35"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-basis.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "822b67c3af1902cfecd7521ea2ddc88ec1c87c2c29e4f1b9a4aedd46d73f8d2f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-expiry.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "1c25864877b49a9c220da7987095f6a8a8e84704cbbe6aa03c86bf42698d4cfb"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-standard-fields.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3ab9cf5960d86094382e308b3a6709ed7d94602738302b22ddad83fedd5ee902"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-standard-old.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "edc3789a9235cbfed99dd216587e3f33bc4d1b097f7d8acea84179196f54398d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-stream.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ba05b2577bd83b4750d9d523e91acf1bfd773bcbad8b263aac463084a505b649"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-structure.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "78e8d82f1d2869eaa13004485c09d5fe91ede6156568ff5b0eb6c38d19b9452c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events-timestamps.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "54086b7bfa022a2c97a4c26f360700003514cd637f4b8e8be6ada8eac4f5d26f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/events.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a09d6cc110399e08a42cad8d823228cab256d4e1d761f2626d615c529e160ee0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/function-operation-input.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4cb4db857bad453db09808a0a7d74c285905d61c21789d311fcb3576bbd96533"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/function-operation-location.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b1c610a2d69b71d6524986e29284992e81ebce122712019127531bfc96720714"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/function-operation-parameters.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "975e1437246135b0623e35daac05e4028d1a811aedc87ae035c16725c34436ec"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/function-operation-type.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b4d2e5194869bb1115e26e3ea49e8cb5e8795f6b14324ae63cf001785008a2ff"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/function-operation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e5965b063e5f596c1eb857de80ce58ade4eb76eb2bccf366fe160caff0e92bd7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-accumulate.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:accumulate",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "767a8a509e77f96bf3c78d41765852600afcf87ff19b6e06839d1042ca8913a8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-aggregate.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "aa1e3b0253ff2734b03e0ac2f6017df3e404a03064a9087c24b6d88167390991"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-appendaggregation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:appendAggregation",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3d335815f44f8f87683ef2c59285c6ee10e3467557a39366c19f88c568f58a19"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-append.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:append",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "68e68b97a71f797ec73296defd23b181f349ec2df7b4a4364b51b5a4ed9546b4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-contains.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array.contains",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cbab59b2517d0ed7773786244a2a4b0c2fa324f24f97c1a0ddb28cb9b22591cd"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-dedup.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:dedup",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2c96afbdb2bf8613977f3becea91b94bb5d2555f62844c0592311e47643d5976"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-drop.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:drop",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b6eba6e01bb6456ba891d2ee02b51247249b6d5f2735726402560c2b1ecae0fc"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-eval.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array.eval",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "fbcbfaf7254b0d54e04708d2015908ab600dcd8c064fb07a0d973143012d4c82"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-exists.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:exists",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f9e411a7115bdd4f040cab8874b9197447bdd2edecf131771531aa63a16d6559"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-filter.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array.filter",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ff086fc4e1c1581a6d5cf932ca79dee79db1ddb1996f7d5357db76b71aee3d98"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-intersection.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:intersection",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f9ffaae8f0146c6fdd4bb72fe585bb48c8253d92c83838bd4dd7f8ec9f69f38c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-length.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array.length",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c3536d6bd3de298bb7663fe8f1807ae99d06cd8cceeddb7d4c7a6db722fdb511"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-reduceall.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:reduceAll",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "18cf62ad135876d680d8e61d020d9cdb95c319cb8be780696b7fe2559e4f9635"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-reducecolumn.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:reduceColumn",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "35cf2dcd0401c5347f250c57a208f7ad04fca94f2fe81765c3cb7f7427255265"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-reducerow.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:reduceRow",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "070d1c31e482e221452878e6b7d3b4b5ae518467bc2db984fd712176d6eb2de8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-regex.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:regex",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c5257764761c83020cf69f3a97a832b02aac6d833c0957131666f2a31e59d541"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-rename.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:rename",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5b1aedd67c494b2b6804c8d5c5290f06ea29b81fe64d873336ac8cf7463cedb5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-sort.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:sort",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c653e43f315c5cd6cecb8c7033a13bdca82723b74a3c89a433d1f373abeee49d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array-union.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:array:union",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5a90ff052aca866bcf5a5ae9ce46c6bc04d0a0743ea208d59ebc050c656400be"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-array.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7fced05110ddff987bdeb368730b22e25c4f6bd224d38943c7c4085c5c5da135"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-asn.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:asn",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e5903056a044e61090f3ff661c591578a68ad4f7c6fdaa6698e31b28523dbc30"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-avg.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:avg",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3e5b65ac8ac8be20b3c760fd4e0867e7a637441d6bb643a6460c5e34f9d88e11"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-base64decode.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:base64Decode",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "041fbb47c9bf1794afc4147d53ece023872bcb92cf1e0a5d473c7e45e004eae4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-base64encode.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:base64Encode",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "56fd53a9f39d85f91557c5be2164086d56a830d9b53d7b95ecd0f3898d1e269b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-beta-param.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:beta:param",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5e229a47d4739e65d28fb4a83e4be423f96034ffce8cd9f002986c9accb4a474"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-beta-repeating.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:beta:repeating",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "60a4acfea497470c1187f549fdaebe2bc4b1f4d15e9e50c7512146878175b96c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-bitfield-extractflags.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:bitfield:extractFlags",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "71d5389a0ff6309c63761c145494658135070d01e2bf23d2366618c1db130246"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-bitfield-extractflagsasarray.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:bitfield:extractFlagsAsArray",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c059a391c19415e8125a6acab3a9768ff2a94601490fe25352ddb0c7aaf7200f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-bitfield-extractflagsasstring.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:bitfield:extractFlagsAsString",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c93640de9c44defb4f1d1c4db6b0fa01d4b5a1249f4c55a68d13cf8238ee71ed"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-bucket.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:bucket",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "1b97309afe57aae3af850c68d360980603c1c4b7dea03ee10fe8bc45196834b3"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-callfunction.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:callFunction",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a50875d231fc493e276e44b9266a403278a770b373590a10e88e5fab64eae640"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-cidr.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:cidr",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9e038cfc37df9f47f3830b8da2a85b8fe518c9f14f24b43a148ef15386e7edd7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-coalesce.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:coalesce",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "fae258ed7a644d8ecd3e8a31059fac20bcf7c02112babed512d18e755ae68f75"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-collect.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:collect",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f3fa84cc5c6462ca0089b39b19909b55444a18612b83ae5c8cb8f09c62d3d874"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-communityid.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:communityId",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "854af9d4a6948bb865c08fcf9f426e662227e07761feac11d6149b6178cf0b82"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-comparison.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e2983391f5c3f6bb63a0cf50fda673425020d8f575c2797a9f2d59d755c091e6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-concat.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:concat",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cfe719d486dea03b127fca0596c13415b909e30390c0fc608676ffd891955cda"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-concatarray.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:concatArray",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6095d67ff284b005521129a7d76906de8006ca680276cb281610d57458698e29"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-condition.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b3f36f620dbd169dd9d139ceca020547e669ab0d66fb238b9a184ac887360672"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-copyevent.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0cc0e282cca39c05da93664205b2784c8144e76c52d4c49255d7f10ea3884240"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-correlate.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:correlate",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "38d7f9fcf1a0cb7ca999dafc9e8a1c85be42ce179b8bfc92dd1000903f342c6d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-count.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:count",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "415f441d57bfc0ff1e9cdd44572f3039916a9f99f72a05f9e97410a89ce8e34b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-counterasrate.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:counterAsRate",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "043f854edc3cd0ca0c1bd8ec43bfffd89b81c3745f62a6f1d27b6c67ad70aa3c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-createevents.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:createEvents",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7443d09a49d083cb4fca2b8746ee000f16ff172ab395f1ef645659fb8243da03"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-crypto-md5.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:crypto:md5",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "925caec0f4e8d2f34a394d8b37183dda0bd3e71006269057dc2ac88a65242990"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-crypto-sha1.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:crypto:sha1",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6f9cb74af70eb5fa720050d8feb0fcdd4bcf657cfdea7d7e0c4505aec71ee39f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-crypto-sha256.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:crypto:sha256",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8030b588c068ea3125ce7abcefbfddbac79f6c598650ed5662de1294c6d376d9"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-data-manipulation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "62d5add700ad18a42ab273ae4bf9c6f6a884bd2c29cb4e65e2bcbed270fd8e17"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-debugging.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "62e0670732cd6425bd430e5b73880f04853a2c534f98c0587e10e9eeba638999"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-default.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:default",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "32f636799eb7ed3db6b5c3766eeb1c15e0bbc43d06013198665114a9b5d11bf6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-definetable.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:defineTable",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d9533a8ebcc7e3d7dfc975db47b3d2b321586b079e23319f3bb943f4ab3cec1a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-drop.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:drop",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b38c8aba390001c8112aa987c340ec7b31b6e502606ef175112602cb132ce5eb"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-dropevent.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:dropEvent",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "eeb9910693934f7cd1d1b1d4dd24659b2b5208d47af598baf28e700ea80cc468"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-duration.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:duration",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "77f9fc2fbd85d033546cc4f9297dcfc11d682d9031476e2c928a6772f4c19c47"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-end.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:end",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e59dc43fc6054fcb9c5ef5a595f676f134d9417b5c269b8217504b5ec6f1eabe"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-eval.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:eval",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f79ec071f3306c255d68e89c9c749bb4540d2ca710422ad06de014f8560f5849"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-event.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "541a0a3b5f6b01f65417dd99d6883ca4b9bb43749705f76669994681bb52102c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-eventfieldcount.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:eventFieldCount",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9d1ac86c196c038ae57e1b049bf3f8431ec4105b5c78659b4f7c773c96120286"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-eventinternals.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:eventInternals",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0607e512e658a312387ebbd74927d61be280fc1d8dae4f5cd0b5325665894c5d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-eventsize.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:eventSize",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "1d7b08aa78d46ffc719b0cae95c63d62621a4a27c8cc3d9f4f6265b42a377908"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-explain-astable.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:explain:asTable",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "906240aa41b55361dfcbc802ec14ba9d1d81affc319da96ec1180d9f157c8718"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-fieldset.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:fieldset",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c131bfa3b2cbc53d19ad6956217521438bbeea16bf423ee9bd086297563a73be"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-fieldstats.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:fieldstats",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b5d3456775db23706d27417289a25a4d5806d164fc2717eb6bbef74dbf445831"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-filter.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b3935fdbedd19b926decbf84ded98695a509933c4c1a81da610a8cff74087100"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-findtimestamp.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:findTimestamp",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6e3b1ff9e53c32c836abdebe1442c13446cadde2b491263db4d8e398dd208476"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-format.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:format",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5f8bb1b0bf4297c3b8634f553eeffcfbb6e26d62e23f8c0f726ad69c473d39bc"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-formatduration.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:formatDuration",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "326bd68f412f7efc671a7447e263c854ec582d47be532a018370469f64f1e7ad"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-formattime.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:formatTime",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9dbec2a434768c0fba3bb3cdcacd0c4e9ee38e283fd40e0a8f8e70aa188b0a8d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-formatting.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e598d2c6917bea2c325fee3327aa74c960dd8a9a5578d406cb7700ba1f998e8a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-geography-distance.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:geography:distance",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "64ebfdc3c52e8784937c7a3f513a5fac9a1e2e8e88079ca29bc5b3f6e7e308d7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-geohash.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:geohash",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cc0e179b4ffaf21c3a386795477b5601012a6133936ecaff63b741bc8d71126c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-geolocation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3009ab35c1797f905b041686a6a3b7b3e006403946f8274a3cb34cc35b989ce6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-getfield.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:getField",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "99998d37c537fcecfff575d472952c09f7f663875b5c549aa51f9506307f0558"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-groupby.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:groupBy",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "dd219449904e945257b07fd9f80d8a4817262e632b75a3428ef1214e4d7e233e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-hash-functions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "911c612beba472afe0cefbd826fd28bb525f0c3bcd3391e582dc68ec55553665"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-hash.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:hash",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7726517dc536f72b844f47617ba43361d13ade88d9016b602fbe9bb327092490"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-hashmatch.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:hashMatch",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "453e577b95d876eb42b90fe316842a39e1bbfbd546b2d55b011485533a7eedde"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-hashrewrite.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:hashRewrite",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "18117150e0d3facd48e01adf4f32072296c9a2316418169299754439479b87ec"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-head.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:head",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b0ec5f425e24bd0c395efaca970ef1d0f9e9bff213068bb29c6b78dfc5443f83"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-if.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:if",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "361648b4fdd93af96f426bf3134c81b77a774c0c0e708f980b26bd6f9abb102f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-in.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:in",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c4def386e5e4b3d10669e33581b2913cc3b89c3b1805ea754e4926afa87cef74"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-ioc-lookup.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:ioc.lookup",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e2649711bd003ea8b21bf19cecb9b1a035fc834e4a47a8d6e17a039100bdd53b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-iplocation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:ipLocation",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4c692aba0f36f7f5d530de6adc6b78182ca4fb58aea1f1569dc0fdf63c0ccada"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-join-functions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "15a3b8fd6de60a41defc1e345a358f259d3d23d4b82bb129938873ab46704871"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-join.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:join",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "916f0680062c576bab795db13c37d73bc5050ba059cc7b895534a63557051afa"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-json-prettyprint.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:json:prettyPrint",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a6a25931e442f31edaf79a1ada6841d6c539c818698a85c5ec5d91c20a38caa5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-kvparse.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:kvParse",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e166e720b31ce47b60121a540f91f918d528b33241fd13d6b59152f4b72f27b3"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-length.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:length",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ee889f1f499d9e9b6de60b28bf8814814da3ad12a8a518e3570fec495cf12498"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-linreg.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:linReg",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0e7e4c5f3f895296762ab4f97254c95af86c7895b47428a6f47bc4dccca67974"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-lower.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:lower",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5ccf5d91b566562f80f5aa98edc217059eb6d6041e4b3168ad79e277ec222dc5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-lowercase.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:lowercase",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c2519205fca901f4ea97fac63710721cb1242bf70bd06656e9fdea8e47b7bcff"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-match.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:match",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5c4ea82781e7e23719518514ca33156e4b95f17102b8d2401c83d3dec347e2c6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-matchasarray.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:matchAsArray",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4d39e66b4e01811163ddd288e63cdda1fafadcff2becb0be2d5037f94747a85f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math-spherical2cartesian.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "53dbc5de4a4eff7b705570126ba7f8254a53cee7e82a0f09c44bfa6dc92f5e5c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-math.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "514fa23cfc89fe4d3249961accec6ea72d471a9c02c2b3615fb4d16a5c2a6b18"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-max.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:max",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "dec1b16921840f02a63ba0dbc3061bee40203869a26524e371542d25d18c61f0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-min.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:min",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "eb5f67e05bdb161dbcb9e717b02db94a03c1430354ae69a4de33b41560b1a7f8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-neighbor.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:neighbor",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4b48f3b01a1fe851c75aea98d19b89da9dcf2d75b1626739a85e6a2ad35f46e3"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-network-location.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c73c696e714f2632b1c5471e48a75bf8d0c9e6119bcdb45f4610f2d94ed58802"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-now.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:now",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0649e8f3a3c3f083ebadeb88c560f927728463ef61082e5ba1b8785bd56139f9"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-objectarray-eval.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:objectArray.eval",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f2d5bab08d97c111e4abe68b3f6d8980de4d615d7ccfc7b8cf3157067dbc3004"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-objectarray-exists.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:objectArray.exists",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f31bb93791588b9f1d8825b42eee1925cbc8c0ad08be72484a26d861176f808c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsecef.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseCEF",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "719a9d5f86ad4b66e622b6e611735623176f10c3801e8307d40eaaf4a1527924"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsecsv.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseCsv",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c44b4c01bf00682773293fe62f6b3766a8e569d3ce0c3c0ac3b30f6e565c05df"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsefixedwidth.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseFixedWidth",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c9e8ae7f4739a5a1745827930b894b761a471cb431746540abbaa907b45283cf"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsehexstring.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseHexString",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "255f992929f1ea6106cab14ed65957a54421443e4462e1eb56202aaace870a3b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parseint.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseInt",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6af90c95299c633a5c87c207a9b6dd1f9b3000bdf1c0f639626df0aeaf615f81"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsejson.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseJson",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "fb4260d0b9e2fb3a9f1bd8952cb7194c6632a3ce6bb37b55fd346cc1d010c4b6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parseleef.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseLEEF",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "559867636592fa5c527d3059199138ae80ca1c0e097150756bf766e54f21f371"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsetimestamp.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseTimestamp",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c1300d8e347135fbe8b28f61c28b92c9911863f89a1421153527a6484db44156"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parseuri.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseUri",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "40abd6af29686b9f2b6125fee8018a0a8d5c5d52a004110c8c637b5f763d976e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parseurl.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseUrl",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f86ffa739b968b05982df6b4de27dbdee79b6743165527197caafac13b7bc191"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsexml.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:parseXml",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "346484839a37e24d53e8d9bd16322e1b778dde89f9fb20c83885d575e0d0f85f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-parsing.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ea50bdc06764e2865fb5f8220720be0264eaea9ff809038e68311fd3742586fa"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-partition.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:partition",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7cdf5bdcb1b146e6148519de99ed9298a67f0022837c478b8706801025f91865"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-percentage.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:percentage",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "67f63a2bff0d01a463d666904264e09ec236f2d73dd19aa23b5d600b3fe72614"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-percentile.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:percentile",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "35261c841329c8d6b903ce50c0565e7f4be8aa253f449be36e2dde4f98c6992f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-preamble.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "68f71b185becfaca6e99d68b164436c68a03b69ad9653159de1e537cd5052274"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-range.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:range",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "37e189d6eabc3255e6e445af44381b136ee303bdaf4bc1aff52eda7f2c2a5fa7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-readfile.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:readFile",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "482b16ed9fdc52d053864fc89642157fd52e77a8ad2a9d40ba67e38ef4fcbbb7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-readpersistedaggregation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:readPersistedAggregation",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f67813c8f42082dba10b7a8d7a9e874e463981e5c7640cc47ab530698b47b355"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-regex.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:regex",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8719117d3a3ac5289ddc4f31c5606b69e4eef0edb8b1e30f49fa7ad93add8da1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-regular-expression.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7b496562710792bf2c4f6492cb0835d0949a296320a5607c0045cbd17609a6a2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-remotetable.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:remoteTable",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0c4296b68425520bc7258d6ef8209a637a8eb498dff5c52d674b9c84f46c266c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-rename.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:rename",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "48d65531b31c3e641fdedf83888c79f3f1f68e4fcce979e52016a1bd2b56c29f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-replace.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:replace",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "22d9aa5dec434d6a57c227c50293fdf137939c60616c6f00f8df439ca5efd241"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-reversedns.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:reverseDns",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "405fe3efabad88b08fcbc5e7d8d8cca1011d03d553c855223b93d83b5a00cc3e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-round.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:round",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c762d5d70ff0d87a446fff9ec53b985ad7cb9fc731df721fadee900a1696278a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-sample.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:sample",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cebc63073e73c71cc1f0a9ac87ddf21fd61a09fc4ae7dbe481feff23a785d901"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-sankey.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:sankey",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f24cab7e108ebf8338e318ccbf4f559784d39ee014dd0f1e9d6cfa7c18369cc1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-security.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c6f1d388d7f559e03505a7b70fa3448967377702d7fc9b46abbc286b265dfa3a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-select.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:select",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d9d5029403307483f495efb4e5a5f6b995ee2b638d499511c7d99461d44c96c5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selectfrommax.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:selectFromMax",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ffafef55ff724c2f8c4fc5ac84cc9c175dab4a4e0e278a3390956d0486c76880"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selectfrommin.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:selectFromMin",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c1321f8f4d993a8c6170ac67c7bc2e96ca8318cb673e02e2483b786b19326abe"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selectlast.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:selectLast",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ee43fbbded1861d5dd91c9a09bbef1babad227691fd74bd3941b591e39da3a09"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selfjoin.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:selfJoin",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5a4986060b9fe7291b849e027aaaa9f1be57f63efb6c3fcedbdb121bd32d55bc"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-selfjoinfilter.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:selfJoinFilter",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "87c77d9fc3799f9135016a3190c6d09201aa4e192f1b157f935016878d089d9c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-sequence.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4105b6f36cb0d00f6c466bda54686dd18838ca6dfb86acdfdc3271d25e4328d2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-series.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:series",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d4de35d74c05e7d79eff764cc6fe4712d26399192a2cb34ab5351143d5753348"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-session.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:session",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "18a95c888f4a06dc34dacacdb6e9032b6661c5221b711ad8737bc98b2decc62f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-setfield.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:setField",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "15f51e820b5ebeeb81d5c94bee1366c484373361bccda61e6e8dd06879ec73f9"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-settimeinterval.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:setTimeInterval",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "719c21d58dd9571f895154aab79b570e1f5bc99381c82e0ef5472142a4ce1989"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-shannonentropy.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:shannonEntropy",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "36404b9d743c8f2b9d3e2a46e872d2bb255ae36443bcca2d505212c3b78c43fa"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-slidingtimewindow.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:slidingTimeWindow",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "95251f6fa486aa00cf0c8a4c232367541d2a9a07fc0773ef2c3d053f446d9b5c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-slidingwindow.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:slidingWindow",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8e6e33db66083a06271cfeb74e95574f25e96ad2f414b0ee81a8931a6df96871"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-sort.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:sort",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f0c20133ed4eff362d865a14b60dc23943d52cea67ec00d23b94abbd952fad41"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-source.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b2d66cd5d00c5fd15964c10fb0b324d8aeb955f9730a159d89269ca18ad1c4b6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-split.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:split",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f9318a843bd086e941bfe56ffdd15fb24cb9b64699357961828e4b9eba34a87d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-splitstring.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:splitString",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6ce48a01bc71f971c4cd204ecfec0ccec8c3796f88d7ee339a8fb520c41bb498"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-start.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:start",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "22e5b93cdac2da0d07fcccf2bc014a2730ce12bc5126c402be4ff999b4954681"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-statistics.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b917a136f2435b8a83c59f22ebc051925b88e1f7249f88397a39ab5434f011c1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-stats.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:stats",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d2fa7d224512e28f801d25aea9aa48b383a04619ec7d62077a4f544f4431ffb2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-stddev.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:stdDev",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0745237b0db7f5c8e2890ce3d716e869e98f2bcc47945b6f05694f4a4f14080f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-string.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5717e5323dcbf141d13f5f6f8fc9d475e7608c60e9c8127372b39af726c41911"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-stripansicodes.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:stripAnsiCodes",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a04f37107e7a8e05e221f24537196452693706ee712a39a369d9ad3d1757c9bf"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-subnet.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:subnet",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c0093eb9b8e5bf4a38ce2d54f25e84694b921917c942c699b929877d9618666f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-sum.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:sum",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d675ef79fe0a14e568ef228bbe2cdea70ade5e484abad26c4e61c050d0683892"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-table.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:table",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3fb00ea8d633b3069b21ea100aa2b23054856e7aae3964941ed8bfbaa9d711c8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-tail.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:tail",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e3ed520566ee1e82dfeeab7a16dbe16b3135fd8a1ce1c732e1bcc781a77cf924"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-test.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:test",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e9f474529c57b7962ac7b43ef1cfe38862a5ffb44214374c4c24582ff46623e0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-time-date.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "1b9f7c10bb20a4f0effb26316482568a9f6ef8fee2e4416154d607db3e4a7565"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-timechart.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:timeChart",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d07adca58fa878b7919eefb7e64fd0b5970eea701929ac6767e7ba98c49a2e41"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-tokenhash.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:tokenHash",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9c0b2c2a4c2e4e4c4e1d014eb87e21762da93f261540e722d54203586665bc00"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-top.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:top",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6d4e5936ac10b23ca9148b906a41e67436c8ccac3ac989ff0eef8bbbd90d4029"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-transformation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6d6a900643269af4e3d5c61cf11d0ae7c3e9a7aa563a4eb5e1ca07b0d426aa93"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-transpose.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:transpose",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e3f1449f5017dbc1aff356604b9ad5025d2567cb8e6010efc221ac735b838237"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-unit-convert.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:unit:convert",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6486635c28e896c5d36f9e301003266ec5b1070ad2f01349f59ed5882160e6d4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-upper.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:upper",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d10b28cc93aab9d60960bed92202db16209f20dc12300b093c84b30aaad639f8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-urldecode.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:urlDecode",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9b163699ffda9006c09f846a9ffb485d35546794f73fba976cb1fbda41c8b60c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-urlencode.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:urlEncode",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7ad29923caa7dcf66fa9f5dd3460377aa2d404d45bfd1172f505122e0e043e29"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-widget.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "debede708bc0f6c66242fbae7c15f0bceb8a3a71934dbc9f3fef88dcf4777b54"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-wildcard.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:wildcard",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "85a0f838a0595262afb9b80e0c57560ec661e3d31073e38dce228368e0680197"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-window.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:window",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "33ec1f6b6f3189317a70faef2e617c3f917c5496e6c52faedd89e0560b165e91"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-worldmap.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:worldMap",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0c4a9e433761f3ee02a13d9f037cee0aa37b85538def92d30d1d59ddad7d8dcc"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-writejson.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:writeJson",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2e7180644e0e0fb045f5d00f77dc03c01d98c471f773d80bf35cf99339a280af"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions-xml-prettyprint.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:function:xml:prettyPrint",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "95f3e42d6ca373a36ea232a8115dab0807b789582fbb847251c01902c13c673c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/functions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "17f69016c08d5ef152fb85db84ad2e7ef73176c66b62b17f89cff597befece9d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-arrays.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5bdd00afa0aee5c7f414d39e153d2e9ef6bb678889e0268c25d8b3fe6aded002"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-converting.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "203be3cea378ef91c2dfd6d8ac780b6692af4765050b37422b2db10c131b6c6f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-dedup.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7f453622b261a55836d2c4399b7aeb709a0c82d4b4056b63b4c492f57dd80ef5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-format.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "61a8f889bf2b54e05f5a753f9a75ab5954ce266c398a894fe74a593fcf095d71"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-limiting-fields.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "df4070be68493f37f2e81b896c4f5dc6f387f0cf8c3c6f7b5fb2fe11047813c1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-limiting.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7906089c419076505cfe96ababa8ad5a7e1508387290eeec8d3a3b6ab4e19e1c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-misc.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8d5dd966939633485e22ea5a1ef66fb00efd4032ac0817c0e18c3db54bc3d506"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-modifydata.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "897935cf88931aeea827a65fddbe267f24e0907865a7ef21e9249cfd28971dca"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-sorting.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ac25b9070395305b9c2af7663d8d31fb036a0c8391ec107fce8ee0f7e1119380"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-time.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "991be1c377ed8d138277d886c8fe46e20c11e94348eed7c8a3e8a451c839106a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto-traps.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "34d4591bb3bdd7c30ac929f37e67664a4662565140549cbe823b37708de17631"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-howto.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0436b2ab4eb6a411d671f63b9a8cf257f4ace7d677e2cc8da4512ea3a90e3120"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-context.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d28fb28c85291970394877d5a3a7f424525ad3f8cf510b66ecb20e94f56f41fa"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-eventsource.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9e2afe6203fdffa0cacd3dd11e8db24cd5198a6bf49fb3b812eb40ce77a2be39"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-files.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cb3d1082f932d6d04f7d9fdc537ca519a66a58d8eef9414910ebe626b1cb4059"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-limits-functions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f3e9208a68eccef91ea48860249ccc27fffca9fdd8498c29f6a8ec3f977892a8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-limits-implied.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e84093ba8b19be866403a1e2ec9793776e3a5c12f0801dc9883e974073c2571b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-limits-variables.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "c189b4ff23c173c46fce58a38a4acc9358a5623763854378566e93fa8e0786c1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-limits.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d0c25eba71dc3e5ad2d09409c86bf66e3b92c527315d857f0da5f81b6565588d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-pipeline-event.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9a04daf181388a76b42e90797e52761472ce71fd7c313241982060de60739c50"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-pipeline-eventset.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8ae56ef96f0935afec370a8dbdf0c37bf11605aa5e3fcf5a04e025c5ef5d4319"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-pipeline-finalizing.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "1d435e7df0c4945fadba4de9f9e5c53e31d792b3429e973951c9d9c39177e556"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-pipeline-sequence.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "095ee4f92d2359ef60680ae33cf193f09e6de3e9bc5f772a4dfc16b4b4dc9f4b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-pipeline.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "51649618a36bbd569f8fc64a6c17da8cecccb7a8372a8b73251430beabd51c2a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-processing.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b17690fcb1a391225368b6012ef1e38a95f798dcf518ae6d6fc18e14d7399bbd"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-query-prefix.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "60f93afa4f97d45581960ed7c74a361822aebcd9a2b6c01da18b1f242c49c941"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries-categories.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a39571aa511a74983f9f4f4056aa6aa420865d3fdff5e14f76fe3f374290a615"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries-context.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4a554e6a6354b7e46577df507dcf1ce2a50c3073b6ca7d15fe4384454b7ed4d5"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries-examples.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2b27dffa44c98864ffcc81bdc2fb3c7bfb67186f3b349e544ee2da3dd919128a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries-inputs.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "becd7e40a0bb83f77918e99bb59c4c199da87643b330af5fe34f8b61ec62706e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries-outputs.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "549e11625203f4e7a0442403f36b8a71d626c06698b66bd1ffe141cd46923ce4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries-syntax.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "19c44797144edfbedb621bb55e0104128a30b2682811efcb56fd27220eb9fa31"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-subqueries.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3f7f75c4d0594fc970f5a310c8108efebef0c621d8233cbb6c1f389f66b9c6fc"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation-troubleshooting.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3592ad5ab659c6475b2a529437d83a086a1c739a76e3dcb4f30ddab3605f9c12"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/query-operation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e30bd0a1118980142ba893937acfbbe3176cfac1a9dde43d17fee39ad5e023c7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-aggregation.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "204f910084ef0687cdd5274d5442dbad0254ccaef647e6c78ceb5a4b32393fff"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-analytics.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "51bd06b079d30ab2fc01145a7c0df54d5f0b03cf178d1d7612f5fd8df0daed9e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-filtering.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "1cd05313282d7e4b972a14cf4ad0fe709e2df93da67adff7c57f1c1d08d233a1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-iteration.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ea6d31096bbe203c2cd223d6e649325c7c278a63fdec32bf095afa21232de203"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-joins.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5dba989fc2dbbdc78ccfc6fa13877e20c74ec4f57185fef07fb0cc8e5389bafc"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-matching.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7bf5db6eece27fe6fa4167905c1d0fd62ab1811c63ec45f883475383c081b6ae"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-reuse.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "aa4057658240e00e3e31730fe155cf60ada316a2634504c71f9310dd37c54560"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-schema.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "87e294b24ba9698b79c2c4feefa789054c906d9f3368db122ab04a1d1df2f2b7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-sorting.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "649029689aaa1bfd3c504390e6bb71f7fe5ffa12daf30702e52cef7d3c2164d3"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-subqueries.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a920dc6ed8bb9abf8bd2deecf811be61c765fb91fd8a1f3f1999b587d339c472"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-approaches-time.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6bc1417f2bb157b22a659d11d5580d8d81b7a8a018bb7d7485b9ef90abbc08d1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-dbcomp.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b0825179913104a89b731ca1d4f1259cc1f0a0a5d3cb909242c9a4ae7dd4fc57"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql-structure.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f81cfddbe2083a6426c630c174047e686df84e96547bbc4b2b54c7e61b610212"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/sql-to-cql.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "71b7b9bc8755c01b0b405bbb763a42b2b51db4be1d081b8ddad143dde83e52cd"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-array.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5958206cd2119fcf35a9df9e9c7d20af4746420712a5ad6a4965ce3df6ceaf8a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-comments.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6d2fbe0b8c66cbbcfdbc4aecd14fc6b3bc1b9101d1c8598f02b945a94e587c1d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-conditional.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ff0485b8da7619c4fcc17a0d09b78759f0c25a9a81f84d081158a0357239c02c"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-aggregate.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "24c6936b9d6765f81986d9c28f91fd9c21fc5134142d01bc1395ef8ca48732fe"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-name.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2da9e9ba4cb006b72a99b2195d3f40e3a8ea558d0f4754e918486be108f8ae56"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-of-aggregate-functions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "89bc062e90bd867a06e5513e70269ebdc5c5dc95036673a1aee9a491c8bf51c0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-of-arrays-of-strings.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2072b7a2457371c048ae9a1df5396921484fca9180a71f24355e8ff6c37458f2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-of-expressions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "e010d21cd70d3ccc5de9e6f93ed6425777ded475423fd655a609d7b06cd83d01"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-of-fieldnames.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "57c9f79ecb803201a201b6a976efda839d2bcd27b62046aa29031821f7091d9a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-of-numbers.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "57e870e7335ddc47831c0e80cf2d4c0cda85466c64486cbd793cbac3f6f14e37"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array-of-strings.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6e9c895b97591b6322bb12fac1caa3740fb336b9255173ea3341edc97b97c505"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-array.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7e68779c2a89fa9374a4c455dca51b16c56a519b391c6b57aad475092fadcfb7"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-boolean.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "720c5e01f192d7e8e95777bcf70076550259a442a887a840636bafce3ab55be9"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-double.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8186aa2335b3a03bbbe4d4969b83eaa76793e2695f42e46d387c77600c17bd37"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-enum.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "20efce042a29408945d2bb9afecfb6898a51214e7acfcf5295cd6a3a5542939b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-expression.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "bcb97a78dab6603993c7c047004e952227ee910014847c789df7b7400ea974a4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-fieldname.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3527cbc97c2e4fb80c2cfd5abedc065031f552b7f4a2b50e7d22be492ae54b8d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-filename.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9582d4a8d67ffc62fedfaaf7a561ca35f069c72b03692444a1e4c151de244e69"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-function.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "b352017523e18cc738e0a190d531be907395cbc44634bcb58bfd4f8d7a1a61e2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-integer.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "f40939c5bac7564f1d477e686f6279fd07b4fa58a012f90c2ce4b970a60c900a"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-long.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "180f307fb5f155faedafea1b3f28431b6959b4bd663604cff2abcde4bdc51e68"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-number.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "88454bae00f8c051bcae955378eed663292f9d6690144f8c52157fcd63fcc1c0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-regex.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "97a97562b84310915c2f25b12d9d5ec3f6be65d4ba29e857b46d3349db0815d0"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-relative-time.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6de76daa3c71c2e07f6dfea233e2b9ec34a3d3d5e905c117229b0a35140c2fcd"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-string.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "79b3f5f3b6d1791c653ee0b6aa3041fec3a8e4018a083bda540f1dfadf5ba482"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-time-point.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "af522f3157c123ca9b7c3c2a9296b5df9763631cb94b385e405adcd6bd573e8b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-datatypes-detail-time-zone-name.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "50b359fa0bed4dc656ed44cce2ad2d11ee19f2cbdc7adb6d6777acaaa75c6360"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-expressions.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "19290ff0addece63f450c5fe282c149182c6ebdb6f6d880f269b0bd906bf3cf1"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-fields-user-input.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3f3cb64491e09557d4f1d7d5d176a90aa2ae1c51402576cd7310b200983265fb"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-fields.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "ed1f1ece5288f8c628e4da15925b7e855235836bc8072e6b60255b4815404b6f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-filters.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "bf130797dff7e48e9f40ef346e6ed829e278a6d26cddc499bf52f66ddf5b4bac"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-function-user.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9359f5db3669e4431c6747239559ac0b9cc08ec78d7cc866b1f27b432a6e95f2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-function.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "99a102c36e89e5b1967aa2bfc6877bcf204995baaec325ea701d97aa763f6e71"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-macros.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "6c2bbede36aa1f05863a88cb018e0e6df7f7e908ee2e0134df1fc2743bd6b69f"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-operators.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d6e921379e554ea45355f0bc8b4f0a4f5c0cc1146803457db8a1b9d0b4b27e36"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-persisted-aggregations.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a5732874680bdd77339a6f38b9a5d2bff9fc1fa09eb1b229d0be388ca1552159"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex-diffs.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cbf7b89082540ebcf7f4af11d1fa1b925db999389b271edf8c739c57fca42add"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex-engines.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "fc7b462d2bdcbafa4a51e3af297ac476cef7305154e382750980a496f28dd87e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex-flags.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8adadfdcce18aa89d523d84f60b9d42a85ab0016a90332ccf192cdf46aa045e8"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex-syntax.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "0c10939ca666a4f2e424713916485ba61ef6c34ff8d11ea94c4c0a1455ca0635"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex-unsupported.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "213ed9693fcf63191efef9cfb4b7ca60049b8960b0da312c9d96fa3d5de6ee08"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "cd6c78c13f0b9f9a93f1c4460b5db711583a2c4ef81b76b11b6afe5dae7a97a2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-regex2-syntax.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "19e7675e20e67e75f6c522e50be6e7bee03ed1b2aff6cbb6b1b1b9e41cb79e3b"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-time-relative.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "30a7ef25bd6a626739633c974b6f18eda43ac903228cb54c21cebdadd66beb48"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-time-timezones.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3ddb2df8fadb33c51694b002ab2d60e26cb1926a4a384334e3d0ab905ae10ae4"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax-time.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a0d37c1d1cd574b01000f22f125190ab3e880652b2b94a1471d34256be767d21"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/syntax.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "21f9fd4c9795f3b6797a3bd5fde090b935aef9069a7e4acfa98e0dee51c8ee2e"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-flow-order.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2896fe4c5d66a5276da181bef4cf1df035138670282667473c0db6b78972b696"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-manage-asset-sharing.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "fb122be01f4d558da67cd8f15a1d92f9a1b34e7806ae38d114db4288041b8738"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-manage-interactions-saved-query.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "8f5d5613183984b91750843cffab6c838f08cd51aaa98f561b4dc1fe706ca890"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-manage-save-new.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "66aa3c17d4cdbb4732f9f37ca10cc5611e9261fd72e88f2b59d62ec2916207bb"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-manage-write.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "7f2f4e7d64276008d0409395b221c6eb96d9004dc604497d30a929bf909017e9"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-manage.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5e671601cf299946b69e97991e0827efa1c8c0f04ed102b79b82cc6cefe620a2"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-operations.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "2d80d3f1aa72c6e0c377367c3f0e5b9f15f316359d942e2853d9e10eb2e6b4d6"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-usage-best-practice.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "3b4847fd3c03309960291f75faabaa909c556be8f89e11fd251c45d2dfc3890d"
+    },
+    {
+      "url": "https://library.humio.com/crowdstrike-query-language/writing-queries-write-best-practice.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "9800da3a7f3228dbaef6001ff1ae66c01dfed31bef520de3136cd576389d97ff"
+    },
+    {
+      "url": "https://library.humio.com/lql-grammar/reserved-words.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "a5bcc7cf6b43224f2b2cfbfa0196ac9340a6d7d121f674e706e9690a77b20dbb"
+    },
+    {
+      "url": "https://library.humio.com/lql-grammar/syntax-grammar-guide-appendix-a.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "309c7e68beb2c7bc00cb0b64a6bd076b63a5eaf51869dab4902a6f66f4c24079"
+    },
+    {
+      "url": "https://library.humio.com/lql-grammar/syntax-grammar-guide-appendix-b.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "d39a9ede24eb649e44211bc7dfa2f7ba0445bdca1bca4b5e9a7ac4e08cecf3fe"
+    },
+    {
+      "url": "https://library.humio.com/lql-grammar/syntax-grammar-guide-appendix-c.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "386648c515d2425f6deac39b2f1c2c76f45a83af6150e6d9a5d9f148ffc9cda5"
+    },
+    {
+      "url": "https://library.humio.com/lql-grammar/syntax-grammar-guide-subset.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "4bbb05ff97eddf492bb4348a8924b9d51c788f3f96e854b7045e52406844b8e1"
+    },
+    {
+      "url": "https://library.humio.com/lql-grammar/syntax-grammar-guide.html",
+      "reviewed_at": "2026-11-14",
+      "record_id": "cql:qualification:core-v3",
+      "kind": "official public reference; independent factual summary",
+      "sha256": "5723e56eed7aecde0fb33f526f4ba9ef0832007d63f13cbaacd92a67d7e278cc"
+    },
+    {
+      "url": "https://library.humio.com/deployment/configuration-enabling-features.html",
+      "record_id": "cql:qualification:core-v3",
+      "reviewed_at": "2026-11-14",
+      "kind": "official public prerequisite reference; independent factual summary",
+      "sha256": "b91cc3519de862e4e61cf14f1d09744f7cfc45b73e3d5466591a9d203e09234b"
+    },
+    {
+      "url": "https://library.humio.com/deployment/configuration-ioc.html",
+      "record_id": "cql:qualification:core-v3",
+      "reviewed_at": "2026-11-14",
+      "kind": "official public prerequisite reference; independent factual summary",
+      "sha256": "3c1f9502f19c8f819cca4ce825eabd19fe431facbb9104dac1a0efe7e375208f"
+    },
+    {
+      "url": "https://library.humio.com/deployment/configuration-maxmind.html",
+      "record_id": "cql:qualification:core-v3",
+      "reviewed_at": "2026-11-14",
+      "kind": "official public prerequisite reference; independent factual summary",
+      "sha256": "876cbcaac4c63b27566512f4929e65bb07480adacbe8be7501c1e7e5db4994c2"
+    },
+    {
+      "url": "https://library.humio.com/data-analysis-1.266.0/query-joins-methods-adhoc-tables.html",
+      "record_id": "cql:qualification:core-v3",
+      "reviewed_at": "2026-11-14",
+      "kind": "official public prerequisite reference; independent factual summary",
+      "sha256": "15d940bb2826dd3cae1513d8b5bf789b90a11f3b7dcd388875541d0363fe0844"
     }
   ],
-  "edits": "Reference text adapted for CQLmatic; source identifiers and attribution retained."
+  "edits": "Reference text adapted for CQLmatic with source identifiers and attribution retained. Independent function and language summaries supplement the pinned corpus; official public page hashes identify the reviewed reference material. The series.memlimit default follows the attributed cql:function:series description in references/cql/correlation.md from the pinned knowledge ancestry, which states 1KiB; it does not establish a deployment memory ceiling.",
+  "primary_reference_scope": {
+    "publisher": "CrowdStrike",
+    "reviewed_at": "2026-11-14",
+    "index_url": "https://library.humio.com/crowdstrike-query-language/functions.html",
+    "function_pages": 196,
+    "query_candidates": 194,
+    "current_query_candidates": 193,
+    "deprecated_query_candidates": 1,
+    "excluded": 2,
+    "cql_pages": 343,
+    "grammar_pages": 6,
+    "scope_file": "data/function-scope.json",
+    "parameter_file": "data/function-parameters.json",
+    "qualification": "Public documentation membership and attributed facts; executable argument forms, target availability and execution require separate checks.",
+    "prerequisite_pages": 4
+  },
+  "knowledge_ancestry": {
+    "repository": "https://github.com/mychaelconnolly/ngsiem-query-engine",
+    "revision": "2158f99fc529e234d5fd6fd4d4af899d7d83a848",
+    "source_files": [
+      {
+        "path": "references/cql/aggregation.md",
+        "sha256": "b6ef044c1305144418185a8e3950ace59380499d8b08e7d22aea36d1924b1bd4"
+      },
+      {
+        "path": "references/cql/core.md",
+        "sha256": "c7a50ee9f7e12f694d1ad87b4ce05b55589313c14b612a0fca0ee9c71b7177b9"
+      },
+      {
+        "path": "references/cql/correlation.md",
+        "sha256": "4ddd49e389763662fa5a830d0c8ea01ea41b90f3e47e864801fcec2a90bf7af9"
+      },
+      {
+        "path": "references/cql/detection-logic.md",
+        "sha256": "b5cc921f8ec909baab57b576516c8ba619562d5107f1d78b40ccc960bbd2f8b1"
+      },
+      {
+        "path": "references/cql/enrichment.md",
+        "sha256": "a4b44d337000a2e7c93b4b32ac8307ed2cccd6b7b0ad5818301c8bbf84cb3e73"
+      },
+      {
+        "path": "references/cql/filtering.md",
+        "sha256": "967561eb19447e309a1a027c14d10eff9a261d9e66ef3d04c163045f67f6237a"
+      },
+      {
+        "path": "references/cql/index.md",
+        "sha256": "53a77b7ef5c14524cc70f261da12fdb182f1e88b80e589a28d7192db19d73864"
+      },
+      {
+        "path": "references/cql/joins.md",
+        "sha256": "ad70242b714905c6679ebd6bd6890dd8cc91f5822312afc169ff5e0d327f356a"
+      },
+      {
+        "path": "references/cql/limits.md",
+        "sha256": "7a37310ba6d68a5b33f367984322946cb88e4c153331906ad2350bef683e76a8"
+      },
+      {
+        "path": "references/cql/matching.md",
+        "sha256": "ac94e8514edcc92aa80d0f68d04665bdc81b64f09419dd376dfe9105044ea213"
+      },
+      {
+        "path": "references/cql/misconceptions.md",
+        "sha256": "41bbcc2dee7745d4be52a62b38dcd22ed39ccc8f92f24a7d16dc3b35d5022979"
+      },
+      {
+        "path": "references/cql/parsing.md",
+        "sha256": "66cc2c7067d7c43f3bb9e365cc415d23afc1acd1b253d84c0e27e492b9e71d4e"
+      },
+      {
+        "path": "references/cql/patterns.md",
+        "sha256": "6dbd626184fb39dc65f9029c581073378269debc5c81c38a07b6eb0c7822c4a5"
+      },
+      {
+        "path": "references/cql/performance.md",
+        "sha256": "64896260d4b73f644955df9c09461e915f4530069c63067d7ee6b75cb8ceb111"
+      },
+      {
+        "path": "references/cql/selection.md",
+        "sha256": "266545ed98964b01b717d18cb30dfc3944649f551f55a97fbeebd4e20fff4b50"
+      },
+      {
+        "path": "references/cql/strings.md",
+        "sha256": "a7be980d3c0181ad41a96316f4048d5ad8ebff5f33c697baab24dfad6743f482"
+      },
+      {
+        "path": "references/cql/syntax.md",
+        "sha256": "0d24bec824bb2e8a41f0a564041a705d317f03ee4ae6a3b5cdc9b1a7a97d7a5a"
+      },
+      {
+        "path": "references/cql/testing.md",
+        "sha256": "b502daaa3239037bbdd59bab9eca7a6c1ba3091f7a2466bbfad6ed3b11095370"
+      },
+      {
+        "path": "references/cql/time.md",
+        "sha256": "675d92a7064e28a67a92e77efdeb7be321ef9f1a19cb6ba4e39be806f73dedd3"
+      },
+      {
+        "path": "references/cql/transformation.md",
+        "sha256": "0860827a4b91fa81b0ee2385f24f220fc393dd15b0c27e31a4c52dc90a473475"
+      },
+      {
+        "path": "references/cql/troubleshooting.md",
+        "sha256": "f7ddf936e4365bd76277e13c0af6662395796e40516d653dc3ba422784e483bf"
+      },
+      {
+        "path": "corpus/standards/cps.jsonl",
+        "sha256": "0cea467fe5d61961170abac39d1426c3919aee0501bc9587f16eeec045e71592"
+      },
+      {
+        "path": "corpus/standards/ecs.jsonl",
+        "sha256": "50cca902e4cdb1b30e7be5f6167407f9441ffc8c01dae02e056aa81c04ac34a5"
+      },
+      {
+        "path": "corpus/provenance/standards.jsonl",
+        "sha256": "b4b02d83230a358c5ff63da9fd2138dd7d221577ba2fb9c9a28957df8a6a8c08"
+      }
+    ]
+  },
+  "knowledge_revision_algorithm": "SHA-256 of a SHA-256 manifest in knowledge_revision_inputs order; each line contains the digest, two spaces, the path, and a newline.",
+  "knowledge_revision_inputs": [
+    "data/knowledge.json",
+    "data/function-parameters.json",
+    "data/function-scope.json",
+    "docs/ANALYST-WORKFLOW.md"
+  ]
 }

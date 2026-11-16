@@ -30,6 +30,9 @@ impl Drop for Temp {
     }
 }
 fn inventory_command(dir: &Path, action: Value) -> Command {
+    inventory_command_at(dir, &dir.join("workflow/state.json"), action)
+}
+fn inventory_command_at(dir: &Path, state: &Path, action: Value) -> Command {
     let request = dir.join("request.json");
     fs::write(
         &request,
@@ -39,7 +42,7 @@ fn inventory_command(dir: &Path, action: Value) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
     command
         .args(["env", "inventory", "--json", "--state"])
-        .arg(dir.join("workflow/state.json"))
+        .arg(state)
         .arg("--request")
         .arg(request);
     command
@@ -792,11 +795,11 @@ fn relay(
             );
             call(
                 dir,
-                json!({"kind":"dispatch-discovery","probe_id":probe["probe_id"]}),
+                json!({"kind":"dispatch-discovery","run_index":progress["action"]["run_index"],"probe_id":probe["probe_id"]}),
             );
             progress = call(
                 dir,
-                json!({"kind":"discovery-step","answers":[{"probe_id":probe["probe_id"],"result_file":file}]}),
+                json!({"kind":"discovery-step","run_index":progress["action"]["run_index"],"answers":[{"probe_id":probe["probe_id"],"result_file":file}]}),
             );
         }
     }
@@ -1063,8 +1066,19 @@ fn completed_legacy_source_run(dir: &Path) -> Value {
 }
 
 #[test]
-fn completed_prior_version_history_allows_new_scout_refresh_and_discovery() {
-    for entry in ["prepare-scout", "prepare-refresh", "prepare-discovery"] {
+fn completed_format_two_history_allows_guarded_inventory_actions() {
+    // Completed format-2 history is a compatibility control for the guarded routes.
+    for entry in [
+        "prepare-scout",
+        "prepare-refresh",
+        "prepare-discovery",
+        "prepare-capabilities",
+        "dispatch-refresh",
+        "dispatch-capability",
+        "resume-capabilities",
+        "dispatch-discovery",
+        "resume-discovery",
+    ] {
         let dir = Temp::new();
         let completed = completed_legacy_source_run(&dir.0);
         let run = &completed["status"]["discovery_runs"][0];
@@ -1082,6 +1096,37 @@ fn completed_prior_version_history_allows_new_scout_refresh_and_discovery() {
             }
             "prepare-refresh" => {
                 json!({"kind":entry,"session_id":"synthetic-session","host_evidence_file":refresh_host(&dir.0),"automatic":false})
+            }
+            "prepare-capabilities" => capability_request(&dir.0),
+            "dispatch-refresh" => {
+                let prepared = call(
+                    &dir.0,
+                    json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":refresh_host(&dir.0)}),
+                );
+                json!({"kind":entry,"session_id":"synthetic-session","attempt_id":prepared["action"]["attempt_id"]})
+            }
+            "dispatch-capability" | "resume-capabilities" => {
+                let prepared = call(&dir.0, capability_request(&dir.0));
+                let run_id = &prepared["action"]["capability"]["run_id"];
+                if entry == "resume-capabilities" {
+                    call(&dir.0, json!({"kind":"pause-capabilities","run_id":run_id}));
+                }
+                let mut action =
+                    json!({"kind":entry,"run_id":run_id,"execution_context_id":"synthetic-auth"});
+                if entry == "dispatch-capability" {
+                    action["case_id"] = json!("array-union");
+                    action["session_id"] = json!("synthetic-session");
+                }
+                action
+            }
+            "dispatch-discovery" | "resume-discovery" => {
+                let prepared = call(&dir.0, source_run_request(5));
+                if entry == "resume-discovery" {
+                    call(&dir.0, json!({"kind":"pause-discovery"}));
+                    json!({"kind":entry})
+                } else {
+                    json!({"kind":entry,"probe_id":prepared["action"]["relay"]["probes"][0]["probe_id"]})
+                }
             }
             _ => source_run_request(5),
         };
@@ -1135,13 +1180,18 @@ fn prior_version_history_rejects_unsafe_or_inconsistent_runs_without_mutation() 
                         ))
                         .unwrap();
                 }
-                "MCP_STATE_TAMPERED"
+                "INVENTORY_INPUT"
             }
             "unknown-producer" | "future-producer" => {
                 checkpoint["producer_version"] = json!(if problem == "future-producer" {
-                    "0.1.7"
+                    format!(
+                        "{}.{}.{}",
+                        env!("CARGO_PKG_VERSION_MAJOR"),
+                        env!("CARGO_PKG_VERSION_MINOR"),
+                        env!("CARGO_PKG_VERSION_PATCH").parse::<u64>().unwrap() + 1
+                    )
                 } else {
-                    "0.1.5-custom"
+                    "0.1.5-custom".into()
                 });
                 "MCP_STATE_TAMPERED"
             }
@@ -1239,7 +1289,7 @@ fn prior_version_unresolved_host_cleanup_blocks_new_searches_without_mutation() 
 fn old_failed_checkpoint(dir: &Path) -> Value {
     confirm_quick_source(dir, "synthetic");
     let prepared = prepare_source_run(dir);
-    let failed = call(
+    call(
         dir,
         volume_answer(
             dir,
@@ -1252,17 +1302,6 @@ fn old_failed_checkpoint(dir: &Path) -> Value {
             .as_str()
             .unwrap(),
     );
-    let mut old: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
-    old["status"] = json!("failed");
-    old["failure"] = failed["action"]["relay"]["diagnostics"][0].clone();
-    old["session"]["attempts"][0]["outcome"] = json!("failed");
-    old["session"]["attempts"][0]["terminal"] =
-        old["session"]["attempts"][0]["rejected_results"][0]["evidence"].clone();
-    old["session"]["attempts"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("rejected_results");
-    fs::write(relay_path, serde_json::to_vec(&old).unwrap()).unwrap();
     let inspected = cqlmatic::mcp::inspect_state(relay_path).unwrap();
     assert!(cqlmatic::mcp::has_in_flight(&inspected));
     let state_path = dir.join("workflow/state.json");
@@ -1278,6 +1317,398 @@ fn refresh_host(dir: &Path) -> String {
         "refresh-host.json",
         json!({"schema_version":1,"environment":environment(),"session_id":"synthetic-session","verified_at":"2026-01-01T00:00:00Z","mechanism":"provider-enforced-search-lifetime","max_search_seconds":60,"capability_reference":"Synthetic provider capability","verification_evidence":"Synthetic session verification of provider search lifetime"}),
     )
+}
+
+fn capability_request(dir: &Path) -> Value {
+    json!({"kind":"prepare-capabilities","execution_context_id":"synthetic-auth",
+        "session_id":"synthetic-session","case_ids":["array-union"],
+        "host_evidence_file":refresh_host(dir),"max_queries":2,"max_seconds":120})
+}
+
+fn save_checkpoint(path: &Path, checkpoint: &mut Value) {
+    let mut binding = serde_json::to_vec(&(
+        &checkpoint["request_sha256"],
+        &checkpoint["created_at"],
+        &checkpoint["pack"],
+        &checkpoint["receipt"],
+        &checkpoint["session"]["transport"],
+        &checkpoint["session"]["predecessor_sha256"],
+    ))
+    .unwrap();
+    if checkpoint["session"]["sparse_fieldset_fallback"] == true {
+        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    if let Some(owner) = checkpoint["session"].get("inventory_owner") {
+        binding.extend_from_slice(b"\0inventory-owner-v1\0");
+        binding.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
+    checkpoint["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
+    fs::write(path, serde_json::to_vec(checkpoint).unwrap()).unwrap();
+    cqlmatic::mcp::inspect_state(path).unwrap();
+}
+
+fn paused_discovery_with_pack(dir: &Path) -> Value {
+    confirm_quick_source(dir, "synthetic");
+    relay(dir, prepare_source_run(dir), &[], &[], None);
+    let prepared = call(dir, source_run_request(5));
+    call(dir, json!({"kind":"pause-discovery"}));
+    prepared
+}
+
+#[test]
+fn non_discovery_search_blockers_do_not_point_to_a_discovery_run() {
+    for blocker in ["capability", "refresh"] {
+        let dir = Temp::new();
+        let prepared = paused_discovery_with_pack(&dir.0);
+        if blocker == "capability" {
+            let capability = call(&dir.0, capability_request(&dir.0));
+            call(
+                &dir.0,
+                json!({"kind":"dispatch-capability","run_id":capability["action"]["capability"]["run_id"],
+                    "case_id":"array-union","execution_context_id":"synthetic-auth","session_id":"synthetic-session"}),
+            );
+        } else {
+            let refresh = call(
+                &dir.0,
+                json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":refresh_host(&dir.0)}),
+            );
+            call(
+                &dir.0,
+                json!({"kind":"dispatch-refresh","attempt_id":refresh["action"]["attempt_id"],"session_id":"synthetic-session"}),
+            );
+        }
+        let state_path = dir.0.join("workflow/state.json");
+        let before = fs::read(&state_path).unwrap();
+        let actions = if blocker == "capability" {
+            &["dispatch-discovery", "resume-discovery"][..]
+        } else {
+            &["dispatch-discovery"][..]
+        };
+        for &kind in actions {
+            let action = if kind == "dispatch-discovery" {
+                json!({"kind":kind,"run_index":1,"probe_id":prepared["action"]["relay"]["probes"][0]["probe_id"]})
+            } else {
+                json!({"kind":kind,"run_index":1})
+            };
+            for flag in [None, Some("--summary"), Some("--brief")] {
+                let mut command = inventory_command(&dir.0, action.clone());
+                if let Some(flag) = flag {
+                    command.arg(flag);
+                }
+                let output = command.output().unwrap();
+                assert_eq!(output.status.code(), Some(2), "{blocker}: {output:?}");
+                assert!(output.stdout.is_empty());
+                let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+                assert!(
+                    diagnostic.get("pointer").is_none(),
+                    "{blocker}: {diagnostic}"
+                );
+                if flag == Some("--brief") {
+                    assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+                    assert_eq!(
+                        diagnostic["message"],
+                        "Inventory brief command failed. Inspect protected full-mode output locally."
+                    );
+                } else {
+                    assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
+                    assert!(diagnostic["message"].as_str().unwrap().contains(blocker));
+                }
+                assert_eq!(fs::read(&state_path).unwrap(), before);
+            }
+        }
+    }
+}
+
+#[test]
+fn owned_discovery_keeps_capability_guards_and_allows_settlement_then_inventory_resume() {
+    let dir = Temp::new();
+    let prepared = paused_discovery_with_pack(&dir.0);
+    let run = &prepared["status"]["discovery_runs"][1];
+    let relay_path = Path::new(run["state_path"].as_str().unwrap());
+    let state_path = dir.0.join("workflow/state.json");
+    let checkpoint: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    assert_eq!(
+        checkpoint["session"]["inventory_owner"],
+        json!(fs::canonicalize(&state_path).unwrap())
+    );
+    let capability = call(&dir.0, capability_request(&dir.0));
+    let run_id = capability["action"]["capability"]["run_id"].clone();
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-capability","run_id":run_id,"case_id":"array-union",
+        "execution_context_id":"synthetic-auth","session_id":"synthetic-session"}),
+    );
+    let inventory_before = fs::read(&state_path).unwrap();
+    let relay_before = fs::read(relay_path).unwrap();
+    assert_rejected(&dir.0, json!({"kind":"resume-discovery"}), "capability");
+    for arguments in [
+        vec!["--resume".to_string()],
+        vec![
+            "--dispatch".to_string(),
+            prepared["action"]["relay"]["probes"][0]["probe_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+        ],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["env", "discover", "--mcp", "--state"])
+            .arg(relay_path)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("DISCOVERY_INVENTORY_OWNER"),
+            "{output:?}"
+        );
+        assert_eq!(fs::read(relay_path).unwrap(), relay_before);
+    }
+    assert_eq!(fs::read(&state_path).unwrap(), inventory_before);
+    assert_eq!(fs::read(relay_path).unwrap(), relay_before);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+
+    let stored: cqlmatic::inventory::InventoryState =
+        serde_json::from_slice(&inventory_before).unwrap();
+    let run = &stored.capability_runs[0];
+    let attempt = &run.attempts[0];
+    let raw =
+        json!({"isError":true,"content":[{"type":"text","text":"Synthetic generic failure"}]});
+    let result = protected_fixture(&dir.0, "capability-result.json", raw);
+    let now = cqlmatic::discovery::timestamp();
+    let settlement = protected_fixture(
+        &dir.0,
+        "capability-settlement.json",
+        json!({
+        "schema_version":1,"attempt_id":attempt.reservation.id,"environment":run.environment,
+        "session_id":run.session_id,"arguments":attempt.reservation.arguments,"termination":"completed",
+        "recorded_at":now,"result_sha256":cqlmatic::sha256_hex(&fs::read(&result).unwrap()),
+        "evidence":"Synthetic exact capability settlement"}),
+    );
+    let submitted = call(
+        &dir.0,
+        json!({"kind":"submit-capability","run_id":run_id,
+        "attempt_id":attempt.reservation.id,"execution_context_id":"synthetic-auth",
+        "result_file":result,"settlement_file":settlement,"retrieved_at":now}),
+    );
+    assert_eq!(submitted["status"]["capability_blocked"], false);
+    assert_eq!(
+        submitted["action"]["capability"]["cases"][0]["last_outcome"],
+        "unknown"
+    );
+    let resumed = call(&dir.0, json!({"kind":"resume-discovery"}));
+    let probe = &resumed["action"]["relay"]["probes"][0]["probe_id"];
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","probe_id":probe}),
+    );
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let answer = fixture(
+        &dir.0,
+        "owned-discovery-result.json",
+        json!({"result":[{"events":10}]}),
+    );
+    let settled = call(
+        &dir.0,
+        json!({"kind":"discovery-step","answers":[{"probe_id":probe,"result_file":answer}]}),
+    );
+    assert_eq!(settled["action"]["relay"]["status"], "paused");
+    assert_eq!(settled["status"]["capability_blocked"], false);
+}
+
+#[test]
+fn capability_entry_points_associate_retained_legacy_inventory_relays_without_renewing_them() {
+    for entry in [
+        "prepare-capabilities",
+        "dispatch-capability",
+        "resume-capabilities",
+        "resume-discovery",
+    ] {
+        let dir = Temp::new();
+        let prepared = paused_discovery_with_pack(&dir.0);
+        let action = if entry == "prepare-capabilities" {
+            capability_request(&dir.0)
+        } else {
+            let capability = call(&dir.0, capability_request(&dir.0));
+            let id = &capability["action"]["capability"]["run_id"];
+            if entry == "resume-capabilities" {
+                call(&dir.0, json!({"kind":"pause-capabilities","run_id":id}));
+                json!({"kind":entry,"run_id":id,"execution_context_id":"synthetic-auth"})
+            } else if entry == "resume-discovery" {
+                call(
+                    &dir.0,
+                    json!({"kind":"dispatch-capability","run_id":id,"case_id":"array-union",
+                    "execution_context_id":"synthetic-auth","session_id":"synthetic-session"}),
+                );
+                json!({"kind":entry})
+            } else {
+                json!({"kind":entry,"run_id":id,"case_id":"array-union",
+                    "execution_context_id":"synthetic-auth","session_id":"synthetic-session"})
+            }
+        };
+        let mut legacy = Vec::new();
+        for run in prepared["status"]["discovery_runs"].as_array().unwrap() {
+            let path = PathBuf::from(run["state_path"].as_str().unwrap());
+            let mut checkpoint: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            checkpoint["session"]
+                .as_object_mut()
+                .unwrap()
+                .remove("inventory_owner");
+            save_checkpoint(&path, &mut checkpoint);
+            legacy.push((path, checkpoint));
+        }
+        if entry == "resume-discovery" {
+            assert_rejected(&dir.0, action, "capability");
+        } else {
+            call(&dir.0, action);
+        }
+        let owner = fs::canonicalize(dir.0.join("workflow/state.json")).unwrap();
+        for (path, before) in legacy {
+            let mut associated: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(associated["session"]["inventory_owner"], json!(owner));
+            associated["session"]
+                .as_object_mut()
+                .unwrap()
+                .remove("inventory_owner");
+            associated["session"]["binding_sha256"] = before["session"]["binding_sha256"].clone();
+            assert_eq!(associated, before, "{entry}");
+            assert_eq!(
+                cqlmatic::mcp::resume(&path).unwrap_err().code,
+                "DISCOVERY_INVENTORY_OWNER"
+            );
+        }
+    }
+}
+
+#[test]
+fn inventory_discovery_entry_points_associate_legacy_relays_under_the_owner_lock() {
+    for entry in [
+        "prepare-discovery",
+        "dispatch-discovery",
+        "resume-discovery",
+        "prepare-refresh",
+        "dispatch-refresh",
+        "prepare-scout",
+    ] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let prepared = prepare_source_run(&dir.0);
+        if entry != "dispatch-discovery" {
+            call(&dir.0, json!({"kind":"pause-discovery"}));
+        }
+        let action = match entry {
+            "prepare-discovery" => source_run_request(5),
+            "dispatch-discovery" => {
+                json!({"kind":entry,"probe_id":prepared["action"]["relay"]["probes"][0]["probe_id"]})
+            }
+            "prepare-refresh" => {
+                json!({"kind":entry,"session_id":"synthetic-session","host_evidence_file":refresh_host(&dir.0),"automatic":false})
+            }
+            "dispatch-refresh" => {
+                let refresh = call(
+                    &dir.0,
+                    json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":refresh_host(&dir.0),"automatic":false}),
+                );
+                json!({"kind":entry,"attempt_id":refresh["action"]["attempt_id"],"session_id":"synthetic-session"})
+            }
+            "prepare-scout" => {
+                json!({"kind":entry,"environment":environment(),"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_seconds":60})
+            }
+            _ => json!({"kind":entry}),
+        };
+        let path = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let mut legacy: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        legacy["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("inventory_owner");
+        save_checkpoint(path, &mut legacy);
+        let state_path = dir.0.join("workflow/state.json");
+        let owner = cqlmatic::storage::Writer::acquire(&state_path).unwrap();
+        let before = fs::read(path).unwrap();
+        assert_rejected(&dir.0, action.clone(), "Another writer holds");
+        assert_eq!(fs::read(path).unwrap(), before);
+        drop(owner);
+        call(&dir.0, action);
+        let associated: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            associated["session"]["inventory_owner"],
+            json!(fs::canonicalize(&state_path).unwrap())
+        );
+        assert_eq!(associated["request"], legacy["request"]);
+        assert_eq!(associated["answers"], legacy["answers"]);
+        assert_eq!(
+            associated["session"]["captures"],
+            legacy["session"]["captures"]
+        );
+        assert_eq!(
+            associated["session"]["periods"][0],
+            legacy["session"]["periods"][0]
+        );
+        assert_eq!(
+            cqlmatic::mcp::resume(path).unwrap_err().code,
+            "DISCOVERY_INVENTORY_OWNER"
+        );
+    }
+}
+
+#[test]
+fn selected_inventory_discovery_rejects_mismatched_reference_and_foreign_owner() {
+    for entry in ["dispatch-discovery", "resume-discovery"] {
+        for field in ["start", "max_queries", "max_seconds", "mode", "owner"] {
+            let dir = Temp::new();
+            confirm_quick_source(&dir.0, "synthetic");
+            let prepared = prepare_source_run(&dir.0);
+            if entry == "resume-discovery" {
+                call(&dir.0, json!({"kind":"pause-discovery"}));
+            }
+            let state_path = dir.0.join("workflow/state.json");
+            let relay_path = Path::new(
+                prepared["status"]["discovery_runs"][0]["state_path"]
+                    .as_str()
+                    .unwrap(),
+            );
+            let mut inventory: Value =
+                serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+            if field == "owner" {
+                let mut checkpoint: Value =
+                    serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+                checkpoint["session"]["inventory_owner"] =
+                    json!(dir.0.join("other-inventory.json"));
+                save_checkpoint(relay_path, &mut checkpoint);
+            } else {
+                inventory["discovery_runs"][0][field] = match field {
+                    "start" => json!("2026-01-01T00:00:01Z"),
+                    "max_queries" => json!(5),
+                    "max_seconds" => json!(121),
+                    _ => json!("full"),
+                };
+                fs::write(&state_path, serde_json::to_vec(&inventory).unwrap()).unwrap();
+            }
+            let inventory_before = fs::read(&state_path).unwrap();
+            let relay_before = fs::read(relay_path).unwrap();
+            let action = if entry == "dispatch-discovery" {
+                json!({"kind":entry,"probe_id":prepared["action"]["relay"]["probes"][0]["probe_id"]})
+            } else {
+                json!({"kind":entry})
+            };
+            assert_rejected(
+                &dir.0,
+                action,
+                if field == "owner" {
+                    "DISCOVERY_INVENTORY_OWNER"
+                } else {
+                    "differs from its inventory reference"
+                },
+            );
+            assert_eq!(fs::read(&state_path).unwrap(), inventory_before);
+            assert_eq!(fs::read(relay_path).unwrap(), relay_before);
+        }
+    }
 }
 
 #[test]
@@ -1348,6 +1779,9 @@ fn preexisting_newer_discovery_cannot_dispatch_around_older_uncertain_attempt() 
             .as_str()
             .unwrap(),
     );
+    let mut checkpoint: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    checkpoint["session"]["inventory_owner"] = json!(fs::canonicalize(&state_path).unwrap());
+    save_checkpoint(relay_path, &mut checkpoint);
     let before = fs::read(&state_path).unwrap();
     let untouched = fs::read(relay_path).unwrap();
     assert_rejected(
@@ -1504,6 +1938,14 @@ fn replacement_requires_verified_safe_lifecycle_for_every_retained_run() {
         .unwrap()
         .push(completed["status"]["discovery_runs"][0].clone());
     fs::write(&state_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let completed_path = Path::new(
+        completed["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let mut checkpoint: Value = serde_json::from_slice(&fs::read(completed_path).unwrap()).unwrap();
+    checkpoint["session"]["inventory_owner"] = json!(fs::canonicalize(&state_path).unwrap());
+    save_checkpoint(completed_path, &mut checkpoint);
     let before = fs::read(&state_path).unwrap();
     assert_rejected(
         &dir.0,
@@ -1598,6 +2040,711 @@ fn identical_paused_discovery_resumes_its_allowance_instead_of_replacing_it() {
 }
 
 #[test]
+fn selected_older_discovery_preserves_captures_allowance_and_later_run() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "one");
+    call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources",
+        "context":"Synthetic retained runs","expected_sources":[{"type":"one"},{"type":"two"}]}),
+    );
+    let first = prepare_source_run(&dir.0);
+    assert_eq!(first["action"]["run_index"], 0);
+    let progress = call(
+        &dir.0,
+        volume_answer(&dir.0, &first, json!({"result":[{"events":10}]})),
+    );
+    let first_probe = first["action"]["relay"]["probes"][0]["probe_id"]
+        .as_str()
+        .unwrap();
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let later = call(&dir.0, source_run_request(5));
+    assert_eq!(later["action"]["run_index"], 1);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let first_path = Path::new(
+        first["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let later_path = Path::new(
+        later["status"]["discovery_runs"][1]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let saved: Value = serde_json::from_slice(&fs::read(first_path).unwrap()).unwrap();
+    let later_bytes = fs::read(later_path).unwrap();
+    assert_eq!(saved["session"]["attempts"].as_array().unwrap().len(), 1);
+    assert_rejected(
+        &dir.0,
+        source_run_request(4),
+        "resume-discovery with run_index 0",
+    );
+    let resumed = call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+    assert_eq!(resumed["action"]["run_index"], 0);
+    assert_eq!(
+        resumed["action"]["relay"]["probes"],
+        progress["action"]["relay"]["probes"]
+    );
+    assert!(
+        resumed["action"]["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("run_index 0")
+    );
+    let summary_output = inventory_command(&dir.0, json!({"kind":"discovery-step","run_index":0}))
+        .arg("--summary")
+        .output()
+        .unwrap();
+    assert!(summary_output.status.success(), "{summary_output:?}");
+    let summary: Value = serde_json::from_slice(&summary_output.stdout).unwrap();
+    assert_eq!(summary["action"]["run_index"], 0);
+    assert!(
+        summary["action"]["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("run_index=0")
+    );
+    let brief = brief_call(&dir.0, json!({"kind":"discovery-step","run_index":0}));
+    assert_eq!(brief["action"]["run_index"], 0);
+    let completed = relay(&dir.0, resumed, &[], &[], None);
+    assert_eq!(completed["action"]["run_index"], 0);
+    assert_eq!(
+        completed["status"]["discovery_runs"][0]["status"],
+        "complete"
+    );
+    assert_eq!(completed["status"]["discovery_runs"][1]["status"], "paused");
+    assert_eq!(
+        completed["status"]["active_pack"]["path"],
+        first["status"]["discovery_runs"][0]["pack_path"]
+    );
+    let after: Value = serde_json::from_slice(&fs::read(first_path).unwrap()).unwrap();
+    assert_eq!(after["answers"][first_probe], saved["answers"][first_probe]);
+    assert_eq!(
+        after["session"]["attempts"][0],
+        saved["session"]["attempts"][0]
+    );
+    assert_eq!(after["session"]["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(after["request"], saved["request"]);
+    assert_eq!(
+        after["session"]["periods"][0],
+        saved["session"]["periods"][0]
+    );
+    assert_eq!(fs::read(later_path).unwrap(), later_bytes);
+    let polled = call(&dir.0, json!({"kind":"discovery-step","run_index":0}));
+    assert_eq!(polled["action"]["run_index"], 0);
+    assert_eq!(polled["action"]["relay"]["status"], "complete");
+    let latest = call(&dir.0, json!({"kind":"discovery-step"}));
+    assert_eq!(latest["action"]["run_index"], 1);
+    assert_eq!(latest["action"]["relay"]["status"], "paused");
+}
+
+#[test]
+fn later_completion_allows_explicit_new_preparation_but_never_rebases_older_run() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let first = prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let later = call(&dir.0, source_run_request(5));
+    let later = relay(&dir.0, later, &[], &[], None);
+    let first_path = Path::new(
+        first["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let old_bytes = fs::read(first_path).unwrap();
+    let fresh = prepare_source_run(&dir.0);
+    assert_eq!(fresh["action"]["run_index"], 2);
+    assert_eq!(
+        fresh["status"]["discovery_runs"][0],
+        later["status"]["discovery_runs"][0]
+    );
+    assert_eq!(fs::read(first_path).unwrap(), old_bytes);
+    let fresh_path = Path::new(
+        fresh["status"]["discovery_runs"][2]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let fresh_state: Value = serde_json::from_slice(&fs::read(fresh_path).unwrap()).unwrap();
+    assert_eq!(fresh_state["request"]["max_queries"], 4);
+    assert_eq!(fresh_state["session"]["attempts"], json!([]));
+    assert_eq!(
+        fresh_state["session"]["predecessor_sha256"],
+        json!(cqlmatic::sha256_hex(
+            &fs::read(fresh_state["pack"].as_str().unwrap()).unwrap()
+        ))
+    );
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":2}));
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let later_path = Path::new(
+        later["status"]["discovery_runs"][1]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let later_bytes = fs::read(later_path).unwrap();
+    for kind in ["resume-discovery", "dispatch-discovery"] {
+        let mut action = json!({"kind":kind,"run_index":0});
+        if kind == "dispatch-discovery" {
+            action["probe_id"] = first["action"]["relay"]["probes"][0]["probe_id"].clone();
+        }
+        assert_rejected(&dir.0, action, "earlier inventory");
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert_eq!(fs::read(first_path).unwrap(), old_bytes);
+    }
+    let inventory: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(inventory["active_pack"], later["status"]["active_pack"]);
+    assert_eq!(fs::read(later_path).unwrap(), later_bytes);
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    assert_eq!(fs::read(first_path).unwrap(), old_bytes);
+}
+
+#[test]
+fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let first = prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    relay(&dir.0, call(&dir.0, source_run_request(5)), &[], &[], None);
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    for kind in ["resume-discovery", "dispatch-discovery"] {
+        let mut action = json!({"kind":kind,"run_index":0});
+        if kind == "dispatch-discovery" {
+            action["probe_id"] = first["action"]["relay"]["probes"][0]["probe_id"].clone();
+        }
+        for flag in [None, Some("--summary"), Some("--brief")] {
+            let mut command = inventory_command(&dir.0, action.clone());
+            if let Some(flag) = flag {
+                command.arg(flag);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(output.stdout.is_empty());
+            let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(diagnostic["pointer"], "/discovery_runs/0");
+            if flag == Some("--brief") {
+                assert_eq!(
+                    diagnostic,
+                    json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error",
+                    "message":"Inventory brief command failed for discovery run_index 0. Inspect protected full-mode output locally.",
+                    "pointer":"/discovery_runs/0"})
+                );
+                let text = String::from_utf8(output.stderr).unwrap();
+                assert!(!text.contains("earlier inventory"));
+                assert!(!text.contains(dir.0.to_str().unwrap()));
+                assert!(text.len() < 4096);
+            } else {
+                let message = diagnostic["message"].as_str().unwrap();
+                assert!(message.starts_with("Discovery run_index 0:"));
+                assert!(message.contains("earlier inventory"));
+            }
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+        }
+    }
+    let relay_path = Path::new(
+        first["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let guard = cqlmatic::storage::Writer::acquire(relay_path).unwrap();
+    let locked = inventory_command(&dir.0, json!({"kind":"resume-discovery","run_index":0}))
+        .arg("--brief")
+        .output()
+        .unwrap();
+    assert_eq!(locked.status.code(), Some(2));
+    assert!(locked.stdout.is_empty());
+    let diagnostic: Value = serde_json::from_slice(&locked.stderr).unwrap();
+    assert_eq!(diagnostic["pointer"], "/discovery_runs/0");
+    assert_eq!(
+        diagnostic["message"],
+        "Inventory brief command failed for discovery run_index 0. Inspect protected full-mode output locally."
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    drop(guard);
+    let output = inventory_command(&dir.0, json!({"kind":"resume-discovery","run_index":99}))
+        .arg("--brief")
+        .output()
+        .unwrap();
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+    assert!(diagnostic.get("pointer").is_none());
+    assert_eq!(
+        diagnostic["message"],
+        "Inventory brief command failed. Inspect protected full-mode output locally."
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+}
+
+#[test]
+fn selected_older_run_cannot_resolve_work_recorded_after_later_preparation() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
+    );
+    let first = call(&dir.0, source_run_request(40));
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let later = call(&dir.0, source_run_request(41));
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    call(
+        &dir.0,
+        json!({"kind":"record-inventory-hints","environment":environment(),
+        "hints":[{"source":{"type":"synthetic"},"fields":["hinted_field"]}]}),
+    );
+    let selected = call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+    let completed = relay(&dir.0, selected, &["hinted_field"], &[], None);
+    assert_eq!(completed["action"]["relay"]["status"], "complete");
+    let saved: Value =
+        serde_json::from_slice(&fs::read(dir.0.join("workflow/state.json")).unwrap()).unwrap();
+    assert_eq!(saved["pending_inventory"][0]["after_run"], 2);
+    assert_eq!(
+        saved["pending_inventory"][0]["capture_boundary"]["run"],
+        later["status"]["discovery_runs"][1]["state_path"]
+    );
+    assert!(saved["pending_inventory"][0]["resolution"].is_null());
+    assert_eq!(
+        saved["discovery_runs"][0]["state_path"],
+        first["status"]["discovery_runs"][0]["state_path"]
+    );
+}
+
+#[test]
+fn invalid_run_selection_cannot_associate_legacy_relays_or_mutate_inventory() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let path = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let mut legacy: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    legacy["session"]
+        .as_object_mut()
+        .unwrap()
+        .remove("inventory_owner");
+    save_checkpoint(path, &mut legacy);
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let relay_before = fs::read(path).unwrap();
+    for kind in [
+        "discovery-step",
+        "dispatch-discovery",
+        "pause-discovery",
+        "resume-discovery",
+    ] {
+        let mut action = json!({"kind":kind,"run_index":99});
+        if kind == "dispatch-discovery" {
+            action["probe_id"] = json!("unused");
+        }
+        assert_rejected(&dir.0, action, "run_index 99 is out of range");
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert_eq!(fs::read(path).unwrap(), relay_before);
+    }
+}
+
+#[test]
+fn discovery_run_selection_preserves_unselected_request_serialization() {
+    for wire in [
+        json!({"kind":"discovery-step","answers":[]}),
+        json!({"kind":"dispatch-discovery","probe_id":"synthetic"}),
+        json!({"kind":"pause-discovery"}),
+        json!({"kind":"resume-discovery"}),
+    ] {
+        let action: cqlmatic::inventory::InventoryAction =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(action).unwrap(), wire);
+        let mut selected = wire;
+        selected["run_index"] = json!(0);
+        let action: cqlmatic::inventory::InventoryAction =
+            serde_json::from_value(selected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(action).unwrap(), selected);
+    }
+}
+
+#[test]
+fn another_retained_search_blocks_selected_older_work_and_identical_preparation() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let latest = call(&dir.0, source_run_request(5));
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","probe_id":latest["action"]["relay"]["probes"][0]["probe_id"]}),
+    );
+    for cancel_requested in [false, true] {
+        if cancel_requested {
+            call(&dir.0, json!({"kind":"pause-discovery","run_index":1}));
+        }
+        let state_path = dir.0.join("workflow/state.json");
+        let before = fs::read(&state_path).unwrap();
+        for flag in [None, Some("--summary"), Some("--brief")] {
+            let mut command =
+                inventory_command(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+            if let Some(flag) = flag {
+                command.arg(flag);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(output.stdout.is_empty());
+            let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(diagnostic["pointer"], "/discovery_runs/1");
+            let message = diagnostic["message"].as_str().unwrap();
+            assert!(message.contains("run_index 1"), "{diagnostic}");
+            if flag == Some("--brief") {
+                assert_eq!(
+                    message,
+                    "Inventory brief command failed for discovery run_index 1. Inspect protected full-mode output locally."
+                );
+                assert!(output.stderr.len() <= 4096);
+                assert!(!String::from_utf8_lossy(&output.stderr).contains(dir.0.to_str().unwrap()));
+            } else {
+                assert!(message.contains("unresolved termination or cleanup"));
+            }
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+        }
+    }
+    assert_rejected(
+        &dir.0,
+        json!({"kind":"resume-discovery","run_index":0}),
+        "unresolved termination or cleanup",
+    );
+    assert_rejected(
+        &dir.0,
+        source_run_request(4),
+        "unresolved termination or cleanup",
+    );
+    let paused = brief_call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    assert_eq!(paused["action"]["run_index"], 0);
+    let answer = fixture(
+        &dir.0,
+        "unreserved-answer.json",
+        json!({"result":[{"events":10}]}),
+    );
+    let incomplete = brief_call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,
+        "answers":[{"probe_id":"unknown","result_file":answer}]}),
+    );
+    assert_eq!(incomplete["action"]["run_index"], 0);
+    assert_eq!(incomplete["action"]["outcome"], "incomplete");
+}
+
+#[test]
+fn all_run_preflight_errors_point_to_the_blocking_retained_run() {
+    let other = Temp::new();
+    confirm_quick_source(&other.0, "synthetic");
+    let external = relay(&other.0, prepare_source_run(&other.0), &[], &[], None);
+    for problem in ["missing", "corrupt", "locked", "reference", "owner"] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        call(
+            &dir.0,
+            json!({"kind":"import-pack","pack_file":external["status"]["active_pack"]["path"]}),
+        );
+        let selected = prepare_source_run(&dir.0);
+        call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+        let later = call(&dir.0, source_run_request(5));
+        call(&dir.0, json!({"kind":"pause-discovery","run_index":1}));
+        let state_path = dir.0.join("workflow/state.json");
+        let selected_path = Path::new(
+            selected["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let blocking_path = Path::new(
+            later["status"]["discovery_runs"][1]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let mut inventory: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        let guard = match problem {
+            "missing" => {
+                fs::remove_file(blocking_path).unwrap();
+                None
+            }
+            "corrupt" => {
+                fs::write(blocking_path, b"{}").unwrap();
+                None
+            }
+            "locked" => Some(cqlmatic::storage::Writer::acquire(blocking_path).unwrap()),
+            "reference" => {
+                inventory["discovery_runs"][1]["max_seconds"] = json!(121);
+                fs::write(&state_path, serde_json::to_vec(&inventory).unwrap()).unwrap();
+                None
+            }
+            "owner" => {
+                let mut checkpoint: Value =
+                    serde_json::from_slice(&fs::read(blocking_path).unwrap()).unwrap();
+                checkpoint["session"]["inventory_owner"] = json!(dir.0.join("foreign-state.json"));
+                save_checkpoint(blocking_path, &mut checkpoint);
+                None
+            }
+            _ => unreachable!(),
+        };
+        let expected_code = match problem {
+            "corrupt" => "MCP_STATE_TAMPERED",
+            "locked" => "PACK_BUSY",
+            "owner" => "DISCOVERY_INVENTORY_OWNER",
+            _ => "INVENTORY_INPUT",
+        };
+        let before = fs::read(&state_path).unwrap();
+        let selected_before = fs::read(selected_path).unwrap();
+        let packs: Vec<_> = inventory["packs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reference| reference["path"].as_str().unwrap())
+            .chain(
+                inventory["discovery_runs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|run| run["pack_path"].as_str().unwrap()),
+            )
+            .map(|path| (path, fs::read(path).unwrap()))
+            .collect();
+        for kind in ["resume-discovery", "dispatch-discovery"] {
+            let mut action = json!({"kind":kind,"run_index":0});
+            if kind == "dispatch-discovery" {
+                action["probe_id"] = selected["action"]["relay"]["probes"][0]["probe_id"].clone();
+            }
+            for flag in [None, Some("--summary"), Some("--brief")] {
+                let mut command = inventory_command(&dir.0, action.clone());
+                if let Some(flag) = flag {
+                    command.arg(flag);
+                }
+                let output = command.output().unwrap();
+                assert_eq!(output.status.code(), Some(2), "{problem}: {output:?}");
+                assert!(output.stdout.is_empty());
+                let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+                assert_eq!(
+                    diagnostic["pointer"], "/discovery_runs/1",
+                    "{problem}: {diagnostic}"
+                );
+                if flag == Some("--brief") {
+                    assert_eq!(
+                        diagnostic,
+                        json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error",
+                        "message":"Inventory brief command failed for discovery run_index 1. Inspect protected full-mode output locally.",
+                        "pointer":"/discovery_runs/1"})
+                    );
+                    assert!(output.stderr.len() <= 4096);
+                    assert!(
+                        !String::from_utf8_lossy(&output.stderr).contains(dir.0.to_str().unwrap())
+                    );
+                } else {
+                    assert_eq!(diagnostic["code"], expected_code, "{problem}: {diagnostic}");
+                    assert_eq!(diagnostic["severity"], "error");
+                    assert!(
+                        diagnostic["message"]
+                            .as_str()
+                            .unwrap()
+                            .starts_with("Discovery run_index 1:")
+                    );
+                }
+                assert_eq!(fs::read(&state_path).unwrap(), before);
+                assert_eq!(fs::read(selected_path).unwrap(), selected_before);
+                for (path, bytes) in &packs {
+                    assert_eq!(&fs::read(path).unwrap(), bytes);
+                }
+            }
+        }
+        drop(guard);
+    }
+}
+
+#[test]
+fn identical_paused_request_cannot_replace_a_missing_or_corrupt_predecessor() {
+    for problem in ["missing", "corrupt"] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        relay(&dir.0, prepare_source_run(&dir.0), &[], &[], None);
+        let prepared = call(&dir.0, source_run_request(5));
+        call(&dir.0, json!({"kind":"pause-discovery"}));
+        let pack = Path::new(
+            prepared["status"]["discovery_runs"][1]["pack_path"]
+                .as_str()
+                .unwrap(),
+        );
+        if problem == "missing" {
+            fs::remove_file(pack).unwrap();
+        } else {
+            fs::write(pack, b"{}").unwrap();
+        }
+        let path = dir.0.join("workflow/state.json");
+        let before = fs::read(&path).unwrap();
+        let relay = Path::new(
+            prepared["status"]["discovery_runs"][1]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let relay_before = fs::read(relay).unwrap();
+        for kind in ["resume-discovery", "dispatch-discovery"] {
+            let mut action = json!({"kind":kind,"run_index":1});
+            if kind == "dispatch-discovery" {
+                action["probe_id"] = prepared["action"]["relay"]["probes"][0]["probe_id"].clone();
+            }
+            assert_rejected(&dir.0, action, "MCP_ACTIVATION_CONFLICT");
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(fs::read(relay).unwrap(), relay_before);
+        }
+        assert_rejected(&dir.0, source_run_request(5), "MCP_ACTIVATION_CONFLICT");
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn stale_prepared_discovery_rejects_reservation_but_keeps_pause_and_exact_settlement() {
+    let other = Temp::new();
+    confirm_quick_source(&other.0, "imported");
+    let external = relay(&other.0, prepare_source_run(&other.0), &[], &[], None);
+    for phase in ["needs-probes", "paused", "in-flight"] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let prepared = prepare_source_run(&dir.0);
+        let probe = &prepared["action"]["relay"]["probes"][0]["probe_id"];
+        match phase {
+            "paused" => {
+                call(&dir.0, json!({"kind":"pause-discovery"}));
+            }
+            "in-flight" => {
+                call(
+                    &dir.0,
+                    json!({"kind":"dispatch-discovery","probe_id":probe}),
+                );
+            }
+            _ => {}
+        }
+        call(
+            &dir.0,
+            json!({"kind":"import-pack","pack_file":external["status"]["active_pack"]["path"]}),
+        );
+        let state_path = dir.0.join("workflow/state.json");
+        let relay_path = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let before = fs::read(&state_path).unwrap();
+        let relay_before = fs::read(relay_path).unwrap();
+        for kind in ["resume-discovery", "dispatch-discovery"] {
+            let mut action = json!({"kind":kind,"run_index":0});
+            if kind == "dispatch-discovery" {
+                action["probe_id"] = probe.clone();
+            }
+            assert_rejected(&dir.0, action, "earlier inventory");
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+            assert_eq!(fs::read(relay_path).unwrap(), relay_before);
+        }
+        let paused = call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+        if phase == "in-flight" {
+            assert_eq!(paused["action"]["relay"]["status"], "cancel-requested");
+            let checkpoint: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+            let attempt = &checkpoint["session"]["attempts"][0];
+            let proof = protected_fixture(
+                &dir.0,
+                "cancelled.json",
+                json!({
+                "schema_version":1,"request_sha256":checkpoint["request_sha256"],"probe_id":probe,
+                "repository":environment()["view"],
+                "query_sha256":cqlmatic::sha256_hex(attempt["probe"]["query"].as_str().unwrap().as_bytes()),
+                "start":attempt["probe"]["start"],"end":attempt["probe"]["end"],
+                "dispatched_at":attempt["dispatched_at"],"outcome":"cancelled","cleanup":"confirmed",
+                "caller_assertion":"exact-host-attempt-terminal-cleanup"}),
+            );
+            assert_eq!(
+                cqlmatic::mcp::settle_cancelled(
+                    relay_path,
+                    probe.as_str().unwrap(),
+                    Path::new(&proof)
+                )
+                .unwrap()
+                .status,
+                "paused"
+            );
+            let poll = call(&dir.0, json!({"kind":"discovery-step","run_index":0}));
+            assert_eq!(poll["status"]["discovery_runs"][0]["status"], "paused");
+        } else {
+            assert_eq!(paused["action"]["relay"]["status"], "paused");
+        }
+        let old = fs::read(relay_path).unwrap();
+        let fresh = prepare_source_run(&dir.0);
+        assert_eq!(fresh["action"]["run_index"], 1);
+        assert_eq!(fs::read(relay_path).unwrap(), old);
+        let fresh_path = Path::new(
+            fresh["status"]["discovery_runs"][1]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let fresh_checkpoint: Value =
+            serde_json::from_slice(&fs::read(fresh_path).unwrap()).unwrap();
+        assert_eq!(
+            fresh_checkpoint["session"]["predecessor_sha256"],
+            json!(cqlmatic::sha256_hex(
+                &fs::read(fresh_checkpoint["pack"].as_str().unwrap()).unwrap()
+            ))
+        );
+    }
+}
+
+#[test]
+fn case_variant_inventory_owner_and_legacy_recorded_spelling_share_one_identity() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let state_path = dir.0.join("workflow/state.json");
+    let upper = dir.0.join("workflow/STATE.json");
+    if !upper.exists() {
+        let writer = cqlmatic::storage::Writer::acquire(&state_path).unwrap();
+        assert!(!writer.matches_identity(&upper).unwrap());
+        return;
+    }
+    let writer = cqlmatic::storage::Writer::acquire(&state_path).unwrap();
+    assert_eq!(
+        writer.identity().unwrap(),
+        fs::canonicalize(&upper).unwrap()
+    );
+    assert_eq!(
+        cqlmatic::storage::Writer::acquire(&upper)
+            .err()
+            .unwrap()
+            .code,
+        "PACK_BUSY"
+    );
+    let output = inventory_command_at(&dir.0, &upper, json!({"kind":"resume-discovery"}))
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&output.stderr).contains("PACK_BUSY"));
+    drop(writer);
+    let output = inventory_command_at(&dir.0, &upper, json!({"kind":"resume-discovery"}))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let relay_path = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let mut legacy: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    legacy["session"]["inventory_owner"] = json!(upper);
+    save_checkpoint(relay_path, &mut legacy);
+    let binding = legacy["session"]["binding_sha256"].clone();
+    let resumed = call(&dir.0, json!({"kind":"resume-discovery"}));
+    assert_eq!(resumed["action"]["run_index"], 0);
+    let after: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    assert_eq!(
+        after["session"]["inventory_owner"],
+        legacy["session"]["inventory_owner"]
+    );
+    assert_eq!(after["session"]["binding_sha256"], binding);
+}
+
+#[test]
 fn resume_after_last_paused_answer_promotes_verified_pack_and_resolves_pending_work() {
     let dir = Temp::new();
     confirm_quick_source(&dir.0, "baseline");
@@ -1622,6 +2769,152 @@ fn resume_after_last_paused_answer_promotes_verified_pack_and_resolves_pending_w
     let before = fs::read(&state_path).unwrap();
     call(&dir.0, json!({"kind":"resume-discovery"}));
     assert_eq!(fs::read(&state_path).unwrap(), before);
+}
+
+#[test]
+fn resuming_a_later_run_reuses_held_completed_relay_for_pending_work() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "baseline");
+    call(
+        &dir.0,
+        json!({"kind":"record-inventory-hints","environment":environment(),
+        "hints":[{"source":{"type":"new-source"}}]}),
+    );
+    confirm_quick_source(&dir.0, "new-source");
+    relay(&dir.0, prepare_source_run(&dir.0), &[], &[], None);
+    call(&dir.0, source_run_request(5));
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let path = dir.0.join("workflow/state.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(state["pending_inventory"][0]["resolution"].is_object());
+    state["pending_inventory"][0]["resolution"] = Value::Null;
+    fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let resumed = call(&dir.0, json!({"kind":"resume-discovery"}));
+    assert_eq!(resumed["status"]["discovery_runs"][0]["status"], "complete");
+    assert_eq!(resumed["action"]["relay"]["status"], "needs-probes");
+    assert_eq!(resumed["status"]["settings_attention"], true);
+    assert!(resumed["status"]["pending_inventory"][0]["resolution"].is_null());
+}
+
+#[test]
+fn completed_run_evidence_errors_point_to_the_blocking_run() {
+    for problem in ["locked", "missing-receipt", "corrupt-receipt", "reference"] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "baseline");
+        call(
+            &dir.0,
+            json!({"kind":"record-inventory-hints","environment":environment(),
+            "hints":[{"source":{"type":"new-source"}}]}),
+        );
+        confirm_quick_source(&dir.0, "new-source");
+        relay(&dir.0, prepare_source_run(&dir.0), &[], &[], None);
+        call(&dir.0, source_run_request(5));
+        call(&dir.0, json!({"kind":"pause-discovery","run_index":1}));
+        let state_path = dir.0.join("workflow/state.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert!(state["pending_inventory"][0]["resolution"].is_object());
+        state["pending_inventory"][0]["resolution"] = Value::Null;
+        let original_state = serde_json::to_vec(&state).unwrap();
+        fs::write(&state_path, &original_state).unwrap();
+        let relay_path = Path::new(state["discovery_runs"][0]["state_path"].as_str().unwrap());
+        let receipt_path = Path::new(state["discovery_runs"][0]["receipt_path"].as_str().unwrap());
+        let receipt_bytes = fs::read(receipt_path).unwrap();
+        let moved_receipt = receipt_path.with_file_name("held-receipt.json");
+        let artifacts: Vec<_> = state["discovery_runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|run| {
+                ["state_path", "pack_path", "receipt_path"]
+                    .map(|field| PathBuf::from(run[field].as_str().unwrap()))
+            })
+            .collect();
+        let guard = match problem {
+            "locked" => Some(cqlmatic::storage::Writer::acquire(relay_path).unwrap()),
+            "missing-receipt" => {
+                fs::rename(receipt_path, &moved_receipt).unwrap();
+                None
+            }
+            "corrupt-receipt" => {
+                fs::write(receipt_path, b"{}").unwrap();
+                None
+            }
+            "reference" => {
+                let mut inconsistent = state.clone();
+                inconsistent["discovery_runs"][0]["max_seconds"] = json!(121);
+                fs::write(&state_path, serde_json::to_vec(&inconsistent).unwrap()).unwrap();
+                None
+            }
+            _ => unreachable!(),
+        };
+        let expected_code = match problem {
+            "locked" => "PACK_BUSY",
+            "corrupt-receipt" => "MCP_STATE_TAMPERED",
+            _ => "INVENTORY_INPUT",
+        };
+        let before = fs::read(&state_path).unwrap();
+        let artifact_bytes: Vec<_> = artifacts.iter().map(|path| fs::read(path).ok()).collect();
+        for flag in [None, Some("--summary"), Some("--brief")] {
+            let mut command = inventory_command(
+                &dir.0,
+                json!({"kind":"discovery-step","run_index":1,"answers":[]}),
+            );
+            if let Some(flag) = flag {
+                command.arg(flag);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2), "{problem}: {output:?}");
+            assert!(output.stdout.is_empty());
+            let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(
+                diagnostic["pointer"], "/discovery_runs/0",
+                "{problem}: {diagnostic}"
+            );
+            if flag == Some("--brief") {
+                assert_eq!(
+                    diagnostic,
+                    json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error",
+                    "message":"Inventory brief command failed for discovery run_index 0. Inspect protected full-mode output locally.",
+                    "pointer":"/discovery_runs/0"})
+                );
+                assert!(output.stderr.len() <= 4096);
+                assert!(!String::from_utf8_lossy(&output.stderr).contains(dir.0.to_str().unwrap()));
+            } else {
+                assert_eq!(diagnostic["code"], expected_code, "{problem}: {diagnostic}");
+                assert_eq!(diagnostic["severity"], "error");
+                assert!(
+                    diagnostic["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Discovery run_index 0:")
+                );
+            }
+            assert_eq!(fs::read(&state_path).unwrap(), before);
+            for (path, bytes) in artifacts.iter().zip(&artifact_bytes) {
+                assert_eq!(&fs::read(path).ok(), bytes);
+            }
+        }
+        drop(guard);
+        match problem {
+            "missing-receipt" => {
+                fs::rename(&moved_receipt, receipt_path).unwrap();
+            }
+            "corrupt-receipt" => {
+                fs::write(receipt_path, receipt_bytes).unwrap();
+            }
+            "reference" => {
+                fs::write(&state_path, &original_state).unwrap();
+            }
+            _ => {}
+        }
+        let control = call(
+            &dir.0,
+            json!({"kind":"discovery-step","run_index":1,"answers":[]}),
+        );
+        assert_eq!(control["action"]["run_index"], 1);
+        assert_eq!(control["action"]["relay"]["status"], "paused");
+        assert_eq!(fs::read(&state_path).unwrap(), original_state);
+    }
 }
 
 #[test]
@@ -1746,67 +3039,257 @@ fn completed_discovery_replay_keeps_newer_active_pack_and_validates_artifacts() 
         inconsistent["discovery_runs"][0][field] = other_run[field].clone();
         let saved = serde_json::to_vec(&inconsistent).unwrap();
         fs::write(&state_path, &saved).unwrap();
-        assert_rejected(
-            &first.0,
-            json!({"kind":"discovery-step","answers":[]}),
-            "artifact paths differ from the verified relay",
-        );
+        for flag in [None, Some("--summary"), Some("--brief")] {
+            let mut command =
+                inventory_command(&first.0, json!({"kind":"discovery-step","answers":[]}));
+            if let Some(flag) = flag {
+                command.arg(flag);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(
+                diagnostic["pointer"], "/discovery_runs/0",
+                "{field}: {diagnostic}"
+            );
+            if flag == Some("--brief") {
+                assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+            } else {
+                assert!(
+                    diagnostic["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("differs from its inventory reference")
+                );
+            }
+        }
         assert_eq!(fs::read(&state_path).unwrap(), saved);
     }
 }
 
 #[test]
-fn first_promotion_requires_current_predecessor_and_recovers_after_interruption() {
+fn late_completion_is_superseded_without_promotion_or_repeated_mutation() {
     let dir = Temp::new();
     let other = Temp::new();
+    confirm_quick_source(&dir.0, "baseline");
+    call(
+        &dir.0,
+        json!({"kind":"record-inventory-hints","environment":environment(),
+        "hints":[{"source":{"type":"first-source"}}]}),
+    );
     confirm_quick_source(&dir.0, "first-source");
     confirm_quick_source(&other.0, "imported-source");
     let prepared = prepare_source_run(&dir.0);
+    let answer = volume_answer(&dir.0, &prepared, json!({"result":[{"events":10}]}));
     let external = relay(&other.0, prepare_source_run(&other.0), &[], &[], None);
     let imported = call(
         &dir.0,
         json!({"kind":"import-pack","pack_file":external["status"]["active_pack"]["path"]}),
     );
     let state_path = dir.0.join("workflow/state.json");
-    let answer = volume_answer(&dir.0, &prepared, json!({"result":[{"events":10}]}));
-    let before = fs::read(&state_path).unwrap();
-    assert_rejected(
-        &dir.0,
-        answer,
-        "Prepare discovery again from the current inventory",
-    );
-    let stale = &prepared["status"]["discovery_runs"][0];
-    for field in ["pack_path", "receipt_path"] {
-        assert!(Path::new(stale[field].as_str().unwrap()).is_file());
-    }
-    assert_rejected(
-        &dir.0,
-        json!({"kind":"discovery-step","answers":[]}),
-        "Prepare discovery again from the current inventory",
-    );
-    assert_eq!(fs::read(&state_path).unwrap(), before);
-
-    let prepared = prepare_source_run(&dir.0);
-    let before = fs::read(&state_path).unwrap();
-    let completed = relay(&dir.0, prepared, &[], &[], None);
-    let active = &completed["status"]["active_pack"];
-    let pack = cqlmatic::storage::read_pack(Path::new(active["path"].as_str().unwrap())).unwrap();
-    assert_eq!(pack.data.sources.len(), 2);
-
-    // Simulate interruption after the relay sealed its artifacts and before inventory committed.
-    fs::write(&state_path, before).unwrap();
-    let recovered = call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
-    assert_eq!(recovered["status"]["active_pack"]["path"], active["path"]);
+    let before: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let completed = call(&dir.0, answer.clone());
+    assert_eq!(completed["action"]["status"], "incomplete");
+    assert_eq!(completed["action"]["relay"]["status"], "complete");
     assert_eq!(
-        recovered["status"]["active_pack"]["content_digest"],
-        active["content_digest"]
+        completed["action"]["diagnostics"][0]["code"],
+        "DISCOVERY_SUPERSEDED"
     );
-    let bytes = fs::read(&state_path).unwrap();
-    let saved: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(saved["packs"].as_array().unwrap().len(), 2);
-    assert_eq!(saved["packs"][0], imported["status"]["active_pack"]);
-    call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
-    assert_eq!(fs::read(&state_path).unwrap(), bytes);
+    assert_eq!(
+        completed["action"]["diagnostics"][0]["pointer"],
+        "/discovery_runs/0"
+    );
+    assert_eq!(
+        completed["status"]["discovery_runs"][0]["status"],
+        "superseded"
+    );
+    assert_eq!(
+        completed["status"]["active_pack"],
+        imported["status"]["active_pack"]
+    );
+    assert_eq!(
+        completed["status"]["pending_inventory"][0]["resolution"],
+        Value::Null
+    );
+    let saved = fs::read(&state_path).unwrap();
+    let inventory: Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(inventory["packs"], before["packs"]);
+    assert_eq!(inventory["failures"], before["failures"]);
+    assert_eq!(inventory["pending_inventory"][0]["resolution"], Value::Null);
+    let run = &prepared["status"]["discovery_runs"][0];
+    let artifacts: Vec<_> = ["state_path", "pack_path", "receipt_path"]
+        .iter()
+        .map(|field| {
+            let path = PathBuf::from(run[field].as_str().unwrap());
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    for action in [
+        json!({"kind":"discovery-step","answers":[]}),
+        json!({"kind":"resume-discovery"}),
+        answer,
+    ] {
+        for flag in [None, Some("--summary"), Some("--brief")] {
+            let mut command = inventory_command(&dir.0, action.clone());
+            if let Some(flag) = flag {
+                command.arg(flag);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty());
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            if flag == Some("--brief") {
+                assert_eq!(result["action"]["outcome"], "incomplete");
+                assert_eq!(result["status"]["counts"]["discovery_unfinished"], 0);
+                assert_ne!(
+                    result["status"]["refresh"]["blocker"],
+                    "recorded-discovery-unfinished"
+                );
+                assert!(output.stdout.len() <= 4096);
+                let text = String::from_utf8_lossy(&output.stdout);
+                for raw in [
+                    "earlier inventory",
+                    "This probe was already answered",
+                    dir.0.to_str().unwrap(),
+                ] {
+                    assert!(!text.contains(raw), "{text}");
+                }
+            } else {
+                assert_eq!(result["action"]["status"], "incomplete");
+                let expected = if action["answers"].as_array().is_some_and(|a| !a.is_empty()) {
+                    "MCP_ALREADY_ANSWERED"
+                } else {
+                    "DISCOVERY_SUPERSEDED"
+                };
+                assert_eq!(result["action"]["diagnostics"][0]["code"], expected);
+            }
+            assert_eq!(fs::read(&state_path).unwrap(), saved);
+            for (path, bytes) in &artifacts {
+                assert_eq!(&fs::read(path).unwrap(), bytes);
+            }
+        }
+    }
+    let unrelated = fixture(
+        &dir.0,
+        "unrelated-answer.json",
+        json!({"result":[{"events":10}]}),
+    );
+    let rejected = call(
+        &dir.0,
+        json!({"kind":"discovery-step",
+        "answers":[{"probe_id":"unrelated-probe","result_file":unrelated}]}),
+    );
+    assert_eq!(rejected["action"]["status"], "incomplete");
+    assert_eq!(
+        rejected["action"]["diagnostics"][0]["code"],
+        "DISCOVERY_PHASE"
+    );
+    assert_eq!(
+        rejected["status"]["discovery_runs"][0]["status"],
+        "superseded"
+    );
+    assert_eq!(rejected["status"]["failures"].as_array().unwrap().len(), 1);
+    let saved = fs::read(&state_path).unwrap();
+    for field in ["state_path", "pack_path", "receipt_path"] {
+        let path = Path::new(run[field].as_str().unwrap());
+        let original = fs::read(path).unwrap();
+        fs::write(path, b"{}").unwrap();
+        assert_rejected(
+            &dir.0,
+            json!({"kind":"discovery-step","answers":[]}),
+            "MCP_STATE_TAMPERED",
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), saved);
+        fs::write(path, original).unwrap();
+    }
+    let fresh = prepare_source_run(&dir.0);
+    let completed = relay(&dir.0, fresh, &[], &[], None);
+    assert_eq!(
+        completed["status"]["discovery_runs"][0]["status"],
+        "superseded"
+    );
+    assert_eq!(
+        completed["status"]["discovery_runs"][1]["status"],
+        "complete"
+    );
+    let inventory: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let work = inventory["pending_inventory"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|work| work["source"]["type"] == "first-source")
+        .unwrap();
+    assert!(work["resolution"].is_object(), "{work}");
+}
+
+#[test]
+fn another_completion_supersedes_an_already_reserved_run() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let first = prepare_source_run(&dir.0);
+    let answer = volume_answer(&dir.0, &first, json!({"result":[{"events":10}]}));
+    let state_path = dir.0.join("workflow/state.json");
+    let before_completion = fs::read(&state_path).unwrap();
+    call(&dir.0, answer);
+    // Recover inventory separately from the already activated relay after an interrupted commit.
+    fs::write(&state_path, before_completion).unwrap();
+    let later = call(&dir.0, source_run_request(5));
+    let answer = volume_answer(&dir.0, &later, json!({"result":[{"events":10}]}));
+    let promoted = call(&dir.0, json!({"kind":"discovery-step","run_index":0}));
+    let superseded = call(&dir.0, answer);
+    assert_eq!(superseded["action"]["status"], "incomplete");
+    assert_eq!(superseded["action"]["relay"]["status"], "complete");
+    assert_eq!(
+        superseded["status"]["discovery_runs"][1]["status"],
+        "superseded"
+    );
+    assert_eq!(
+        superseded["status"]["active_pack"],
+        promoted["status"]["active_pack"]
+    );
+    let saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(saved["packs"].as_array().unwrap().len(), 1);
+    let brief = brief_call(&dir.0, json!({"kind":"discovery-step","run_index":1}));
+    assert_eq!(brief["action"]["outcome"], "incomplete");
+    assert_eq!(brief["status"]["counts"]["discovery_unfinished"], 0);
+}
+
+#[test]
+fn inventory_resume_recovers_activating_after_pack_replacement_before_receipt() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let answer = volume_answer(&dir.0, &prepared, json!({"result":[{"events":10}]}));
+    let state_path = dir.0.join("workflow/state.json");
+    let before = fs::read(&state_path).unwrap();
+    let completed = call(&dir.0, answer);
+    let run = &completed["status"]["discovery_runs"][0];
+    let relay_path = Path::new(run["state_path"].as_str().unwrap());
+    let receipt_path = Path::new(run["receipt_path"].as_str().unwrap());
+    let receipt_bytes = fs::read(receipt_path).unwrap();
+    let pack_path = Path::new(run["pack_path"].as_str().unwrap());
+    let pack_bytes = fs::read(pack_path).unwrap();
+    // Reconstruct the durable point after frozen pack replacement and before receipt/state completion.
+    let mut checkpoint: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    checkpoint["status"] = json!("activating");
+    checkpoint["pack_sha256"] = Value::Null;
+    fs::remove_file(receipt_path).unwrap();
+    save_checkpoint(relay_path, &mut checkpoint);
+    fs::write(&state_path, before).unwrap();
+    let recovered = call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+    assert_eq!(recovered["action"]["relay"]["status"], "complete");
+    for field in ["path", "content_digest"] {
+        assert_eq!(
+            recovered["status"]["active_pack"][field],
+            completed["status"]["active_pack"][field]
+        );
+    }
+    assert_eq!(fs::read(pack_path).unwrap(), pack_bytes);
+    assert_eq!(fs::read(receipt_path).unwrap(), receipt_bytes);
+    let saved = fs::read(&state_path).unwrap();
+    call(&dir.0, json!({"kind":"resume-discovery"}));
+    assert_eq!(fs::read(&state_path).unwrap(), saved);
 }
 
 #[test]
@@ -1968,20 +3451,7 @@ fn late_original_settles_retained_search_before_an_identical_new_run() {
     saved["created_at"] = json!("2026-01-02T00:00:00Z");
     saved["session"]["periods"] = json!([{"start":"2026-01-02T00:00:00Z","end":null}]);
     saved["session"]["attempts"][0]["dispatched_at"] = json!("2026-01-02T00:00:01Z");
-    let mut binding = serde_json::to_vec(&(
-        &saved["request_sha256"],
-        &saved["created_at"],
-        &saved["pack"],
-        &saved["receipt"],
-        &saved["session"]["transport"],
-        &saved["session"]["predecessor_sha256"],
-    ))
-    .unwrap();
-    if saved["session"]["sparse_fieldset_fallback"] == true {
-        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
-    }
-    saved["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
-    fs::write(relay_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    save_checkpoint(relay_path, &mut saved);
     let original = fixture(
         &dir.0,
         "late-original.json",
@@ -2347,7 +3817,7 @@ fn cumulative_pack_covers_multiple_sources_and_declared_field_batches() {
     for batch in [json!(["first"]), json!(["second", "quiet"])] {
         let prepared = call(
             &dir.0,
-            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[first],"population_fields":[{"source":{"repo":"synthetic"},"fields":batch}],"max_queries":30,"max_seconds":300}),
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[first],"population_fields":[{"source":{"repo":"synthetic"},"fields":batch}],"max_queries":30,"max_seconds":3600}),
         );
         assert!(
             prepared["action"]["warning"]
@@ -2362,7 +3832,7 @@ fn cumulative_pack_covers_multiple_sources_and_declared_field_batches() {
     }
     let prepared = call(
         &dir.0,
-        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[other],"max_queries":30,"max_seconds":300}),
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[other],"max_queries":30,"max_seconds":3600}),
     );
     let completed = relay(&dir.0, prepared, &["peer"], &[], None);
     let quiet = completed["status"]["sources"]
@@ -2468,7 +3938,7 @@ fn native_fieldset_batches_keep_unselected_fields_pending() {
     for selected in ["a", "b"] {
         let prepared = call(
             &dir.0,
-            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[source],"population_fields":[{"source":{"repo":"synthetic"},"fields":[selected]}],"max_queries":30,"max_seconds":300}),
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","source_ids":[source],"population_fields":[{"source":{"repo":"synthetic"},"fields":[selected]}],"max_queries":30,"max_seconds":3600}),
         );
         let completed = relay(&dir.0, prepared, &["a", "b"], &[], Some(&[selected]));
         let active = completed["status"]["active_pack"]["path"].as_str().unwrap();

@@ -73,6 +73,51 @@ fn blank_canvas_is_offline_and_cannot_claim_full_map() {
 }
 
 #[test]
+fn superseded_discovery_is_terminal_without_capture_boundary_or_work_credit() {
+    let mut state = prepared();
+    state.discovery_runs.push(
+        serde_json::from_value(json!({
+            "state_path":"synthetic-run.json","pack_path":"synthetic-pack.json",
+            "receipt_path":"synthetic-receipt.json","start":START,"end":NOW,
+            "source_ids":[state.sources[0].id],"value_fields":[],"max_queries":4,
+            "max_seconds":120,"answered":1,"elapsed_seconds":1.0,"status":"paused"
+        }))
+        .unwrap(),
+    );
+    let boundary = InventoryCaptureBoundary {
+        run: "synthetic-run.json".into(),
+        request_sha256: "0".repeat(64),
+        accepted_probe_ids: vec![],
+    };
+    let hints = vec![InventoryHint {
+        source: source(),
+        fields: vec!["new_field".into()],
+    }];
+    state
+        .record_inventory_hints_with_boundary(&environment(), hints.clone(), Some(boundary.clone()))
+        .unwrap();
+    state.discovery_runs[0].status = "superseded".into();
+    state.validate().unwrap();
+    let status = assess(&state, &[]).unwrap();
+    let notification = brief(&status, None);
+    assert_eq!(notification["counts"]["discovery_unfinished"], 0);
+    assert_ne!(
+        notification["refresh"]["blocker"],
+        "recorded-discovery-unfinished"
+    );
+    assert!(
+        state
+            .record_inventory_hints_with_boundary(&environment(), hints, Some(boundary))
+            .is_err()
+    );
+    state.pending_inventory[0].resolution = Some(WorkResolution::Inventoried {
+        run: "synthetic-run.json".into(),
+        evidence: vec![],
+    });
+    assert!(state.validate().is_err());
+}
+
+#[test]
 fn scouting_retains_exact_saved_result_and_rejects_different_query() {
     let mut state = prepared();
     let capture = &state.scouting[0];
@@ -733,6 +778,8 @@ fn saved_query_observations_reject_derived_aliased_aggregate_join_and_other_sour
         r##"#repo="synthetic" #type="synthetic-type" | n := 1"##,
         r##"#repo="synthetic" #type="synthetic-type" | rename(field=direct,as=alias)"##,
         r##"#repo="synthetic" #type="synthetic-type" | count(as=events)"##,
+        r##"#repo="synthetic" #type="synthetic-type" | events := count()"##,
+        r##"#repo="synthetic" #type="synthetic-type" | total := sum(direct)"##,
         r##"#repo="synthetic" #type="synthetic-type" | join({#repo="other"},field=direct)"##,
         r##"#repo="synthetic" | head(10)"##,
     ] {

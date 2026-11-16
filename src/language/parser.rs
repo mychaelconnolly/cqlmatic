@@ -253,13 +253,20 @@ impl Parser<'_> {
                 });
             }
             if self.eat("=~") {
+                let negated = self.eat("!");
+                self.space();
+                let call_start = self.pos;
                 let n = self.identifier()?;
-                let mut c = self.call(n, self.pos)?;
+                let mut c = self.call(n, call_start)?;
                 c.args.push(Arg {
                     name: Some("field".into()),
                     value: Value::String(name),
                 });
-                return Ok(Step::Call(c));
+                return Ok(if negated {
+                    Step::Filter(Filter::Not(Box::new(Filter::Call(c))))
+                } else {
+                    Step::Call(c)
+                });
             }
             if self.eat("<=>") {
                 if self.rest().trim_start().starts_with('"') {
@@ -402,6 +409,7 @@ impl Parser<'_> {
     }
     fn pattern(&mut self) -> Result<Pattern> {
         self.space();
+        self.saved_call()?;
         if self.rest().starts_with('"') {
             return Ok(Pattern::Text(self.string()?));
         }
@@ -462,6 +470,36 @@ impl Parser<'_> {
         }
         Ok(Pattern::Text(text.into()))
     }
+    fn saved_call(&mut self) -> Result<()> {
+        self.space();
+        if !self.rest().starts_with('$') {
+            return Ok(());
+        }
+        let start = self.pos;
+        self.pos += 1;
+        let name = self.pos;
+        let named = if self.rest().starts_with('"') {
+            self.string().is_ok()
+        } else {
+            while let Some(c) = self.rest().chars().next() {
+                if c.is_whitespace() || "|(){},;<>!=\"'`".contains(c) {
+                    break;
+                }
+                self.pos += c.len_utf8();
+            }
+            self.pos > name
+        };
+        let invocation = named && self.eat("(");
+        self.pos = start;
+        if invocation {
+            self.fail(
+                "Saved-query and resource invocations require resolution outside this profile.",
+                true,
+            )
+        } else {
+            Ok(())
+        }
+    }
     fn call(&mut self, name: String, start: usize) -> Result<Call> {
         self.nested(|p| {
             p.expect("(")?;
@@ -488,6 +526,14 @@ impl Parser<'_> {
                         && p.eat("*")
                     {
                         Value::String("*".into())
+                    } else if name.eq_ignore_ascii_case("wildcard")
+                        && matches!(argname.as_deref(), None | Some("pattern"))
+                    {
+                        if let Some(pattern) = p.bare_glob() {
+                            Value::String(pattern)
+                        } else {
+                            p.expression(0)?
+                        }
                     } else {
                         p.expression(0)?
                     };
@@ -508,6 +554,26 @@ impl Parser<'_> {
                 end: p.pos,
             })
         })
+    }
+    fn bare_glob(&mut self) -> Option<String> {
+        self.space();
+        let start = self.pos;
+        while let Some(c) = self
+            .rest()
+            .chars()
+            .next()
+            .filter(|c| c.is_alphanumeric() || "_@#.:$*-".contains(*c))
+        {
+            self.pos += c.len_utf8();
+        }
+        let end = self.pos;
+        self.space();
+        if self.input[start..end].contains('*') && self.rest().starts_with([',', ')']) {
+            Some(self.input[start..end].into())
+        } else {
+            self.pos = start;
+            None
+        }
     }
     fn number_atom(&mut self) -> Option<Value> {
         self.space();
@@ -600,6 +666,10 @@ impl Parser<'_> {
     }
     fn expression(&mut self, min: u8) -> Result<Value> {
         self.nested(|p| {
+            p.saved_call()?;
+            if p.pos == p.input.len() || p.rest().starts_with([',', ')', ']', '}', ';', '|']) {
+                return p.fail("Expected an expression.", false);
+            }
             let mut left = if p.eat("!") {
                 Value::Unary {
                     op: "!".into(),

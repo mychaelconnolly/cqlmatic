@@ -12,6 +12,7 @@ pub struct GroundingEvidence<'a> {
     pub environment: &'a EnvironmentId,
     pub active_pack: Option<&'a Pack>,
     pub query_observations: &'a [QueryObservation],
+    pub capabilities: Option<crate::capability::CapabilityEvidence<'a>>,
 }
 
 pub fn generate(request: GenerateRequest, pack: Option<&Pack>) -> Analysis {
@@ -152,6 +153,241 @@ pub fn check_with_evidence(
     }
 }
 
+fn target_requirements(
+    pipeline: &Pipeline,
+    selected_environment: Option<&EnvironmentId>,
+    evidence: Option<crate::capability::CapabilityEvidence<'_>>,
+) -> Vec<Diagnostic> {
+    use crate::capability::{self, CaseId, ResourceBindings};
+    struct Notices<'a> {
+        selected_view: Option<&'a str>,
+        evidence: Option<capability::CapabilityEvidence<'a>>,
+        remote: bool,
+        qualified: BTreeMap<CaseId, Option<capability::QualifiedCapability>>,
+        diagnostics: BTreeMap<String, Diagnostic>,
+    }
+    fn observed(message: String) -> Diagnostic {
+        let mut diagnostic = Diagnostic::warning("CQL_TARGET_OBSERVED", message);
+        diagnostic.severity = Severity::Info;
+        diagnostic
+    }
+    impl Notices<'_> {
+        fn notice(&mut self, key: String, diagnostic: Diagnostic) {
+            // One observed form cannot waive an unqualified sibling's prerequisite.
+            if self.diagnostics.get(&key).is_none_or(|previous| {
+                previous.severity == Severity::Info && diagnostic.severity == Severity::Warning
+            }) {
+                self.diagnostics.insert(key, diagnostic);
+            }
+        }
+        fn call(&mut self, call: &Call, target: Option<&str>, scalar: bool) {
+            let Some(resolved) = crate::catalog::resolve(call) else {
+                return;
+            };
+            let spec = resolved.function;
+            let case = match spec.name {
+                "array:union" => Some(CaseId::ArrayUnion),
+                "array:intersection" => Some(CaseId::ArrayIntersection),
+                "array:reduceRow" => Some(CaseId::ArrayReduceRow),
+                "array:reduceColumn" => Some(CaseId::ArrayReduceColumn),
+                _ => None,
+            }
+            .filter(|case| {
+                !self.remote && resolved.diagnostics.is_empty() && case.matches_call(call)
+            });
+            let qualified = case
+                .and_then(|case| {
+                    self.evidence
+                        .filter(|e| target.is_none_or(|t| t == e.environment.view))
+                        .and_then(|e| {
+                            // Eligibility precedes the cache: remote and unqualified calls cannot inherit it.
+                            self.qualified
+                                .entry(case)
+                                .or_insert_with(|| {
+                                    capability::qualify(e, case, ResourceBindings::None {})
+                                        .ok()
+                                        .flatten()
+                                })
+                                .as_ref()
+                        })
+                })
+                .cloned();
+            for requirement in spec
+                .requirements()
+                .iter()
+                .filter(|r| r.applies(&resolved.arguments))
+            {
+                let key = format!("{}:{}:{target:?}", spec.name, requirement.note);
+                let diagnostic = if let Some(qualified) = &qualified {
+                    observed(format!(
+                        "{}: this form was observed available at {}; evidence expires at {}. Target and execution context are caller-attested.",
+                        spec.name, qualified.observed_at, qualified.expires_at
+                    ))
+                } else {
+                    let remediation = if case.is_none() {
+                        "Verify the prerequisite on the selected target; no automated capability case covers this form."
+                    } else if target.is_some_and(|target| self.selected_view != Some(target)) {
+                        "Verify the prerequisite on the queried view, or analyze it with capability evidence from a matching selected target."
+                    } else {
+                        "Run the optional capability check for this form or verify the prerequisite."
+                    };
+                    Diagnostic::warning(
+                        "CQL_TARGET_REQUIREMENT",
+                        format!(
+                            "{} requires this prerequisite: {} Availability has not been confirmed for the selected target. {remediation}",
+                            spec.name, requirement.note
+                        ),
+                    )
+                };
+                self.notice(key, diagnostic);
+            }
+            if let Some(entry) = crate::catalog::scope_entry(spec.name) {
+                let form_conditions = entry["forms"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(
+                        |form| match (spec.name, form["id"].as_str().unwrap_or("")) {
+                            ("wildcard", "expression") => scalar,
+                            ("rename", "field_pairs") => {
+                                matches!(resolved.arguments.get("field"), Some(Value::Array(_)))
+                            }
+                            ("cidr", "lookup_subnets") => resolved.arguments.contains_key("file"),
+                            ("worldMap", "ip_input") => resolved.arguments.contains_key("ip"),
+                            _ => false,
+                        },
+                    )
+                    .flat_map(|form| form["conditions"].as_array().into_iter().flatten());
+                for condition in entry["conditions"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(form_conditions)
+                {
+                    let kind = condition["kind"].as_str().unwrap_or("");
+                    let value = condition["value"].as_str().unwrap_or("");
+                    if !matches!(kind, "lifecycle" | "minimum_version" | "resource")
+                        || kind == "resource" && !spec.requirements().is_empty()
+                    {
+                        continue;
+                    }
+                    let key = format!("{}:{kind}:{value}:{target:?}", spec.name);
+                    let diagnostic = if kind == "minimum_version" {
+                        if let Some(qualified) = &qualified {
+                            observed(format!(
+                                "{}: this form was observed available at {}; evidence expires at {}.",
+                                spec.name, qualified.observed_at, qualified.expires_at
+                            ))
+                        } else {
+                            Diagnostic::warning(
+                                "CQL_TARGET_REQUIREMENT",
+                                format!(
+                                    "{} requires target support documented from version {value}. Availability has not been confirmed for the selected target.",
+                                    spec.name
+                                ),
+                            )
+                        }
+                    } else if kind == "lifecycle" {
+                        Diagnostic::warning(
+                            "CQL_FUNCTION_LIFECYCLE",
+                            format!(
+                                "{} is {value}; {}",
+                                spec.name,
+                                condition["reason"]
+                                    .as_str()
+                                    .unwrap_or("verify the documented usage restrictions")
+                            ),
+                        )
+                    } else {
+                        Diagnostic::warning(
+                            "CQL_TARGET_REQUIREMENT",
+                            format!(
+                                "{} requires {value}; verify the existing resource and access on the selected target.",
+                                spec.name
+                            ),
+                        )
+                    };
+                    self.notice(key, diagnostic);
+                }
+            }
+            let nested_target = resolved
+                .arguments
+                .get("view")
+                .and_then(|v| v.text())
+                .or(target);
+            let enclosing_evidence = self.evidence;
+            let enclosing_remote = self.remote;
+            if spec.name == "remoteTable" {
+                self.evidence = None;
+                self.remote = true;
+            }
+            for argument in &call.args {
+                self.value(&argument.value, nested_target);
+            }
+            self.evidence = enclosing_evidence;
+            self.remote = enclosing_remote;
+        }
+        fn value(&mut self, value: &Value, target: Option<&str>) {
+            match value {
+                Value::Call(call) => self.call(call, target, true),
+                Value::Array(values) => {
+                    for value in values {
+                        self.value(value, target);
+                    }
+                }
+                Value::Query { pipeline, .. } => self.pipeline(pipeline, target),
+                Value::Binary { left, right, .. } => {
+                    self.value(left, target);
+                    self.value(right, target);
+                }
+                Value::Unary { value, .. } => self.value(value, target),
+                _ => {}
+            }
+        }
+        fn filter(&mut self, filter: &Filter, target: Option<&str>) {
+            match filter {
+                Filter::Call(call) => self.call(call, target, false),
+                Filter::And(filters) | Filter::Or(filters) => {
+                    for filter in filters {
+                        self.filter(filter, target);
+                    }
+                }
+                Filter::Not(filter) => self.filter(filter, target),
+                _ => {}
+            }
+        }
+        fn pipeline(&mut self, pipeline: &Pipeline, target: Option<&str>) {
+            for step in &pipeline.steps {
+                match step {
+                    Step::Call(call) => self.call(call, target, false),
+                    Step::Assign { value, .. } => self.value(value, target),
+                    Step::Filter(filter) => self.filter(filter, target),
+                    Step::Case(branches) => {
+                        for branch in branches {
+                            self.pipeline(branch, target);
+                        }
+                    }
+                    Step::Match { arms, .. } => {
+                        for (_, branch) in arms {
+                            self.pipeline(branch, target);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut notices = Notices {
+        selected_view: selected_environment.map(|environment| environment.view.as_str()),
+        evidence,
+        remote: false,
+        qualified: BTreeMap::new(),
+        diagnostics: BTreeMap::new(),
+    };
+    notices.pipeline(pipeline, None);
+    notices.diagnostics.into_values().collect()
+}
+
 fn inventory_requirements(query: &str) -> Result<Vec<Requirement>, Diagnostic> {
     let pipeline = language::parser::parse(query).map_err(|error| error.diagnostic)?;
     let report = language::validate::validate(&pipeline, query);
@@ -274,6 +510,26 @@ fn finish(
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
     result.grounding = ground(pipeline, context, pack, evidence);
+    let capability_evidence = evidence.and_then(|e| e.capabilities).filter(|e| {
+        report.status == Acceptance::Accepted
+            && evidence.is_some_and(|outer| outer.environment == e.environment)
+            && context.execution_context_id.as_deref() == e.execution_context_id
+            && context
+                .environment
+                .as_ref()
+                .is_none_or(|target| target == e.environment)
+            && pack.is_none_or(|pack| &pack.environment == e.environment)
+            && result.grounding.conflicting.is_empty()
+    });
+    result.diagnostics.extend(target_requirements(
+        pipeline,
+        context
+            .environment
+            .as_ref()
+            .or(pack.map(|pack| &pack.environment))
+            .or(evidence.map(|evidence| evidence.environment)),
+        capability_evidence,
+    ));
     result.outcome = match report.status {
         Acceptance::Rejected => Outcome::Invalid,
         Acceptance::Unknown => Outcome::Unsupported,
@@ -427,10 +683,7 @@ impl Flow {
         self.available.as_ref()
     }
     fn conditional(&self, field: &str) -> bool {
-        if self.origin == Origin::Synthetic
-            || self.derived.contains(field)
-            || self.arrays.iter().any(|a| array_element(field, a))
-        {
+        if self.derived.contains(field) || self.arrays.iter().any(|a| array_element(field, a)) {
             return false;
         }
         self.conditional.contains(field)
@@ -440,10 +693,8 @@ impl Flow {
                 .any(|a| array_element(field, a))
     }
     fn produces(&self, field: &str) -> bool {
-        self.origin == Origin::Synthetic
-            || !self.conditional(field)
-                && (self.derived.contains(field)
-                    || self.arrays.iter().any(|a| array_element(field, a)))
+        !self.conditional(field)
+            && (self.derived.contains(field) || self.arrays.iter().any(|a| array_element(field, a)))
     }
     fn unverified(&self, field: &str) -> bool {
         (self.unverified_fields.contains(field)
@@ -461,7 +712,9 @@ impl Flow {
             && !self.produces(field)
     }
     fn absent(&self, field: &str) -> bool {
-        self.removed.contains(field)
+        self.removed.iter().any(|removed| {
+            removed == field || removed.contains("[]") && array_element(field, removed)
+        }) && !self.produces(field)
             || !self.unverified(field)
                 && self.available.as_ref().is_some_and(|fields| {
                     !fields.contains(field)
@@ -473,23 +726,25 @@ impl Flow {
                 })
     }
     fn array_absent(&self, array: &str) -> bool {
-        !self.unknown_namespace(array)
-            && !self
-                .split_unknown
-                .iter()
-                .any(|(prefix, strip)| *strip || path_contains(prefix, array))
-            && !self
-                .arrays
-                .iter()
-                .chain(&self.conditional_arrays)
-                .any(|a| array_covers(a, array) || array_covers(array, a))
-            && self
-                .available
-                .as_ref()
-                .is_some_and(|fields| !fields.iter().any(|f| indexed_member(f, array).is_some()))
+        !self.arrays.iter().any(|known| array_covers(known, array))
+            && (self.removed.iter().any(|removed| {
+                removed == array || removed.contains("[]") && array_covers(removed, array)
+            }) || !self.unknown_namespace(array)
+                && !self
+                    .split_unknown
+                    .iter()
+                    .any(|(prefix, strip)| *strip || path_contains(prefix, array))
+                && !self
+                    .arrays
+                    .iter()
+                    .chain(&self.conditional_arrays)
+                    .any(|a| array_covers(a, array) || array_covers(array, a))
+                && self.available.as_ref().is_some_and(|fields| {
+                    !fields.iter().any(|f| indexed_member(f, array).is_some())
+                }))
     }
     fn array_produces(&self, array: &str) -> bool {
-        if self.origin == Origin::Synthetic || self.arrays.iter().any(|a| array_covers(a, array)) {
+        if self.arrays.iter().any(|a| array_covers(a, array)) {
             return true;
         }
         !self.unknown_namespace(array)
@@ -507,8 +762,7 @@ impl Flow {
             })
     }
     fn member_produces(&self, member: &str) -> bool {
-        self.origin == Origin::Synthetic
-            || self.arrays.iter().any(|a| array_covers(a, member))
+        self.arrays.iter().any(|a| array_covers(a, member))
             || !self.unknown_namespace(member)
                 && self.available.as_ref().is_some_and(|fields| {
                     let members = fields
@@ -538,7 +792,7 @@ impl Flow {
                 .any(|a| array_covers(a, array) || array_covers(array, a))
     }
 }
-fn path_contains(parent: &str, field: &str) -> bool {
+pub(crate) fn path_contains(parent: &str, field: &str) -> bool {
     field
         .strip_prefix(parent)
         .is_some_and(|tail| tail.is_empty() || tail.starts_with('.') || tail.starts_with('['))
@@ -562,7 +816,7 @@ fn indexed_member<'a>(field: &'a str, pattern: &str) -> Option<&'a str> {
     (indexed && (tail.is_empty() || tail.starts_with('.') || tail.starts_with('['))).then_some(tail)
 }
 
-fn array_covers(array: &str, field: &str) -> bool {
+pub(crate) fn array_covers(array: &str, field: &str) -> bool {
     if array.ends_with("[]") {
         path_contains(array, field) || indexed_member(field, array).is_some()
     } else {
@@ -897,7 +1151,7 @@ fn add_unknown(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         array: false,
         scope: state.scope.clone(),
         field: field.into(),
-        derived: state.origin == Origin::Synthetic,
+        derived: false,
         conditional: false,
         origin: state.origin,
         uncertain_source: true,
@@ -928,6 +1182,104 @@ fn expression_fields(v: &Value, state: &Flow, out: &mut GroundingScan<'_>) {
         _ => {}
     }
 }
+
+fn step_aggregates(step: &Step) -> bool {
+    match step {
+        Step::Call(call) => crate::catalog::function(&call.name)
+            .is_some_and(|function| function.effect == crate::catalog::Effect::Aggregate),
+        Step::Assign { value, .. } => crate::catalog::assigned_aggregate(value).is_some(),
+        _ => false,
+    }
+}
+
+fn correlation_input_fields(
+    state: &Flow,
+    args: &BTreeMap<String, &Value>,
+    out: &mut GroundingScan<'_>,
+) {
+    if let Some(globals) = args.get("globalConstraints") {
+        for field in fields_of(globals) {
+            add(state, &field, out);
+        }
+    }
+    if let Some(dimension) = args.get("sequenceBy") {
+        for field in fields_of(dimension) {
+            add(state, &field, out);
+        }
+    } else {
+        add(state, "@timestamp", out);
+    }
+}
+
+fn correlation_inputs(
+    pipeline: &Pipeline,
+    mut state: Flow,
+    args: &BTreeMap<String, &Value>,
+    out: &mut GroundingScan<'_>,
+) -> Option<Flow> {
+    // Trace only paths that have not aggregated. The ordinary scan records all query reads.
+    let mut trace = GroundingScan {
+        requirements: Vec::new(),
+        record_kind_context: None,
+        first_pipeline: false,
+        skip_next_kind_check: true,
+    };
+    let mut start = 0;
+    for (index, step) in pipeline.steps.iter().enumerate() {
+        if !step_aggregates(step) && !matches!(step, Step::Case(_) | Step::Match { .. }) {
+            continue;
+        }
+        state = scan_pipeline(
+            &Pipeline {
+                steps: pipeline.steps[start..index].to_vec(),
+            },
+            state,
+            &mut trace,
+        );
+        trace.requirements.clear();
+        if step_aggregates(step) {
+            correlation_input_fields(&state, args, out);
+            return None;
+        }
+        let pending = match step {
+            Step::Case(branches) => branches
+                .iter()
+                .filter_map(|branch| correlation_inputs(branch, state.clone(), args, out))
+                .collect::<Vec<_>>(),
+            Step::Match { field, arms } => arms
+                .iter()
+                .filter_map(|(pattern, branch)| {
+                    let incoming = scan_pipeline(
+                        &Pipeline {
+                            steps: vec![Step::Match {
+                                field: field.clone(),
+                                arms: vec![(pattern.clone(), Pipeline::default())],
+                            }],
+                        },
+                        state.clone(),
+                        &mut trace,
+                    );
+                    trace.requirements.clear();
+                    correlation_inputs(branch, incoming, args, out)
+                })
+                .collect::<Vec<_>>(),
+            _ => unreachable!("only conditional steps remain"),
+        };
+        if pending.is_empty() {
+            return None;
+        }
+        state = merge_branches(&state, pending);
+        start = index + 1;
+    }
+    Some(scan_pipeline(
+        &Pipeline {
+            steps: pipeline.steps[start..].to_vec(),
+        },
+        state,
+        &mut trace,
+    ))
+}
+
 fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool) -> Option<Flow> {
     let resolved = crate::catalog::resolve(c)?;
     if !resolved.diagnostics.is_empty() {
@@ -961,36 +1313,21 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             {
                 // Correlation aggregation queries are scanned in pieces for field flow.
                 check_record_kinds(pipeline, state, out, true);
-                let boundary = if *aggregation {
-                    pipeline.steps.iter().position(|step| matches!(step, Step::Call(c) if crate::catalog::function(&c.name).is_some_and(|f| f.effect == crate::catalog::Effect::Aggregate))).unwrap_or(pipeline.steps.len())
-                } else {
-                    pipeline.steps.len()
-                };
-                let prefix = Pipeline {
-                    steps: pipeline.steps[..boundary].to_vec(),
-                };
-                out.skip_next_kind_check = true;
-                let mut local = scan_pipeline(&prefix, state.clone(), out);
-                if let Some(globals) = resolved.arguments.get("globalConstraints") {
-                    for field in fields_of(globals) {
-                        add(&local, &field, out);
-                    }
-                }
-                if let Some(dimension) = resolved.arguments.get("sequenceBy") {
-                    for field in fields_of(dimension) {
-                        add(&local, &field, out);
+                if *aggregation {
+                    if let Some(input) =
+                        correlation_inputs(pipeline, state.clone(), &resolved.arguments, out)
+                    {
+                        correlation_input_fields(&input, &resolved.arguments, out);
                     }
                 } else {
-                    add(&local, "@timestamp", out);
+                    out.skip_next_kind_check = true;
+                    let input = scan_pipeline(pipeline, state.clone(), out);
+                    correlation_input_fields(&input, &resolved.arguments, out);
+                    contexts.insert(name.clone(), input);
+                    continue;
                 }
                 out.skip_next_kind_check = true;
-                local = scan_pipeline(
-                    &Pipeline {
-                        steps: pipeline.steps[boundary..].to_vec(),
-                    },
-                    local,
-                    out,
-                );
+                let local = scan_pipeline(pipeline, state.clone(), out);
                 contexts.insert(name.clone(), local);
             }
         }
@@ -1079,6 +1416,17 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
         }
     }
     let foreign = resolved.arguments.get("query").and_then(|value| {
+        if resolved.function.name == "remoteTable" {
+            let external = Flow {
+                origin: Origin::External,
+                ..Flow::default()
+            };
+            return Some(if let Value::Query { pipeline, .. } = value {
+                scan_pipeline(pipeline, external, out)
+            } else {
+                external
+            });
+        }
         if let Value::Query { pipeline, .. } = value {
             Some(scan_pipeline(
                 pipeline,
@@ -1102,8 +1450,8 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             .map(|v| fields_of(v).into_iter().collect::<BTreeSet<_>>())
             .unwrap_or_default();
         let mut provided = BTreeSet::new();
-        if let Some(files) = resolved.arguments.get("file") {
-            for name in fields_of(files) {
+        {
+            for name in resolved.resource_names() {
                 let mut source = state.tables.get(&name).cloned().unwrap_or_else(|| Flow {
                     origin: Origin::External,
                     field_target: state.target.clone(),
@@ -1140,13 +1488,22 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
         }
     }
     for (name, value) in &resolved.arguments {
-        if negated && resolved.function.name == "match" && name == "include" {
+        if negated
+            && matches!(resolved.function.name, "match" | "matchAsArray")
+            && name == "include"
+        {
             continue;
         }
         if name == "source" && resolved.function.name == "getField" {
             continue;
         }
         if name == "query" && foreign.is_some() {
+            continue;
+        }
+        if resolved.function.name.starts_with("time:")
+            && name == "timezoneField"
+            && resolved.arguments.contains_key("timezone")
+        {
             continue;
         }
         let role = resolved.function.argument_role(name);
@@ -1157,7 +1514,7 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             };
             let context = foreign.as_ref().or(table).unwrap_or(&external);
             for field in fields_of(value) {
-                if !(resolved.function.name == "defineTable"
+                if !(matches!(resolved.function.name, "defineTable" | "remoteTable")
                     && name == "include"
                     && crate::catalog::all_columns(value))
                 {
@@ -1170,11 +1527,19 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             }
         } else if role == crate::catalog::ArgumentRole::InputField {
             for field in fields_of(value) {
+                if resolved.function.name == "array:append"
+                    && name == "array"
+                    && state.array_absent(&field)
+                {
+                    continue;
+                }
                 if resolved.function.name != "default" || !state.absent(&field) {
                     if resolved.function.name == "split" && name == "field" {
                         add_array(state, &format!("{field}[]"), out);
-                    } else if name == "array" && field.ends_with("[]") {
-                        add_array(state, &field, out);
+                    } else if name == "array"
+                        && (field.ends_with("[]") || resolved.function.name.starts_with("array:"))
+                    {
+                        add_array(state, &format!("{}[]", field.trim_end_matches("[]")), out);
                     } else {
                         add(state, &field, out);
                     }
@@ -1188,10 +1553,17 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
                     scan_queries(value, &independent(state), out);
                 }
                 crate::catalog::ArgumentScope::Continuing
-                | crate::catalog::ArgumentScope::FilterQuery => scan_queries(value, state, out),
-                crate::catalog::ArgumentScope::Inline => {
+                | crate::catalog::ArgumentScope::FilterQuery
+                | crate::catalog::ArgumentScope::Aggregate => scan_queries(value, state, out),
+                crate::catalog::ArgumentScope::Inline
+                | crate::catalog::ArgumentScope::ElementAggregate => {
                     let mut local = state.clone();
                     if let Some(array) = resolved.arguments.get("array").and_then(|v| v.text()) {
+                        let array_name = if resolved.function.argument_kind("array") == Some("z") {
+                            format!("{}[]", array.trim_end_matches("[]"))
+                        } else {
+                            array.into()
+                        };
                         let binding = resolved
                             .arguments
                             .get("var")
@@ -1206,7 +1578,7 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
                         local.locals.insert(
                             binding.into(),
                             ElementBinding {
-                                array: local_field(state, array),
+                                array: local_field(state, &array_name),
                                 structured,
                             },
                         );
@@ -1240,7 +1612,7 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             }
         }
     }
-    if matches!(resolved.function.name, "join" | "match") {
+    if matches!(resolved.function.name, "join" | "match" | "matchAsArray") {
         let foreign_name = if resolved.function.name == "join" {
             "key"
         } else {
@@ -1302,6 +1674,13 @@ fn scan_queries(value: &Value, state: &Flow, out: &mut GroundingScan<'_>) {
         }
         Value::Call(c) => {
             scan_call(c, state, out, false);
+        }
+        Value::Word(name)
+            if crate::catalog::function(name).is_some_and(|f| {
+                f.effect == crate::catalog::Effect::Aggregate && f.required.is_empty()
+            }) =>
+        {
+            scan_call(&Call::new(name, vec![]), state, out, false);
         }
         _ => {}
     }
@@ -1630,7 +2009,23 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                 }
             }
             Step::Assign { field, value } => {
+                if let Some(call) = crate::catalog::aliased_call(field, value) {
+                    state = scan_pipeline(
+                        &Pipeline {
+                            steps: vec![Step::Call(call)],
+                        },
+                        state,
+                        out,
+                    );
+                    continue;
+                }
                 expression_fields(value, &state, out);
+                if crate::catalog::assigned_aggregate(value).is_some() {
+                    project(&mut state, BTreeSet::new());
+                    state.derived.clear();
+                    state.conditional.clear();
+                    state.definite.clear();
+                }
                 let definite = definite_value(value, &state) || state.definite.contains(field);
                 write(&mut state, field.clone(), definite);
             }
@@ -1686,13 +2081,22 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                             ..Flow::default()
                         });
                         state.tables = tables;
+                        if spec.name == "createEvents" {
+                            let fields = ["@rawstring", "@timestamp", "@timestamp.nanos"]
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect::<BTreeSet<_>>();
+                            state.available = Some(fields.clone());
+                            state.definite = fields.clone();
+                            state.derived = fields;
+                        }
                     }
                     if spec.name == "correlate"
                         && let Some(exported) = &exported
                     {
                         state = exported.clone();
                     }
-                    if spec.name == "defineTable"
+                    if matches!(spec.name, "defineTable" | "remoteTable")
                         && let (Some(name), Some(mut exported)) = (
                             resolved.arguments.get("name").and_then(|v| v.text()),
                             exported,
@@ -1706,7 +2110,9 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                 .filter(|field| !exported.absent(field))
                                 .collect();
                             project(&mut exported, fields.clone());
-                            exported.derived = fields;
+                            if spec.name == "defineTable" {
+                                exported.derived = fields;
+                            }
                         }
                         exported.tables.clear();
                         state.tables.insert(name.into(), exported);
@@ -1735,6 +2141,31 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                 .conditional_arrays
                                 .extend(std::mem::take(&mut state.arrays));
                             state.definite.clear();
+                        }
+                    }
+                    if spec.name != "split"
+                        && let Some(writes) = crate::catalog::output_writes(c)
+                        && let Some(prefix) = writes.dynamic_prefix
+                    {
+                        state.unknown_prefixes.insert(prefix.clone());
+                        if !writes.preserves_existing {
+                            state.conditional.extend(
+                                state
+                                    .derived
+                                    .iter()
+                                    .filter(|field| field.starts_with(&prefix))
+                                    .cloned(),
+                            );
+                            state.derived.retain(|field| !field.starts_with(&prefix));
+                            state.definite.retain(|field| !field.starts_with(&prefix));
+                            state.conditional_arrays.extend(
+                                state
+                                    .arrays
+                                    .iter()
+                                    .filter(|field| field.starts_with(&prefix))
+                                    .cloned(),
+                            );
+                            state.arrays.retain(|field| !field.starts_with(&prefix));
                         }
                     }
                     if let Some((outputs, members)) = spec.named_outputs(&resolved.arguments) {
@@ -1808,6 +2239,61 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                 }
                             }
                         }
+                        "setField" => {
+                            if let Some(Value::String(field)) = resolved.arguments.get("target") {
+                                write(&mut state, field.clone(), false);
+                            }
+                        }
+                        "lowercase" => {
+                            let rename = resolved
+                                .arguments
+                                .get("include")
+                                .and_then(|v| v.text())
+                                .is_some_and(|v| matches!(v, "fields" | "both"));
+                            if let Some(value) = resolved.arguments.get("field") {
+                                for old in fields_of(value) {
+                                    let field = if rename {
+                                        old.to_lowercase()
+                                    } else {
+                                        old.clone()
+                                    };
+                                    if field != old {
+                                        state.derived.remove(&old);
+                                        state.definite.remove(&old);
+                                        state.conditional.insert(old.clone());
+                                        state.removed.remove(&old);
+                                        state.unverified_fields.insert(old.clone());
+                                    }
+                                    write(&mut state, field, false);
+                                }
+                            }
+                        }
+                        "array:drop" | "array:rename" => {
+                            if let Some(array) =
+                                resolved.arguments.get("array").and_then(|v| v.text())
+                            {
+                                if spec.name == "array:rename"
+                                    && resolved.arguments.get("asArray").and_then(|v| v.text())
+                                        == Some(array)
+                                {
+                                    continue;
+                                }
+                                let prefix = array.trim_end_matches("[]");
+                                state.removed.insert(array.into());
+                                state.derived.retain(|field| !path_contains(prefix, field));
+                                state
+                                    .conditional
+                                    .retain(|field| !path_contains(prefix, field));
+                                state.definite.retain(|field| !path_contains(prefix, field));
+                                state.arrays.retain(|field| !path_contains(prefix, field));
+                                state
+                                    .conditional_arrays
+                                    .retain(|field| !path_contains(prefix, field));
+                                if let Some(fields) = &mut state.available {
+                                    fields.retain(|field| !path_contains(prefix, field));
+                                }
+                            }
+                        }
                         "select" | "table" => {
                             if let Some(fields) = resolved.arguments.get("fields") {
                                 project(&mut state, fields_of(fields).into_iter().collect());
@@ -1826,21 +2312,48 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                 }
                             }
                         }
-                        "groupBy" | "count" | "stats" | "sum" | "avg" | "min" | "max"
-                        | "collect" | "selectFromMax" | "selectFromMin" | "selectLast" | "top"
-                        | "fieldset" | "bucket" | "timeChart" | "session" | "series" => {
+                        _ if spec.resolved_effect(&resolved.arguments)
+                            == crate::catalog::Effect::Aggregate =>
+                        {
                             if let Some((outputs, retains)) = crate::catalog::aggregate_outputs(c) {
-                                if retains {
+                                if spec.name == "appendAggregation" {
+                                    let mut summary = state.clone();
+                                    project(&mut summary, outputs.clone());
+                                    summary.arrays.extend(
+                                        outputs
+                                            .iter()
+                                            .filter(|field| field.contains("[]"))
+                                            .cloned(),
+                                    );
+                                    summary.derived = outputs;
+                                    summary.conditional.clear();
+                                    summary.definite.clear();
+                                    state = merge_branches(&state, vec![state.clone(), summary]);
+                                } else if retains {
                                     for field in outputs {
                                         write(&mut state, field, false);
                                     }
                                 } else {
                                     project(&mut state, outputs.clone());
+                                    state.arrays.extend(
+                                        outputs
+                                            .iter()
+                                            .filter(|field| field.contains("[]"))
+                                            .cloned(),
+                                    );
                                     state.derived = outputs;
                                     state.conditional.clear();
                                     state.definite.clear();
                                     state.removed.clear();
                                 }
+                            } else {
+                                state.derived.clear();
+                                state.conditional.clear();
+                                state.definite.clear();
+                                state.arrays.clear();
+                                state.conditional_arrays.clear();
+                                state.available = None;
+                                state.unknown_enrichment = true;
                             }
                         }
                         _ => {}
@@ -2767,6 +3280,137 @@ pub fn recipe_catalog() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_notices_replay_retained_capture_once_and_reject_corruption() {
+        use crate::capability::{CapabilityEvidence, CapabilityRun, CaseId, QUALIFICATION_CALLS};
+        use serde_json::json;
+        let environment = EnvironmentId {
+            cloud: Cloud::Us1,
+            tenant: "0".repeat(32),
+            view: "synthetic".into(),
+        };
+        let start = "2026-01-01T00:00:00Z";
+        let settled = "2026-01-01T00:00:01Z";
+        let host = serde_json::to_vec(&json!({"schema_version":1,"environment":environment,
+            "session_id":"synthetic-session","verified_at":start,
+            "mechanism":"provider-enforced-search-lifetime","max_search_seconds":1,
+            "capability_reference":"Synthetic reference","verification_evidence":"Synthetic fixture"})).unwrap();
+        let mut run = CapabilityRun::prepare(
+            environment.clone(),
+            "synthetic-auth".into(),
+            "synthetic-session".into(),
+            vec![CaseId::ArrayUnion],
+            &host,
+            1,
+            10,
+            start,
+            0,
+        )
+        .unwrap();
+        let reservation = run
+            .dispatch(
+                CaseId::ArrayUnion,
+                "synthetic-auth",
+                "synthetic-session",
+                start,
+            )
+            .unwrap()
+            .reservation
+            .clone();
+        let raw = br#"{"result":[{"out[0]":1,"out[1]":2,"out[2]":3}]}"#;
+        let report = serde_json::to_vec(&json!({"schema_version":1,"environment":environment,
+            "session_id":"synthetic-session","attempt_id":reservation.id,"arguments":reservation.arguments,
+            "termination":"completed","recorded_at":settled,"result_sha256":crate::sha256_hex(raw),
+            "evidence":"Synthetic terminal report"})).unwrap();
+        run.submit(
+            &reservation.id,
+            "synthetic-auth",
+            Some(raw),
+            &report,
+            settled,
+            settled,
+        )
+        .unwrap();
+        let pipeline = language::parser::parse(
+            "array:union(items,as=out)|array:union(out,as=again)|array:union(again,as=last)",
+        )
+        .unwrap();
+        for valid in [true, false] {
+            if !valid {
+                run.attempts[0].capture.as_mut().unwrap().sha256 = "0".repeat(64);
+            }
+            QUALIFICATION_CALLS.with(|calls| calls.set(0));
+            let diagnostics = target_requirements(
+                &pipeline,
+                Some(&environment),
+                Some(CapabilityEvidence {
+                    runs: std::slice::from_ref(&run),
+                    environment: &environment,
+                    execution_context_id: Some("synthetic-auth"),
+                    now: settled,
+                }),
+            );
+            assert_eq!(QUALIFICATION_CALLS.with(|calls| calls.get()), 1);
+            assert_eq!(
+                diagnostics.iter().any(|d| d.code == "CQL_TARGET_OBSERVED"),
+                valid
+            );
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.code == "CQL_TARGET_REQUIREMENT"),
+                !valid
+            );
+        }
+    }
+
+    #[test]
+    fn target_notices_qualify_each_eligible_case_once_including_absence_and_errors() {
+        use crate::capability::{CapabilityEvidence, QUALIFICATION_CALLS};
+        let environment = EnvironmentId {
+            cloud: Cloud::Us1,
+            tenant: "0".repeat(32),
+            view: "synthetic".into(),
+        };
+        let calls = "array:union(items,as=out) | array:intersection(items,as=out) | array:reduceRow(items,var=x,function=sum(x),as=out) | array:reduceColumn(items,var=x,function=sum(x),as=out)";
+        let pipeline = language::parser::parse(&format!("{calls} | {calls}")).unwrap();
+        for now in ["2026-01-01T00:00:00Z", "invalid-time"] {
+            QUALIFICATION_CALLS.with(|calls| calls.set(0));
+            let diagnostics = target_requirements(
+                &pipeline,
+                Some(&environment),
+                Some(CapabilityEvidence {
+                    runs: &[],
+                    environment: &environment,
+                    execution_context_id: Some("synthetic-auth"),
+                    now,
+                }),
+            );
+            assert_eq!(QUALIFICATION_CALLS.with(|calls| calls.get()), 4);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|d| d.code == "CQL_TARGET_REQUIREMENT")
+            );
+            assert!(diagnostics.iter().all(|d| d.code != "CQL_TARGET_OBSERVED"));
+        }
+        QUALIFICATION_CALLS.with(|calls| calls.set(0));
+        let pipeline = language::parser::parse(
+            "math:sqrt(value,as=root) | array:union(items) | join(query={array:union(items,as=out)},field=host,view=other)",
+        ).unwrap();
+        target_requirements(
+            &pipeline,
+            Some(&environment),
+            Some(CapabilityEvidence {
+                runs: &[],
+                environment: &environment,
+                execution_context_id: Some("synthetic-auth"),
+                now: "2026-01-01T00:00:00Z",
+            }),
+        );
+        assert_eq!(QUALIFICATION_CALLS.with(|calls| calls.get()), 0);
+    }
 
     #[test]
     fn uncredited_fields_use_positive_exact_names_without_the_quick_lead_cap() {

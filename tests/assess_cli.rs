@@ -799,3 +799,103 @@ fn env_inspect_summary_is_opt_in_and_default_json_stays_detailed() {
     assert!(summary.get("annotations").is_none());
     assert!(summary["sources"][0].get("field_count").is_some());
 }
+
+#[test]
+fn assess_cli_preserves_unknown_state_row_limit_max_in_final_upstream_and_nested_queries() {
+    for (stage, call) in [
+        ("sort", "sort(user, limit=max)"),
+        ("head", "head(limit=max)"),
+        ("tail", "tail(limit=max)"),
+        ("table", "table([user], limit=max)"),
+    ] {
+        for query in [
+            call.to_string(),
+            format!("{call} | count()"),
+            format!("defineTable(name=t, query={{ {call} }}, include=[user]) | readFile(t)"),
+        ] {
+            let mut command = binary();
+            command.args(["assess", "--request", "-", "--json"]);
+            let request = json!({
+                "schema_version": 1,
+                "query": query,
+                "result": {"result": [{"user": "sample", "_count": 1}]}
+            });
+            let row = result(&run(command, request.to_string().as_bytes()), 1);
+            assert_eq!(row["outcome"], "inconclusive", "{query}: {row}");
+            assert!(
+                row["caps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|cap| cap["stage"] != stage),
+                "{query}: {row}"
+            );
+            finding(&row, "RESULT_UPSTREAM_CAP_UNVERIFIED", "warning");
+            finding(&row, "RESULT_COMPLETENESS_UNATTESTED", "info");
+            assert!(
+                row["findings"].as_array().unwrap().iter().any(|finding| {
+                    finding["code"] == "RESULT_UPSTREAM_CAP_UNVERIFIED"
+                        && finding["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains(&format!("{stage}(limit=max)"))
+                        && finding["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("StateRowLimit")
+                        && finding["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("effective numeric cap is unknown")
+                }),
+                "{query}: {row}"
+            );
+        }
+    }
+}
+
+#[test]
+fn assess_cli_distinguishes_missing_outputs_dynamic_outputs_and_unknown_coverage() {
+    for (query, payload, outcome, code, finding_code, severity) in [
+        (
+            "lower(@rawstring, as=normalized)",
+            json!({"result":[{"@rawstring":"synthetic"}]}),
+            "advisory",
+            1,
+            "RESULT_NULL_FIELDS",
+            "warning",
+        ),
+        (
+            "parseJson()",
+            json!({"result":[{"a":1},{"b":2}]}),
+            "no-findings",
+            0,
+            "RESULT_OUTPUT_COVERAGE",
+            "info",
+        ),
+        (
+            "futureResult()",
+            json!({"result":[{"value":1}]}),
+            "inconclusive",
+            1,
+            "RESULT_QUERY_COVERAGE",
+            "warning",
+        ),
+        (
+            r#"remoteTable(connection="synthetic", name="t", query="select user from events") | readFile(t)"#,
+            json!({"result":[{"user":"a"}]}),
+            "inconclusive",
+            1,
+            "RESULT_UPSTREAM_CAP_UNVERIFIED",
+            "warning",
+        ),
+    ] {
+        let mut command = binary();
+        command.args(["assess", "--request", "-", "--json"]);
+        let request = json!({"schema_version":1,"query":query,"result":payload});
+        let row = result(&run(command, request.to_string().as_bytes()), code);
+        assert_eq!(row["outcome"], outcome, "{query}: {row}");
+        finding(&row, finding_code, severity);
+        finding(&row, "RESULT_COMPLETENESS_UNATTESTED", "info");
+    }
+}

@@ -15,6 +15,120 @@
     "result"
   ],
   "$defs": {
+    "CapabilityOutcome": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "unknown"
+      ]
+    },
+    "CapabilityStatus": {
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "cases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CaseStatus"
+          }
+        },
+        "execution_context_id": {
+          "type": "string"
+        },
+        "max_queries": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "termination_pending": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "execution_context_id",
+        "session_id",
+        "max_queries",
+        "attempts",
+        "max_seconds",
+        "paused",
+        "termination_pending",
+        "cases"
+      ]
+    },
+    "CaseId": {
+      "type": "string",
+      "enum": [
+        "array-union",
+        "array-intersection",
+        "array-reduce-row",
+        "array-reduce-column",
+        "math-sqrt"
+      ]
+    },
+    "CaseStatus": {
+      "type": "object",
+      "properties": {
+        "case_id": {
+          "$ref": "#/$defs/CaseId"
+        },
+        "case_revision": {
+          "type": "string"
+        },
+        "last_attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CapabilityOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retrieved_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "case_revision"
+      ]
+    },
     "Cloud": {
       "type": "string",
       "enum": [
@@ -301,6 +415,15 @@
         "blank_canvas": {
           "type": "boolean"
         },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityStatus"
+          }
+        },
+        "capability_blocked": {
+          "type": "boolean"
+        },
         "context": {
           "type": [
             "string",
@@ -497,6 +620,8 @@
         "automatic_refresh_available",
         "refresh_attempts",
         "refresh_blocked",
+        "capabilities",
+        "capability_blocked",
         "pending_inventory",
         "inventory_notification_count",
         "settings_attention",
