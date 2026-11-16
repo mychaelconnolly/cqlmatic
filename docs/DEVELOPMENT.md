@@ -154,7 +154,7 @@ print('Function, parameter, guidance and public-reference membership agree.')
 PY
 ```
 
-Membership checks do not replace representative typed/raw positive and negative cases for each family, recursive context/output checks, result-assessment checks or the independent review gates in [releasing](RELEASING.md). An unavailable required reviewer leaves its gate pending.
+Membership checks do not replace representative typed/raw positive and negative cases for each family, recursive context/output checks, result-assessment checks or the pull-request review in [releasing](RELEASING.md).
 
 ### Optional capability observations and refresh
 

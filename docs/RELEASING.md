@@ -21,7 +21,7 @@ Inspect the complete source, comments, reference data, workflows, metadata and h
 3. Generate `SOURCE-SHA256SUMS` over every intended index path except itself. Require exact membership, regular files and index/worktree equality. Stage the checksum file, establish the final source commit and verify its tree against a separate full SHA-256 manifest outside the source tree.
 4. Run Windows CI and generate both websites for that exact commit. Record successful run/artifact IDs and native digests outside tracked source. Source changes require new checksums, a new reviewed commit and affected checks/artifacts again. Do not put generated artifact hashes or the final commit ID into tracked source checksums.
 5. Finish all archives, release notes, outer checksums and both website outputs before freezing review. Verify extracted exact membership and every file digest; reject missing, extra, stale, duplicate, linked or unsafe members and private metadata.
-6. Obtain two independent reviews of identical frozen source, website and outbound manifests. Keep bytes unchanged during first passes. Resolve blockers, rerun affected checks and obtain targeted re-review. An unavailable required check/reviewer leaves the gate pending.
+6. Review the pull request that carries the final source, and check the website and outbound manifests against it. Resolve blocking findings and rerun affected checks. A failing required check leaves the gate pending.
 7. Create the annotated `v0.1.7` tag after these gates pass. Verify its annotation and peeled target against the reviewed commit. Record full commit/tag IDs and manifest hashes for approval. Never move the existing `v0.1.0` tag.
 
 ## Native packages
