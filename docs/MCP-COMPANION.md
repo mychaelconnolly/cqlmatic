@@ -6,6 +6,26 @@ The model interprets analyst intent, source purpose, and parser transformations.
 
 CQLmatic can prepare and check CQL offline while an authorized agent uses the **read-only** Falcon MCP tool `falcon_search_ngsiem` for execution. The agent relays discovery responses and saved search results; CQLmatic does not need Falcon API keys in this mode. The [API discovery path](ENVIRONMENT.md#plan-then-execute-explicitly) remains available.
 
+## How to tell whether a hosted search finished
+
+The hosted search tool returns these shapes, either bare or inside a text envelope:
+
+| Outcome | Abbreviated `result` | Meaning and next action |
+| --- | --- | --- |
+| Completed with data | `[{...}]` | Inspect the returned rows. |
+| Completed with zero results | `[]` or `[{"_count":"0"}]` | Run a positive control before concluding no matches. |
+| Timed out | `{"error":"NGSIEM search timed out after 20 seconds..."}` | Accepted and cut off before completion, with no partial rows. Narrow the query or time range and run it again; the job cannot be checked later. |
+| Rejected at start | `{"error":"Failed to start..."}` | Rejected and never ran; no specific reason is returned. Fix the query before another attempt. |
+| Started, then failed | `{"error":"Failed to poll...","details":{...}}` | Check named lookup files and other resources. |
+
+A list-valued `result` means the search completed; an object-valued `result` with an `error` string means it did not. This rule applies whether `isError` is true, false or absent. Completeness flags still prevent accepting incomplete evidence. A hosted timeout reports the cutoff; it does not establish that the remote job has stopped.
+
+A completed search with zero results shows no matches only after a positive control: run the query again without the selective filter or field and confirm a non-zero count. Keep the original source, window and authorized limits. A non-zero control count shows data exists there; check the original field name and value next.
+
+For refresh and capability settlement, a hosted `Failed to start` answer maps to `not-started`, a hosted timeout answer to `timed-out`, and a lost response or client-side wait ending without a tool answer to `unresolved`. A started-then-failed answer has no matching termination value in this release and stays `unresolved`. Submit the exact bound settlement; these answers do not import completed evidence.
+
+Discovery retains these error answers in `cleanup-pending`. The same attempt still needs an acceptable original successful result or exact bound host cleanup settlement before another search starts; submitting an error answer does not settle it automatically. A narrowed query is a different probe and cannot answer the outstanding attempt. Keep the checkpoint and never submit a cancellation assertion unless it is true.
+
 <a id="1-build-an-observed-environment-pack"></a>
 
 ## When an environment session begins
@@ -141,7 +161,7 @@ Save the entire MCP result **exactly as received** in `.local/mcp-result.json` (
 cqlmatic assess --query-file .local/query.cql --result .local/mcp-result.json --pack .local/pack.json
 ```
 
-Assess outcomes are `no-findings` (exit `0`), `advisory` and `inconclusive` (exit `1`), and `error` (exit `2`); findings include `RESULT_EMPTY`, `RESULT_CAP_REACHED`, `RESULT_INCOMPLETE`, `RESULT_NULL_FIELDS`, `RESULT_KEY_COVERAGE`, and `RESULT_COMPLETENESS_UNATTESTED`. Inspect the outcome and findings together. Cap findings depend on the function, explicit versus default sizing, and placement. An explicit requested final `sort`/`head`/`tail`/`table`/`top` size is informational when reached. `groupBy(..., limit=max)` in any position is inconclusive because its target `GroupMaxLimit` is unknown, and a final result with more rows than its stage allows is inconclusive. Defaults, numeric `groupBy` caps, series limits, per-group `collect` values and `join` subquery limits have distinct checks; see [result assessment](RESULT-ASSESSMENT.md) for the full rules. `no-findings` means only that these checks found no issue; it does not prove correctness or completeness. A timeout, empty sample, or `inconclusive` result is **not** “no results”: narrow the request, obtain an authorized new window, or rerun and assess the new raw result. `assess` also accepts `--request`, `--jsonl` or `--json`; its contract is available with `cqlmatic --schema assess`.
+Assess outcomes are `no-findings` (exit `0`), `advisory` and `inconclusive` (exit `1`), and `error` (exit `2`); findings include `RESULT_EMPTY`, `RESULT_CAP_REACHED`, `RESULT_INCOMPLETE`, `RESULT_NULL_FIELDS`, `RESULT_KEY_COVERAGE`, and `RESULT_COMPLETENESS_UNATTESTED`. Inspect the outcome and findings together. Cap findings depend on the function, explicit versus default sizing, and placement. An explicit requested final `sort`/`head`/`tail`/`table`/`top` size is informational when reached. `groupBy(..., limit=max)` in any position is inconclusive because its target `GroupMaxLimit` is unknown, and a final result with more rows than its stage allows is inconclusive. Defaults, numeric `groupBy` caps, series limits, per-group `collect` values and `join` subquery limits have distinct checks; see [result assessment](RESULT-ASSESSMENT.md) for the full rules. `no-findings` means only that these checks found no issue; it does not prove correctness or completeness. A timeout or `inconclusive` result is **not** “no results”. Narrow the query or time range after a hosted timeout. A completed search with zero results shows no matches only after a positive control: run the query again without the selective filter or field and confirm a non-zero count. Keep the original source, window and authorized limits. A non-zero control count shows data exists there; check the original field name and value next. `assess` also accepts `--request`, `--jsonl` or `--json`; its contract is available with `cqlmatic --schema assess`.
 
 ### Record positive field observations explicitly
 

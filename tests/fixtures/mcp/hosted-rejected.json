@@ -1,0 +1,6 @@
+{
+  "result": {
+    "error": "Failed to start NGSIEM search: Request failed with status code 0 API said: MsaspecResponseFields TextConsumer Trace ID: synthetic-id"
+  },
+  "trace_id": "synthetic-id"
+}

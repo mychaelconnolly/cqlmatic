@@ -138,7 +138,7 @@ After a field pack is active, **capabilities (optional)** in `cqlmatic env inven
 
 ### Write with the saved map
 
-Generation, checking, and saved-result assessment reuse the confirmed local inventory's active pack in both Full and Quick modes. Use `status` to inspect its target, path, and remaining gaps:
+Generation, checking, and saved-result assessment reuse the confirmed local inventory's active pack in both Full and Quick modes. See [hosted search outcomes](docs/MCP-COMPANION.md#how-to-tell-whether-a-hosted-search-finished) for completion, error settlement and positive controls for zero results. Use `status` to inspect its target, path, and remaining gaps:
 
 ```sh
 cqlmatic generate --request examples/generate.request.json --json

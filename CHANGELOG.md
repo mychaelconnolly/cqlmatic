@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Hosted search `result.error` answers report `MCP_DEADLINE` for the hosted cutoff and `MCP_TOOL_ERROR` for start rejection or other failures, regardless of the envelope error flag. Assessment reports `RESULT_TIMEOUT` or `RESULT_ERROR`; discovery still requires settlement.
+- Empty and zero-count assessment messages require a positive control: rerun without the selective filter or field and confirm a non-zero count before concluding no matches.
+
 - `setTimeInterval` requires `start` by name; unnamed endpoints report `CQL_ARGUMENT_COUNT`. Write `setTimeInterval(start=1d) | count()`.
 - `check` rejects aggregates and joins inside `case` alternatives and `match` arms with `CQL_BRANCH_FUNCTION`, including `case { count(); * }`. 0.1.7 accepted these calls in branches; aggregate or join before or after the conditional.
 - Quoted `"*"` is free text: `count() | "*"` reports `CQL_FREE_TEXT_AFTER_AGGREGATE`. Bare `*` remains match-all. 0.1.7 accepted the quoted form after aggregation.

@@ -1,0 +1,16 @@
+{
+  "result": {
+    "details": {
+      "body": {
+        "errors": [
+          {
+            "message": "[GET /humio/api/v1/repositories/{repository}/queryjobs/{id}] GetSearchStatusV1 (status 400): {}"
+          }
+        ]
+      },
+      "status_code": 400
+    },
+    "error": "Failed to poll NGSIEM search status: Invalid request. GetSearchStatusV1 (status 400): {}. Trace ID: synthetic-id"
+  },
+  "trace_id": "synthetic-id"
+}

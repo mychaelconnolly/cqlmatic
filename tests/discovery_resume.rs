@@ -1422,6 +1422,18 @@ fn rejected_mcp_results_remain_in_flight_until_exact_cleanup_and_charged_retry()
     network::CANCELLED.store(false, Ordering::Relaxed);
     for (raw, code) in [
         (
+            include_bytes!("fixtures/mcp/hosted-timeout.json").as_slice(),
+            "MCP_DEADLINE",
+        ),
+        (
+            include_bytes!("fixtures/mcp/hosted-rejected.json").as_slice(),
+            "MCP_TOOL_ERROR",
+        ),
+        (
+            include_bytes!("fixtures/mcp/hosted-poll-failed.json").as_slice(),
+            "MCP_TOOL_ERROR",
+        ),
+        (
             br#"{"isError":true,"content":[{"type":"text","text":"request timed out"}]}"#
                 .as_slice(),
             "MCP_DEADLINE",
@@ -2019,5 +2031,176 @@ fn cached_native_activation_keeps_predecessor_binding() {
         assert_eq!(fs::read(&run.state).unwrap(), state);
         assert_eq!((backend.starts.len(), backend.polls, backend.stops), calls);
         assert!(!run.receipt.exists());
+    }
+}
+
+fn hosted_error_checkpoint(resumable: bool, raw: &[u8]) -> Run {
+    let mut run = Run::new(Transport::Mcp, 3);
+    if !resumable {
+        let request = serde_json::from_value(run.saved()["request"].clone()).unwrap();
+        run.state = run.directory.join("legacy.json");
+        mcp::init(request, &run.state, &run.pack, &run.receipt).unwrap();
+    }
+    let id = if resumable {
+        run.probe()
+    } else {
+        mcp::step(&run.state, &[]).unwrap().probes[0]["probe_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    if resumable {
+        mcp::dispatch(&run.state, &id).unwrap();
+    }
+    let file = run.directory.join("hosted-error.json");
+    fs::write(&file, raw).unwrap();
+    mcp::step(&run.state, &[(id, file)]).unwrap();
+    run
+}
+
+fn diagnostic_pointer(saved: &Value) -> String {
+    if saved["schema_version"] == 3 {
+        "/session/attempts/0/rejected_results/0/diagnostic".into()
+    } else {
+        format!(
+            "/answers/{}/diagnostic",
+            saved["answers"].as_object().unwrap().keys().next().unwrap()
+        )
+    }
+}
+
+#[test]
+fn earlier_hosted_error_checkpoints_preserve_the_original_shape_diagnostic() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for resumable in [false, true] {
+        for raw in [
+            include_bytes!("fixtures/mcp/hosted-timeout.json").as_slice(),
+            include_bytes!("fixtures/mcp/hosted-rejected.json").as_slice(),
+            include_bytes!("fixtures/mcp/hosted-poll-failed.json").as_slice(),
+        ] {
+            let run = hosted_error_checkpoint(resumable, raw);
+            let mut saved = run.saved();
+            saved["producer_version"] = json!("0.1.6");
+            let pointer = diagnostic_pointer(&saved);
+            *saved.pointer_mut(&pointer).unwrap() = serde_json::to_value(Diagnostic::error(
+                "MCP_SHAPE",
+                "MCP search result must have a result array",
+            ))
+            .unwrap();
+            if !resumable {
+                saved["failure"] = saved.pointer(&pointer).unwrap().clone();
+            }
+            run.save(&saved);
+            assert!(mcp::inspect_state(&run.state).is_ok());
+            assert_eq!(run.saved(), saved);
+        }
+    }
+}
+
+#[test]
+fn earlier_error_envelope_checkpoints_preserve_their_original_diagnostic() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for (raw, code, message) in [
+        (
+            include_bytes!("fixtures/mcp/hosted-timeout-error-envelope.json").as_slice(),
+            "MCP_DEADLINE",
+            "MCP search tool reported a timeout",
+        ),
+        (
+            include_bytes!("fixtures/mcp/hosted-timeout-success-envelope.json").as_slice(),
+            "MCP_SHAPE",
+            "MCP search result must have a result array",
+        ),
+    ] {
+        let run = hosted_error_checkpoint(false, raw);
+        let mut saved = run.saved();
+        saved["producer_version"] = json!("0.1.6");
+        let pointer = diagnostic_pointer(&saved);
+        *saved.pointer_mut(&pointer).unwrap() =
+            serde_json::to_value(Diagnostic::error(code, message)).unwrap();
+        saved["failure"] = saved.pointer(&pointer).unwrap().clone();
+        run.save(&saved);
+        assert!(mcp::inspect_state(&run.state).is_ok(), "{code}");
+        assert_eq!(run.saved(), saved);
+    }
+}
+
+#[test]
+fn earlier_hosted_error_checkpoints_reject_edited_diagnostics_and_bytes() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for resumable in [false, true] {
+        let run = hosted_error_checkpoint(
+            resumable,
+            include_bytes!("fixtures/mcp/hosted-timeout.json"),
+        );
+        let mut saved = run.saved();
+        saved["producer_version"] = json!("0.1.6");
+        let pointer = diagnostic_pointer(&saved);
+        *saved.pointer_mut(&pointer).unwrap() = serde_json::to_value(Diagnostic::error(
+            "MCP_SHAPE",
+            "MCP search result must have a result array",
+        ))
+        .unwrap();
+        if !resumable {
+            saved["failure"] = saved.pointer(&pointer).unwrap().clone();
+        }
+        for change in ["message", "code", "bytes", "current-producer"] {
+            // Resumable checkpoints bind rejected answers by their bytes.
+            if resumable && change != "bytes" {
+                continue;
+            }
+            let mut edited = saved.clone();
+            if change == "bytes" {
+                let hex = if resumable {
+                    "/session/attempts/0/rejected_results/0/evidence/raw_hex".to_owned()
+                } else {
+                    pointer.replace("diagnostic", "raw_hex")
+                };
+                *edited.pointer_mut(&hex).unwrap() = json!("00");
+            } else if change == "current-producer" {
+                edited["producer_version"] = json!(env!("CARGO_PKG_VERSION"));
+            } else {
+                edited.pointer_mut(&pointer).unwrap()[change] = json!("edited");
+            }
+            run.save(&edited);
+            assert_eq!(
+                mcp::inspect_state(&run.state).unwrap_err().code,
+                "MCP_STATE_TAMPERED",
+                "{resumable} {change}"
+            );
+        }
+    }
+}
+
+#[test]
+fn current_hosted_error_checkpoints_store_the_new_diagnostic() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for resumable in [false, true] {
+        for (raw, code) in [
+            (
+                include_bytes!("fixtures/mcp/hosted-timeout.json").as_slice(),
+                "MCP_DEADLINE",
+            ),
+            (
+                include_bytes!("fixtures/mcp/hosted-rejected.json").as_slice(),
+                "MCP_TOOL_ERROR",
+            ),
+            (
+                include_bytes!("fixtures/mcp/hosted-poll-failed.json").as_slice(),
+                "MCP_TOOL_ERROR",
+            ),
+        ] {
+            let run = hosted_error_checkpoint(resumable, raw);
+            let saved = run.saved();
+            assert_eq!(
+                saved.pointer(&diagnostic_pointer(&saved)).unwrap()["code"],
+                code
+            );
+            assert!(mcp::inspect_state(&run.state).is_ok());
+        }
     }
 }

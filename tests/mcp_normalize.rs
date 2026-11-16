@@ -694,3 +694,66 @@ fn live_metadata_uses_completeness_flag_truthiness() {
         }
     }
 }
+
+#[test]
+fn hosted_result_errors_have_the_same_code_in_every_envelope() {
+    for (name, code) in [
+        ("timeout", "MCP_DEADLINE"),
+        ("rejected", "MCP_TOOL_ERROR"),
+        ("poll-failed", "MCP_TOOL_ERROR"),
+    ] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp");
+        let raw = std::fs::read(root.join(format!("hosted-{name}.json"))).unwrap();
+        assert_code(&raw, code);
+        for suffix in ["error-envelope", "success-envelope"] {
+            assert_code(
+                &std::fs::read(root.join(format!("hosted-{name}-{suffix}.json"))).unwrap(),
+                code,
+            );
+        }
+        let body: Value = serde_json::from_slice(&raw).unwrap();
+        let mut wrapped =
+            json!({"content":[{"type":"text","text":String::from_utf8(raw).unwrap()}]});
+        wrapped["structuredContent"] = body;
+        assert_code(&serde_json::to_vec(&wrapped).unwrap(), code);
+    }
+}
+
+#[test]
+fn hosted_error_classification_ignores_detail_keys_and_bounds_text() {
+    for text in [
+        "Failed to poll NGSIEM search status",
+        "Failed to start NGSIEM search",
+        "other failure",
+        "Failed to start NGSIEM search: NGSIEM search timed out",
+        "Failed to poll NGSIEM search status: connection timed out",
+        "prefix NGSIEM search timed out",
+        "ngsiem search timed out",
+    ] {
+        let body =
+            json!({"result":{"error":text,"details":{"timeout_seconds":20,"deadline":"timeout"}}});
+        assert_code(&serde_json::to_vec(&body).unwrap(), "MCP_TOOL_ERROR");
+        for flag in [true, false] {
+            assert_code(&envelope(&body.to_string(), flag), "MCP_TOOL_ERROR");
+        }
+    }
+    let text = "é".repeat(350);
+    let body = json!({"result":{"error":text}});
+    let diagnostic = mcp::normalize(body.to_string().as_bytes()).unwrap_err();
+    assert!(diagnostic.message.ends_with(&"é".repeat(300)));
+    assert!(!diagnostic.message.contains(&"é".repeat(301)));
+    let rejected = json!({"result":{"error":"Failed to start NGSIEM search"}});
+    assert!(
+        mcp::normalize(rejected.to_string().as_bytes())
+            .unwrap_err()
+            .message
+            .contains("rejected at start and did not run")
+    );
+    for error in [json!(""), json!("  "), Value::Null, json!(true), json!({})] {
+        let body = json!({"result":{"error":error}});
+        assert_code(body.to_string().as_bytes(), "MCP_SHAPE");
+        for flag in [true, false] {
+            assert_code(&envelope(&body.to_string(), flag), "MCP_SHAPE");
+        }
+    }
+}

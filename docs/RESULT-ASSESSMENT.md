@@ -22,7 +22,7 @@ The query must fit the implemented parser, but assessment is not a substitute fo
 
 ## Accepted saved-response shapes
 
-A bare result is an object with a `result` array of objects:
+A completed bare result is an object with a `result` array of objects. A failed hosted answer instead has a `result` object with a non-empty `error` string; see [hosted search outcomes](MCP-COMPANION.md#how-to-tell-whether-a-hosted-search-finished):
 
 ```json
 {"result":[{"_count":"24"}]}
@@ -38,7 +38,7 @@ The standard MCP text envelope must contain exactly one `{type:"text",text:STRIN
 
 Saved-result files may contain whitespace-separated identical JSON repeats produced by a host display. Differing copies or duplicate object keys fail closed. Assessment **requests**, including JSONL records, still require one JSON document with unique object keys, including inside `result`. If the host saved a large response to a file, pass that file directly; never retype or trim it.
 
-Timeout/deadline text, tool errors, incomplete flags and malformed metadata/rows cannot become successful empty observations. Recognized completeness indicators are evaluated both at top level and inside metadata; flags are conservative, including floating-point values that decode to zero. Any non-null `error`/`errors` value is treated as a tool error. Normalization validates shape and flags, not the remote search's completeness.
+Timeout/deadline text, tool errors, incomplete flags and malformed metadata/rows cannot become successful empty observations. Recognized completeness indicators are evaluated both at top level and inside metadata; flags are conservative, including floating-point values that decode to zero. Any non-null top-level or metadata `error`/`errors` value is treated as a tool error. A non-empty `result.error` string is classified from that string alone: the hosted cutoff is a timeout, and other errors are tool errors, regardless of `isError` or keys inside `details`. Normalization validates shape and flags, not the remote search's completeness.
 
 The raw result-file limit is 8 MiB. Full request/JSONL input is limited to 1 MiB, so a larger permitted saved result should use the file-pair mode. At **10,000 or more rows**, assessment is inconclusive (`RESULT_ROW_LIMIT`); discovery rejects such a response rather than activating a pack. The common normalizer does not itself impose that row-count rule.
 
@@ -71,8 +71,8 @@ When multiple findings apply, severity of the **outcome** is `error` > `inconclu
 
 | Finding | Interpretation and next action |
 | --- | --- |
-| `RESULT_EMPTY` | Zero returned rows are inconclusive; inspect source, window, field semantics, and failures. It is not evidence of no activity. |
-| `RESULT_ZERO_COUNT` | A recognized aggregate count alias contains integer zero or string `"0"`; advisory, not proof of underlying absence. Counts are tracked through known aggregate outputs. |
+| `RESULT_EMPTY` | Zero returned rows are inconclusive; inspect source, window, field semantics, and failures. Run a positive control: drop the selective filter or field and confirm a non-zero count before concluding no matches. |
+| `RESULT_ZERO_COUNT` | A recognized aggregate count alias contains integer zero or string `"0"`; advisory, not proof of underlying absence. Run the same positive control before concluding no matches. Counts are tracked through known aggregate outputs. |
 | `RESULT_NULL_FIELDS` | Inspected output column has missing, null, or empty-string values; review intended evidence and nullable transforms. |
 | `RESULT_KEY_COVERAGE` | A relevant key has a stored coverage fraction below one in one unambiguously selected source. Suggested same-parent fields are candidate leads, not automatic substitutions. |
 | `RESULT_CAP_REACHED` | A visible result or collected list reached a recognized cap; severity depends on requested size versus completeness ceiling. |
@@ -82,7 +82,9 @@ When multiple findings apply, severity of the **outcome** is `error` > `inconclu
 | `RESULT_OUTPUT_COVERAGE` | A recognized operation writes dynamically named columns. Informational: known columns and other checks continue, but the result does not certify a complete output schema. |
 | `RESULT_ROW_LIMIT` | At least 10,000 rows; the MCP path may not contain every row. |
 | `RESULT_COLUMN_REPORT_LIMIT` | More than 1,000 columns were inspected. Informational: `columns` and `RESULT_NULL_FIELDS` list only the first 1,000 by name, and the outcome still reflects every column. |
-| `RESULT_TIMEOUT`, `RESULT_ERROR`, `RESULT_INCOMPLETE`, `RESULT_SHAPE` | Tool timeout/error/completeness/shape failed normalization; inconclusive. Narrow or repair the authorized workflow and retain the capture. |
+| `RESULT_TIMEOUT` | Inconclusive. The hosted cutoff means accepted but cut off without rows; narrow the query or window and run again. The job cannot be checked later. |
+| `RESULT_ERROR` | Inconclusive. Rejected at start means it never ran: fix the query. A polling failure means it started then failed: check lookup files and resources. |
+| `RESULT_INCOMPLETE`, `RESULT_SHAPE` | Completeness or shape failed normalization; inconclusive. Repair the authorized workflow and retain the capture. |
 | `RESULT_JSON`, `RESULT_QUERY_PARSE`, `REQUEST_VERSION`, pack errors | Invalid saved JSON, unsupported parser input, wrong version, or incompatible snapshot; fix the specific error. |
 
 Coverage inspection is deliberately narrow: each inspected source context must identify exactly one pack source without ambiguous `#repo`/`#type` selection. Primary queries, independent subqueries and declared-table dependencies retain their own source/field lineage; an imported column is not automatically an input read from the primary source. It uses recorded rates for relevant fields, and can suggest up to five qualified observed siblings under the same parent. No warning does not establish complete field presence, source availability, record-kind resolution, or correctness. It does not replace generation/checking's informational normal-mode kind notice or strict `CQL_RECORD_KIND_AMBIGUOUS` policy.

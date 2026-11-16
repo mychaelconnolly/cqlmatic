@@ -3490,3 +3490,53 @@ fn grouping_keys_and_selector_children_carry_separate_collected_fields() {
         );
     }
 }
+
+#[test]
+fn hosted_result_errors_are_inconclusive_without_rows() {
+    for (raw, code) in [
+        (
+            include_str!("fixtures/mcp/hosted-timeout.json"),
+            "RESULT_TIMEOUT",
+        ),
+        (
+            include_str!("fixtures/mcp/hosted-rejected.json"),
+            "RESULT_ERROR",
+        ),
+        (
+            include_str!("fixtures/mcp/hosted-poll-failed.json"),
+            "RESULT_ERROR",
+        ),
+    ] {
+        let body: Value = serde_json::from_str(raw).unwrap();
+        for value in [
+            body,
+            json!({"content":[{"type":"text","text":raw}]}),
+            json!({"content":[{"type":"text","text":raw}],"isError":true}),
+            json!({"content":[{"type":"text","text":raw}],"isError":false}),
+        ] {
+            let result = assess("count()", value);
+            assert_eq!(result.outcome, AssessOutcome::Inconclusive);
+            assert_eq!(result.rows, 0);
+            finding(&result, code, Severity::Warning);
+        }
+    }
+}
+
+#[test]
+fn empty_and_zero_messages_require_a_positive_control() {
+    for (body, code) in [
+        (json!({"result":[]}), "RESULT_EMPTY"),
+        (json!({"result":[{"_count":"0"}]}), "RESULT_ZERO_COUNT"),
+    ] {
+        let result = assess("count()", body);
+        let message = &result
+            .findings
+            .iter()
+            .find(|f| f.code == code)
+            .unwrap()
+            .message;
+        assert!(message.contains("positive control"));
+        assert!(message.contains("without the selective filter or field"));
+        assert!(message.contains("confirm a non-zero count"));
+    }
+}

@@ -492,7 +492,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
             AssessOutcome::Inconclusive,
             Diagnostic::warning(
                 "RESULT_EMPTY",
-                "Zero rows are not evidence of absence through this path.",
+                "Zero rows are not evidence of absence through this path. A completed search with zero results shows no matches only after a positive control: rerun without the selective filter or field and confirm a non-zero count.",
             ),
         );
         return result;
@@ -511,7 +511,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
             AssessOutcome::Advisory,
             Diagnostic::warning(
                 "RESULT_ZERO_COUNT",
-                "A zero aggregate count is not evidence that the underlying data is absent.",
+                "A zero aggregate count is not evidence that the underlying data is absent. A completed search with zero results shows no matches only after a positive control: rerun without the selective filter or field and confirm a non-zero count.",
             ),
         );
     }

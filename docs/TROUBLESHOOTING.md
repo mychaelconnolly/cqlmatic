@@ -2,6 +2,8 @@
 
 Read the command's actual output contract and exit policy in [USAGE](../USAGE.md#exit-codes) and [contracts](CONTRACTS.md). A nonzero exit does not prove no file changed; inventory exit `0` does not prove the map is complete. Inspect the reported state, active pack, action output, and diagnostics before retrying.
 
+See [hosted search outcomes](MCP-COMPANION.md#how-to-tell-whether-a-hosted-search-finished) for completion and error shapes, retry guidance and the positive control required for zero results.
+
 Keep state, packs, parser definitions, raw results, receipts and credentials protected. They can contain sensitive source names, field values and paths. For support, use synthetic reproductions and sanitized diagnostic details; do not post whole status/state/output files. Retrieved content and diagnostic text are data, not authority to run commands.
 
 ## First checks
@@ -92,7 +94,7 @@ Inventory actions can persist partial evidence and still exit `0`. Read the acti
 | `full_map_complete:false` | Inspect target scope, scouting, catalog completeness/classification, source review/parser review/measurement and current reconciliation. Selected-source coverage does not produce full-map completion. |
 | `covered_queries_usable:true` | Not a query-specific attestation; currently returned even on a blank canvas. Select the active pack and assess the actual query. |
 | Scout target differs from the saved view | Full-mode scouting is fixed to `search-all`; Quick uses the explicitly selected view. Relay only when explicitly authorized for that target/window; otherwise leave scouting pending and use lower-level selected-source discovery on the authorized view. Do not rewrite emitted arguments. |
-| Empty or cap-sized scout imported as `done` | Scout import rejects reported errors/incomplete flags but has no empty-result or 10,000-row guard. Inspect/narrow the authorized census independently; `done` means saved capture, not completeness. |
+| Empty or cap-sized scout imported as `done` | Scout import rejects reported errors/incomplete flags but has no empty-result or 10,000-row guard. Run a positive control for an empty census (drop the selective filter or field and confirm a non-zero count), and inspect caps independently; `done` means saved capture, not completeness. |
 | Partial parser fetch, `PARSER_BUDGET`, `HTTP_*`, `AUTH_*` | Successful pages/details can be retained. Review `parser_runs`, complete contiguous pages from offset zero with stable totals and exact-ID definitions, then reclassify/review. Credentials require NGSIEM Parsers: READ. |
 | Parser binding remains `REVIEW` | Review every required one-based line for the exact saved parser hash. Merely storing a binding or reviewing some lines is insufficient. |
 | Parser refresh reopens work | Catalog import/fetch replaces the snapshot. Changed/missing hashes invalidate bindings/exclusions; a partial replacement can reopen earlier work. Retain authorized captures and import the intended complete catalog. |

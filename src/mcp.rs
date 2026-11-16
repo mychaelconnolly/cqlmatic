@@ -23,6 +23,11 @@ pub struct Normalized {
 }
 
 pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
+    normalize_classified(raw, true)
+}
+
+// `hosted` classifies an error object inside `result`; without it such an answer is a shape error.
+fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
     if raw.len() > MAX_RESULT_BYTES {
         return Err(Diagnostic::error(
             "MCP_TOO_LARGE",
@@ -35,15 +40,15 @@ pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
     let body = if object.contains_key("content") {
-        parse_envelope(object)?
+        parse_envelope(object, hosted)?
     } else {
         value
     };
 
-    parse_result(body, raw)
+    parse_result(body, raw, hosted)
 }
 
-fn parse_envelope(object: &Map<String, Value>) -> Result<Value, Diagnostic> {
+fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
     // structuredContent is optional; when present it must equal the parsed text payload.
     if object
         .keys()
@@ -77,6 +82,10 @@ fn parse_envelope(object: &Map<String, Value>) -> Result<Value, Diagnostic> {
             )?;
             if inner.contains_key("content") || inner.contains_key("isError") {
                 return Err(shape("Nested MCP text envelopes are not supported"));
+            }
+            if hosted && inner.get("result").is_some_and(Value::is_object) {
+                return Err(hosted_result_error(&inner)
+                    .unwrap_or_else(|| shape("MCP search result must have a result array")));
             }
         }
         if has_deadline(text) {
@@ -114,11 +123,15 @@ fn parse_envelope(object: &Map<String, Value>) -> Result<Value, Diagnostic> {
     Ok(body)
 }
 
-fn parse_result(value: Value, raw: &[u8]) -> Result<Normalized, Diagnostic> {
+fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
     let mut object = match value {
         Value::Object(object) => object,
         _ => return Err(shape("MCP search result must be an object")),
     };
+
+    if hosted && let Some(diagnostic) = hosted_result_error(&object) {
+        return Err(diagnostic);
+    }
 
     let errors = ["error", "errors"]
         .into_iter()
@@ -204,6 +217,27 @@ fn parse_result(value: Value, raw: &[u8]) -> Result<Normalized, Diagnostic> {
         trace_id,
         raw_sha256: sha256_hex(raw),
     })
+}
+
+fn hosted_result_error(object: &Map<String, Value>) -> Option<Diagnostic> {
+    let text = object.get("result")?.as_object()?.get("error")?.as_str()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let prefix = if text.starts_with("Failed to start") {
+        "The hosted search was rejected at start and did not run"
+    } else if text.starts_with("NGSIEM search timed out") {
+        return Some(Diagnostic::error(
+            "MCP_DEADLINE",
+            "The hosted search was accepted and cut off before completion; no rows were returned.",
+        ));
+    } else {
+        "MCP search tool error"
+    };
+    Some(Diagnostic::error(
+        "MCP_TOOL_ERROR",
+        format!("{prefix}: {}", text.chars().take(300).collect::<String>()),
+    ))
 }
 
 fn error_has_deadline(value: &Value) -> bool {
@@ -529,6 +563,9 @@ fn raw_hex(raw: &[u8]) -> String {
     encoded
 }
 fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, Diagnostic> {
+    Ok(normalize(&answer_bytes(answer)?))
+}
+fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
     if answer.raw_hex.len() > MAX_CAPTURE_BYTES * 2 || !answer.raw_hex.len().is_multiple_of(2) {
         return Err(tampered());
     }
@@ -548,7 +585,13 @@ fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, 
     if sha256_hex(&raw) != answer.raw_sha256 {
         return Err(tampered());
     }
-    Ok(normalize(&raw))
+    Ok(raw)
+}
+// A checkpoint from an earlier release keeps the diagnostic that release recorded for an answer
+// whose `result` is an error object.
+fn earlier_hosted_diagnostic(producer: &str, raw: &[u8], saved: &Diagnostic) -> bool {
+    producer != env!("CARGO_PKG_VERSION")
+        && normalize_classified(raw, false).is_err_and(|earlier| same_diagnostic(saved, &earlier))
 }
 fn same_diagnostic(a: &Diagnostic, b: &Diagnostic) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
@@ -898,10 +941,13 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
                     && answer.trace_id == value.trace_id => {}
             Err(d)
                 if answer.outcome == "failed"
-                    && answer
-                        .diagnostic
-                        .as_ref()
-                        .is_some_and(|saved| same_diagnostic(saved, &d))
+                    && answer.diagnostic.as_ref().is_some_and(|saved| {
+                        same_diagnostic(saved, &d)
+                            || (matches!(d.code.as_str(), "MCP_DEADLINE" | "MCP_TOOL_ERROR")
+                                && answer_bytes(answer).is_ok_and(|raw| {
+                                    earlier_hosted_diagnostic(&state.producer_version, &raw, saved)
+                                }))
+                    })
                     && answer.trace_id.is_none() => {}
             _ => return Err(tampered()),
         }

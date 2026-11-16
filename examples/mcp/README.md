@@ -5,6 +5,8 @@ and `synthetic_repo`. The other JSON files are fabricated `falcon_search_ngsiem`
 responses for offline testing, not deployment evidence. Do not send this identity
 or fixture scopes to a live search service.
 
+See [hosted search outcomes](../../docs/MCP-COMPANION.md#how-to-tell-whether-a-hosted-search-finished) for completion and error shapes, retry guidance and the positive control required for zero results.
+
 Initialize the offline walkthrough with new protected local output paths:
 
 ```sh
