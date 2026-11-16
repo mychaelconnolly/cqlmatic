@@ -78,6 +78,14 @@ pub enum Step {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Pipeline {
     pub steps: Vec<Step>,
+    pub advisories: Vec<(usize, Advisory)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Advisory {
+    pub code: &'static str,
+    pub message: String,
+    pub informational: bool,
 }
 
 pub fn quote(s: &str) -> String {

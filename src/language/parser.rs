@@ -45,6 +45,8 @@ fn parse_pipeline(input: &str, function_composition: bool) -> Result<Pipeline> {
         depth: 0,
         nodes: 0,
         function_composition,
+        advisories: vec![],
+        last_or: false,
     };
     let result = p.pipeline()?;
     if pipeline_depth(&result) > MAX_DEPTH {
@@ -63,6 +65,8 @@ struct Parser<'a> {
     depth: usize,
     nodes: usize,
     function_composition: bool,
+    advisories: Vec<Advisory>,
+    last_or: bool,
 }
 impl Parser<'_> {
     fn fail<T>(&self, message: &str, unsupported: bool) -> Result<T> {
@@ -225,15 +229,23 @@ impl Parser<'_> {
     fn pipeline(&mut self) -> Result<Pipeline> {
         self.nested(|p| {
             let mut steps = Vec::new();
+            let mut advisories = Vec::new();
             p.space();
             if p.pos == p.input.len() || p.rest().starts_with(['}', ';']) {
-                return Ok(Pipeline { steps });
+                return Ok(Pipeline { steps, advisories });
             }
             if p.eat("|") && p.ending() {
                 return p.fail("Expected a stage after the leading pipe.", false);
             }
             loop {
-                steps.push(p.step()?);
+                let enclosing = std::mem::take(&mut p.advisories);
+                let step = p.step()?;
+                advisories.extend(
+                    std::mem::replace(&mut p.advisories, enclosing)
+                        .into_iter()
+                        .map(|advice| (steps.len(), advice)),
+                );
+                steps.push(step);
                 p.space();
                 if !p.eat("|") {
                     break;
@@ -245,7 +257,7 @@ impl Parser<'_> {
                     break;
                 }
             }
-            Ok(Pipeline { steps })
+            Ok(Pipeline { steps, advisories })
         })
     }
     fn step(&mut self) -> Result<Step> {
@@ -368,7 +380,47 @@ impl Parser<'_> {
             )));
         }
         self.pos = start;
-        Ok(Step::Filter(self.and()?))
+        self.space();
+        let first = self.pos;
+        let filter = self.and()?;
+        if matches!(&filter, Filter::Text(_) | Filter::And(_) | Filter::Or(_)) {
+            let mut head = &filter;
+            while let Filter::And(xs) | Filter::Or(xs) = head {
+                head = &xs[0];
+            }
+            if let Filter::Text(Pattern::Text(word)) = head
+                && self.input[first..].starts_with(word)
+                && !word.starts_with('"')
+            {
+                if let Some(function) = crate::catalog::FUNCTIONS
+                    .iter()
+                    .find(|f| f.name.eq_ignore_ascii_case(word))
+                {
+                    self.advise("CQL_BARE_FUNCTION_NAME", format!("{word} is searched as text; write {}() to call the function, or quote it to search for the text.", function.name), false);
+                } else if [
+                    "where", "search", "dedup", "fields", "rex", "spath", "lookup", "tstats",
+                ]
+                .iter()
+                .any(|w| word.eq_ignore_ascii_case(w))
+                {
+                    self.advise(
+                        "CQL_BARE_COMMAND_WORD",
+                        format!(
+                            "{word} is not a query-language command here and is searched as text."
+                        ),
+                        false,
+                    );
+                }
+            }
+        }
+        Ok(Step::Filter(filter))
+    }
+    fn advise(&mut self, code: &'static str, message: impl Into<String>, informational: bool) {
+        self.advisories.push(Advisory {
+            code,
+            message: message.into(),
+            informational,
+        });
     }
     fn and(&mut self) -> Result<Filter> {
         self.nested(|p| {
@@ -377,21 +429,28 @@ impl Parser<'_> {
         })
     }
     fn and_tail(&mut self, first: Filter) -> Result<Filter> {
+        let mut direct_or = self.last_or;
         let mut xs = vec![first];
         loop {
             if self.keyword("AND") {
                 xs.push(self.or()?);
+                direct_or |= self.last_or;
             } else if self.ending() {
                 break;
             } else {
                 xs.push(self.or()?);
+                direct_or |= self.last_or;
             }
         }
-        Ok(if xs.len() == 1 {
+        let filter = if xs.len() == 1 {
             xs.remove(0)
         } else {
             Filter::And(xs)
-        })
+        };
+        if direct_or && matches!(filter, Filter::And(_)) {
+            self.advise("CQL_OR_PRECEDENCE", format!("or binds tighter than and: this is read as {}. Add parentheses to make the intent explicit.", filter.render()), true);
+        }
+        Ok(filter)
     }
     fn or(&mut self) -> Result<Filter> {
         let first = self.primary_filter()?;
@@ -402,6 +461,7 @@ impl Parser<'_> {
         while self.keyword("OR") {
             xs.push(self.primary_filter()?);
         }
+        self.last_or = xs.len() > 1;
         Ok(if xs.len() == 1 {
             xs.remove(0)
         } else {
@@ -434,17 +494,17 @@ impl Parser<'_> {
                 for op in ["!=", ">=", "<=", "=", ">", "<"] {
                     if p.eat(op) {
                         return Ok(Filter::Compare {
-                            field: name,
+                            field: name.clone(),
                             op: op.into(),
-                            value: p.pattern()?,
+                            value: p.comparison_pattern(&name)?,
                         });
                     }
                 }
                 if p.keyword("like") {
                     return Ok(Filter::Compare {
-                        field: name,
+                        field: name.clone(),
                         op: "like".into(),
-                        value: p.pattern()?,
+                        value: p.comparison_pattern(&name)?,
                     });
                 }
             }
@@ -462,12 +522,24 @@ impl Parser<'_> {
             {
                 return Err(Failure { diagnostic: Diagnostic::error("CQL_RESERVED_WORD", format!("'{word}' is reserved; use the lower-case or upper-case operator spelling where supported, or quote it to search for text.")), unsupported: false });
             }
+            if !quoted && pattern == Pattern::Text("&&".into()) {
+                p.advise("CQL_OPERATOR_TEXT", "&& is searched as text; use and or a space between the terms.", false);
+            }
             Ok(Filter::Text(if !quoted && matches!(&pattern, Pattern::Text(text) if text == "*") {
                 Pattern::Any
             } else {
                 pattern
             }))
         })
+    }
+    fn comparison_pattern(&mut self, field: &str) -> Result<Pattern> {
+        self.space();
+        let bare = !self.rest().starts_with(['"', '?']);
+        let pattern = self.pattern()?;
+        if bare && matches!(&pattern, Pattern::Text(word) if word.eq_ignore_ascii_case("null")) {
+            self.advise("CQL_NULL_TEXT", format!("The value is the text \"null\"; use {}=* for has the field and not {}=* for does not have the field.", field, field), false);
+        }
+        Ok(pattern)
     }
     fn pattern(&mut self) -> Result<Pattern> {
         self.space();

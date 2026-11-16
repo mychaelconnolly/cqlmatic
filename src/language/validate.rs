@@ -331,7 +331,22 @@ impl Checker<'_> {
             mut projected,
         } = state.clone();
         let mut mandatory_link = false;
-        for original_step in &p.steps {
+        for (index, original_step) in p.steps.iter().enumerate() {
+            for (_, advice) in p.advisories.iter().filter(|(stage, _)| *stage == index) {
+                if after_aggregate
+                    && matches!(
+                        advice.code,
+                        "CQL_BARE_FUNCTION_NAME" | "CQL_BARE_COMMAND_WORD"
+                    )
+                {
+                    continue;
+                }
+                if advice.informational {
+                    self.info(advice.code, &advice.message, None);
+                } else {
+                    self.emit(advice.code, &advice.message, None, true);
+                }
+            }
             let transformed;
             let step = if let Step::Filter(filter) = original_step
                 && let Some(call) = negated_transform(filter)
@@ -2514,6 +2529,7 @@ impl Checker<'_> {
             }
             Value::Call(call) => {
                 let pipeline = Pipeline {
+                    advisories: vec![],
                     steps: vec![Step::Call(call.clone())],
                 };
                 self.nonaggregate(&pipeline);
@@ -2925,6 +2941,7 @@ pub(crate) fn single_aggregate(value: &Value) -> bool {
     match value {
         Value::Call(call) => bounded_single(
             &Pipeline {
+                advisories: vec![],
                 steps: vec![Step::Call(call.clone())],
             },
             false,
@@ -2935,6 +2952,7 @@ pub(crate) fn single_aggregate(value: &Value) -> bool {
         {
             bounded_single(
                 &Pipeline {
+                    advisories: vec![],
                     steps: vec![Step::Call(Call::new(name, vec![]))],
                 },
                 false,

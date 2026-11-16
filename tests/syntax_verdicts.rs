@@ -381,3 +381,141 @@ fn syntax_boundaries_preserve_text_and_comments() {
         );
     }
 }
+
+#[test]
+fn advisory_filters_preserve_acceptance() {
+    let cases = [
+        ("x=1 | count", "CQL_BARE_FUNCTION_NAME"),
+        ("x=1 | head 10", "CQL_BARE_FUNCTION_NAME"),
+        ("x=1 | sort a", "CQL_BARE_FUNCTION_NAME"),
+        ("x=1 | table a", "CQL_BARE_FUNCTION_NAME"),
+        ("x=1 | groupBy a", "CQL_BARE_FUNCTION_NAME"),
+        ("x=1 | stats count by a", "CQL_BARE_FUNCTION_NAME"),
+        ("x=1 | Count", "CQL_BARE_FUNCTION_NAME"),
+        ("where a=1", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | search b=2", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | dedup c", "CQL_BARE_COMMAND_WORD"),
+        ("fields a", "CQL_BARE_COMMAND_WORD"),
+        ("rex a", "CQL_BARE_COMMAND_WORD"),
+        ("spath a", "CQL_BARE_COMMAND_WORD"),
+        ("lookup a", "CQL_BARE_COMMAND_WORD"),
+        ("TSTATS a", "CQL_BARE_COMMAND_WORD"),
+        ("a=1 && b=2", "CQL_OPERATOR_TEXT"),
+        ("a=1 or b=2 c=3", "CQL_OR_PRECEDENCE"),
+        ("a=1 or b=2 and c=3", "CQL_OR_PRECEDENCE"),
+        ("c=3 a=1 or b=2", "CQL_OR_PRECEDENCE"),
+        ("a=1 and not b=2 or c=3", "CQL_OR_PRECEDENCE"),
+        ("a != null", "CQL_NULL_TEXT"),
+        ("a = null", "CQL_NULL_TEXT"),
+        ("a=NULL", "CQL_NULL_TEXT"),
+        ("case { count; * }", "CQL_BARE_FUNCTION_NAME"),
+        ("a match { * => count }", "CQL_BARE_FUNCTION_NAME"),
+        ("join({ count }, field=a)", "CQL_BARE_FUNCTION_NAME"),
+        ("case { a=1 && b=2; * }", "CQL_OPERATOR_TEXT"),
+        ("a match { * => b=null }", "CQL_NULL_TEXT"),
+        ("join({ a=1 or b=2 c=3 }, field=a)", "CQL_OR_PRECEDENCE"),
+        ("case { (a=1 or b=2 c=3); * }", "CQL_OR_PRECEDENCE"),
+    ];
+    for (query, code) in cases {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+        let diagnostics: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| advisory_code(&d.code))
+            .collect();
+        assert_eq!(diagnostics.len(), 1, "{query}: {result:?}");
+        assert_eq!(diagnostics[0].code, code, "{query}");
+        assert_eq!(
+            diagnostics[0].severity,
+            if code == "CQL_OR_PRECEDENCE" {
+                Severity::Info
+            } else {
+                Severity::Warning
+            }
+        );
+        if code == "CQL_OR_PRECEDENCE" {
+            assert!(diagnostics[0].message.contains("read as ("));
+            assert!(diagnostics[0].message.contains("parentheses"));
+        }
+    }
+}
+
+fn advisory_code(code: &str) -> bool {
+    matches!(
+        code,
+        "CQL_BARE_FUNCTION_NAME"
+            | "CQL_BARE_COMMAND_WORD"
+            | "CQL_OPERATOR_TEXT"
+            | "CQL_OR_PRECEDENCE"
+            | "CQL_NULL_TEXT"
+    )
+}
+
+#[test]
+fn explicit_filter_intent_needs_no_advisory() {
+    for query in [
+        "x=1 | \"count\"",
+        "x=1 | count()",
+        "x=1 | error count",
+        "count=5",
+        "x=1 | head=3",
+        "x=1 | timeout",
+        "x=1 | failed login",
+        "a=1 \"&&\" b=2",
+        "a=1 and b=2",
+        "a=1 b=2",
+        "(a=1 or b=2) c=3",
+        "a=1 or b=2",
+        "a=1 or (b=2 c=3)",
+        "a=\"null\"",
+        "a=*",
+        "not a=*",
+        "a=nullable",
+        "x=1 | \"where\" a=1",
+        "a=?{p=\"null\"}",
+        "a=1 /* && null count */",
+        "a=/null/",
+        "case { \"count\"; * }",
+        "a match { * => \"count\" }",
+        "join({ \"count\" }, field=a)",
+        "a=1 and not (b=2 or c=3)",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+        assert!(
+            !result.diagnostics.iter().any(|d| advisory_code(&d.code)),
+            "{query}: {result:?}"
+        );
+    }
+    for query in [
+        "x=1 | count() | count",
+        "count() | case { count; * }",
+        "count() | a match { * => count }",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Rejected,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_FREE_TEXT_AFTER_AGGREGATE")
+        );
+        assert!(
+            !result.diagnostics.iter().any(|d| advisory_code(&d.code)),
+            "{query}: {result:?}"
+        );
+    }
+}

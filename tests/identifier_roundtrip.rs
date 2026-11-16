@@ -21,6 +21,7 @@ fn boolean_keyword_field_prefixes_are_quoted_in_assignments_and_filters() {
         for suffix in [".user", "[0].user", "[12]", ".用户"] {
             let name = format!("{keyword}{suffix}");
             let expected = Pipeline {
+                advisories: vec![],
                 steps: vec![
                     Step::Assign {
                         field: name.clone(),
@@ -193,6 +194,7 @@ fn keyword_field_names_roundtrip_in_standalone_and_boolean_contexts() {
                 assert_eq!(
                     parser::parse(&query).unwrap_or_else(|error| panic!("{query}: {error:?}")),
                     Pipeline {
+                        advisories: vec![],
                         steps: vec![Step::Filter(expected)],
                     },
                     "{query}"
@@ -202,6 +204,7 @@ fn keyword_field_names_roundtrip_in_standalone_and_boolean_contexts() {
             assert_eq!(
                 parser::parse(&query).unwrap_or_else(|error| panic!("{query}: {error:?}")),
                 Pipeline {
+                    advisories: vec![],
                     steps: vec![Step::Filter(Filter::And(vec![equality("marker"), filter]))],
                 },
                 "{query}"
@@ -217,6 +220,7 @@ fn implicit_conjunction_keeps_operator_prefixed_field_names() {
         assert_eq!(
             parser::parse(&query).unwrap(),
             Pipeline {
+                advisories: vec![],
                 steps: vec![Step::Filter(Filter::And(vec![
                     equality("marker"),
                     equality(field),
@@ -239,6 +243,7 @@ fn unary_not_keeps_its_boolean_meaning() {
         assert_eq!(
             parser::parse(query).unwrap(),
             Pipeline {
+                advisories: vec![],
                 steps: vec![Step::Filter(negated.clone())],
             },
             "{query}"
@@ -247,6 +252,7 @@ fn unary_not_keeps_its_boolean_meaning() {
     assert_eq!(
         parser::parse("marker=alice NOT user=alice").unwrap(),
         Pipeline {
+            advisories: vec![],
             steps: vec![Step::Filter(Filter::And(vec![equality("marker"), negated]))],
         }
     );

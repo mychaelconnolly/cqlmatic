@@ -1231,6 +1231,7 @@ fn correlation_inputs(
         }
         state = scan_pipeline(
             &Pipeline {
+                advisories: vec![],
                 steps: pipeline.steps[start..index].to_vec(),
             },
             state,
@@ -1251,6 +1252,7 @@ fn correlation_inputs(
                 .filter_map(|(pattern, branch)| {
                     let incoming = scan_pipeline(
                         &Pipeline {
+                            advisories: vec![],
                             steps: vec![Step::Match {
                                 field: field.clone(),
                                 arms: vec![(pattern.clone(), Pipeline::default())],
@@ -1273,6 +1275,7 @@ fn correlation_inputs(
     }
     Some(scan_pipeline(
         &Pipeline {
+            advisories: vec![],
             steps: pipeline.steps[start..].to_vec(),
         },
         state,
@@ -1587,6 +1590,7 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
                         Value::Query { pipeline, .. } => Some(scan_pipeline(pipeline, local, out)),
                         Value::Call(call) => Some(scan_pipeline(
                             &Pipeline {
+                                advisories: vec![],
                                 steps: vec![Step::Call(call.clone())],
                             },
                             local,
@@ -2012,6 +2016,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                 if let Some(call) = crate::catalog::aliased_call(field, value) {
                     state = scan_pipeline(
                         &Pipeline {
+                            advisories: vec![],
                             steps: vec![Step::Call(call)],
                         },
                         state,

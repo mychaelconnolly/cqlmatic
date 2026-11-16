@@ -31,6 +31,11 @@ Keep state, packs, parser definitions, raw results, receipts and credentials pro
 | `CQL_MISSING_POLICY`, `CQL_ACCURACY_MODE`, `CQL_UNSUPPORTED_EXACT_AGGREGATE` | Choose missing inclusion/exclusion or exact/estimated mode explicitly. Exact grouped distinct is not silently replaced by an estimate. |
 | `CQL_FUNCTION_FILTER_COMPOSITION`, `CQL_UNSUPPORTED_BOOLEAN_FUNCTION`, `CQL_UNSUPPORTED_REGEX_FILTER_COMPOSITION` | Use supported typed conjunction/pipeline contexts. Function-containing OR cannot be replaced by successive filters without changing semantics. |
 | `CQL_BRANCH_FUNCTION` | Move aggregates, `join`, `selfJoin` and `selfJoinFilter` before or after the whole `case` or `match`. Branch steps may filter, assign and transform. |
+| `CQL_BARE_FUNCTION_NAME` | A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text. |
+| `CQL_BARE_COMMAND_WORD` | The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text. |
+| `CQL_OPERATOR_TEXT` | Bare `&&` is searched as text. Use `and` or a space between terms. |
+| `CQL_OR_PRECEDENCE` | Information: `or` binds tighter than explicit or implied `and`. Add parentheses to make intent explicit. See [operators](https://library.humio.com/crowdstrike-query-language/syntax-operators.html). |
+| `CQL_NULL_TEXT` | Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence. |
 | `CQL_FREE_TEXT_AFTER_AGGREGATE` | Move [free-text filters](https://library.humio.com/crowdstrike-query-language/syntax-filters.html) and [wildcard calls without a field](https://library.humio.com/crowdstrike-query-language/functions-wildcard.html) before the first aggregate, or filter an explicit output field. The match-all term `*` remains valid after aggregation. |
 | `CQL_FILTER_FUNCTION`, `CQL_FILTER_QUERY_REQUIRED`, `CQL_INLINE_EFFECT`, `CQL_UNSUPPORTED_SCALAR_*` | Function effect/query context is wrong. Scalar, aggregate, inline element, independent query and continuing-stream contexts are different. |
 | `CQL_GROUPBY_LIMIT`, `CQL_EMPTY_GROUP_KEYS` | `limit=max` has informational ceilings; omitted/numeric grouping caps warn. Empty grouping keys do not replace a global count. Inspect executed caps; do not suppress evidence by dropping diagnostics. |

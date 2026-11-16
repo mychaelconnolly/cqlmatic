@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `CQL_BARE_FUNCTION_NAME`: A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text.
+- `CQL_BARE_COMMAND_WORD`: The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text.
+- `CQL_OPERATOR_TEXT`: Bare `&&` is searched as text. Use `and` or a space between terms.
+- `CQL_OR_PRECEDENCE`: Information: `or` binds tighter than explicit or implied `and`. Add parentheses to make intent explicit. See [operators](https://library.humio.com/crowdstrike-query-language/syntax-operators.html).
+- `CQL_NULL_TEXT`: Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence.
+
 - One boundary empty stage is accepted with `CQL_EMPTY_STAGE`, for example `x=1 |`; 0.1.7 rejected it. Interior empty stages remain errors.
 - Reserved free-text words and mixed-case operators report `CQL_RESERVED_WORD`, for example `a=1 Or b=2`; 0.1.7 accepted them. Quote reserved text.
 - Row limits are 1..200,000 and group limits 1..1,000,000, or `max`; violations report `CQL_ARGUMENT_RANGE`. `head(0)` and `table([a], type=any)` are rejected; 0.1.7 accepted them.
