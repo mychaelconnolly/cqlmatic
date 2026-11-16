@@ -1339,7 +1339,9 @@ pub fn aggregate_value_outputs(value: &Value) -> Option<(BTreeSet<String>, bool)
             let mut retains = true;
             // Later reducers can replace an uncertain intermediate schema.
             let mut complete = true;
-            for step in &pipeline.steps {
+            for original in &pipeline.steps {
+                let semantic = original.semantic();
+                let step = semantic.as_ref();
                 let aliased = match step {
                     Step::Assign { field, value } => aliased_call(field, value).map(Step::Call),
                     _ => None,

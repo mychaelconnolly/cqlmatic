@@ -3540,3 +3540,80 @@ fn empty_and_zero_messages_require_a_positive_control() {
         assert!(message.contains("confirm a non-zero count"));
     }
 }
+
+#[test]
+fn negated_transforms_have_plain_field_effects() {
+    for call in [
+        "rename(x, as=y)",
+        "drop([x])",
+        "select([x])",
+        "lower(x, as=y)",
+        "parseJson(x)",
+        "splitString(x, by=\",\", as=y)",
+        "setField(target=\"y\", value=1)",
+        "kvParse(x)",
+    ] {
+        let plain = format!("x:=1 | {call} | y=*");
+        let negated = format!("x:=1 | !{call} | y=*");
+        let checked = |q: &str| {
+            app::check(
+                CheckRequest {
+                    schema_version: 1,
+                    id: None,
+                    query: q.into(),
+                    context: Context::default(),
+                },
+                None,
+            )
+        };
+        assert_eq!(
+            checked(&plain).validation.status,
+            Acceptance::Accepted,
+            "{plain}"
+        );
+        let negated_check = checked(&negated);
+        assert_eq!(
+            negated_check.validation.status,
+            Acceptance::Accepted,
+            "{negated}"
+        );
+        assert_eq!(
+            negated_check
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "CQL_NEGATION_NO_EFFECT")
+                .count(),
+            1,
+            "{negated}"
+        );
+        assert!(
+            cqlmatic::language::parser::parse(&negated)
+                .unwrap()
+                .render()
+                .contains(&format!("!{call}")),
+            "{negated}"
+        );
+        assert_eq!(
+            serde_json::to_value(checked(&plain).grounding).unwrap(),
+            serde_json::to_value(checked(&negated).grounding).unwrap(),
+            "{call}"
+        );
+        let a = assess(&plain, json!({"result":[{"y":"a"}]}));
+        let b = assess(&negated, json!({"result":[{"y":"a"}]}));
+        assert_eq!(
+            serde_json::to_value(a.findings).unwrap(),
+            serde_json::to_value(b.findings).unwrap(),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn converted_boolean_caps_equal_canonical_caps() {
+    let a = assess("top(x, rest=false)", rows(10));
+    let b = assess("top(x, rest=FALSE)", rows(10));
+    assert_eq!(
+        serde_json::to_value(a.findings).unwrap(),
+        serde_json::to_value(b.findings).unwrap()
+    );
+}

@@ -268,7 +268,9 @@ impl Checker<'_> {
         };
         let mut outcomes = Vec::new();
         for pipeline in branches {
-            for step in &pipeline.steps {
+            for original_step in &pipeline.steps {
+                let semantic_step = original_step.semantic();
+                let step = semantic_step.as_ref();
                 match step {
                     Step::Call(call)
                     | Step::Assign {
@@ -349,7 +351,7 @@ impl Checker<'_> {
             }
             let transformed;
             let step = if let Step::Filter(filter) = original_step
-                && let Some(call) = negated_transform(filter)
+                && let Some(call) = filter.negated_transform()
             {
                 self.emit(
                     "CQL_NEGATION_NO_EFFECT",
@@ -1138,8 +1140,7 @@ impl Checker<'_> {
         if spec.name == "parseInt"
             && let Some(value) = known_args.get("radix")
             && value
-                .text()
-                .and_then(|v| v.parse::<u32>().ok())
+                .unsigned_integer()
                 .is_none_or(|n| !(2..=36).contains(&n))
         {
             self.emit(
@@ -2070,7 +2071,13 @@ impl Checker<'_> {
                             ["asc", "desc", "ascending", "descending"]
                                 .contains(&choice.to_ascii_lowercase().as_str())
                         } else {
-                            rule.choices.iter().any(|allowed| allowed == &choice)
+                            rule.choices.iter().any(|allowed| {
+                                if kind == "b" || rule.choices == ["false", "true"] {
+                                    allowed.eq_ignore_ascii_case(&choice)
+                                } else {
+                                    allowed == &choice
+                                }
+                            })
                         })
                     {
                         self.emit(
@@ -2494,12 +2501,16 @@ impl Checker<'_> {
     }
 
     fn filter_query(&mut self, pipeline: &Pipeline, call: &Call, tables: &BTreeSet<String>) {
-        if pipeline.steps.iter().any(|step| match step {
-            Step::Filter(_) => false,
-            Step::Call(c) => catalog::resolve(c)
-                .is_some_and(|r| r.function.resolved_effect(&r.arguments) != Effect::Filter),
-            _ => true,
-        }) {
+        if pipeline
+            .steps
+            .iter()
+            .any(|step| match step.semantic().as_ref() {
+                Step::Filter(_) => false,
+                Step::Call(c) => catalog::resolve(c)
+                    .is_some_and(|r| r.function.resolved_effect(&r.arguments) != Effect::Filter),
+                _ => true,
+            })
+        {
             self.emit(
                 "CQL_FILTER_QUERY_REQUIRED",
                 "This argument requires a subquery containing filters only.",
@@ -2545,7 +2556,9 @@ impl Checker<'_> {
         self.fields = outer_fields;
     }
     fn nonaggregate(&mut self, pipeline: &Pipeline) {
-        for step in &pipeline.steps {
+        for original_step in &pipeline.steps {
+            let semantic_step = original_step.semantic();
+            let step = semantic_step.as_ref();
             match step {
                 Step::Call(call)
                 | Step::Assign {
@@ -2700,7 +2713,9 @@ fn inline_writes(value: &Value, output: &str, initial: bool) -> bool {
     }
 }
 fn pipeline_writes(pipeline: &Pipeline, output: &str, mut written: bool) -> bool {
-    for step in &pipeline.steps {
+    for original_step in &pipeline.steps {
+        let semantic_step = original_step.semantic();
+        let step = semantic_step.as_ref();
         match step {
             Step::Assign { field, value } => {
                 if let Some(call) = catalog::aliased_call(field, value) {
@@ -2892,31 +2907,38 @@ fn contains_sequence(value: &Value) -> bool {
             }) || call.args.iter().any(|arg| contains_sequence(&arg.value))
         }
         Value::Array(values) => values.iter().any(contains_sequence),
-        Value::Query { pipeline, .. } => pipeline.steps.iter().any(|step| match step {
-            Step::Call(call) => contains_sequence(&Value::Call(call.clone())),
-            Step::Assign { value, .. } => contains_sequence(value),
-            Step::Case(branches) => branches.iter().any(|pipeline| {
-                contains_sequence(&Value::Query {
-                    label: None,
-                    pipeline: pipeline.clone(),
-                    attributes: vec![],
+        Value::Query { pipeline, .. } => {
+            pipeline
+                .steps
+                .iter()
+                .any(|step| match step.semantic().as_ref() {
+                    Step::Call(call) => contains_sequence(&Value::Call(call.clone())),
+                    Step::Assign { value, .. } => contains_sequence(value),
+                    Step::Case(branches) => branches.iter().any(|pipeline| {
+                        contains_sequence(&Value::Query {
+                            label: None,
+                            pipeline: pipeline.clone(),
+                            attributes: vec![],
+                        })
+                    }),
+                    Step::Match { arms, .. } => arms.iter().any(|(_, pipeline)| {
+                        contains_sequence(&Value::Query {
+                            label: None,
+                            pipeline: pipeline.clone(),
+                            attributes: vec![],
+                        })
+                    }),
+                    _ => false,
                 })
-            }),
-            Step::Match { arms, .. } => arms.iter().any(|(_, pipeline)| {
-                contains_sequence(&Value::Query {
-                    label: None,
-                    pipeline: pipeline.clone(),
-                    attributes: vec![],
-                })
-            }),
-            _ => false,
-        }),
+        }
         _ => false,
     }
 }
 
 fn pipeline_aggregates(pipeline: &Pipeline, mut aggregated: bool) -> bool {
-    for step in &pipeline.steps {
+    for original_step in &pipeline.steps {
+        let semantic_step = original_step.semantic();
+        let step = semantic_step.as_ref();
         match step {
             Step::Call(call) => {
                 aggregated |=
@@ -2965,7 +2987,9 @@ pub(crate) fn single_aggregate(value: &Value) -> bool {
 }
 
 fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
-    for step in &pipeline.steps {
+    for original_step in &pipeline.steps {
+        let semantic_step = original_step.semantic();
+        let step = semantic_step.as_ref();
         match step {
             Step::Call(call) => {
                 let Some(resolved) = catalog::resolve(call) else {
@@ -2986,8 +3010,16 @@ fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
                     "head" | "tail" | "sort" | "table" => {
                         single |= args.get("limit").and_then(|v| v.unsigned_integer()) == Some(1)
                     }
-                    "join" => single &= args.get("max").is_none_or(|v| v.text() == Some("1")),
-                    "match" => single &= args.get("nrows").is_none_or(|v| v.text() == Some("1")),
+                    "join" => {
+                        single &= args
+                            .get("max")
+                            .is_none_or(|v| v.unsigned_integer() == Some(1))
+                    }
+                    "match" => {
+                        single &= args
+                            .get("nrows")
+                            .is_none_or(|v| v.unsigned_integer() == Some(1))
+                    }
                     "split" => single = false,
                     "regex" if args.get("repeat").and_then(|v| v.boolean()) == Some(true) => {
                         single = false
@@ -3309,9 +3341,11 @@ fn narrowing_call(call: &Call) -> bool {
         return false;
     }
     match resolved.function.name {
-        "in" => {
-            matches!(resolved.arguments.get("values"), Some(Value::Array(values)) if !values.is_empty())
-        }
+        "in" => resolved
+            .arguments
+            .get("values")
+            .and_then(|v| v.string_array())
+            .is_some_and(|values| !values.is_empty()),
         "regex" => resolved
             .arguments
             .get("regex")
@@ -3688,23 +3722,6 @@ pub fn regex_analysis(pattern: &str) -> std::result::Result<RegexAnalysis, (bool
         guaranteed: facts.guaranteed,
         case_insensitive: rx.case_insensitive,
     })
-}
-
-fn negated_transform(filter: &Filter) -> Option<&Call> {
-    let Filter::Not(inner) = filter else {
-        return None;
-    };
-    match inner.as_ref() {
-        Filter::Not(_) => negated_transform(inner),
-        Filter::Call(call)
-            if catalog::function(&call.name).is_some_and(|spec| {
-                spec.effect == Effect::Transform && !matches!(spec.name, "eval" | "ioc:lookup")
-            }) =>
-        {
-            Some(call)
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]

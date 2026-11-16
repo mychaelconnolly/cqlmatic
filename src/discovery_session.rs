@@ -471,7 +471,8 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
             if terminal
                 && ended(&attempt.outcome)
                 && (attempt_ending(&raw, &attempt.probe) != Some(attempt.outcome.as_str())
-                    || reused_evidence(state, index, &evidence.raw_sha256))
+                    || (crate::mcp::hosted_answer_identifies_call(&raw)
+                        && reused_evidence(state, index, &evidence.raw_sha256)))
             {
                 return Err(tampered());
             }
@@ -1049,7 +1050,9 @@ pub fn step_resumable(
                         .expect("session checked")
                         .attempts
                         .len();
-                    if reused_evidence(&state, count - 1, &sha256_hex(&raw)) {
+                    if crate::mcp::hosted_answer_identifies_call(&raw)
+                        && reused_evidence(&state, count - 1, &sha256_hex(&raw))
+                    {
                         return Err(error(
                             "MCP_RESULT_REUSED",
                             "This answer was already retained by an earlier attempt.",

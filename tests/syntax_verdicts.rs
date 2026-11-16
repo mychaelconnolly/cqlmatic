@@ -519,3 +519,35 @@ fn explicit_filter_intent_needs_no_advisory() {
         );
     }
 }
+
+#[test]
+fn parameter_default_depth_is_bounded() {
+    let q = format!("a={}1{}", "?{p=".repeat(2048), "}".repeat(2048));
+    let r = check(&q);
+    assert!(
+        r.diagnostics
+            .iter()
+            .any(|d| d.message.contains("nesting or node budget")),
+        "{r:?}"
+    );
+    rows(&["a=?{p=?{q=1}}"], &[]);
+}
+
+#[test]
+fn quote_boundaries_follow_expression_context() {
+    rows(
+        &[
+            "x := a / 2 | message=\"/`literal`\"",
+            "x := a / 2 | y := b / 4 | m=\"it's\"",
+            "a=/x/ | b=\"“quoted”\"",
+            "// don't\n a=1",
+        ],
+        &[],
+    );
+    for q in ["x := a / 2 | m='1'", "a=/it's/ | b='1'", "x := \"a\" + 'b'"] {
+        assert!(
+            check(q).diagnostics.iter().any(|d| d.code == "CQL_QUOTE"),
+            "{q}"
+        );
+    }
+}

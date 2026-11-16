@@ -19,19 +19,16 @@ pub fn parse(input: &str) -> Result<Pipeline> {
             unsupported: false,
         });
     }
-    if let Some(diagnostic) = lexical_diagnostics(input)
-        .into_iter()
-        .find(|d| d.severity == crate::contracts::Severity::Error)
-    {
-        return Err(Failure {
-            diagnostic,
-            unsupported: false,
-        });
-    }
     // Recognize function composition only when the complete query can be parsed.
     parse_pipeline(input, false).or_else(|failure| {
         if failure.unsupported {
-            parse_pipeline(input, true).map_err(|_| failure)
+            parse_pipeline(input, true).map_err(|alternative| {
+                if alternative.diagnostic.code == "CQL_QUOTE" {
+                    alternative
+                } else {
+                    failure
+                }
+            })
         } else {
             Err(failure)
         }
@@ -74,6 +71,23 @@ impl Parser<'_> {
             .chars()
             .next()
             .map_or(self.pos, |c| self.pos + c.len_utf8());
+        if let Some(c) = self.rest().chars().next().filter(|c| {
+            *c == '`'
+                || ("'‘’“”".contains(*c)
+                    && (self.pos == 0
+                        || self.input[..self.pos]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|p| p.is_whitespace() || "=([{,;|<>!+".contains(p))))
+        }) {
+            return Err(Failure {
+                diagnostic: Diagnostic::error(
+                    "CQL_QUOTE",
+                    format!("'{c}' is not a string delimiter; use straight double quotes."),
+                ),
+                unsupported: false,
+            });
+        }
         let mut d = Diagnostic::error(
             if unsupported {
                 "CQL_UNSUPPORTED_SYNTAX"
@@ -587,7 +601,7 @@ impl Parser<'_> {
                     self.pos += 1;
                     self.identifier()?;
                     self.expect("=")?;
-                    let value = self.pattern()?;
+                    let value = self.nested(|p| p.pattern())?;
                     self.expect("}")?;
                     match value {
                         Pattern::Text(default) => text.push_str(&default),
@@ -614,7 +628,7 @@ impl Parser<'_> {
             if c.is_whitespace() || "|(){},;<>!=\"".contains(c) {
                 break;
             }
-            if "'`".contains(c) {
+            if "'`".contains(c) || (text.is_empty() && "‘’“”".contains(c)) {
                 return self.fail(
                     "This unquoted pattern is outside the supported grammar.",
                     true,
@@ -1094,14 +1108,6 @@ pub(super) fn lexical_diagnostics(input: &str) -> Vec<Diagnostic> {
             previous = Some('v');
         } else {
             let c = chars[i];
-            let boundary =
-                i == 0 || chars[i - 1].is_whitespace() || "=([{,;|<>!".contains(chars[i - 1]);
-            if c == '`' || (boundary && "'‘’“”".contains(c)) {
-                out.push(Diagnostic::error(
-                    "CQL_QUOTE",
-                    format!("'{c}' is not a string delimiter; use straight double quotes."),
-                ));
-            }
             if !c.is_whitespace() {
                 if (c == '|' && matches!(previous, None | Some('{' | ';')))
                     || (matches!(c, '}' | ';') && previous == Some('|'))

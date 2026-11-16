@@ -2255,10 +2255,16 @@ fn ending_answers() -> Vec<(&'static str, Vec<u8>)> {
             "failed-after-start",
             include_bytes!("fixtures/mcp/hosted-poll-failed.json").to_vec(),
         ),
-        ("completed-unusable", br#"{"result":[]}"#.to_vec()),
         (
             "completed-unusable",
-            serde_json::to_vec(&json!({"result":vec![json!({"events":"1"});10000]})).unwrap(),
+            br#"{"result":[],"trace_id":"empty-answer"}"#.to_vec(),
+        ),
+        (
+            "completed-unusable",
+            serde_json::to_vec(
+                &json!({"result":vec![json!({"events":"1"});10000],"trace_id":"capped-answer"}),
+            )
+            .unwrap(),
         ),
     ]
 }
@@ -2452,4 +2458,70 @@ fn copied_final_proof_cannot_settle_a_later_attempt_on_load() {
         mcp::inspect_state(&run.state).unwrap_err().code,
         "MCP_STATE_TAMPERED"
     );
+}
+
+#[test]
+fn identical_identifier_free_answers_end_separate_attempts() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    for traces in [
+        [None, None],
+        [Some(""), Some("")],
+        [Some("first"), Some("first")],
+        [Some("first"), Some("second")],
+    ] {
+        let run = Run::new(Transport::Mcp, 4);
+        let id = run.probe();
+        let file = run.directory.join("empty.json");
+        for (index, trace) in traces.iter().enumerate() {
+            if index > 0 {
+                mcp::resume(&run.state).unwrap();
+            }
+            mcp::dispatch(&run.state, &id).unwrap();
+            let mut answer = json!({"result":[]});
+            if let Some(trace) = trace {
+                answer["trace_id"] = json!(trace);
+            }
+            fs::write(&file, serde_json::to_vec(&answer).unwrap()).unwrap();
+            let before = fs::read(&run.state).unwrap();
+            let result = mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]);
+            if index == 1 && traces[0].is_some_and(|id| !id.is_empty()) && traces[0] == traces[1] {
+                assert_eq!(result.unwrap_err().code, "MCP_RESULT_REUSED");
+                assert_eq!(before, fs::read(&run.state).unwrap());
+            } else {
+                assert_eq!(result.unwrap().status, "paused");
+                assert_eq!(
+                    run.saved()["session"]["attempts"][index]["outcome"],
+                    "completed-unusable"
+                );
+                mcp::inspect_state(&run.state).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn cutoff_job_identifier_prevents_reusing_an_untraced_answer() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let run = Run::new(Transport::Mcp, 4);
+    let id = run.probe();
+    let file = run.directory.join("cutoff.json");
+    let mut body: Value =
+        serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-timeout.json")).unwrap();
+    body.as_object_mut().unwrap().remove("trace_id");
+    fs::write(&file, serde_json::to_vec(&body).unwrap()).unwrap();
+    mcp::dispatch(&run.state, &id).unwrap();
+    mcp::step_resumable(&run.state, &[(id.clone(), file.clone())]).unwrap();
+    mcp::resume(&run.state).unwrap();
+    mcp::dispatch(&run.state, &id).unwrap();
+    let before = fs::read(&run.state).unwrap();
+    assert_eq!(
+        mcp::step_resumable(&run.state, &[(id, file)])
+            .unwrap_err()
+            .code,
+        "MCP_RESULT_REUSED"
+    );
+    assert_eq!(before, fs::read(&run.state).unwrap());
+    mcp::inspect_state(&run.state).unwrap();
 }

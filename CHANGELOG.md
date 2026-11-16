@@ -2,6 +2,8 @@
 
 ## 0.1.8
 
+- Repeated discovery answers are refused as reused only when they carry a non-empty `trace_id` or a recognized cutoff job identifier. Identical identifier-free answers can end separate attempts after explicit resume.
+
 - Free text after an aggregate reports `CQL_FREE_TEXT_AFTER_AGGREGATE`, including quoted strings, standalone regexes and fieldless `wildcard()` at nested depths. For example, `groupBy(y) | head 10` and `count() | "*"` were accepted in 0.1.7; use `head(10)` or bare match-all `*`. Field comparisons remain valid; `join` and `defineTable` subqueries start fresh. `createEvents`, `readFile`, `readPersistedAggregation` and `correlate` count as aggregates for this rule.
 - Function-valued arguments require calls: `stats(count)` reports `CQL_ARGUMENT_TYPE`; write `stats(count())`. 0.1.7 accepted bare aggregate names, including in lists and `groupBy` function arguments.
 - Direct assignment requires a function with an `as` parameter: `v := collect(user)` reports `CQL_ASSIGN_ALIAS`. An explicit `as` next to assignment is also rejected. 0.1.7 accepted assignment to functions without `as`.

@@ -229,6 +229,23 @@ fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Di
 
 /// Recognize the hosted search tool's final error answer from its exact decoded shape.
 pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
+    hosted_body_ending(hosted_answer_body(raw)?.as_object()?)
+}
+
+pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
+    let Some(value) = hosted_answer_body(raw) else {
+        return false;
+    };
+    value
+        .get("trace_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+        || value
+            .as_object()
+            .is_some_and(|body| hosted_body_ending(body) == Some("timed-out"))
+}
+
+fn hosted_answer_body(raw: &[u8]) -> Option<Value> {
     if raw.len() > MAX_RESULT_BYTES {
         return None;
     }
@@ -260,7 +277,7 @@ pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
         }
         value = body;
     }
-    hosted_body_ending(value.as_object()?)
+    Some(value)
 }
 
 fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {

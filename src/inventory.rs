@@ -1203,7 +1203,9 @@ impl QueryObservation {
             }
             Ok(())
         }
-        for step in &expected.steps {
+        let semantic_steps: Vec<_> = expected.steps.iter().map(Step::semantic).collect();
+        for step in semantic_steps.iter() {
+            let step = step.as_ref();
             if let Step::Filter(filter) = step {
                 let mut found = vec![];
                 comparisons(filter, &mut found)?;
@@ -1214,7 +1216,9 @@ impl QueryObservation {
         }
         let mut seen_selectors = BTreeSet::new();
         let mut selected: Option<BTreeSet<String>> = None;
-        for step in &pipeline.steps {
+        let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+        for step in semantic_steps.iter() {
+            let step = step.as_ref();
             match step {
                 Step::Filter(filter) => {
                     let mut found = vec![];

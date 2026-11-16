@@ -357,7 +357,9 @@ fn target_requirements(
             }
         }
         fn pipeline(&mut self, pipeline: &Pipeline, target: Option<&str>) {
-            for step in &pipeline.steps {
+            let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+            for step in semantic_steps.iter() {
+                let step = step.as_ref();
                 match step {
                     Step::Call(call) => self.call(call, target, false),
                     Step::Assign { value, .. } => self.value(value, target),
@@ -952,7 +954,7 @@ fn apply_split(state: &mut Flow, args: &BTreeMap<String, &Value>) {
         .get("field")
         .and_then(|v| v.text())
         .unwrap_or("_events");
-    let strip = args.get("strip").copied() == Some(&Value::Bool(true));
+    let strip = args.get("strip").and_then(|v| v.boolean()) == Some(true);
     let root = format!("{prefix}[]");
     let members = split_members(state, prefix)
         .into_iter()
@@ -1225,7 +1227,9 @@ fn correlation_inputs(
         skip_next_kind_check: true,
     };
     let mut start = 0;
-    for (index, step) in pipeline.steps.iter().enumerate() {
+    let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+    for (index, step) in semantic_steps.iter().enumerate() {
+        let step = step.as_ref();
         if !step_aggregates(step) && !matches!(step, Step::Case(_) | Step::Match { .. }) {
             continue;
         }
@@ -1929,7 +1933,9 @@ fn unresolved_selector(filter: &Filter, anchor: SourceAnchor) -> bool {
 fn constrain(state: &mut Flow, steps: &[Step]) {
     let mut found: [BTreeSet<String>; 3] = Default::default();
     let mut filters = Vec::new();
-    for (index, step) in steps.iter().enumerate() {
+    let semantic_steps: Vec<_> = steps.iter().map(Step::semantic).collect();
+    for (index, step) in semantic_steps.iter().enumerate() {
+        let step = step.as_ref();
         match step {
             Step::Filter(filter) if index == 0 || pure_filter(filter) => {
                 selectors(filter, &mut found);
@@ -1995,7 +2001,9 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
     if !std::mem::take(&mut out.skip_next_kind_check) && (root || state.scope == Scope::default()) {
         check_record_kinds(p, &state, out, !root);
     }
-    for (index, step) in p.steps.iter().enumerate() {
+    let semantic_steps: Vec<_> = p.steps.iter().map(Step::semantic).collect();
+    for (index, step) in semantic_steps.iter().enumerate() {
+        let step = step.as_ref();
         if let Step::Filter(filter) = step
             && (!pure_filter(filter)
                 || index == 0
@@ -2214,8 +2222,10 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                         apply_captures(
                             &mut state,
                             info,
-                            resolved.arguments.get("strict").copied() != Some(&Value::Bool(false)),
-                            resolved.arguments.get("repeat").copied() == Some(&Value::Bool(true)),
+                            resolved.arguments.get("strict").and_then(|v| v.boolean())
+                                != Some(false),
+                            resolved.arguments.get("repeat").and_then(|v| v.boolean())
+                                == Some(true),
                         );
                     }
                     match spec.name {
@@ -2425,16 +2435,14 @@ fn positive_kind_call(call: &Call, field: &str) -> Option<String> {
         return None;
     }
     match resolved.function.name {
-        "in" if resolved.arguments.get("ignoreCase") != Some(&&Value::Bool(true)) => {
-            match resolved.arguments.get("values") {
-                Some(Value::Array(values)) if values.len() == 1 => match &values[0] {
-                    Value::Word(text) | Value::String(text) if !text.contains('*') => {
-                        Some(text.clone())
-                    }
-                    _ => None,
-                },
-                _ => None,
-            }
+        "in" if resolved
+            .arguments
+            .get("ignoreCase")
+            .and_then(|v| v.boolean())
+            != Some(true) =>
+        {
+            let values = resolved.arguments.get("values")?.string_array()?;
+            (values.len() == 1 && !values[0].contains('*')).then(|| values[0].clone())
         }
         _ => None,
     }
@@ -2455,7 +2463,7 @@ fn call_assigns_fields(call: &Call) -> bool {
             resolved.function.argument_role(name) == crate::catalog::ArgumentRole::Output
                 || matches!(name.as_str(), "output" | "include")
                 || name == "strict"
-                    && resolved.arguments.get("strict") == Some(&&Value::Bool(false))
+                    && resolved.arguments.get("strict").and_then(|v| v.boolean()) == Some(false)
         })
 }
 
@@ -2478,7 +2486,9 @@ fn transparent_kind_filter(filter: &Filter) -> bool {
 }
 
 fn leading_kind_filter(pipeline: &Pipeline, field: &str) -> bool {
-    for step in &pipeline.steps {
+    let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+    for step in semantic_steps.iter() {
+        let step = step.as_ref();
         match step {
             Step::Filter(filter) => {
                 if !transparent_kind_filter(filter) {
@@ -2506,7 +2516,9 @@ fn uses_record_kind(pipeline: &Pipeline, field: &str, scope: &Scope) -> bool {
     if field == "#event_simpleName" && scope.event.is_some() {
         return true;
     }
-    for step in &pipeline.steps {
+    let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+    for step in semantic_steps.iter() {
+        let step = step.as_ref();
         match step {
             Step::Filter(filter) if transparent_kind_filter(filter) => {
                 if kind_filter_value(filter, field).is_some() {
@@ -2566,7 +2578,9 @@ fn record_kind_gaps(
     nested: bool,
 ) {
     let mut state = Flow::default();
-    for (index, step) in pipeline.steps.iter().enumerate() {
+    let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+    for (index, step) in semantic_steps.iter().enumerate() {
+        let step = step.as_ref();
         match step {
             Step::Filter(_) => constrain(&mut state, &pipeline.steps[index..]),
             Step::Call(call)

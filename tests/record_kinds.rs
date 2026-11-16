@@ -856,3 +856,35 @@ fn multi_value_truncated_kind_facet_discloses_unknown_kinds_in_both_outcomes() {
         );
     }
 }
+
+#[test]
+fn converted_ignore_case_keeps_mixed_kind_safeguard() {
+    let pack = datasets(&["TRAFFIC", "traffic"]);
+    for flag in ["true", "\"true\"", "TRUE"] {
+        let q = format!(
+            "#repo=fw_repo | in(#event.dataset, values=[\"traffic\"], ignoreCase={flag}) | top(dst)"
+        );
+        let result = check(&q, Some(&pack), false);
+        ambiguity(&result);
+        let strict = app::check(
+            CheckRequest {
+                schema_version: 1,
+                id: None,
+                query: q,
+                context: Context {
+                    require_observed: true,
+                    ..Context::default()
+                },
+            },
+            Some(&pack),
+        );
+        assert!(
+            strict
+                .grounding
+                .missing
+                .iter()
+                .any(|s| s.contains("@record-kind")),
+            "{strict:?}"
+        );
+    }
+}
