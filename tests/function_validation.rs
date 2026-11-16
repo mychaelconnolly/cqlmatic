@@ -806,11 +806,16 @@ fn positional_contracts_match_omittable_parameter_facts() {
         }
     }
     // Finite example-only positional forms do not change parameter-table facts.
+    // setTimeInterval requires named start despite its omittable-name table annotation.
     assert_eq!(
         differences,
         BTreeMap::from([
             ("getField", (BTreeSet::from(["source"]), BTreeSet::new())),
             ("math:cosh", (BTreeSet::from(["field"]), BTreeSet::new())),
+            (
+                "setTimeInterval",
+                (BTreeSet::new(), BTreeSet::from(["start"]))
+            ),
         ])
     );
 }
@@ -1155,4 +1160,29 @@ fn implicit_structured_bindings_keep_longer_member_paths_read_only() {
         r#"objectArray:eval("items.nested[]",asArray="out[]",function={select(a)|array:reduceRow("values[]",function={items.nested.foo:=1|sum(items)},var=items)|out:=1})"#,
         "CQL_UNSUPPORTED_PSEUDO_WRITE",
     );
+}
+
+#[test]
+fn set_time_interval_requires_named_start() {
+    for query in [
+        "setTimeInterval(1d) | count()",
+        "setTimeInterval(1m)",
+        r#"setTimeInterval("1h", end="30min")"#,
+    ] {
+        invalid(query, "CQL_ARGUMENT_COUNT");
+    }
+    for query in [
+        "setTimeInterval(start=1d) | count()",
+        "setTimeInterval(start=7d, end=1d) | count()",
+        r#"setTimeInterval(start="1h", end="30min") | count()"#,
+        "setTimeInterval(start=1746054000000, end=1746780124517)",
+    ] {
+        ready(query);
+        assert!(
+            check(query)
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_QUERY_TIME_OVERRIDE")
+        );
+    }
 }

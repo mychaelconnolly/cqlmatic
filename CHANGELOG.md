@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `setTimeInterval` requires `start` by name; unnamed endpoints report `CQL_ARGUMENT_COUNT`. Write `setTimeInterval(start=1d) | count()`.
 - `check` rejects aggregates and joins inside `case` alternatives and `match` arms with `CQL_BRANCH_FUNCTION`, including `case { count(); * }`. 0.1.7 accepted these calls in branches; aggregate or join before or after the conditional.
 - Quoted `"*"` is free text: `count() | "*"` reports `CQL_FREE_TEXT_AFTER_AGGREGATE`. Bare `*` remains match-all. 0.1.7 accepted the quoted form after aggregation.
 - `math:mod` accepts one unnamed argument (`field`); `math:mod(y, 3)` reports `CQL_ARGUMENT_COUNT`. Write `math:mod(y, divisor=3)`. 0.1.7 accepted two unnamed arguments.

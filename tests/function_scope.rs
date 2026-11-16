@@ -537,7 +537,10 @@ fn form_dispositions_resolve_to_exact_evidence_and_preserve_runtime_limits() {
                                 panic!("{name}/{id}: unresolved control {}", item["case_id"])
                             });
                         assert_eq!(control["function"], name);
-                        assert_eq!(control["outcome"], "unsupported");
+                        assert!(matches!(
+                            control["outcome"].as_str(),
+                            Some("unsupported" | "invalid")
+                        ));
                         assert!(
                             control["forms"]
                                 .as_array()

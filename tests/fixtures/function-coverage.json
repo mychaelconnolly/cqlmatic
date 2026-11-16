@@ -3555,11 +3555,11 @@
       "function": "setTimeInterval",
       "primary": false,
       "forms": [
-        "omitted_argument_name"
+        "documented_signature"
       ],
       "placement": "query-preamble",
-      "query": "setTimeInterval(\"7d\") | count()",
-      "canonical": "setTimeInterval(\"7d\") | count()"
+      "query": "setTimeInterval(start=\"7d\") | count()",
+      "canonical": "setTimeInterval(start=\"7d\") | count()"
     },
     {
       "id": "shannonEntropy",
@@ -5012,6 +5012,28 @@
       ],
       "query": "!matchAsArray(\"synthetic.csv\", field=\"user\", nrows=1, asArray=\"matches[]\", strict=false)",
       "outcome": "unsupported",
+      "typed": true
+    },
+    {
+      "id": "math:mod-unnamed-argument",
+      "function": "math:mod",
+      "forms": [
+        "two_unnamed_operands"
+      ],
+      "query": "math:mod(x, 3)",
+      "outcome": "invalid",
+      "diagnostic": "CQL_ARGUMENT_COUNT",
+      "typed": true
+    },
+    {
+      "id": "setTimeInterval-unnamed-argument",
+      "function": "setTimeInterval",
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "query": "setTimeInterval(1d) | count()",
+      "outcome": "invalid",
+      "diagnostic": "CQL_ARGUMENT_COUNT",
       "typed": true
     }
   ]

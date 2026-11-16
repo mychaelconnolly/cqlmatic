@@ -1564,7 +1564,7 @@ pub static FUNCTIONS: &[Function] = &[
     function!("sankey", Aggregate, [], ["source","target"], ["source":"f","target":"f","weight":"g"]),
     function!("selfJoin", Aggregate, ["field"], ["field","where"], ["collect":"F","field":"F","limit":"i","postfilter":"b","prefilter":"b","select":"F","where":"q[]"]),
     function!("setField", Transform, [], ["target","value"], ["target":"e","value":"e"]),
-    function!("setTimeInterval", Definition, ["start"], ["start"], ["end":"t","start":"t","timezone":"s"]),
+    function!("setTimeInterval", Definition, [], ["start"], ["end":"t","start":"t","timezone":"s"]),
     function!("slidingTimeWindow", Aggregate, ["function"], ["function","span"], ["current":"s","function":"g","span":"t","timestampfield":"f"]),
     function!("slidingWindow", Aggregate, ["function"], ["events","function"], ["current":"s","events":"i","function":"g"]),
     function!("start", Transform, ["as"], [], ["as":"s"]),
