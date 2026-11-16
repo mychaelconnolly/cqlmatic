@@ -1595,7 +1595,7 @@ pub static FUNCTIONS: &[Function] = &[
     function!("math:log10", Transform, ["field"], ["field"], ["field":"f","as":"s"]),
     function!("math:log1p", Transform, ["field"], ["field"], ["field":"f","as":"s"]),
     function!("math:log2", Transform, ["field"], ["field"], ["field":"f","as":"s"]),
-    function!("math:mod", Transform, ["field","divisor"], ["field","divisor"], ["field":"f","divisor":"e","as":"s"]),
+    function!("math:mod", Transform, ["field"], ["field","divisor"], ["field":"f","divisor":"e","as":"s"]),
     function!("math:pow", Transform, ["field"], ["field","exponent"], ["field":"f","exponent":"e","as":"s"]),
     function!("math:rad2deg", Transform, ["field"], ["field"], ["field":"f","as":"s"]),
     function!("math:sin", Transform, ["field"], ["field"], ["field":"f","as":"s"]),

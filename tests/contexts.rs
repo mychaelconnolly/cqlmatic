@@ -170,7 +170,7 @@ fn composite_dynamic_writes_and_retained_removals_cannot_restore_observations() 
         "stats({parseJson()|count(as=n)})|select(n)",
         "stats({head(1)|drop(user)|count(as=n)})|select(n)",
         "stats({case{*|parseJson()}|count(as=n)})|select(n)",
-        "stats({parseJson()|case{*|count(as=n)}})|select(n)",
+        "stats({parseJson()|case{*|v:=1}|count(as=n)})|select(n)",
     ] {
         let result = check(query, true);
         assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
@@ -340,11 +340,20 @@ fn branch_origin_and_conditional_production_never_waive_incoming_evidence() {
     for q in [
         "#repo=example | case { * | readFile(\"lookup.csv\") } | user=*",
         "#repo=example | case { user=a | readFile(\"lookup.csv\"); * } | user=*",
-        "#repo=example | case { user=a | unmeasured := \"x\"; * } | unmeasured=*",
     ] {
         let r = check(q, true);
-        assert_eq!(r.outcome, Outcome::NeedsContext, "{q}: {:?}", r.grounding);
+        assert_eq!(r.outcome, Outcome::Invalid, "{q}: {r:?}");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_BRANCH_FUNCTION")
+        );
     }
+    let r = check(
+        "#repo=example | case { user=a | unmeasured := \"x\"; * } | unmeasured=*",
+        true,
+    );
+    assert_eq!(r.outcome, Outcome::NeedsContext);
     for name in ["as", "asArray", "var"] {
         let r = check(&format!("#repo=example | eval({name}=unmeasured)"), true);
         assert_eq!(r.outcome, Outcome::NeedsContext);

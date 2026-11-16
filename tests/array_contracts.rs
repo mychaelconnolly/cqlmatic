@@ -81,7 +81,7 @@ fn array_call(function: &str, argument: &str, value: Expression) -> Stage {
 }
 
 #[test]
-fn checked_string_arrays_require_string_elements() {
+fn checked_string_arrays_accept_string_and_numeric_literals() {
     for (function, prefix) in [
         ("createEvents", ""),
         ("in", "field=user, values="),
@@ -89,12 +89,15 @@ fn checked_string_arrays_require_string_elements() {
     ] {
         let valid = format!("{function}({prefix}[\"alice\", bob])");
         assert_eq!(check(&valid).outcome, Outcome::Ready, "{valid}");
+        for element in ["1", "3.5", "-2"] {
+            let query = format!("{function}({prefix}[\"valid\", {element}])");
+            assert_eq!(check(&query).outcome, Outcome::Ready, "{query}");
+        }
         for element in [
             "{ count() }",
             "count()",
             "1 + 2",
             "[\"nested\"]",
-            "1",
             "true",
             "A: { user=alice }",
         ] {
@@ -187,9 +190,6 @@ fn typed_string_arrays_cannot_emit_nested_executable_values_or_coercions() {
             items: vec![text("nested")],
         },
         Expression::Literal {
-            value: Scalar::Number(1.into()),
-        },
-        Expression::Literal {
             value: Scalar::Boolean(true),
         },
     ];
@@ -202,7 +202,13 @@ fn typed_string_arrays_cannot_emit_nested_executable_values_or_coercions() {
             function,
             argument,
             Expression::Array {
-                items: vec![text("alice"), text("bob")],
+                items: vec![
+                    text("alice"),
+                    text("bob"),
+                    Expression::Literal {
+                        value: Scalar::Number(1.into()),
+                    },
+                ],
             },
         )]);
         assert_eq!(valid.outcome, Outcome::Ready, "{function}");

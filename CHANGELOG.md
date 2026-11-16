@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `check` rejects aggregates and joins inside `case` alternatives and `match` arms with `CQL_BRANCH_FUNCTION`, including `case { count(); * }`. 0.1.7 accepted these calls in branches; aggregate or join before or after the conditional.
+- Quoted `"*"` is free text: `count() | "*"` reports `CQL_FREE_TEXT_AFTER_AGGREGATE`. Bare `*` remains match-all. 0.1.7 accepted the quoted form after aggregation.
+- `math:mod` accepts one unnamed argument (`field`); `math:mod(y, 3)` reports `CQL_ARGUMENT_COUNT`. Write `math:mod(y, divisor=3)`. 0.1.7 accepted two unnamed arguments.
+- String-array arguments accept numeric literals, as in `in(a, values=[3, 6])`, while parameter choices still apply. 0.1.7 reported `CQL_ARGUMENT_TYPE` for numeric elements.
 - `check` rejects free text after the first aggregate with `CQL_FREE_TEXT_AFTER_AGGREGATE`: bare words, quoted strings, standalone regex literals and `wildcard()` without `field`, at any depth and inside `case` and `match` branches. For example, `groupBy(y) | head 10` was accepted in 0.1.7; write `groupBy(y) | head(10)`. Field comparisons and the match-all term `*` remain valid after aggregation, and `join` and `defineTable` subqueries start fresh. `createEvents`, `readFile`, `readPersistedAggregation` and `correlate` count as aggregates for this rule.
 - Function arguments must be calls. `stats(count)`, `stats([count])` and `groupBy(k, function=count)` report `CQL_ARGUMENT_TYPE`; write `count()`. 0.1.7 accepted bare aggregate names here.
 - Direct assignment `field := f(...)` requires a function with an `as` parameter. `v := collect(user)` and `v := table([a])` report `CQL_ASSIGN_ALIAS`, as does an `as` argument given by name or position next to the assignment.

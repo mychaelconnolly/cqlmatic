@@ -27,7 +27,7 @@ fn check(query: &str, strict: bool) -> Analysis {
 fn args(name: &str, named: bool) -> String {
     match name {
         "arctan2" => "x=user,y=user".into(),
-        "mod" if !named => "user,3".into(),
+        "mod" if !named => "user,divisor=3".into(),
         "mod" => "field=user,divisor=3".into(),
         "pow" => "field=user,exponent=3".into(),
         _ if named => "field=user".into(),

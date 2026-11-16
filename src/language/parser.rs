@@ -436,7 +436,13 @@ impl Parser<'_> {
             if p.keyword("false") {
                 return Ok(Filter::Bool(false));
             }
-            Ok(Filter::Text(p.pattern()?))
+            let quoted = p.rest().starts_with('"');
+            let pattern = p.pattern()?;
+            Ok(Filter::Text(if !quoted && matches!(&pattern, Pattern::Text(text) if text == "*") {
+                Pattern::Any
+            } else {
+                pattern
+            }))
         })
     }
     fn pattern(&mut self) -> Result<Pattern> {

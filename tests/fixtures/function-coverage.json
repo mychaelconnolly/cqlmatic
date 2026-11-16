@@ -2278,11 +2278,12 @@
       "function": "math:mod",
       "primary": false,
       "forms": [
-        "two_unnamed_operands"
+        "documented_signature",
+        "omitted_argument_name"
       ],
       "placement": "pipeline",
-      "query": "math:mod(\"value\", 3, as=\"remainder\")",
-      "canonical": "math:mod(\"value\", 3, as=\"remainder\")",
+      "query": "math:mod(\"value\", divisor=3, as=\"remainder\")",
+      "canonical": "math:mod(\"value\", divisor=3, as=\"remainder\")",
       "inputs": [
         "value"
       ],

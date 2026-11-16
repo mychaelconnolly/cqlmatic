@@ -268,6 +268,17 @@ impl Checker<'_> {
         };
         let mut outcomes = Vec::new();
         for pipeline in branches {
+            for step in &pipeline.steps {
+                match step {
+                    Step::Call(call)
+                    | Step::Assign {
+                        value: Value::Call(call),
+                        ..
+                    } => self.branch_function(call),
+                    Step::Filter(filter) => self.branch_filter(filter),
+                    _ => {}
+                }
+            }
             let mut branch = incoming.clone();
             self.pipeline_state(pipeline, context, &mut tables.clone(), &mut branch);
             outcomes.push(branch);
@@ -275,6 +286,25 @@ impl Checker<'_> {
         let mut merged = PipelineState::merge(&outcomes);
         merged.ordered &= incoming.ordered;
         merged
+    }
+    fn branch_function(&mut self, call: &Call) {
+        if catalog::function(&call.name).is_some_and(|f| first_aggregate(f.name, f.effect)) {
+            self.emit("CQL_BRANCH_FUNCTION", format!("{}() cannot be used inside a case or match branch; aggregate before or after the conditional.", call.name), Some(call), false);
+        } else if matches!(call.name.as_str(), "join" | "selfJoin" | "selfJoinFilter") {
+            self.emit("CQL_BRANCH_FUNCTION", format!("{}() cannot be used inside a case or match branch; join before or after the conditional.", call.name), Some(call), false);
+        }
+    }
+    fn branch_filter(&mut self, filter: &Filter) {
+        match filter {
+            Filter::Call(call) => self.branch_function(call),
+            Filter::Not(filter) => self.branch_filter(filter),
+            Filter::And(filters) | Filter::Or(filters) => {
+                for filter in filters {
+                    self.branch_filter(filter);
+                }
+            }
+            _ => {}
+        }
     }
     fn pipeline_state(
         &mut self,
@@ -774,11 +804,7 @@ impl Checker<'_> {
                 } => catalog::function(&call.name),
                 _ => None,
             } {
-                after_aggregate |= function.effect == Effect::Aggregate
-                    || matches!(
-                        function.name,
-                        "createEvents" | "readFile" | "readPersistedAggregation" | "correlate"
-                    );
+                after_aggregate |= first_aggregate(function.name, function.effect);
             }
             if !matches!(step,Step::Call(c) if catalog::function(&c.name).is_some_and(|f|f.effect==Effect::Definition))
             {
@@ -878,9 +904,7 @@ impl Checker<'_> {
                 self.function(c, tables, false, negated, false);
             }
             Filter::Text(p) => {
-                if matches!(p, Pattern::Text(text) if text != "*")
-                    || matches!(p, Pattern::Regex { .. })
-                {
+                if matches!(p, Pattern::Text(_)) || matches!(p, Pattern::Regex { .. }) {
                     self.free_text(None);
                 }
                 self.pattern(p);
@@ -2018,8 +2042,11 @@ impl Checker<'_> {
             if !rule.choices.is_empty() && matches!(kind, "s" | "S" | "s[]") {
                 for value in values {
                     if !has_parameter(value)
-                        && let Some(choice) = value.text()
-                        && !rule.choices.iter().any(|allowed| allowed == choice)
+                        && let Some(choice) = value
+                            .text()
+                            .map(str::to_owned)
+                            .or_else(|| numeric_literal(value).map(|_| value.render()))
+                        && !rule.choices.iter().any(|allowed| allowed == &choice)
                     {
                         self.emit(
                             "CQL_ARGUMENT_VALUE",
@@ -3104,6 +3131,14 @@ fn numeric_expression(value: &Value) -> bool {
     }
 }
 
+fn first_aggregate(name: &str, effect: Effect) -> bool {
+    effect == Effect::Aggregate
+        || matches!(
+            name,
+            "createEvents" | "readFile" | "readPersistedAggregation" | "correlate"
+        )
+}
+
 fn argument_type(v: &Value, kind: &str) -> bool {
     if matches!(v, Value::Parameter(_))
         || matches!(
@@ -3126,7 +3161,9 @@ fn argument_type(v: &Value, kind: &str) -> bool {
             argument_type(v, "s")
                 || matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"s")))
         }
-        "s[]" => matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"s"))),
+        "s[]" => {
+            matches!(v,Value::Array(xs)if xs.iter().all(|x|argument_type(x,"s") || matches!(x, Value::Number(_)) || matches!(x, Value::Unary { op, value } if op == "-" && matches!(value.as_ref(), Value::Number(_)))))
+        }
         "d" => v.text().is_some_and(super::plan::duration),
         "p" => argument_type(v, "e"),
         "e[]" => matches!(v, Value::Array(xs) if xs.iter().all(|x| argument_type(x, "e"))),

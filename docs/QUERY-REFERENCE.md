@@ -58,7 +58,7 @@ Positive regex extraction can produce named capture fields; optional captures or
 
 ### Expressions and arguments
 
-An argument is `{"value": EXPRESSION}` for a positional argument or `{"name":"ARG","value":EXPRESSION}` for a named argument. `name` defaults to absent. Argument order is retained; duplicate resolved names, excess positional arguments, unknown arguments, and missing required arguments are diagnosed. Prefer named arguments when multiple roles could be confused. Documented exceptions are explicit: `readFile` combines multiple unnamed resources in order, and `math:mod` accepts its two unnamed operands. An array-valued parameter does not imply arbitrary variadic support for other functions.
+An argument is `{"value": EXPRESSION}` for a positional argument or `{"name":"ARG","value":EXPRESSION}` for a named argument. `name` defaults to absent. Argument order is retained; duplicate resolved names, excess positional arguments, unknown arguments, and missing required arguments are diagnosed. Prefer named arguments when multiple roles could be confused. `readFile` combines multiple unnamed resources in order. `math:mod` accepts only `field` unnamed; give `divisor` by name, as in `math:mod(y, divisor=3)`. An array-valued parameter does not imply arbitrary variadic support for other functions.
 
 Every expression uses `kind`:
 
@@ -200,12 +200,15 @@ cqlmatic catalog --profile
 
 Documentation membership, lookup guidance and executable forms are separate. The scope ledger records additional documented forms and their conditions; it does not certify each form as implemented. Typed calls must lower through the structured plan and pass the same contextual checks as parsed CQL. Bounded English covers only its grammar above. Field grounding, optional target capability observations and result assessment add different evidence; none establishes full vendor-compiler parity or validates unrestricted English interpretation.
 
+String-array (`s[]`) arguments accept quoted strings, bare words and numeric literals, including decimals and negative numbers. For example, [in()](https://library.humio.com/crowdstrike-query-language/functions-in.html) accepts `in(a, values=[3, 6])`. Parameter choice restrictions still apply.
+
 Argument type codes:
 
 | Code | Checked shape |
 | --- | --- |
 | `f`, `F`, `A` | One field name; one or array of field names; array of field names |
-| `s`, `S`, `s[]` | String/bare word; string or array; array only |
+| `s`, `S` | String/bare word; string or array of strings/bare words |
+| `s[]` | Array of strings, bare words or numeric literals |
 | `b`, `n`, `i`, `j` | Boolean; number; unsigned integer literal; signed integer within the checked integer contract |
 | `l` | Unsigned integer or literal `max` |
 | `v` | Simple scalar/word, including a negative numeric literal; not an arbitrary expression |
@@ -294,7 +297,7 @@ Join/match keys must be nonempty and have equal arity; repeated slots still coun
 
 `setTimeInterval` can appear once, first at the top level before filters or other declarations. It overrides external query time settings and produces `CQL_QUERY_TIME_OVERRIDE`; review the effective interval against the intended API/MCP bounds. `defineTable` and `remoteTable` declarations occupy the following top-level preamble; table count is bounded to ten. A remote query is required in both connection forms, and the CQL subquery form also requires `include`. The declaration rules exclude combination with join/selfJoin/selfJoinFilter. For a declaration preamble, leave plan source/filters empty and place source filters after declarations. Includes are explicit exported fields or scalar all-fields `*`; wildcard list entries are unsupported. `match(table=...)`/`readFile(table=...)` require a preceding declaration. All-fields exports preserve unknown shape when the defining query lacks an exact projection; unknown does not prove a column present or absent.
 
-The profile checks interval endpoints on `setTimeInterval`, `join`, `defineTable`, `remoteTable` and `readPersistedAggregation`: `now`, positive whole-number fixed lookbacks, nonzero signed offsets, signed-long epoch milliseconds and RFC3339 timestamps with an explicit offset. Existing string-typed endpoints require quoted epoch values. Unqualified spellings, including zero durations and strings such as `garbage`, produce `unsupported`, matching the other bounded duration checks. Numeric epoch zero remains supported. `remoteTable` requires named arguments. Catalog name-omission facts retain the parameter-table annotations; finite example-only positional forms for `getField`, `math:cosh` and `math:mod` are explicit exceptions. `parseTimestamp` binds its unnamed argument to `format` and requires a named `field`.
+The profile checks interval endpoints on `setTimeInterval`, `join`, `defineTable`, `remoteTable` and `readPersistedAggregation`: `now`, positive whole-number fixed lookbacks, nonzero signed offsets, signed-long epoch milliseconds and RFC3339 timestamps with an explicit offset. Existing string-typed endpoints require quoted epoch values. Unqualified spellings, including zero durations and strings such as `garbage`, produce `unsupported`, matching the other bounded duration checks. Numeric epoch zero remains supported. `remoteTable` requires named arguments. Catalog name-omission facts retain the parameter-table annotations; finite example-only positional forms for `getField` and `math:cosh` are explicit exceptions. `parseTimestamp` binds its unnamed argument to `format` and requires a named `field`.
 
 All five interval functions reject provably reversed endpoints when both endpoints are explicit and within the same time domain: unsigned durations are lookbacks, signed durations are offsets, and absolute timestamps can be compared with epoch values. `setTimeInterval` also checks its omitted `end` as `now`. Equal endpoints and mixed relative/absolute endpoints are retained; their usefulness and effective runtime interval still require review.
 
@@ -312,7 +315,7 @@ The bundled `series.memlimit` default is `1KiB`. Saved-result assessment treats 
 
 Correlation must be top-level in an independent query, cannot follow aggregate/source replacement, and cannot combine with join. Generic correlation can inherit an ordinary prefix context; the specialized typed stage has stricter sole-stage placement. Mandatory queries cannot aggregate/replace/define streams or nest correlation. Aggregation queries can aggregate but cannot replace/define/nest correlation. Labels are unique across both lists. Links target a different mandatory label and bare field; place them directly in named pipelines. Mandatory links are last (only further links may follow); aggregation links precede aggregates. No links/globalConstraints across multiple mandatory queries warns about a Cartesian constellation.
 
-Assigned aggregates obey the same placement rules as bare calls. Correlation input constraints are grounded before the first aggregate, including assigned reducers and conditional aggregate branches.
+Assigned aggregates obey the same placement rules as bare calls. Correlation input constraints are grounded before the first aggregate, including assigned reducers. `case` alternatives and `match` arms are filter queries: they may filter, assign or transform, but cannot call aggregates, `join`, `selfJoin` or `selfJoinFilter` (`CQL_BRANCH_FUNCTION`). Aggregate and join before or after the conditional. Function arguments with their own subqueries or sub-aggregates keep their argument-specific rules.
 
 Mandatory named queries may specify include fields or explicit all-fields. Aggregation queries may specify after/before anchors referring to mandatory names; other attribute/context combinations are unsupported. `sequenceBy` and `jitterTolerance` require sequence=true; jitter must not exceed within. Root names a mandatory query; iterationLimit is 1..10. Temporal offsets cannot use custom non-timestamp sequenceBy dimensions. A single open interval offset must be smaller than within; same-anchor zero/reversed intervals and provably reversed timestamp order are rejected. Different anchors retain a runtime-window warning: actual timestamps determine the interval, and within does not bound a closed interval.
 

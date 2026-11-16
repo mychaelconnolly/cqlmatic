@@ -498,8 +498,8 @@ fn correlation_aggregation_constraints_read_inputs_before_assigned_reducers() {
     for body in [
         "n:=count()",
         "count(as=n)",
-        "case {true | n:=count(); * | n:=count()}|head(1)",
-        "user match {a => n:=count(); * => n:=count()}|head(1)",
+        "case {true | v:=1; * | v:=2}|n:=count()|head(1)",
+        "user match {a => v:=1; * => v:=2}|n:=count()|head(1)",
     ] {
         let result = app::check(
             CheckRequest {
@@ -524,9 +524,9 @@ fn correlation_constraints_preserve_preaggregate_branch_writes() {
     let pack = serde_json::from_str(include_str!("fixtures/legacy-core-v1-pack.json")).unwrap();
     for body in [
         "constrained:=1|n:=count()",
-        "case {true | constrained:=1|n:=count(); * | constrained:=1|n:=count()}|head(1)",
-        "user match {a => constrained:=1|n:=count(); * => constrained:=1|n:=count()}|head(1)",
-        "case {true | constrained:=1|n:=count(); * | drop(constrained)}|constrained:=1|n:=count()",
+        "case {true | constrained:=1; * | constrained:=1}|n:=count()|head(1)",
+        "user match {a => constrained:=1; * => constrained:=1}|n:=count()|head(1)",
+        "case {true | constrained:=1; * | drop(constrained)}|constrained:=1|n:=count()",
     ] {
         let result = app::check(
             CheckRequest {
@@ -550,9 +550,8 @@ fn correlation_constraints_preserve_preaggregate_branch_writes() {
 fn correlation_removed_branch_inputs_require_context_control() {
     let pack = serde_json::from_str(include_str!("fixtures/legacy-core-v1-pack.json")).unwrap();
     for body in [
-        "case {true | drop(user)|n:=count(); * | drop(user)|n:=count()}|head(1)",
-        "user match {a => drop(user)|n:=count(); * => drop(user)|n:=count()}|head(1)",
-        "case {true | drop(user)|n:=count(); * | true}|n:=count()",
+        "case {true | drop(user); * | drop(user)}|n:=count()|head(1)",
+        "user match {a => drop(user); * => drop(user)}|n:=count()|head(1)",
         "drop(user)|n:=count()",
     ] {
         let result = app::check(
@@ -742,7 +741,7 @@ fn named_remote_tables_and_documented_positional_forms_keep_their_bindings() {
         "math:cosh(field=value)",
         r#"getField("user")"#,
         r#"getField(source="user")"#,
-        "math:mod(value,3)",
+        "math:mod(value,divisor=3)",
         r#"parseTimestamp("seconds",field=timestamp)"#,
         r#"parseTimestamp(field=timestamp,format="seconds")"#,
     ] {
@@ -812,13 +811,6 @@ fn positional_contracts_match_omittable_parameter_facts() {
         BTreeMap::from([
             ("getField", (BTreeSet::from(["source"]), BTreeSet::new())),
             ("math:cosh", (BTreeSet::from(["field"]), BTreeSet::new())),
-            (
-                "math:mod",
-                (
-                    BTreeSet::from(["field", "divisor"]),
-                    BTreeSet::from(["field"])
-                )
-            ),
         ])
     );
 }
