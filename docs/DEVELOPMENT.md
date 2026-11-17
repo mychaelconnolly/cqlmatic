@@ -91,7 +91,7 @@ Tracked images and other binary files must carry no embedded metadata, such as p
 python3 tools/asset_metadata.py
 ```
 
-A tracked file that is not UTF-8 text must be a PNG made only of display chunks; SVG files must hold no metadata elements, editor namespaces or comments. Remove the embedded data before committing, or add a check for a new binary type in [the tool](../tools/asset_metadata.py).
+A tracked file that is not UTF-8 text must be a PNG made only of display chunks at the sizes the format allows; SVG files must be well-formed and hold SVG and XLink names only, with no metadata element, comment, processing instruction, document type or `data-` attribute. Remove the embedded data before committing, or add a check for a new binary type in [the tool](../tools/asset_metadata.py).
 
 For website changes, use a supported, patched Node.js release and the locked private build package:
 

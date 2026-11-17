@@ -42,6 +42,21 @@ class AssetMetadataTests(unittest.TestCase):
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn(kind.decode(), findings[0])
 
+    def test_spare_bytes_inside_allowed_chunks_are_refused(self):
+        signature, header = assets.PNG_SIGNATURE, chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        pixels = zlib.compress(b"\x00\x00")
+        cases = {
+            "nonempty IEND": signature + header + chunk(b"IDAT", pixels) + chunk(b"IEND", b"private provenance"),
+            "oversized pHYs": png(chunk(b"pHYs", b"\x00" * 9 + b"note")),
+            "bytes after the compressed image": signature + header + chunk(b"IDAT", pixels + b"note") + chunk(b"IEND"),
+            "a second data chunk of notes": signature + header + chunk(b"IDAT", pixels) + chunk(b"IDAT", b"note") + chunk(b"IEND"),
+        }
+        for name, data in cases.items():
+            with self.subTest(name=name):
+                self.assertTrue(assets.png_findings(data))
+        split = signature + header + chunk(b"IDAT", pixels[:3]) + chunk(b"IDAT", pixels[3:]) + chunk(b"IEND")
+        self.assertEqual(assets.png_findings(split), [])
+
     def test_damaged_or_extended_pngs_are_refused(self):
         self.assertTrue(assets.png_findings(png(tail=b"hidden")))
         self.assertTrue(assets.png_findings(png()[:-6]))
@@ -53,11 +68,18 @@ class AssetMetadataTests(unittest.TestCase):
     def test_svg_metadata_and_editor_namespaces_are_refused(self):
         clean = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>'
         self.assertEqual(assets.file_findings("icon.svg", clean.encode()), [])
-        for addition in ("<metadata>x</metadata>", '<g xmlns:inkscape="urn:x"/>', "<!-- made with a tool -->",
-                         '<rdf:RDF xmlns:rdf="urn:x"/>'):
+        for addition in ("<metadata>x</metadata>", "<!-- made with a tool -->", '<rdf:RDF xmlns:rdf="urn:x"/>',
+                         '<s:metadata xmlns:s="http://www.w3.org/2000/svg">provenance</s:metadata>',
+                         '<e:layer xmlns:e="urn:editor"/>', '<g xmlns:e="urn:editor" e:label="layer"/>',
+                         '<g data-name="layer"/>', "<?editor version 1?>"):
             with self.subTest(addition=addition):
                 changed = clean.replace("<path", addition + "<path")
                 self.assertTrue(assets.file_findings("icon.svg", changed.encode()))
+        for document in ("<svg", '<!DOCTYPE svg [<!ENTITY note "x">]>' + clean):
+            with self.subTest(document=document[:20]):
+                self.assertTrue(assets.file_findings("icon.svg", document.encode()))
+        linked = clean.replace("<path", '<use xmlns:x="http://www.w3.org/1999/xlink" x:href="#a"/><path')
+        self.assertEqual(assets.file_findings("icon.svg", linked.encode()), [])
 
     def test_text_passes_and_unknown_binary_types_are_refused(self):
         self.assertEqual(assets.file_findings("notes.md", "Exif and XMP are named here.\n".encode()), [])
