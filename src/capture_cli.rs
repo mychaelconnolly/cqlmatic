@@ -415,6 +415,10 @@ pub(crate) struct Call {
 }
 
 impl Call {
+    /// Whether the call names the search tool or the hosted server's gateway to it.
+    pub(crate) fn may_be_search(&self) -> bool {
+        matches!(self.tool.as_str(), SEARCH_TOOL | "execute_tool")
+    }
     /// A call seen on the server's own connection: `result` is the MCP result object, absent
     /// when the server answered with an error.
     pub(crate) fn on_connection(tool: String, arguments: Value, result: Option<Value>) -> Self {

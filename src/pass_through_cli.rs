@@ -9,16 +9,18 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::PathBuf,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
 };
 
-/// Longer messages are passed through without being read.
+/// Longer messages are passed through without being kept or read.
 const MAX_MESSAGE_BYTES: usize = 2 * mcp::MAX_RESULT_BYTES;
 const MAX_PENDING: usize = 256;
+/// Finished searches waiting to be recorded; further ones are passed through unrecorded.
+const MAX_QUEUED: usize = 64;
 
 #[derive(Debug, Args)]
 pub struct PassThroughArgs {
@@ -44,7 +46,7 @@ struct Pending(BTreeMap<String, (String, Value)>);
 impl Pending {
     /// Notes a `tools/call` request on its way to the server.
     fn sent(&mut self, line: &[u8]) {
-        if line.len() > MAX_MESSAGE_BYTES || !line.windows(10).any(|bytes| bytes == b"tools/call") {
+        if !line.windows(10).any(|bytes| bytes == b"tools/call") {
             return;
         }
         let Ok(message) = serde_json::from_slice::<Value>(line) else {
@@ -69,7 +71,7 @@ impl Pending {
 
     /// The finished call, when `line` is the server's answer to a noted request.
     fn answered(&mut self, line: &[u8]) -> Option<Call> {
-        if self.0.is_empty() || line.len() > MAX_MESSAGE_BYTES {
+        if self.0.is_empty() {
             return None;
         }
         let mut message: Value = serde_json::from_slice(line).ok()?;
@@ -89,6 +91,49 @@ impl Pending {
     }
 }
 
+/// Forwards `from` to `to` as its bytes arrive. Each complete line of at most
+/// `MAX_MESSAGE_BYTES` is handed to `before` ahead of its last bytes and to `after` once they
+/// are forwarded. A longer line is forwarded without being kept.
+fn relay(
+    mut from: impl BufRead,
+    mut to: impl Write,
+    mut before: impl FnMut(&[u8]),
+    mut after: impl FnMut(&[u8]),
+) -> io::Result<()> {
+    let mut line = Vec::new();
+    let mut kept = true;
+    loop {
+        let chunk = from.fill_buf()?;
+        if chunk.is_empty() {
+            return to.flush();
+        }
+        let (part, ends) = match chunk.iter().position(|byte| *byte == b'\n') {
+            Some(end) => (&chunk[..=end], true),
+            None => (chunk, false),
+        };
+        kept = kept && line.len() + part.len() <= MAX_MESSAGE_BYTES;
+        if kept {
+            line.extend_from_slice(part);
+        } else {
+            line = Vec::new();
+        }
+        if ends && kept {
+            before(&line);
+        }
+        to.write_all(part)?;
+        let read = part.len();
+        if ends {
+            to.flush()?;
+            if kept {
+                after(&line);
+            }
+            line.clear();
+            kept = true;
+        }
+        from.consume(read);
+    }
+}
+
 pub fn run(args: PassThroughArgs) -> Result<i32, Diagnostic> {
     let failed = |message| Diagnostic::error("PASS_THROUGH", message);
     let mut server = Command::new(&args.command[0])
@@ -97,7 +142,7 @@ pub fn run(args: PassThroughArgs) -> Result<i32, Diagnostic> {
         .stdout(Stdio::piped())
         .spawn()
         .map_err(|_| failed("Cannot start the MCP server command."))?;
-    let mut to_server = server.stdin.take().expect("The server's input is piped");
+    let to_server = server.stdin.take().expect("The server's input is piped");
     let from_server = server.stdout.take().expect("The server's output is piped");
     let pending = Arc::new(Mutex::new(Pending::default()));
 
@@ -105,55 +150,47 @@ pub fn run(args: PassThroughArgs) -> Result<i32, Diagnostic> {
     // Never joined: it may still be waiting on the client when the server exits. Its end
     // closes the server's input.
     thread::spawn(move || {
-        let mut client = std::io::stdin().lock();
-        let mut line = Vec::new();
-        while matches!(client.read_until(b'\n', &mut line), Ok(read) if read > 0) {
+        let note = |line: &[u8]| {
             if let Ok(mut pending) = noted.lock() {
-                pending.sent(&line);
+                pending.sent(line);
             }
-            if to_server
-                .write_all(&line)
-                .and_then(|()| to_server.flush())
-                .is_err()
-            {
-                break;
-            }
-            line.clear();
-        }
+        };
+        let _ = relay(io::stdin().lock(), to_server, note, |_| {});
     });
 
-    let mut from_server = BufReader::new(from_server);
-    let mut client = std::io::stdout().lock();
-    let mut captures = vec![];
-    let mut line = Vec::new();
-    while matches!(from_server.read_until(b'\n', &mut line), Ok(read) if read > 0) {
+    // One recorder takes finished searches in turn, so they never wait on each other.
+    let (queue, searches) = mpsc::sync_channel::<Call>(MAX_QUEUED);
+    let state = args.state;
+    let recorder = thread::spawn(move || {
+        for call in searches {
+            let _ = capture_cli::record(state.clone(), call);
+        }
+    });
+    // The client has its answer before the search is queued.
+    let finished = move |line: &[u8]| {
         let call = pending
             .lock()
             .ok()
-            .and_then(|mut pending| pending.answered(&line));
-        // The client gets its answer before anything is recorded.
-        if client
-            .write_all(&line)
-            .and_then(|()| client.flush())
-            .is_err()
-        {
-            break;
+            .and_then(|mut pending| pending.answered(line));
+        if let Some(call) = call.filter(Call::may_be_search) {
+            let _ = queue.try_send(call);
         }
-        if let Some(call) = call {
-            let state = args.state.clone();
-            captures.push(thread::spawn(move || {
-                let _ = capture_cli::record(state, call);
-            }));
-        }
-        line.clear();
+    };
+    let forwarded = relay(
+        BufReader::new(from_server),
+        io::stdout().lock(),
+        |_| {},
+        finished,
+    );
+    if forwarded.is_err() {
+        // The client is gone but may still hold the server's input open, so the server would
+        // never see its input end.
+        let _ = server.kill();
     }
-    drop(client);
     let status = server
         .wait()
         .map_err(|_| failed("Cannot wait for the MCP server command."))?;
-    for capture in captures {
-        let _ = capture.join();
-    }
+    let _ = recorder.join();
     Ok(status.code().unwrap_or(1))
 }
 
@@ -164,6 +201,37 @@ mod tests {
 
     fn line(message: Value) -> Vec<u8> {
         format!("{message}\n").into_bytes()
+    }
+
+    #[test]
+    fn relay_forwards_everything_and_keeps_only_lines_within_the_limit() {
+        let long = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        let mut input = b"first\n".to_vec();
+        input.extend_from_slice(&long);
+        input.extend_from_slice(b"\nlast\nunfinished");
+        let (mut output, mut before, mut after) = (vec![], vec![], vec![]);
+        // A small buffer splits every line across many reads.
+        relay(
+            BufReader::with_capacity(7, input.as_slice()),
+            &mut output,
+            |line| before.push(line.to_vec()),
+            |line| after.push(line.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(output, input);
+        assert_eq!(before, [b"first\n".to_vec(), b"last\n".to_vec()]);
+        assert_eq!(after, before);
+
+        struct Closed;
+        impl Write for Closed {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        assert!(relay(input.as_slice(), Closed, |_| {}, |_| {}).is_err());
     }
 
     #[test]
