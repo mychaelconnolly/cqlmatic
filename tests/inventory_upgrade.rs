@@ -462,13 +462,16 @@ fn call(binary: &Path, dir: &Path, action: Value) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 fn setup(dir: &Path) {
+    setup_with(old(), dir);
+}
+fn setup_with(binary: &Path, dir: &Path) {
     call(
-        old(),
+        binary,
         dir,
         json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
     );
     call(
-        old(),
+        binary,
         dir,
         json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":"synthetic"}]}),
     );
@@ -546,6 +549,10 @@ fn remove_owner(path: &Path) {
         .as_object_mut()
         .unwrap()
         .remove("inventory_owner");
+    save_checkpoint(path, &mut checkpoint);
+}
+
+fn save_checkpoint(path: &Path, checkpoint: &mut Value) {
     let mut binding = serde_json::to_vec(&(
         &checkpoint["request_sha256"],
         &checkpoint["created_at"],
@@ -558,8 +565,12 @@ fn remove_owner(path: &Path) {
     if checkpoint["session"]["sparse_fieldset_fallback"] == true {
         binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
     }
+    if let Some(owner) = checkpoint["session"].get("inventory_owner") {
+        binding.extend_from_slice(b"\0inventory-owner-v1\0");
+        binding.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
     checkpoint["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
-    write(path, &checkpoint);
+    write(path, checkpoint);
 }
 
 #[test]
@@ -771,6 +782,643 @@ fn route(binary: &Path, dir: &Path, kind: &str) -> Value {
             }
         }
         _ => unreachable!(),
+    }
+}
+
+const HOSTED_FINAL_ANSWERS: [&[u8]; 4] = [
+    include_bytes!("fixtures/mcp/hosted-timeout.json"),
+    include_bytes!("fixtures/mcp/hosted-rejected.json"),
+    include_bytes!("fixtures/mcp/hosted-poll-failed.json"),
+    br#"{"result":[],"trace_id":"synthetic-empty"}"#,
+];
+const STUCK_START: &str = "2026-01-02T00:00:00Z";
+const STUCK_EXPIRED: &str = "2026-01-02T00:02:00Z";
+
+fn evidence(path: &Path, raw: &[u8]) -> Value {
+    use std::fmt::Write;
+    let mut hex = String::with_capacity(raw.len() * 2);
+    for byte in raw {
+        write!(hex, "{byte:02x}").unwrap();
+    }
+    json!({"file":path,"raw_hex":hex,"raw_sha256":cqlmatic::sha256_hex(raw)})
+}
+
+fn rejection(path: &Path, raw: &[u8]) -> Value {
+    json!({
+        "evidence":evidence(path, raw),
+        "diagnostic":cqlmatic::contracts::Diagnostic::error("MCP_SHAPE", "Synthetic rejection")
+    })
+}
+
+fn synthetic_stuck_run(dir: &Path, producer: &str, owned: bool, raw: &[u8]) -> PathBuf {
+    let binary = current_binary();
+    let prepared = prepare(binary, dir, 5);
+    let index = prepared["action"]["run_index"].as_u64().unwrap() as usize;
+    call(
+        binary,
+        dir,
+        json!({"kind":"dispatch-discovery","run_index":index,
+        "probe_id":prepared["action"]["relay"]["probes"][0]["probe_id"]}),
+    );
+    let path = checkpoint(dir, index);
+    let mut saved = read(&path);
+    saved["producer_version"] = json!(producer);
+    saved["status"] = json!("cleanup-pending");
+    saved["created_at"] = json!(STUCK_START);
+    saved["session"]["periods"] = json!([{"start":STUCK_START,"end":null}]);
+    let attempt = &mut saved["session"]["attempts"][0];
+    attempt["dispatched_at"] = json!(STUCK_START);
+    attempt["outcome"] = json!("cleanup-pending");
+    attempt["rejected_results"] = json!([rejection(&dir.join("answer.json"), raw)]);
+    if !owned {
+        saved["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("inventory_owner");
+    }
+    save_checkpoint(&path, &mut saved);
+    let mut inventory = read(&state(dir));
+    inventory["discovery_runs"][index]["status"] = json!("cleanup-pending");
+    write(&state(dir), &inventory);
+    path
+}
+
+#[test]
+fn exhausted_earlier_discovery_allows_every_guarded_route() {
+    let binary = current_binary();
+    let producers = [("0.1.6", false), ("0.1.7", true), ("0.1.7", false)];
+    for (index, kind) in ROUTES.into_iter().enumerate() {
+        let dir = Temp::new();
+        setup_with(binary, &dir.0);
+        if kind.contains("capabilit") {
+            complete(binary, &dir.0, &prepare(binary, &dir.0, 4));
+        }
+        let (producer, owned) = producers[index % producers.len()];
+        let raw = HOSTED_FINAL_ANSWERS[index % HOSTED_FINAL_ANSWERS.len()];
+        let path = synthetic_stuck_run(&dir.0, producer, owned, raw);
+        let mut inventory = read(&state(&dir.0));
+        let mut history = inventory["discovery_runs"]
+            .as_array_mut()
+            .unwrap()
+            .pop()
+            .unwrap();
+        if index % 2 == 0 {
+            let mut saved = read(&path);
+            saved["status"] = json!("cancel-requested");
+            write(&path, &saved);
+            history["status"] = json!("cancel-requested");
+        }
+        write(&state(&dir.0), &inventory);
+        let action = if kind == "prepare-discovery" {
+            // Use the old run's exact request and predecessor.
+            json!({"kind":kind,"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z",
+                "max_queries":5,"max_seconds":120})
+        } else {
+            route(binary, &dir.0, kind)
+        };
+        let mut inventory = read(&state(&dir.0));
+        let runs = inventory["discovery_runs"].as_array_mut().unwrap();
+        let run_index = runs.len();
+        runs.push(history);
+        write(&state(&dir.0), &inventory);
+        let before = fs::read(&path).unwrap();
+        let reply = call(binary, &dir.0, action);
+        assert_eq!(
+            read(&state(&dir.0))["discovery_runs"][run_index]["status"],
+            "failed",
+            "{kind}"
+        );
+        assert_eq!(
+            reply["action"]["notices"][0]["run_index"], run_index,
+            "{kind}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), before, "{kind}");
+        if kind == "prepare-discovery" {
+            assert_eq!(
+                read(&checkpoint(&dir.0, run_index + 1))["request_sha256"],
+                read(&path)["request_sha256"]
+            );
+        }
+    }
+}
+
+#[test]
+fn earlier_discovery_expiry_counts_only_active_intervals() {
+    let dir = Temp::new();
+    setup_with(current_binary(), &dir.0);
+    let path = synthetic_stuck_run(&dir.0, "0.1.7", true, HOSTED_FINAL_ANSWERS[0]);
+    let mut saved = read(&path);
+    saved["session"]["periods"] = json!([
+        {"start":STUCK_START,"end":"2026-01-02T00:00:20Z"},
+        {"start":"2026-01-02T00:03:00Z","end":null}
+    ]);
+    saved["session"]["attempts"][0]["dispatched_at"] = json!("2026-01-02T00:03:00Z");
+    write(&path, &saved);
+    let relay = cqlmatic::mcp::inspect_state(&path).unwrap();
+    for now in [
+        STUCK_EXPIRED,
+        "2026-01-02T00:04:39.999999999Z",
+        "2026-01-01T00:00:00Z",
+        "invalid",
+    ] {
+        assert!(!cqlmatic::mcp::earlier_release_ended(&relay, now), "{now}");
+    }
+    assert!(cqlmatic::mcp::earlier_release_ended(
+        &relay,
+        "2026-01-02T00:04:40Z"
+    ));
+}
+
+#[test]
+fn earlier_discovery_requires_recognized_final_bytes() {
+    let dir = Temp::new();
+    setup_with(current_binary(), &dir.0);
+    let path = synthetic_stuck_run(&dir.0, "0.1.6", false, HOSTED_FINAL_ANSWERS[2]);
+    let mut cases = vec![
+        (
+            "other wording",
+            br#"{"result":{"error":"Unexpected failure","details":{"status_code":400,"body":{}}}}"#
+                .to_vec(),
+        ),
+        (
+            "plain text",
+            b"Failed to poll NGSIEM search status: synthetic".to_vec(),
+        ),
+        (
+            "error with list",
+            br#"{"result":[],"error":"synthetic"}"#.to_vec(),
+        ),
+        ("incomplete", br#"{"result":[],"partial":true}"#.to_vec()),
+        ("truncated", br#"{"result":["#.to_vec()),
+        ("duplicate keys", br#"{"result":[],"result":[]}"#.to_vec()),
+        (
+            "differing repeats",
+            [HOSTED_FINAL_ANSWERS[2], b"\n", HOSTED_FINAL_ANSWERS[0]].concat(),
+        ),
+    ];
+    for status in [json!(503), json!(404), json!("400")] {
+        let mut answer: Value = serde_json::from_slice(HOSTED_FINAL_ANSWERS[2]).unwrap();
+        answer["result"]["details"]["status_code"] = status;
+        cases.push(("other status", serde_json::to_vec(&answer).unwrap()));
+    }
+    let mut oversized = br#"{"result":[]}"#.to_vec();
+    oversized.resize(cqlmatic::mcp::MAX_RESULT_BYTES + 1, b' ');
+    cases.push(("oversized", oversized));
+    let mut saved = read(&path);
+    saved["session"]["attempts"][0]["rejected_results"] = json!([]);
+    write(&path, &saved);
+    reject(current_binary(), &dir.0, scout(), "MCP_STATE_PRODUCER");
+    for (case, raw) in cases {
+        saved["session"]["attempts"][0]["rejected_results"] =
+            json!([rejection(&dir.0.join("answer.json"), &raw)]);
+        write(&path, &saved);
+        let relay = cqlmatic::mcp::inspect_state(&path).unwrap();
+        assert!(
+            !cqlmatic::mcp::earlier_release_ended(&relay, STUCK_EXPIRED),
+            "{case}"
+        );
+    }
+    saved["session"]["attempts"][0]["rejected_results"][0]["evidence"]["raw_hex"] = json!("00");
+    write(&path, &saved);
+    reject(current_binary(), &dir.0, scout(), "MCP_STATE_TAMPERED");
+}
+
+#[test]
+fn earlier_discovery_refuses_conflicting_or_reused_answers_and_accepts_identical_copies() {
+    use cqlmatic::mcp::{earlier_release_ended, inspect_state};
+    let dir = Temp::new();
+    setup_with(current_binary(), &dir.0);
+    let path = synthetic_stuck_run(&dir.0, "0.1.7", true, HOSTED_FINAL_ANSWERS[2]);
+    let original = read(&path);
+    let retained = original["session"]["attempts"][0]["rejected_results"][0].clone();
+    let file = dir.0.join("answer.json");
+    for other in [HOSTED_FINAL_ANSWERS[0], b"unknown"] {
+        let mut saved = original.clone();
+        saved["session"]["attempts"][0]["rejected_results"] =
+            json!([retained, rejection(&file, other)]);
+        write(&path, &saved);
+        assert!(!earlier_release_ended(
+            &inspect_state(&path).unwrap(),
+            STUCK_EXPIRED
+        ));
+    }
+    let mut saved = original.clone();
+    saved["session"]["attempts"][0]["rejected_results"] = json!(vec![retained.clone(); 16]);
+    write(&path, &saved);
+    assert!(earlier_release_ended(
+        &inspect_state(&path).unwrap(),
+        STUCK_EXPIRED
+    ));
+    saved["session"]["attempts"][0]["rejected_results"]
+        .as_array_mut()
+        .unwrap()
+        .push(retained.clone());
+    write(&path, &saved);
+    assert_eq!(inspect_state(&path).unwrap_err().code, "MCP_STATE_TAMPERED");
+
+    let completed = br#"{"result":[{"events":10}]}"#;
+    for reuse_accepted in [false, true] {
+        let mut saved = original.clone();
+        let mut earlier = saved["session"]["attempts"][0].clone();
+        earlier["outcome"] = json!("complete");
+        let probe = &mut earlier["probe"];
+        probe["query"] = json!(format!("{} ", probe["query"].as_str().unwrap()));
+        let (query, start, end) = (
+            probe["query"].as_str().unwrap(),
+            probe["start"].as_str().unwrap(),
+            probe["end"].as_str().unwrap(),
+        );
+        let repository = saved["request"]["environment"]["view"].as_str().unwrap();
+        let id = cqlmatic::discovery::probe_id_for(repository, query, start, end);
+        let accepted = evidence(&file, completed);
+        saved["answers"][id] = json!({"query":query,"start":start,"end":end,"repository":repository,
+            "outcome":"complete","trace_id":null,"raw_hex":accepted["raw_hex"],
+            "raw_sha256":accepted["raw_sha256"],"ingested_at":STUCK_START,"diagnostic":null});
+        if reuse_accepted {
+            earlier["rejected_results"] = json!([]);
+            saved["session"]["attempts"][0]["rejected_results"] =
+                json!([rejection(&file, completed)]);
+        }
+        saved["session"]["attempts"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, earlier);
+        write(&path, &saved);
+        assert!(
+            !earlier_release_ended(&inspect_state(&path).unwrap(), STUCK_EXPIRED),
+            "{reuse_accepted}"
+        );
+    }
+}
+
+#[test]
+fn earlier_discovery_relief_requires_the_exact_producer_transport_attempt_and_owner() {
+    use cqlmatic::mcp::{self, earlier_release_ended, inspect_state};
+    let dir = Temp::new();
+    setup_with(current_binary(), &dir.0);
+    let path = synthetic_stuck_run(&dir.0, "0.1.7", true, HOSTED_FINAL_ANSWERS[2]);
+    let original = read(&path);
+    for (producer, diagnostic) in [
+        (env!("CARGO_PKG_VERSION"), "INVENTORY_INPUT"),
+        ("0.1.5", "MCP_STATE_TAMPERED"),
+        ("999.0.0", "MCP_STATE_TAMPERED"),
+        ("0.1.6", "INVENTORY_INPUT"), // An original 0.1.6 checkpoint cannot have an owner.
+    ] {
+        let mut saved = original.clone();
+        saved["producer_version"] = json!(producer);
+        write(&path, &saved);
+        reject(current_binary(), &dir.0, scout(), diagnostic);
+    }
+    for (pointer, value, diagnostic) in [
+        ("/status", json!("needs-probes"), "INVENTORY_INPUT"),
+        (
+            "/session/attempts/0/outcome",
+            json!("dispatched"),
+            "INVENTORY_INPUT",
+        ),
+        (
+            "/session/attempts/0/job_id",
+            json!("synthetic"),
+            "MCP_STATE_TAMPERED",
+        ),
+        (
+            "/session/attempts/0/no_start_confirmed",
+            json!(true),
+            "MCP_STATE_TAMPERED",
+        ),
+        (
+            "/session/attempts/0/terminal",
+            original["session"]["attempts"][0]["rejected_results"][0]["evidence"].clone(),
+            "INVENTORY_INPUT",
+        ),
+        (
+            "/session/inventory_owner",
+            json!(dir.0.join("other-inventory.json")),
+            "DISCOVERY_INVENTORY_OWNER",
+        ),
+    ] {
+        let mut saved = original.clone();
+        *saved.pointer_mut(pointer).unwrap() = value;
+        save_checkpoint(&path, &mut saved);
+        reject(current_binary(), &dir.0, scout(), diagnostic);
+    }
+    let mut saved = original.clone();
+    let pending = saved["session"]["attempts"][0].clone();
+    saved["session"]["attempts"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, pending);
+    write(&path, &saved);
+    reject(current_binary(), &dir.0, scout(), "MCP_STATE_TAMPERED");
+
+    let mut native = original.clone();
+    native["session"]["transport"] = json!("native");
+    write(&path, &native);
+    remove_owner(&path);
+    assert!(!earlier_release_ended(
+        &inspect_state(&path).unwrap(),
+        STUCK_EXPIRED
+    ));
+    reject(current_binary(), &dir.0, scout(), "DISCOVERY_TRANSPORT");
+
+    let legacy = dir.0.join("legacy.json");
+    mcp::init(
+        serde_json::from_value(original["request"].clone()).unwrap(),
+        &legacy,
+        &dir.0.join("legacy-pack.json"),
+        &dir.0.join("legacy-receipt.json"),
+    )
+    .unwrap();
+    let mut saved = read(&legacy);
+    saved["producer_version"] = json!("0.1.7");
+    write(&legacy, &saved);
+    assert!(!earlier_release_ended(
+        &inspect_state(&legacy).unwrap(),
+        STUCK_EXPIRED
+    ));
+}
+
+#[test]
+fn earlier_discovery_expiry_is_recorded_once_with_the_guarded_action() {
+    let binary = current_binary();
+    let dir = Temp::new();
+    setup_with(binary, &dir.0);
+    let path = synthetic_stuck_run(&dir.0, "0.1.6", false, HOSTED_FINAL_ANSWERS[2]);
+    let before = fs::read(&path).unwrap();
+    let status = Command::new(binary)
+        .args(["status", "--json", "--brief", "--state"])
+        .arg(state(&dir.0))
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["counts"]["discovery_recovery"], 1);
+    assert_eq!(
+        status["refresh"]["blocker"],
+        "recorded-discovery-recovery-required"
+    );
+    assert!(
+        status["notices"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("rechecked from their saved checkpoints")
+    );
+
+    let mut invalid = scout();
+    invalid["max_seconds"] = json!(601);
+    reject(binary, &dir.0, invalid, "INVENTORY_EVIDENCE");
+    let output = command_with_flag(binary, &dir.0, scout(), Some("--brief"));
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.len() <= 4096);
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["status"]["counts"]["discovery_recovery"], 0);
+    assert_eq!(reply["status"]["counts"]["discovery_unfinished"], 1);
+    assert_eq!(
+        reply["status"]["refresh"]["blocker"],
+        "recorded-discovery-unfinished"
+    );
+    assert_eq!(reply["status"]["notices"][0]["severity"], "info");
+    assert_eq!(
+        reply["action"]["notices"],
+        json!([
+            {"severity":"info","code":"DISCOVERY_ALLOWANCE_EXPIRED","run_index":0}
+        ])
+    );
+    let stored = read(&state(&dir.0));
+    assert_eq!(stored["discovery_runs"][0]["status"], "failed");
+    assert_eq!(stored["scout_plan"]["max_seconds"], 60);
+    let failures = stored["failures"].as_array().unwrap();
+    assert_eq!(failures.len(), 1);
+    assert!(
+        failures[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("run_index 0 exhausted")
+    );
+    let repeat = call(binary, &dir.0, scout());
+    assert!(repeat["action"].get("notices").is_none());
+    assert_eq!(read(&state(&dir.0))["failures"], stored["failures"]);
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    let mut saved = read(&path);
+    saved["session"]["attempts"][0]["rejected_results"] = json!([]);
+    write(&path, &saved);
+    reject(binary, &dir.0, scout(), "MCP_STATE_PRODUCER");
+}
+
+#[test]
+fn exhausted_earlier_discovery_refuses_every_selected_lifecycle_action() {
+    let binary = current_binary();
+    let dir = Temp::new();
+    setup_with(binary, &dir.0);
+    let path = synthetic_stuck_run(&dir.0, "0.1.6", false, HOSTED_FINAL_ANSWERS[2]);
+    call(binary, &dir.0, scout());
+    let before = snapshot(&dir.0);
+    for action in [
+        json!({"kind":"resume-discovery","run_index":0}),
+        json!({"kind":"dispatch-discovery","run_index":0,"probe_id":"p-0000000000000000"}),
+        json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+        json!({"kind":"pause-discovery","run_index":0}),
+    ] {
+        reject(binary, &dir.0, action, "MCP_STATE_PRODUCER");
+    }
+    assert_eq!(
+        cqlmatic::mcp::settle_cancelled(&path, "unused", &path)
+            .unwrap_err()
+            .code,
+        "MCP_STATE_PRODUCER"
+    );
+    unchanged(&before);
+}
+
+#[test]
+fn exhausted_earlier_discovery_leaves_other_blockers_in_force() {
+    let binary = current_binary();
+    for blocker in ["refresh", "capability", "discovery"] {
+        let dir = Temp::new();
+        setup_with(binary, &dir.0);
+        if blocker == "capability" {
+            complete(binary, &dir.0, &prepare(binary, &dir.0, 4));
+        }
+        let path = synthetic_stuck_run(&dir.0, "0.1.7", true, HOSTED_FINAL_ANSWERS[2]);
+        let mut inventory = read(&state(&dir.0));
+        let history = inventory["discovery_runs"]
+            .as_array_mut()
+            .unwrap()
+            .pop()
+            .unwrap();
+        write(&state(&dir.0), &inventory);
+        let resume = match blocker {
+            "refresh" => {
+                let resume = route(binary, &dir.0, "resume-discovery");
+                let dispatch = route(binary, &dir.0, "dispatch-refresh");
+                call(binary, &dir.0, dispatch);
+                Some(resume)
+            }
+            "capability" => {
+                let dispatch = route(binary, &dir.0, "dispatch-capability");
+                call(binary, &dir.0, dispatch);
+                None
+            }
+            _ => {
+                answer(
+                    binary,
+                    &dir.0,
+                    &prepare(binary, &dir.0, 7),
+                    json!({"error":"Synthetic transport error"}),
+                );
+                None
+            }
+        };
+        let mut inventory = read(&state(&dir.0));
+        inventory["discovery_runs"]
+            .as_array_mut()
+            .unwrap()
+            .push(history);
+        write(&state(&dir.0), &inventory);
+        let before = fs::read(&path).unwrap();
+        reject(binary, &dir.0, scout(), "INVENTORY_INPUT");
+        if let Some(resume) = resume {
+            reject(binary, &dir.0, resume, "INVENTORY_INPUT");
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+}
+
+fn release_binary(variable: &str, version: &str) -> PathBuf {
+    let path = PathBuf::from(std::env::var_os(variable).unwrap_or_else(|| {
+        panic!("Set {variable} to the unmodified CQLmatic {version} executable")
+    }));
+    verify_binary(&path, version);
+    path
+}
+
+fn standalone_command(binary: &Path, path: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Output {
+    Command::new(binary)
+        .args(["env", "discover", "--mcp", "--state"])
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+#[ignore = "Set CQLMATIC_V016_BINARY and CQLMATIC_V017_BINARY to unmodified release executables"]
+fn genuine_earlier_discovery_exhausts_without_another_probe() {
+    const ALLOWANCE: i64 = 8;
+    for (version, variable) in [
+        ("0.1.6", "CQLMATIC_V016_BINARY"),
+        ("0.1.7", "CQLMATIC_V017_BINARY"),
+    ] {
+        let writer = release_binary(variable, version);
+        let dir = Temp::new();
+        setup_with(&writer, &dir.0);
+        let prepared = call(
+            &writer,
+            &dir.0,
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z",
+            "end":"2026-01-02T00:00:00Z","max_queries":5,"max_seconds":ALLOWANCE}),
+        );
+        let probe = prepared["action"]["relay"]["probes"][0]["probe_id"]
+            .as_str()
+            .unwrap();
+        call(
+            &writer,
+            &dir.0,
+            json!({"kind":"dispatch-discovery","probe_id":probe}),
+        );
+        let answer = dir.0.join("answer.json");
+        fs::write(&answer, HOSTED_FINAL_ANSWERS[2]).unwrap();
+        let stuck = call(
+            &writer,
+            &dir.0,
+            json!({"kind":"discovery-step","answers":[{"probe_id":probe,"result_file":answer}]}),
+        );
+        assert_eq!(stuck["action"]["relay"]["status"], "cleanup-pending");
+        let path = checkpoint(&dir.0, 0);
+        let original = fs::read(&path).unwrap();
+        let saved = read(&path);
+        assert_eq!(saved["producer_version"], version);
+        assert_eq!(
+            saved["session"]["attempts"][0]["outcome"],
+            "cleanup-pending"
+        );
+        assert_eq!(
+            saved["session"].get("inventory_owner").is_some(),
+            version == "0.1.7"
+        );
+        let expiry = cqlmatic::environment::parse_time(saved["created_at"].as_str().unwrap())
+            .unwrap()
+            + time::Duration::seconds(ALLOWANCE);
+        if let Ok(wait) = std::time::Duration::try_from(expiry - time::OffsetDateTime::now_utc()) {
+            std::thread::sleep(wait);
+        }
+        call(current_binary(), &dir.0, scout());
+        assert_eq!(
+            read(&state(&dir.0))["discovery_runs"][0]["status"],
+            "failed"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        let resume = || {
+            let output = if version == "0.1.6" {
+                standalone_command(&writer, &path, &["--resume"])
+            } else {
+                command(
+                    &writer,
+                    &dir.0,
+                    json!({"kind":"resume-discovery","run_index":0}),
+                )
+            };
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("\"probe_id\""),
+                "{output:?}"
+            );
+            output
+        };
+        let blocked = resume();
+        assert_eq!(blocked.status.code(), Some(2), "{blocked:?}");
+        let late = dir.0.join("late-answer.json");
+        write(&late, &json!({"result":[{"events":10}]}));
+        let output = standalone_command(
+            &writer,
+            &path,
+            &["--answer", &format!("{probe}={}", late.display())],
+        );
+        let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["status"], "failed", "{output:?}");
+        assert_eq!(reply["diagnostics"][0]["code"], "MCP_DEADLINE");
+        assert_eq!(reply["probes"], json!([]));
+        resume();
+
+        fs::write(&path, &original).unwrap();
+        let attempt = &saved["session"]["attempts"][0];
+        let proof = dir.0.join("cancelled.json");
+        write(
+            &proof,
+            &json!({"schema_version":1,"request_sha256":saved["request_sha256"],
+            "probe_id":probe,"repository":saved["request"]["environment"]["view"],
+            "query_sha256":cqlmatic::sha256_hex(attempt["probe"]["query"].as_str().unwrap().as_bytes()),
+            "start":attempt["probe"]["start"],"end":attempt["probe"]["end"],
+            "dispatched_at":attempt["dispatched_at"],"outcome":"cancelled","cleanup":"confirmed",
+            "caller_assertion":"exact-host-attempt-terminal-cleanup"}),
+        );
+        let output = standalone_command(
+            &writer,
+            &path,
+            &[
+                "--settle-cancelled",
+                &format!("{probe}={}", proof.display()),
+            ],
+        );
+        let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["status"], "paused", "{output:?}");
+        assert_eq!(reply["probes"], json!([]));
+        let expired = resume();
+        assert!(
+            String::from_utf8_lossy(&expired.stderr).contains("MCP_DEADLINE"),
+            "{expired:?}"
+        );
     }
 }
 
@@ -1012,12 +1660,7 @@ fn foreign_owner_must_still_match_locked_inventory() {
 }
 
 fn standalone(path: &Path, args: &[String]) -> Value {
-    let output = Command::new(old())
-        .args(["env", "discover", "--mcp", "--state"])
-        .arg(path)
-        .args(args)
-        .output()
-        .unwrap();
+    let output = standalone_command(old(), path, args);
     assert!(
         matches!(output.status.code(), Some(0 | 2 | 3)) && !output.stdout.is_empty(),
         "{output:?}"

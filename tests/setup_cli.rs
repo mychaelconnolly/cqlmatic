@@ -310,5 +310,11 @@ fn host_managed_import_requires_bound_report_and_exact_available_tool() {
     assert_eq!(verified.status.code(), Some(0));
     let verified: Value = serde_json::from_slice(&verified.stdout).unwrap();
     assert_eq!(verified["state"]["phase"], "tool-discovery-verified");
-    assert!(verified["handoff"].as_str().unwrap().contains("search-all"));
+    let handoff = verified["handoff"].as_str().unwrap();
+    assert!(handoff.contains("search-all"));
+    assert!(handoff.contains("set search_started_at to the answer's arrival time"));
+    assert!(handoff.contains("recorded_at is at least the retained provider lifetime later"));
+    assert!(handoff.contains("submit the answer as result_file and keep the case unknown"));
+    assert!(handoff.contains("ends a format-3 MCP discovery attempt and pauses the run"));
+    assert!(!handoff.contains("Discovery error answers still require settlement"));
 }

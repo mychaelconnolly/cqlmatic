@@ -597,6 +597,8 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     Ok(0)
 }
 
+const DISCOVERY_ALLOWANCE_EXPIRED: &str = "DISCOVERY_ALLOWANCE_EXPIRED";
+
 fn state_fingerprint(state: &InventoryState) -> Result<String, Diagnostic> {
     serde_json::to_vec(state)
         .map(|bytes| cqlmatic::sha256_hex(&bytes))
@@ -679,6 +681,7 @@ fn apply_and_store_with_work_budget(
             mcp::require_current_producer(&relay)
                 .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
         }
+        let mut ended_runs = Vec::new();
         if !relay_guards.is_empty() {
             // Validate every reference before durably associating pre-owner resumable checkpoints.
             for (index, run) in state.discovery_runs.iter().enumerate() {
@@ -695,8 +698,19 @@ fn apply_and_store_with_work_budget(
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
                 verify_run_reference(&state, run, &relay)
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
-                preflight_foreign_run(&state, &action, index, &relay, &writer)
-                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+                if preflight_foreign_run(&state, &action, index, &relay, &writer, &now)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
+                {
+                    ended_runs.push(index);
+                }
+            }
+            if !ended_runs.is_empty()
+                && matches!(&action, InventoryAction::ResumeDiscovery { .. })
+                && state.refresh_blocked()
+            {
+                return Err(fail(
+                    "Reconcile the unresolved refresh before resuming discovery.",
+                ));
             }
             for (index, relay) in relay_guards.iter().enumerate() {
                 mcp::bind_inventory_owner(relay, &writer)
@@ -730,6 +744,15 @@ fn apply_and_store_with_work_budget(
             } else {
                 (None, None)
             };
+        let mut notices = Vec::new();
+        for index in ended_runs {
+            if state.record_expired_discovery(index, &now) {
+                notices.push(json!({
+                    "code":DISCOVERY_ALLOWANCE_EXPIRED,"severity":"info","run_index":index,
+                    "message":format!("Earlier discovery run_index {index} was recorded as failed after exhausting its active-time allowance.")
+                }));
+            }
+        }
         let mut extra = apply(
             path,
             &mut state,
@@ -767,8 +790,11 @@ fn apply_and_store_with_work_budget(
         }
         if evidence_limited {
             extra["inventory_work_evidence_limited"] = json!(true);
-            extra["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
-            "message":"Discovery progress was saved. Some older evidence was omitted from automatic pending-work resolution because its verification budget was reached. Unproven work remains pending."}]);
+            notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
+            "message":"Discovery progress was saved. Some older evidence was omitted from automatic pending-work resolution because its verification budget was reached. Unproven work remains pending."}));
+        }
+        if !notices.is_empty() {
+            extra["notices"] = json!(notices);
         }
         if let Some(before) = before
             && before == state_fingerprint(&state)?
@@ -903,8 +929,21 @@ fn action_brief(action: &Value) -> Value {
             compact["cost"]["answer_bytes"] = json!(bytes);
         }
     }
+    let mut notices = Vec::new();
     if action["inventory_work_evidence_limited"] == true {
-        compact["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}]);
+        notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}));
+    }
+    if let Some(index) = action["notices"].as_array().and_then(|notices| {
+        notices
+            .iter()
+            .filter(|notice| notice["code"] == DISCOVERY_ALLOWANCE_EXPIRED)
+            .find_map(|notice| notice["run_index"].as_u64())
+    }) {
+        notices
+            .push(json!({"code":DISCOVERY_ALLOWANCE_EXPIRED,"severity":"info","run_index":index}));
+    }
+    if !notices.is_empty() {
+        compact["notices"] = json!(notices);
     }
     compact
 }
@@ -1376,7 +1415,10 @@ fn check_discovery_predecessor(state: &InventoryState, index: usize) -> Result<(
     Ok(())
 }
 
-fn check_retained_run(relay: &mcp::State) -> Result<(), Diagnostic> {
+fn check_retained_run(relay: &mcp::State, earlier_ended: bool) -> Result<(), Diagnostic> {
+    if earlier_ended {
+        return Ok(());
+    }
     if mcp::has_in_flight(relay)
         || matches!(
             relay.status.as_str(),
@@ -1402,18 +1444,21 @@ fn preflight_foreign_run(
     index: usize,
     relay: &mcp::State,
     owner: &storage::Writer,
-) -> Result<(), Diagnostic> {
+    now: &str,
+) -> Result<bool, Diagnostic> {
     let owned = mcp::inspect_inventory_owner(relay, owner)?;
     let Err(version) = mcp::require_current_producer(relay) else {
-        return Ok(());
+        return Ok(false);
     };
+    let earlier_ended = mcp::earlier_release_ended(relay, now);
     if mcp::is_resumable(relay)
         && !matches!(relay.status.as_str(), "activated" | "failed")
         && !owned
+        && !earlier_ended
     {
         return Err(version);
     }
-    check_retained_run(relay).map_err(|mut diagnostic| {
+    check_retained_run(relay, earlier_ended).map_err(|mut diagnostic| {
         diagnostic.message.push(' ');
         diagnostic.message.push_str(&version.message);
         diagnostic
@@ -1460,13 +1505,14 @@ fn preflight_foreign_run(
             ));
         }
     }
-    Ok(())
+    Ok(earlier_ended)
 }
 
 fn check_retained_searches(
     state: &InventoryState,
     request: Option<&discovery::DiscoverRequest>,
     selected_run: Option<usize>,
+    now: &str,
 ) -> Result<(), Diagnostic> {
     if state.capability_blocked() {
         return Err(fail(
@@ -1501,7 +1547,7 @@ fn check_retained_searches(
         if selected_run == Some(index) {
             continue;
         }
-        check_retained_run(&relay)
+        check_retained_run(&relay, mcp::earlier_release_ended(&relay, now))
             .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
         if relay.status == "paused"
             && mcp::is_resumable(&relay)
@@ -1577,7 +1623,7 @@ fn apply(
                     "Reconcile the outstanding refresh before optional capability checks.",
                 ));
             }
-            check_retained_searches(state, None, None)?;
+            check_retained_searches(state, None, None, now)?;
             for previous in &state.capability_runs {
                 if previous.execution_context_id == execution_context_id
                     && previous.session_id == session_id
@@ -1628,7 +1674,7 @@ fn apply(
                     "Reconcile the outstanding refresh before a capability search.",
                 ));
             }
-            check_retained_searches(state, None, None)?;
+            check_retained_searches(state, None, None, now)?;
             let bytes = serde_json::to_vec_pretty(state)
                 .map_err(|_| fail("Cannot preflight capability capture capacity."))?;
             if bytes.len() as u64 + (mcp::MAX_RESULT_BYTES as u64 * 2) + 4 * 1024 * 1024
@@ -1704,7 +1750,7 @@ fn apply(
                     "Reconcile the outstanding refresh before resuming capability checks.",
                 ));
             }
-            check_retained_searches(state, None, None)?;
+            check_retained_searches(state, None, None, now)?;
             let run = state
                 .capability_runs
                 .iter_mut()
@@ -1758,7 +1804,7 @@ fn apply(
             host_evidence_file,
             automatic,
         } => {
-            check_retained_searches(state, None, None)?;
+            check_retained_searches(state, None, None, now)?;
             distinct_from_state(path, Path::new(&host_evidence_file))?;
             let raw = observation_input(Path::new(&host_evidence_file), 64 * 1024)?;
             let id = state.prepare_refresh(session_id, &raw, automatic, now)?;
@@ -1772,7 +1818,7 @@ fn apply(
             attempt_id,
             session_id,
         } => {
-            check_retained_searches(state, None, None)?;
+            check_retained_searches(state, None, None, now)?;
             let arguments = state.dispatch_refresh(&attempt_id, &session_id, now)?;
             let max_seconds = state
                 .refresh_attempts
@@ -1867,7 +1913,7 @@ fn apply(
             end,
             max_seconds,
         } => {
-            check_retained_searches(state, None, None)?;
+            check_retained_searches(state, None, None, now)?;
             if state.refresh_blocked() {
                 return Err(fail(
                     "Reconcile the unresolved refresh before preparing a new search.",
@@ -2075,7 +2121,7 @@ fn apply(
                 max_queries,
                 max_seconds,
             )?;
-            check_retained_searches(state, Some(&request), None)?;
+            check_retained_searches(state, Some(&request), None, now)?;
             let prior = cumulative_pack(state)?;
             let run_dir = snapshot_directory(path, "discovery", state.discovery_runs.len() + 1)?;
             let relay = run_dir.join("relay-state.json");
@@ -2247,7 +2293,7 @@ fn apply(
             let request = mcp::inspect_state(Path::new(&selected.state_path))
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?
                 .request;
-            check_retained_searches(state, Some(&request), Some(run_index))?;
+            check_retained_searches(state, Some(&request), Some(run_index), now)?;
             check_discovery_predecessor(state, run_index)?;
             let run = state
                 .discovery_runs
@@ -2285,7 +2331,7 @@ fn apply(
                     "Reconcile outstanding capability termination before resuming discovery.",
                 ));
             }
-            check_retained_searches(state, None, Some(run_index))?;
+            check_retained_searches(state, None, Some(run_index), now)?;
             check_discovery_predecessor(state, run_index)?;
             let run = state
                 .discovery_runs
