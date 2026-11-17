@@ -380,6 +380,13 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
             "source-bound explicit population batches; sampled fields use the sample window and unsampled fields use the full request window"
         );
     }
+    if let Some((low, high)) = expected_searches(r) {
+        // An estimate for sources that hold events; the query limit always applies.
+        result["searches"] = json!({"expected_low":low.min(r.max_queries),"limit":r.max_queries});
+        if let Some(high) = high {
+            result["searches"]["expected_high"] = json!(high.min(r.max_queries));
+        }
+    }
     if r.depth.is_full() {
         result["deferred_stages"].as_array_mut().expect("stages are an array").push(json!("one source-bound full-window fieldset fallback when positive source volume has an empty recent sample; affected population, tag and value probes use that full window"));
     }
@@ -1015,6 +1022,54 @@ fn stratified_source(
     }
     Ok(SourceProgress::Complete(measured))
 }
+/// Expected searches for a run whose sources hold events, counted with the builders the
+/// frontier uses: the fewest, and the most when that can be stated before the first answers.
+/// A census names its own sources, so it has no figure; an uncapped field run measures every
+/// field it finds, so it has no upper figure.
+pub fn expected_searches(r: &DiscoverRequest) -> Option<(u32, Option<u32>)> {
+    if r.census {
+        return None;
+    }
+    let (mut low, mut high) = (0, Some(0));
+    for s in &r.sources {
+        if r.depth == DiscoveryDepth::SourcesOnly {
+            low += 1;
+            high = high.map(|high| high + 1);
+            continue;
+        }
+        let fixed = base_probes(r, s).ok()?.len()
+            + tag_probes(r, s, false).ok()?.len()
+            + r.value_fields.len();
+        // Fields are measured in chunks, over the sample window, the whole window or both.
+        let selected = field_selection(r, s).map(|fields| fields.len().max(1));
+        low += fixed + selected.unwrap_or(1).div_ceil(POPULATION_CHUNK);
+        high = match (high, selected.or(r.max_population_fields_per_source)) {
+            (Some(high), Some(fields)) => {
+                // A capped run takes its dataset facet from the base measurement.
+                let kinds = record_kind_candidates(r)
+                    .into_iter()
+                    .filter(|field| {
+                        r.max_population_fields_per_source.is_none() || *field != "#event.dataset"
+                    })
+                    .count();
+                // One more search when the sample window lists no fields, then every kind
+                // facet and rare-kind field listing.
+                Some(
+                    high + fixed
+                        + 1
+                        + kinds
+                        + RARE_KIND_LIMIT
+                        + fields.div_ceil(POPULATION_CHUNK)
+                        + 1,
+                )
+            }
+            _ => None,
+        };
+    }
+    let count = |searches: usize| u32::try_from(searches).unwrap_or(u32::MAX);
+    Some((count(low), high.map(count)))
+}
+
 /// List the reachable, unanswered measurements using the same builders as execution.
 pub fn frontier(
     r: &DiscoverRequest,

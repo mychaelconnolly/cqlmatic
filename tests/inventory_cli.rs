@@ -743,11 +743,24 @@ fn relay(
 ) -> Value {
     let mut populated = Vec::new();
     for round in 0..8 {
+        // Every relay response counts its searches against the run's limit.
+        let relay = &progress["action"]["relay"];
+        let searches = &relay["cost"]["searches"];
+        assert_eq!(
+            searches["ready"],
+            relay["probes"].as_array().unwrap().len(),
+            "{progress}"
+        );
+        assert_eq!(searches["limit"], relay["max_queries"], "{progress}");
+        assert!(searches["used"].as_u64() <= searches["limit"].as_u64());
+        assert!(relay["cost"]["answer_bytes"].is_u64(), "{progress}");
         if progress["action"]["relay"]["status"] != "needs-probes" {
             assert_eq!(
                 progress["action"]["relay"]["status"], "complete",
                 "{progress}"
             );
+            assert!(searches["used"].as_u64() > Some(0), "{progress}");
+            assert!(relay["cost"]["answer_bytes"].as_u64() > Some(0));
             if let Some(expected) = expected_population {
                 populated.sort();
                 let mut expected = expected.to_vec();

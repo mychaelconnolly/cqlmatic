@@ -562,12 +562,36 @@ pub struct VerifiedCompletion {
     pub predecessor_pack_sha256: Option<String>,
 }
 
+/// What a run has used and is expected to need, in searches and answer bytes.
+#[derive(Debug, Serialize)]
+pub struct Cost {
+    pub searches: Searches,
+    /// Bytes of every answer handed back so far.
+    pub answer_bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Searches {
+    /// Searches charged to the run, whatever their outcome.
+    pub used: usize,
+    /// Searches this response asks for.
+    pub ready: usize,
+    /// Expected total for sources that hold events, within `limit`; absent when it cannot be
+    /// stated before the first answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_low: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_high: Option<u32>,
+    pub limit: u32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StepOutput {
     pub mode: &'static str,
     pub status: &'static str,
     pub answered: usize,
     pub max_queries: u32,
+    pub cost: Cost,
     pub probes: Vec<Value>,
     pub active_pack_updated: bool,
     pub diagnostics: Vec<Diagnostic>,
@@ -1120,6 +1144,33 @@ fn wire_probes(state: &State, probes: Vec<Probe>) -> Vec<Value> {
         })
         .collect()
 }
+fn cost(state: &State, ready: usize) -> Cost {
+    let limit = state.request.max_queries;
+    let expected = discovery::expected_searches(&state.request);
+    Cost {
+        searches: Searches {
+            used: state
+                .session
+                .as_ref()
+                .map_or(state.answers.len(), |session| session.attempts_len()),
+            ready,
+            expected_low: expected.map(|(low, _)| low.min(limit)),
+            expected_high: expected
+                .and_then(|(_, high)| high)
+                .map(|high| high.min(limit)),
+            limit,
+        },
+        answer_bytes: state
+            .answers
+            .values()
+            .map(|answer| answer.raw_hex.len() / 2)
+            .sum::<usize>()
+            + state
+                .session
+                .as_ref()
+                .map_or(0, |session| session.answer_bytes()),
+    }
+}
 fn progress(
     state: &State,
     status: &'static str,
@@ -1140,6 +1191,7 @@ fn progress(
         status,
         answered: state.answers.len() + state.session.as_ref().map_or(0, |s| s.captures.len()),
         max_queries: state.request.max_queries,
+        cost: cost(state, probes.len()),
         probes: wire_probes(state, probes),
         active_pack_updated,
         diagnostics,
