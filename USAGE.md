@@ -155,6 +155,8 @@ Empty/whitespace input and `*` are valid match-all checks. Static acceptance doe
 
 `groupBy(..., limit=max)` emits informational `CQL_GROUPBY_LIMIT`; numeric or omitted grouping limits warn. Therefore `--fail-on-warning` does not reject the informational form. Group and memory ceilings still apply.
 
+Performance notes are informational too. `ComputerName=a | #event_simpleName=ProcessRollup2` reports `CQL_TAG_FILTER_ORDER`, and `y := lower(a) | ComputerName=b` reports `CQL_FILTER_AFTER_TRANSFORM`: filter on `#` fields first and transform last. `CQL_SORT_COST`, `CQL_SPLIT_COST`, `CQL_WILDCARD_IGNORE_CASE` and `CQL_REGEX_ALL_FIELDS` cover single stages; see [coverage](docs/COVERAGE.md).
+
 ## Assess saved results
 
 Choose exactly one of `--request FILE`, `--jsonl`, or the pair `--query-file FILE --result FILE`. Optional flags are `--pack FILE`, `--inventory-state FILE` and `--json`; generation/check policy flags do not apply. Assessment reuses a matching inventory's active pack unless an explicit pack is selected, and never saves leads or converts the query ledger into population rates.
