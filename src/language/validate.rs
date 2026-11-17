@@ -44,7 +44,7 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
     if checker.definitions > 0 && checker.joins {
         checker.emit(
             "CQL_TABLE_JOIN_CONFLICT",
-            "defineTable cannot be combined with join or selfJoinFilter.",
+            "defineTable cannot be combined with join, selfJoin or selfJoinFilter.",
             None,
             false,
         );
@@ -87,6 +87,157 @@ enum QueryContext {
     Aggregation,
     Subaggregate,
 }
+
+/// What the stages of one query have done so far, for notes about stage order and cost.
+#[derive(Default)]
+struct StageOrder {
+    /// An earlier stage is not a per-event step with listed outputs, so no filter can be
+    /// said to belong before it.
+    fixed_order: bool,
+    /// A stage other than a tag filter or a declaration has run.
+    past_tag_filters: bool,
+    transformed: bool,
+    /// An earlier stage may have removed events.
+    filtered: bool,
+    /// Leading names of the fields earlier stages wrote, renamed or were given.
+    touched: BTreeSet<String>,
+    tag_noted: bool,
+    filter_noted: bool,
+}
+
+impl StageOrder {
+    fn notes(&mut self, step: &Step, narrowed: bool) -> Vec<(&'static str, &'static str)> {
+        let mut notes = vec![];
+        match step {
+            Step::Filter(filter) => {
+                let mut fields = vec![];
+                let comparisons = compared_fields(filter, &mut fields);
+                let tags_only = comparisons && fields.iter().all(|field| field.starts_with('#'));
+                // Only a whole filter that reads nothing an earlier stage touched, and writes
+                // nothing itself, gives the same result when it runs earlier.
+                let movable = comparisons
+                    && !self.fixed_order
+                    && !has_capture_marker(filter)
+                    && !fields.iter().any(|field| {
+                        // A failing function reports through the @error fields.
+                        field.starts_with("@error") || self.touched.contains(leading_name(field))
+                    });
+                if movable && tags_only && self.past_tag_filters && !self.tag_noted {
+                    self.tag_noted = true;
+                    notes.push((
+                        "CQL_TAG_FILTER_ORDER",
+                        "Tag filters select the data that is searched. Put filters on #-fields before other filters and transformations.",
+                    ));
+                }
+                if movable
+                    && self.transformed
+                    && !self.filter_noted
+                    && !fields.iter().any(|field| field.starts_with('#'))
+                {
+                    self.filter_noted = true;
+                    notes.push((
+                        "CQL_FILTER_AFTER_TRANSFORM",
+                        "This filter reads only fields that the preceding transformations did not write. Filter first, so that the transformations run on fewer events.",
+                    ));
+                }
+                // After a transformation a named field may no longer hold the event's own value.
+                if narrowed && !self.transformed && unfielded_regex(filter) {
+                    notes.push((
+                        "CQL_REGEX_ALL_FIELDS",
+                        "A regex with no field searches the fields of each event, which is slower than a regex on one field. If the text is in a known field, field=/regex/ is faster.",
+                    ));
+                }
+                let mut calls = vec![];
+                filter_calls(filter, &mut calls);
+                if calls.iter().any(|call| case_insensitive_wildcard(call)) {
+                    notes.push(WILDCARD_IGNORE_CASE);
+                }
+                self.past_tag_filters |= !tags_only;
+                self.filtered = true;
+                self.fixed_order |= !calls.is_empty();
+                for pattern in positive_regexes(filter) {
+                    for capture in regex_captures(pattern) {
+                        self.touched.insert(leading_name(&capture).into());
+                    }
+                }
+            }
+            Step::Assign { field, value } => {
+                self.past_tag_filters = true;
+                self.transformed = true;
+                self.touched.insert(leading_name(field).into());
+                if let Value::Call(call) = value {
+                    self.touch_call(call);
+                }
+            }
+            Step::Call(call) => {
+                let resolved = catalog::resolve(call);
+                let effect = resolved
+                    .as_ref()
+                    .map(|resolved| resolved.function.resolved_effect(&resolved.arguments));
+                if effect == Some(Effect::Definition) {
+                    return notes;
+                }
+                let name = resolved.as_ref().map(|resolved| resolved.function.name);
+                if !self.filtered && name == Some("sort") {
+                    notes.push((
+                        "CQL_SORT_COST",
+                        "sort works in memory and no earlier stage filters the events it sorts. Narrow the events before sorting where the query allows, or sort after an aggregate.",
+                    ));
+                }
+                if !self.filtered && name == Some("split") {
+                    notes.push((
+                        "CQL_SPLIT_COST",
+                        "split copies the other fields of an event for every array element and no earlier stage filters the events. Filter on other fields before the split where the query allows.",
+                    ));
+                }
+                if case_insensitive_wildcard(call) {
+                    notes.push(WILDCARD_IGNORE_CASE);
+                }
+                self.past_tag_filters = true;
+                // A function may drop the events it cannot process.
+                self.filtered = true;
+                if effect == Some(Effect::Transform) {
+                    self.transformed = true;
+                    self.touch_call(call);
+                } else {
+                    self.fixed_order = true;
+                }
+            }
+            _ => {
+                self.past_tag_filters = true;
+                self.filtered = true;
+                self.fixed_order = true;
+            }
+        }
+        notes
+    }
+
+    /// Records what a call writes and every name it is given, since a transformation may
+    /// rename, remove or overwrite its inputs.
+    fn touch_call(&mut self, call: &Call) {
+        match catalog::output_writes(call) {
+            // lowercase can rename fields by locale rules that are not modelled here.
+            Some(writes)
+                if !call.name.eq_ignore_ascii_case("lowercase")
+                    && writes.dynamic_prefix.is_none()
+                    && !(writes.fields.is_empty() && writes.required.is_empty()) =>
+            {
+                for name in writes.fields.iter().chain(&writes.required) {
+                    self.touched.insert(leading_name(name).into());
+                }
+            }
+            _ => self.fixed_order = true,
+        }
+        for argument in &call.args {
+            named_values(&argument.value, &mut self.touched);
+        }
+    }
+}
+
+const WILDCARD_IGNORE_CASE: (&str, &str) = (
+    "CQL_WILDCARD_IGNORE_CASE",
+    "A case-insensitive wildcard search can take up to twice as long. Set ignoreCase=true only when the case varies.",
+);
 
 #[derive(Clone, Default)]
 struct PipelineState {
@@ -335,6 +486,11 @@ impl Checker<'_> {
             mut projected,
         } = state.clone();
         let mut mandatory_link = false;
+        // Order notes apply to a query's own stages, not to function arguments or branches.
+        let mut order = (context == QueryContext::Plain
+            && self.enclosed_queries == 0
+            && self.aggregate_parents.is_empty())
+        .then(StageOrder::default);
         for (index, original_step) in p.steps.iter().enumerate() {
             for (_, advice) in p.advisories.iter().filter(|(stage, _)| *stage == index) {
                 if after_aggregate
@@ -417,6 +573,19 @@ impl Checker<'_> {
                         Some(call),
                         false,
                     );
+                }
+            }
+            if aggregated || replaced || synthetic {
+                order = None;
+            }
+            if let Some(order) = &mut order {
+                for (code, message) in order.notes(step, narrowed) {
+                    let call = if let Step::Call(call) = step {
+                        Some(call)
+                    } else {
+                        None
+                    };
+                    self.info(code, message, call);
                 }
             }
             match step {
@@ -1451,7 +1620,7 @@ impl Checker<'_> {
                 false,
             );
         }
-        self.joins |= matches!(spec.name, "join" | "selfJoinFilter");
+        self.joins |= matches!(spec.name, "join" | "selfJoin" | "selfJoinFilter");
         self.join_seen |= spec.name == "join";
         self.correlation_seen |= spec.name == "correlate";
         if matches!(spec.name, "match" | "matchAsArray" | "readFile")
@@ -3398,6 +3567,82 @@ fn narrowing_filter(filter: &Filter) -> bool {
         Filter::Or(filters) => !filters.is_empty() && filters.iter().all(narrowing_filter),
         Filter::Call(call) => narrowing_call(call),
         _ => false,
+    }
+}
+
+/// Collects the compared fields; false when the filter holds anything but field comparisons.
+fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
+    match filter {
+        Filter::Compare { field, .. } => {
+            fields.push(field);
+            true
+        }
+        Filter::And(filters) | Filter::Or(filters) => {
+            filters.iter().all(|filter| compared_fields(filter, fields))
+        }
+        Filter::Not(filter) => compared_fields(filter, fields),
+        _ => false,
+    }
+}
+
+fn filter_calls<'a>(filter: &'a Filter, calls: &mut Vec<&'a Call>) {
+    match filter {
+        Filter::Call(call) => calls.push(call),
+        Filter::And(filters) | Filter::Or(filters) => {
+            for filter in filters {
+                filter_calls(filter, calls);
+            }
+        }
+        Filter::Not(filter) => filter_calls(filter, calls),
+        _ => {}
+    }
+}
+
+fn unfielded_regex(filter: &Filter) -> bool {
+    match filter {
+        Filter::Text(Pattern::Regex { .. }) => true,
+        Filter::And(filters) | Filter::Or(filters) => filters.iter().any(unfielded_regex),
+        Filter::Not(filter) => unfielded_regex(filter),
+        _ => false,
+    }
+}
+
+fn case_insensitive_wildcard(call: &Call) -> bool {
+    catalog::resolve(call).is_some_and(|resolved| {
+        resolved.function.name == "wildcard"
+            // Case can only matter to a pattern that holds a letter.
+            && resolved
+                .arguments
+                .get("pattern")
+                .and_then(|value| value.text())
+                .is_some_and(|pattern| pattern.chars().any(char::is_alphabetic))
+            && resolved
+                .arguments
+                .get("ignoreCase")
+                .is_some_and(|value| match value {
+                    Value::Bool(value) => *value,
+                    Value::Word(text) | Value::String(text) => text == "true",
+                    _ => false,
+                })
+    })
+}
+
+/// The part of a field name before its first member or element, as in `a` for `a[0].b`.
+fn leading_name(field: &str) -> &str {
+    &field[..field.find(['[', '.']).unwrap_or(field.len())]
+}
+
+fn named_values(value: &Value, names: &mut BTreeSet<String>) {
+    match value {
+        Value::Word(text) | Value::String(text) => {
+            names.insert(leading_name(text).into());
+        }
+        Value::Array(values) => {
+            for value in values {
+                named_values(value, names);
+            }
+        }
+        _ => {}
     }
 }
 

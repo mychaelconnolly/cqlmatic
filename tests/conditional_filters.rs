@@ -253,6 +253,15 @@ fn join_functions_are_top_level_in_their_own_query() {
     let nested =
         "x=1 | join({y=1 | groupBy(k, function={join({z=1}, field=k) | count()})}, field=k)";
     rejected(nested, "CQL_JOIN_PLACEMENT");
+    // A table query is no place for any join function.
+    rejected(
+        r#"defineTable({selfJoin(k, where=[{a=1},{b=2}])}, name="t", include=k) | match(table=t, field=k)"#,
+        "CQL_TABLE_JOIN_CONFLICT",
+    );
+    rejected(
+        r#"defineTable({a=1}, name="t", include=k) | selfJoin(k, where=[{a=1},{b=2}]) | match(table=t, field=k)"#,
+        "CQL_TABLE_JOIN_CONFLICT",
+    );
     assert_eq!(
         check(nested)
             .diagnostics
