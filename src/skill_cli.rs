@@ -3,7 +3,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use cqlmatic::contracts::Diagnostic;
 use std::{
     env, fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -175,7 +175,7 @@ fn write(path: &Path, text: &str, written: &mut Written) -> Result<(), Diagnosti
         }
         Err(_) => false,
     };
-    if exists && fs::read(path).is_ok_and(|current| current == text.as_bytes()) {
+    if exists && same(path, text) {
         written.unchanged += 1;
         return Ok(());
     }
@@ -201,6 +201,16 @@ fn write(path: &Path, text: &str, written: &mut Written) -> Result<(), Diagnosti
         written.created += 1;
     }
     Ok(())
+}
+
+/// Whether the file already holds exactly `text`, reading no more than one byte past its length.
+fn same(path: &Path, text: &str) -> bool {
+    let mut current = Vec::with_capacity(text.len() + 1);
+    fs::File::open(path).is_ok_and(|file| {
+        file.take(text.len() as u64 + 1)
+            .read_to_end(&mut current)
+            .is_ok()
+    }) && current == text.as_bytes()
 }
 
 /// The text of a bundled file as installed: links to bundled guides stay local, and every
@@ -464,6 +474,17 @@ mod tests {
             }
         );
         assert_eq!(fs::read(skill.join("notes.md")).unwrap(), b"kept");
+        let longer = installed(SKILL_SOURCE, SKILL) + "appended";
+        fs::write(skill.join("SKILL.md"), &longer).unwrap();
+        assert!(!same(
+            &skill.join("SKILL.md"),
+            &installed(SKILL_SOURCE, SKILL)
+        ));
+        assert_eq!(install(&root).unwrap().updated, 1);
+        assert!(same(
+            &skill.join("SKILL.md"),
+            &installed(SKILL_SOURCE, SKILL)
+        ));
         let leftovers: Vec<_> = fs::read_dir(&skill)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
