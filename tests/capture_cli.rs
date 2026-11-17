@@ -796,3 +796,80 @@ fn a_state_holding_captures_among_its_imports_still_loads() {
     assert_eq!(state["query_observations"].as_array().unwrap().len(), 1);
     assert_eq!(state["captured_observations"].as_array().unwrap().len(), 1);
 }
+
+/// `cat` stands in for a server: it answers with whatever arrives, so the answer is sent too.
+#[cfg(unix)]
+#[test]
+fn pass_through_relays_every_message_unchanged_and_records_a_finished_search() {
+    let dir = Temp::new();
+    dir.confirm();
+    let call = |id: u64, query: &str| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "falcon_search_ngsiem",
+            "arguments": {
+                "repository": "third-party", "query_string": query,
+                "start": hours_ago(2), "end": hours_ago(1)
+            }
+        }})
+    };
+    let answer = |id: u64, rows: Value| {
+        json!({"jsonrpc": "2.0", "id": id, "result": {
+            "content": [{"type": "text", "text": body(rows)}], "isError": false, "_meta": {}
+        }})
+    };
+    let messages = [
+        json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}).to_string(),
+        "not JSON at all".to_owned(),
+        call(1, "#type=synthetic | head(5)").to_string(),
+        call(2, "#type=synthetic | count()").to_string(),
+        answer(1, json!([{"user": "ann"}])).to_string(),
+        answer(2, json!([{"_count": "1"}])).to_string(),
+        json!({"jsonrpc": "2.0", "id": 3, "error": {"code": -32601, "message": "x"}}).to_string(),
+    ];
+    let input = messages
+        .iter()
+        .map(|message| format!("{message}\n"))
+        .collect::<String>();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["env", "pass-through", "--state"])
+        .arg(dir.state())
+        .args(["--", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), input);
+
+    let state = dir.saved();
+    assert_eq!(state["captured_observations"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        state["captured_observations"][0]["fields"][0]["field"],
+        "user"
+    );
+    assert_eq!(dir.tally(), json!({"recorded": 1, "not-creditable": 1}));
+
+    // A server command that cannot start is reported, not passed through.
+    let missing = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args([
+            "env",
+            "pass-through",
+            "--",
+            "cqlmatic-no-such-server-command",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(missing.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("PASS_THROUGH"));
+}

@@ -11,7 +11,8 @@ CQLmatic is a modular monolith in one Cargo package. The executable is the suppo
 | `setup` | Strict named-native or external selection, preview plans, phases and saved discovery evidence | None |
 | `setup_cli` | Native-client detection/commands, guarded Copilot configuration writes, external report import, protected setup state/backups and terminal flow | Filesystem/native processes |
 | `skill_cli` | Bundled agent skill and its linked guides, written into a client's skill directory | Filesystem |
-| `capture_cli` | Client hook payloads read into query observations and pending inventory work | Filesystem |
+| `capture_cli` | Client hook payloads read into captured observations and pending inventory work | Filesystem |
+| `pass_through_cli` | MCP server command run with its messages passed through and finished searches recorded | Child process, filesystem |
 | `inventory` | Strict inventory actions, source/parser review, conservative declarations and completion assessment | None |
 | `inventory_cli` | Inventory/status adapters, parser API reads, saved evidence import and cumulative-pack activation | Filesystem, parser API, relay adapters |
 | `contracts` | Strict versioned requests, semantic plan, result types | None |
