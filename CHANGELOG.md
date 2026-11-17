@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cqlmatic skill install --client CLIENT` writes the agent skill into the selected client's user-level skill directory: `claude-code` uses `~/.claude/skills`, and `codex`, `vs-code` and the Copilot surfaces use `~/.agents/skills`; `CLAUDE_CONFIG_DIR` and `COPILOT_HOME` relocate their clients. `--dir DIR` targets another host. The installed `cqlmatic-companion` folder holds `SKILL.md` and every guide it links to, so the skill reads the same without the source tree. A verified setup names the command for its client in `next_actions`. In 0.1.8 the skill shipped only as a source file with links that resolved inside the repository.
 - On Windows, protection checks for existing private directories and files are made through direct system calls. 0.1.8 started PowerShell for each check, so inventory and discovery commands that verify many paths run faster. The owner, access-rule and ancestor conditions and the `SETUP_PROTECTION` diagnostics are unchanged. Creating a private directory still uses the fixed PowerShell helper.
 
 ## 0.1.8

@@ -1029,7 +1029,12 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
             next_actions.push("Ask the selected host session to report its effective OAuth client ID and configuration source, then save tool discovery for this exact client/server/endpoint; import it to confirm falcon_search_ngsiem is available.".into());
         }
         SetupPhase::Authenticated => next_actions.push("Authentication was reported, but falcon_search_ngsiem is not available. Check the selected host's effective server, Falcon roles, enabled tools and consent, then import a fresh bound report.".into()),
-        SetupPhase::ToolDiscoveryVerified => next_actions.push("Paste the provided handoff into your selected host agent. In cqlmatic env inventory Settings, choose persistent Quick or Full discovery: Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can cost more time and model tokens. Confirm the target, window, finite budget and authorization before searches. Settings can switch to Full later without discarding saved evidence.".into()),
+        SetupPhase::ToolDiscoveryVerified => {
+            next_actions.push("Paste the provided handoff into your selected host agent. In cqlmatic env inventory Settings, choose persistent Quick or Full discovery: Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can cost more time and model tokens. Confirm the target, window, finite budget and authorization before searches. Settings can switch to Full later without discarding saved evidence.".into());
+            if let Some(s) = selected {
+                next_actions.push(skill_install_hint(s.client).into());
+            }
+        }
         SetupPhase::AdvancedPending => next_actions.push("Advanced API-client mode remains pending. Configure the native client's approved service plugin in its protected UI. Use the minimum read scopes; setup never reads your credential reference, obtains tokens, or manages MCP transport.".into()),
     }
     if let Some(s) = selected {
@@ -1068,6 +1073,31 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
         SourceMetadata { reviewed_on: HOST_SOURCES_REVIEWED.into(), title: "VS Code Copilot MCP".into(), url: "https://code.visualstudio.com/docs/agent-customization/mcp-servers".into(), uncertainty: "Copilot and Local harness configuration destinations differ; select and inspect the intended harness.".into() },
         SourceMetadata { reviewed_on: HOST_SOURCES_REVIEWED.into(), title: "GitHub CLI Copilot launcher".into(), url: "https://cli.github.com/manual/gh_copilot".into(), uncertainty: "gh copilot launches Copilot CLI and can download it when absent; CQLmatic never invokes this launcher.".into() },
     ] }
+}
+fn skill_install_hint(client: ClientKind) -> &'static str {
+    match client {
+        ClientKind::Codex => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --client codex."
+        }
+        ClientKind::VsCode => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --client vs-code."
+        }
+        ClientKind::ClaudeCode => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --client claude-code."
+        }
+        ClientKind::CopilotCli => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --client copilot-cli."
+        }
+        ClientKind::CopilotApp => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --client copilot-app."
+        }
+        ClientKind::CopilotVscode => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --client copilot-vscode."
+        }
+        ClientKind::External => {
+            "Give the agent its CQLmatic skill: run cqlmatic skill install --dir with the host's user-level skill directory."
+        }
+    }
 }
 fn host_setup_hint(client: ClientKind) -> &'static str {
     match client {

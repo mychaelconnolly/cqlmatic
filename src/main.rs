@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 mod inventory_cli;
 mod setup_cli;
+mod skill_cli;
 mod terminal;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cqlmatic::{
@@ -75,6 +76,11 @@ enum Command {
     Env {
         #[command(subcommand)]
         command: EnvCommand,
+    },
+    /// Install the bundled agent skill for a supported client.
+    Skill {
+        #[command(subcommand)]
+        command: skill_cli::SkillCommand,
     },
 }
 #[derive(Args)]
@@ -1886,8 +1892,9 @@ fn main() -> ExitCode {
             Some(Command::Assess(args)) => assess(args),
             Some(Command::Catalog(args)) => catalog(args),
             Some(Command::Env { command }) => env(command),
+            Some(Command::Skill { command }) => skill_cli::run(command),
             None => Err(input_error(
-                "Choose setup, status, generate, check, assess, catalog, env, or --schema. Use --help for details.",
+                "Choose setup, status, generate, check, assess, catalog, env, skill, or --schema. Use --help for details.",
             )),
         }
     };

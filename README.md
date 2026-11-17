@@ -120,7 +120,7 @@ To build from source, clone the repository or extract the source release, instal
 ./target/release/cqlmatic setup
 ```
 
-See [development](docs/DEVELOPMENT.md) for native Windows commands. Ask your assistant to follow [the companion workflow](docs/MCP-COMPANION.md), then run inventory and inspect `cqlmatic status` before writing environment-specific queries.
+See [development](docs/DEVELOPMENT.md) for native Windows commands. After setup, run `cqlmatic skill install --client CLIENT` to [give your assistant its skill](docs/SETUP.md#install-the-agent-skill), which follows [the companion workflow](docs/MCP-COMPANION.md). Then run inventory and inspect `cqlmatic status` before writing environment-specific queries.
 
 ### Start with the environment
 
