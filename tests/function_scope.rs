@@ -402,7 +402,15 @@ fn parameter_facts_cover_candidates_without_promoting_open_choices_or_dynamic_li
         100
     );
     for name in ["groupBy", "head", "tail", "sort", "table"] {
-        assert!(parameter(name, "limit")["maximum"].is_null());
+        assert_eq!(parameter(name, "limit")["minimum"], 1);
+        assert_eq!(
+            parameter(name, "limit")["maximum"],
+            if name == "groupBy" {
+                1_000_000
+            } else {
+                200_000
+            }
+        );
     }
     for (name, argument) in [
         ("regex", "flags"),
@@ -537,7 +545,10 @@ fn form_dispositions_resolve_to_exact_evidence_and_preserve_runtime_limits() {
                                 panic!("{name}/{id}: unresolved control {}", item["case_id"])
                             });
                         assert_eq!(control["function"], name);
-                        assert_eq!(control["outcome"], "unsupported");
+                        assert!(matches!(
+                            control["outcome"].as_str(),
+                            Some("unsupported" | "invalid")
+                        ));
                         assert!(
                             control["forms"]
                                 .as_array()

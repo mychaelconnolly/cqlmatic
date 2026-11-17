@@ -77,7 +77,13 @@ fn text_filters_keep_expression_inputs_and_filter_only_contexts() {
             check(&format!(r#"x := {function}(user, substring="a")"#)),
             generate(&function, args.clone(), true),
         ] {
-            assert_eq!(result.outcome, Outcome::Unsupported, "{result:?}");
+            assert_eq!(result.outcome, Outcome::Invalid, "{result:?}");
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code == "CQL_ASSIGN_ALIAS")
+            );
             assert!(
                 result
                     .diagnostics
@@ -166,7 +172,6 @@ fn text_computations_share_typed_raw_and_nested_contexts() {
         r#"text:editDistance(target=user,reference="x",maxDistance=101)"#,
         r#"text:editDistance(target=user,reference="x",maxDistance=1.5)"#,
         r#"text:editDistance(user,reference="x",maxDistance=5)"#,
-        r#"text:editDistance(target=user,reference="x",maxDistance=5,ignoreCase="true")"#,
     ] {
         assert_eq!(check(query).outcome, Outcome::Invalid, "{query}");
     }
@@ -181,15 +186,19 @@ fn object_array_distances_have_bounded_expression_lists_and_no_scalar_result() {
             json!({"kind":"array","items":[literal(json!("alice")),field("other")]}),
         ),
         arg(Some("maxDistance"), literal(json!(5))),
-        arg(Some("asArray"), literal(json!("distances"))),
+        arg(Some("asArray"), literal(json!("distances[]"))),
     ];
     ready(generate("text:editDistanceAsArray", args.clone(), false));
     ready(check(
-        r#"text:editDistanceAsArray(target=user,references=["alice",text:trim(other)],maxDistance=5,asArray=distances,ignoreCase=true,allowTranspositions=false) | distances[0].distance=*"#,
+        r#"text:editDistanceAsArray(target=user,references=["alice",text:trim(other)],maxDistance=5,asArray="distances[]",ignoreCase=true,allowTranspositions=false) | distances[0].distance=*"#,
     ));
-    assert_eq!(
-        generate("text:editDistanceAsArray", args, true).outcome,
-        Outcome::Unsupported
+    let scalar = generate("text:editDistanceAsArray", args, true);
+    assert_eq!(scalar.outcome, Outcome::Invalid, "{scalar:?}");
+    assert!(
+        scalar
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_ASSIGN_ALIAS")
     );
     for references in ["[]", "[{}]", "[[\"alice\"]]", "\"alice\""] {
         assert_ne!(
@@ -213,7 +222,9 @@ fn object_array_distances_have_bounded_expression_lists_and_no_scalar_result() {
     for prefix in ["#tag", ""] {
         assert_eq!(check(&format!(r#"text:editDistanceAsArray(target=user,references=["alice"],maxDistance=5,asArray="{prefix}")"#)).outcome,Outcome::Invalid);
     }
-    assert_eq!(check(r#"text:editDistanceAsArray(target=user,references=["alice"],maxDistance=5,asArray="out[]")"#).outcome,Outcome::Unsupported);
+    ready(check(
+        r#"text:editDistanceAsArray(target=user,references=["alice"],maxDistance=5,asArray="out[]")"#,
+    ));
 }
 
 #[test]
@@ -335,6 +346,10 @@ fn every_text_time_function_has_public_catalog_attribution() {
 
 #[test]
 fn filters_and_computations_preserve_nested_query_effect_boundaries() {
+    ready(check("!text:trim(user)"));
+    ready(check(
+        r#"text:editDistance(target=user,reference="x",maxDistance=5,ignoreCase="true")"#,
+    ));
     ready(check(
         r#"selfJoinFilter(user,where=[{text:contains(user,substring="a")}])"#,
     ));
@@ -345,7 +360,6 @@ fn filters_and_computations_preserve_nested_query_effect_boundaries() {
     for query in [
         "selfJoinFilter(user,where=[{time:hour(@timestamp)}])",
         r#"groupBy(user,function=text:length(user))"#,
-        r#"!text:trim(user)"#,
     ] {
         assert_ne!(check(query).outcome, Outcome::Ready, "{query}");
     }

@@ -19,11 +19,31 @@ pub fn parse(input: &str) -> Result<Pipeline> {
             unsupported: false,
         });
     }
+    // Recognize function composition only when the complete query can be parsed.
+    parse_pipeline(input, false).or_else(|failure| {
+        if failure.unsupported {
+            parse_pipeline(input, true).map_err(|alternative| {
+                if alternative.diagnostic.code == "CQL_QUOTE" {
+                    alternative
+                } else {
+                    failure
+                }
+            })
+        } else {
+            Err(failure)
+        }
+    })
+}
+
+fn parse_pipeline(input: &str, function_composition: bool) -> Result<Pipeline> {
     let mut p = Parser {
         input,
         pos: 0,
         depth: 0,
         nodes: 0,
+        function_composition,
+        advisories: vec![],
+        last_or: false,
     };
     let result = p.pipeline()?;
     if pipeline_depth(&result) > MAX_DEPTH {
@@ -41,6 +61,9 @@ struct Parser<'a> {
     pos: usize,
     depth: usize,
     nodes: usize,
+    function_composition: bool,
+    advisories: Vec<Advisory>,
+    last_or: bool,
 }
 impl Parser<'_> {
     fn fail<T>(&self, message: &str, unsupported: bool) -> Result<T> {
@@ -48,6 +71,23 @@ impl Parser<'_> {
             .chars()
             .next()
             .map_or(self.pos, |c| self.pos + c.len_utf8());
+        if let Some(c) = self.rest().chars().next().filter(|c| {
+            *c == '`'
+                || ("'‘’“”".contains(*c)
+                    && (self.pos == 0
+                        || self.input[..self.pos]
+                            .chars()
+                            .next_back()
+                            .is_some_and(|p| p.is_whitespace() || "=([{,;|<>!+".contains(p))))
+        }) {
+            return Err(Failure {
+                diagnostic: Diagnostic::error(
+                    "CQL_QUOTE",
+                    format!("'{c}' is not a string delimiter; use straight double quotes."),
+                ),
+                unsupported: false,
+            });
+        }
         let mut d = Diagnostic::error(
             if unsupported {
                 "CQL_UNSUPPORTED_SYNTAX"
@@ -116,13 +156,13 @@ impl Parser<'_> {
     fn keyword(&mut self, s: &str) -> bool {
         self.space();
         let tail = self.rest();
-        if tail
-            .get(..s.len())
-            .is_some_and(|x| x.eq_ignore_ascii_case(s))
-            && tail[s.len()..]
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric() && !"_.[".contains(c))
+        if tail.get(..s.len()).is_some_and(|x| {
+            x == s.to_ascii_lowercase()
+                || (s != "like" && s != "true" && s != "false" && x == s.to_ascii_uppercase())
+        }) && tail[s.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && !"_.[".contains(c))
         {
             self.pos += s.len();
             true
@@ -142,12 +182,12 @@ impl Parser<'_> {
         while let Some(c) = self.rest().chars().next() {
             self.pos += c.len_utf8();
             if c == '"' && !escaped {
-                return serde_json::from_str(&self.input[start..self.pos]).map_err(|_| Failure {
+                return decode_string(&self.input[start..self.pos]).map_err(|_| Failure {
                     diagnostic: Diagnostic::error(
                         "CQL_STRING_ESCAPE",
-                        "Unsupported string escape; use JSON-compatible CQL string escapes.",
+                        "Invalid hexadecimal string escape; use four or eight hexadecimal digits.",
                     ),
-                    unsupported: true,
+                    unsupported: false,
                 });
             }
             if c == '\n' || c == '\r' {
@@ -203,21 +243,35 @@ impl Parser<'_> {
     fn pipeline(&mut self) -> Result<Pipeline> {
         self.nested(|p| {
             let mut steps = Vec::new();
+            let mut advisories = Vec::new();
             p.space();
             if p.pos == p.input.len() || p.rest().starts_with(['}', ';']) {
-                return Ok(Pipeline { steps });
+                return Ok(Pipeline { steps, advisories });
+            }
+            if p.eat("|") && p.ending() {
+                return p.fail("Expected a stage after the leading pipe.", false);
             }
             loop {
-                steps.push(p.step()?);
+                let enclosing = std::mem::take(&mut p.advisories);
+                let step = p.step()?;
+                advisories.extend(
+                    std::mem::replace(&mut p.advisories, enclosing)
+                        .into_iter()
+                        .map(|advice| (steps.len(), advice)),
+                );
+                steps.push(step);
                 p.space();
                 if !p.eat("|") {
                     break;
                 }
                 if p.ending() {
-                    return p.fail("A pipeline cannot end with '|'.", false);
+                    if p.rest().starts_with('|') {
+                        return p.fail("An interior pipeline stage cannot be empty.", false);
+                    }
+                    break;
                 }
             }
-            Ok(Pipeline { steps })
+            Ok(Pipeline { steps, advisories })
         })
     }
     fn step(&mut self) -> Result<Step> {
@@ -305,7 +359,18 @@ impl Parser<'_> {
             if !name.eq_ignore_ascii_case("not") && self.eat("(") {
                 self.pos = start;
                 let name = self.identifier()?;
-                return Ok(Step::Call(self.call(name, start)?));
+                let call = self.call(name, start)?;
+                let end = self.pos;
+                let composition =
+                    self.function_composition && (self.keyword("AND") || self.keyword("OR"));
+                self.pos = end;
+                if composition {
+                    return self.nested(|p| {
+                        let first = p.or_tail(Filter::Call(call))?;
+                        Ok(Step::Filter(p.and_tail(first)?))
+                    });
+                }
+                return Ok(Step::Call(call));
             }
         }
         self.pos = start;
@@ -329,32 +394,88 @@ impl Parser<'_> {
             )));
         }
         self.pos = start;
-        Ok(Step::Filter(self.and()?))
+        self.space();
+        let first = self.pos;
+        let filter = self.and()?;
+        if matches!(&filter, Filter::Text(_) | Filter::And(_) | Filter::Or(_)) {
+            let mut head = &filter;
+            while let Filter::And(xs) | Filter::Or(xs) = head {
+                head = &xs[0];
+            }
+            if let Filter::Text(Pattern::Text(word)) = head
+                && self.input[first..].starts_with(word)
+                && !word.starts_with('"')
+            {
+                if let Some(function) = crate::catalog::FUNCTIONS
+                    .iter()
+                    .find(|f| f.name.eq_ignore_ascii_case(word))
+                {
+                    self.advise("CQL_BARE_FUNCTION_NAME", format!("{word} is searched as text; write {}() to call the function, or quote it to search for the text.", function.name), false);
+                } else if [
+                    "where", "search", "dedup", "fields", "rex", "spath", "lookup", "tstats",
+                ]
+                .iter()
+                .any(|w| word.eq_ignore_ascii_case(w))
+                {
+                    self.advise(
+                        "CQL_BARE_COMMAND_WORD",
+                        format!(
+                            "{word} is not a query-language command here and is searched as text."
+                        ),
+                        false,
+                    );
+                }
+            }
+        }
+        Ok(Step::Filter(filter))
+    }
+    fn advise(&mut self, code: &'static str, message: impl Into<String>, informational: bool) {
+        self.advisories.push(Advisory {
+            code,
+            message: message.into(),
+            informational,
+        });
     }
     fn and(&mut self) -> Result<Filter> {
         self.nested(|p| {
-            let mut xs = vec![p.or()?];
-            loop {
-                if p.keyword("AND") {
-                    xs.push(p.or()?);
-                } else if p.ending() {
-                    break;
-                } else {
-                    xs.push(p.or()?);
-                }
-            }
-            Ok(if xs.len() == 1 {
-                xs.remove(0)
-            } else {
-                Filter::And(xs)
-            })
+            let first = p.or()?;
+            p.and_tail(first)
         })
     }
+    fn and_tail(&mut self, first: Filter) -> Result<Filter> {
+        let mut direct_or = self.last_or;
+        let mut xs = vec![first];
+        loop {
+            if self.keyword("AND") {
+                xs.push(self.or()?);
+                direct_or |= self.last_or;
+            } else if self.ending() {
+                break;
+            } else {
+                xs.push(self.or()?);
+                direct_or |= self.last_or;
+            }
+        }
+        let filter = if xs.len() == 1 {
+            xs.remove(0)
+        } else {
+            Filter::And(xs)
+        };
+        if direct_or && matches!(filter, Filter::And(_)) {
+            self.advise("CQL_OR_PRECEDENCE", format!("or binds tighter than and: this is read as {}. Add parentheses to make the intent explicit.", filter.render()), true);
+        }
+        Ok(filter)
+    }
     fn or(&mut self) -> Result<Filter> {
-        let mut xs = vec![self.primary_filter()?];
+        let first = self.primary_filter()?;
+        self.or_tail(first)
+    }
+    fn or_tail(&mut self, first: Filter) -> Result<Filter> {
+        let mut xs = vec![first];
         while self.keyword("OR") {
             xs.push(self.primary_filter()?);
         }
+        self.last_or = xs.len() > 1;
         Ok(if xs.len() == 1 {
             xs.remove(0)
         } else {
@@ -363,7 +484,11 @@ impl Parser<'_> {
     }
     fn primary_filter(&mut self) -> Result<Filter> {
         self.nested(|p| {
-            if p.keyword("NOT") || p.eat("!") {
+            let word_negation = p.keyword("NOT");
+            if word_negation || p.eat("!") {
+                if word_negation && p.ending() {
+                    return Err(Failure { diagnostic: Diagnostic::error("CQL_RESERVED_WORD", "'not' is reserved; supply a filter to negate, or quote it to search for text."), unsupported: false });
+                }
                 return Ok(Filter::Not(Box::new(p.primary_filter()?)));
             }
             if p.eat("(") {
@@ -383,17 +508,17 @@ impl Parser<'_> {
                 for op in ["!=", ">=", "<=", "=", ">", "<"] {
                     if p.eat(op) {
                         return Ok(Filter::Compare {
-                            field: name,
+                            field: name.clone(),
                             op: op.into(),
-                            value: p.pattern()?,
+                            value: p.comparison_pattern(&name)?,
                         });
                     }
                 }
                 if p.keyword("like") {
                     return Ok(Filter::Compare {
-                        field: name,
+                        field: name.clone(),
                         op: "like".into(),
-                        value: p.pattern()?,
+                        value: p.comparison_pattern(&name)?,
                     });
                 }
             }
@@ -404,17 +529,37 @@ impl Parser<'_> {
             if p.keyword("false") {
                 return Ok(Filter::Bool(false));
             }
-            Ok(Filter::Text(p.pattern()?))
+            let quoted = p.rest().starts_with('"');
+            let pattern = p.pattern()?;
+            if !quoted && let Pattern::Text(word) = &pattern
+                && ["and", "or", "not", "like", "in", "match", "case", "true", "false"].contains(&word.to_ascii_lowercase().as_str())
+            {
+                return Err(Failure { diagnostic: Diagnostic::error("CQL_RESERVED_WORD", format!("'{word}' is reserved; use the lower-case or upper-case operator spelling where supported, or quote it to search for text.")), unsupported: false });
+            }
+            if !quoted && pattern == Pattern::Text("&&".into()) {
+                p.advise("CQL_OPERATOR_TEXT", "&& is searched as text; use and or a space between the terms.", false);
+            }
+            Ok(Filter::Text(if !quoted && matches!(&pattern, Pattern::Text(text) if text == "*") {
+                Pattern::Any
+            } else {
+                pattern
+            }))
         })
+    }
+    fn comparison_pattern(&mut self, field: &str) -> Result<Pattern> {
+        self.space();
+        let bare = !self.rest().starts_with(['"', '?']);
+        let pattern = self.pattern()?;
+        if bare && matches!(&pattern, Pattern::Text(word) if word.eq_ignore_ascii_case("null")) {
+            self.advise("CQL_NULL_TEXT", format!("The value is the text \"null\"; use {}=* for has the field and not {}=* for does not have the field.", field, field), false);
+        }
+        Ok(pattern)
     }
     fn pattern(&mut self) -> Result<Pattern> {
         self.space();
         self.saved_call()?;
         if self.rest().starts_with('"') {
             return Ok(Pattern::Text(self.string()?));
-        }
-        if self.eat("?") {
-            return Ok(Pattern::Parameter(self.identifier()?));
         }
         if self.rest().starts_with('/') {
             self.pos += 1;
@@ -445,30 +590,63 @@ impl Parser<'_> {
             }
             return self.fail("Unterminated regular expression.", false);
         }
-        let start = self.pos;
+        let mut text = String::new();
         while let Some(c) = self.rest().chars().next() {
+            if c == '$' {
+                return self.fail("Put values containing $ in double quotes.", false);
+            }
+            if c == '?' {
+                self.pos += 1;
+                if self.rest().starts_with('{') {
+                    self.pos += 1;
+                    self.identifier()?;
+                    self.expect("=")?;
+                    let value = self.nested(|p| p.pattern())?;
+                    self.expect("}")?;
+                    match value {
+                        Pattern::Text(default) => text.push_str(&default),
+                        Pattern::Parameter(name) => return Ok(Pattern::Parameter(name)),
+                        other if text.is_empty() => return Ok(other),
+                        _ => {
+                            return self.fail("Put the parameter default in double quotes.", false);
+                        }
+                    }
+                    continue;
+                }
+                let start = self.pos;
+                while self
+                    .rest()
+                    .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    self.pos += 1;
+                }
+                if self.pos == start {
+                    return self.fail("Put values containing ? in double quotes.", false);
+                }
+                return Ok(Pattern::Parameter(self.input[start..self.pos].into()));
+            }
             if c.is_whitespace() || "|(){},;<>!=\"".contains(c) {
                 break;
             }
-            if "'`".contains(c) {
+            if "'`".contains(c) || (text.is_empty() && "‘’“”".contains(c)) {
                 return self.fail(
                     "This unquoted pattern is outside the supported grammar.",
                     true,
                 );
             }
             self.pos += c.len_utf8();
+            text.push(c);
         }
-        if self.pos == start {
+        if text.is_empty() {
             return self.fail("Expected a filter value.", false);
         }
-        let text = &self.input[start..self.pos];
         if text.ends_with("//") {
             return self.fail(
                 "Ambiguous slash syntax is outside this profile; quote the pattern.",
                 true,
             );
         }
-        Ok(Pattern::Text(text.into()))
+        Ok(Pattern::Text(text))
     }
     fn saved_call(&mut self) -> Result<()> {
         self.space();
@@ -712,7 +890,15 @@ impl Parser<'_> {
             } else if p.rest().starts_with('"') {
                 Value::String(p.string()?)
             } else if p.eat("?") {
-                Value::Parameter(p.identifier()?)
+                if p.eat("{") {
+                    p.identifier()?;
+                    p.expect("=")?;
+                    let value = p.expression(0)?;
+                    p.expect("}")?;
+                    value
+                } else {
+                    Value::Parameter(p.identifier()?)
+                }
             } else if let Some(number) = p.number_atom() {
                 number
             } else {
@@ -845,6 +1031,104 @@ fn pipeline_depth(pipeline: &Pipeline) -> usize {
         })
         .max()
         .unwrap_or(0)
+}
+
+fn decode_string(raw: &str) -> std::result::Result<String, ()> {
+    let mut json = String::from("\"");
+    let mut chars = raw[1..raw.len() - 1].chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            json.push(c);
+            continue;
+        }
+        let next = chars.next().ok_or(())?;
+        if next == 'U' {
+            let digits: String = chars.by_ref().take(8).collect();
+            if digits.len() != 8 {
+                return Err(());
+            }
+            let ch = u32::from_str_radix(&digits, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or(())?;
+            let encoded = serde_json::to_string(&ch.to_string()).map_err(|_| ())?;
+            json.push_str(&encoded[1..encoded.len() - 1]);
+        } else if "tnrbf\\\"u".contains(next) {
+            json.push('\\');
+            json.push(next);
+        } else {
+            json.push_str("\\\\");
+            json.push(next);
+        }
+    }
+    json.push('"');
+    serde_json::from_str(&json).map_err(|_| ())
+}
+
+pub(super) fn lexical_diagnostics(input: &str) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    let mut previous = None;
+    while i < chars.len() {
+        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+        } else if chars[i] == '"' || chars[i] == '/' {
+            let delimiter = chars[i];
+            i += 1;
+            while i < chars.len() && chars[i] != delimiter {
+                if chars[i] == '\\' {
+                    if delimiter == '"'
+                        && let Some(escape) = chars.get(i + 1)
+                        && "tnrbf".contains(*escape)
+                        && chars.get(i + 2).is_some_and(char::is_ascii_alphanumeric)
+                    {
+                        let name = match escape {
+                            't' => "tab",
+                            'n' => "newline",
+                            'r' => "carriage return",
+                            'b' => "backspace",
+                            _ => "form feed",
+                        };
+                        out.push(Diagnostic::warning("CQL_STRING_ESCAPE_CONTROL", format!("The escape is a {name} control character and will not match a literal backslash; write \\\\ for a backslash.")));
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            i += 1;
+            previous = Some('v');
+        } else {
+            let c = chars[i];
+            if !c.is_whitespace() {
+                if (c == '|' && matches!(previous, None | Some('{' | ';')))
+                    || (matches!(c, '}' | ';') && previous == Some('|'))
+                {
+                    out.push(Diagnostic::warning(
+                        "CQL_EMPTY_STAGE",
+                        "The empty stage has no effect and is usually a typing slip.",
+                    ));
+                }
+                previous = Some(c);
+            }
+            i += 1;
+        }
+    }
+    if previous == Some('|') {
+        out.push(Diagnostic::warning(
+            "CQL_EMPTY_STAGE",
+            "The empty stage has no effect and is usually a typing slip.",
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

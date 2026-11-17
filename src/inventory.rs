@@ -1203,7 +1203,9 @@ impl QueryObservation {
             }
             Ok(())
         }
-        for step in &expected.steps {
+        let semantic_steps: Vec<_> = expected.steps.iter().map(Step::semantic).collect();
+        for step in semantic_steps.iter() {
+            let step = step.as_ref();
             if let Step::Filter(filter) = step {
                 let mut found = vec![];
                 comparisons(filter, &mut found)?;
@@ -1214,7 +1216,9 @@ impl QueryObservation {
         }
         let mut seen_selectors = BTreeSet::new();
         let mut selected: Option<BTreeSet<String>> = None;
-        for step in &pipeline.steps {
+        let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+        for step in semantic_steps.iter() {
+            let step = step.as_ref();
             match step {
                 Step::Filter(filter) => {
                     let mut found = vec![];
@@ -1481,7 +1485,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
-            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a timeout or lost response does not establish termination."}));
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value: use unresolved, then lifetime-expired once the retained provider lifetime has elapsed."}));
     } else if blocker == "awaiting-host-settlement" {
         notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
             "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
@@ -3987,7 +3991,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         .iter()
         .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
     {
-        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search; a client timeout or lost response does not establish termination.".into());
+        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value: use unresolved, then lifetime-expired once the retained provider lifetime has elapsed.".into());
     }
     let prepared = state
         .refresh_attempts

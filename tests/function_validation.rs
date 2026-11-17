@@ -42,6 +42,122 @@ fn unsupported(query: &str, code: &str) {
 }
 
 #[test]
+fn function_arguments_require_calls_including_inside_arrays() {
+    for query in [
+        "x=1 | stats(count)",
+        "x=1 | stats([count])",
+        "x=1 | groupBy(k, function=count)",
+        "x=1 | groupBy(k, function=[count, max(y)])",
+        r#"x=1 | stats("count")"#,
+        r#"x=1 | stats(["count"])"#,
+        r#"x=1 | groupBy(k, function="count")"#,
+        r#"x=1 | groupBy(k, function=[count(), "max"])"#,
+    ] {
+        invalid(query, "CQL_ARGUMENT_TYPE");
+        assert_eq!(
+            check(query).validation.status,
+            Acceptance::Rejected,
+            "{query}"
+        );
+    }
+    for query in [
+        "x=1 | stats(count())",
+        "x=1 | stats([count(), avg(y)])",
+        "x=1 | groupBy(k, function=count())",
+        "x=1 | [count(), max(y)]",
+        "x=1 | stats()",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn direct_function_assignment_requires_one_output_alias() {
+    for query in [
+        "x=1 | v := collect(user)",
+        "x=1 | v := table([a])",
+        r#"x=1 | v := cidr(ip, subnet="10.0.0.0/8")"#,
+        r#"x=1 | v := wildcard("a*", field=message)"#,
+        "x=1 | v := stats(count())",
+        r#"x=1 | v := now("current")"#,
+        "x=1 | v := lower(y, as=w)",
+        "x=1 | v := count(as=w)",
+        r#"x=1 | v := start("current")"#,
+    ] {
+        invalid(query, "CQL_ASSIGN_ALIAS");
+        assert_eq!(
+            check(query).validation.status,
+            Acceptance::Rejected,
+            "{query}"
+        );
+    }
+    for query in [
+        "x=1 | v := count()",
+        "x=1 | v := min(y)",
+        "x=1 | v := lower(y)",
+        "x=1 | v := 1",
+        "x=1 | v := y + 1",
+        "x=1 | v := now()",
+        "x=1 | lower(y, as=v)",
+        "x=1 | v := lower(y, as=w) + 1",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+    }
+    assert_eq!(
+        check("v := unclassified(y)").validation.status,
+        Acceptance::Unknown
+    );
+    invalid("v := unclassified(as=w)", "CQL_ASSIGN_ALIAS");
+    let eval = check("x=1 | v := eval(result=(value + 1))");
+    assert_eq!(eval.validation.status, Acceptance::Unknown, "{eval:?}");
+    assert!(
+        eval.diagnostics
+            .iter()
+            .all(|d| d.code != "CQL_ASSIGN_ALIAS"),
+        "{eval:?}"
+    );
+}
+
+#[test]
+fn timestamp_parsing_requires_a_named_field_and_binds_unnamed_format() {
+    for query in [
+        "parseTimestamp(timestamp)",
+        r#"parseTimestamp("timestamp")"#,
+        r#"parseTimestamp("time_text", format="yyyy-MM-dd HH:mm:ss", timezone="UTC")"#,
+    ] {
+        invalid(query, "CQL_ARGUMENT_REQUIRED");
+        assert_eq!(
+            check(query).validation.status,
+            Acceptance::Rejected,
+            "{query}"
+        );
+    }
+    for query in [
+        "parseTimestamp(field=expiryTime)",
+        r#"parseTimestamp("millis", field=timestamp)"#,
+        r#"parseTimestamp("yyyy-MM-dd'T'HH:mm:ss", field=timestamp, timezone="America/New_York")"#,
+        "parseTimestamp(field=_bucket, format=millis)",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn zero_relative_time_literals_remain_outside_the_profile() {
     unsupported("setTimeInterval(start=0d)", "CQL_UNSUPPORTED_DURATION");
     ready("setTimeInterval(start=0,end=1)");
@@ -188,6 +304,9 @@ fn numeric_bounds_compare_the_unrounded_decimal_literal() {
 #[test]
 fn catalog_numeric_bounds_have_literal_boundary_controls() {
     let templates = BTreeMap::from([
+        (("groupBy", "limit"), "groupBy(a,limit=BOUND)"),
+        (("sort", "limit"), "sort(a,limit=BOUND)"),
+        (("table", "limit"), "table([a],limit=BOUND)"),
         (("bucket", "limit"), "bucket(span=1m,limit=BOUND)"),
         (("collect", "limit"), "collect(user,limit=BOUND)"),
         (
@@ -280,7 +399,7 @@ fn catalog_numeric_bounds_have_literal_boundary_controls() {
         }
     }
     assert_eq!(covered, templates.keys().copied().collect());
-    assert_eq!(covered.len(), 23);
+    assert_eq!(covered.len(), 26);
     assert_eq!(
         runtime_fields,
         BTreeSet::from([
@@ -382,8 +501,8 @@ fn correlation_aggregation_constraints_read_inputs_before_assigned_reducers() {
     for body in [
         "n:=count()",
         "count(as=n)",
-        "case {true | n:=count(); * | n:=count()}|head(1)",
-        "user match {a => n:=count(); * => n:=count()}|head(1)",
+        "case {true | v:=1; * | v:=2}|n:=count()|head(1)",
+        "user match {a => v:=1; * => v:=2}|n:=count()|head(1)",
     ] {
         let result = app::check(
             CheckRequest {
@@ -408,9 +527,9 @@ fn correlation_constraints_preserve_preaggregate_branch_writes() {
     let pack = serde_json::from_str(include_str!("fixtures/legacy-core-v1-pack.json")).unwrap();
     for body in [
         "constrained:=1|n:=count()",
-        "case {true | constrained:=1|n:=count(); * | constrained:=1|n:=count()}|head(1)",
-        "user match {a => constrained:=1|n:=count(); * => constrained:=1|n:=count()}|head(1)",
-        "case {true | constrained:=1|n:=count(); * | drop(constrained)}|constrained:=1|n:=count()",
+        "case {true | constrained:=1; * | constrained:=1}|n:=count()|head(1)",
+        "user match {a => constrained:=1; * => constrained:=1}|n:=count()|head(1)",
+        "case {true | constrained:=1; * | drop(constrained)}|constrained:=1|n:=count()",
     ] {
         let result = app::check(
             CheckRequest {
@@ -434,9 +553,8 @@ fn correlation_constraints_preserve_preaggregate_branch_writes() {
 fn correlation_removed_branch_inputs_require_context_control() {
     let pack = serde_json::from_str(include_str!("fixtures/legacy-core-v1-pack.json")).unwrap();
     for body in [
-        "case {true | drop(user)|n:=count(); * | drop(user)|n:=count()}|head(1)",
-        "user match {a => drop(user)|n:=count(); * => drop(user)|n:=count()}|head(1)",
-        "case {true | drop(user)|n:=count(); * | true}|n:=count()",
+        "case {true | drop(user); * | drop(user)}|n:=count()|head(1)",
+        "user match {a => drop(user); * => drop(user)}|n:=count()|head(1)",
         "drop(user)|n:=count()",
     ] {
         let result = app::check(
@@ -599,7 +717,7 @@ fn top_rest_accepts_boolean_spellings_of_its_string_choices() {
     ] {
         invalid(query, "CQL_ARGUMENT_VALUE");
     }
-    invalid("top(user,rest=1)", "CQL_ARGUMENT_TYPE");
+    invalid("top(user,rest=1)", "CQL_ARGUMENT_VALUE");
     invalid("lower(user,as=true)", "CQL_ARGUMENT_TYPE");
     invalid("sort(user,order=true)", "CQL_ARGUMENT_TYPE");
 
@@ -626,9 +744,9 @@ fn named_remote_tables_and_documented_positional_forms_keep_their_bindings() {
         "math:cosh(field=value)",
         r#"getField("user")"#,
         r#"getField(source="user")"#,
-        "math:mod(value,3)",
+        "math:mod(value,divisor=3)",
         r#"parseTimestamp("seconds",field=timestamp)"#,
-        r#"parseTimestamp(timestamp,format="seconds")"#,
+        r#"parseTimestamp(field=timestamp,format="seconds")"#,
     ] {
         ready(query);
     }
@@ -638,7 +756,10 @@ fn named_remote_tables_and_documented_positional_forms_keep_their_bindings() {
     );
     for (query, argument) in [
         (r#"parseTimestamp("seconds",field=timestamp)"#, "format"),
-        (r#"parseTimestamp(timestamp,format="seconds")"#, "field"),
+        (
+            r#"parseTimestamp(field=timestamp,format="seconds")"#,
+            "field",
+        ),
     ] {
         let pipeline = cqlmatic::language::parser::parse(query).unwrap();
         let cqlmatic::language::ast::Step::Call(call) = &pipeline.steps[0] else {
@@ -688,22 +809,15 @@ fn positional_contracts_match_omittable_parameter_facts() {
         }
     }
     // Finite example-only positional forms do not change parameter-table facts.
-    // Timestamp parsing additionally retains its legacy field form.
+    // setTimeInterval requires named start despite its omittable-name table annotation.
     assert_eq!(
         differences,
         BTreeMap::from([
             ("getField", (BTreeSet::from(["source"]), BTreeSet::new())),
             ("math:cosh", (BTreeSet::from(["field"]), BTreeSet::new())),
             (
-                "math:mod",
-                (
-                    BTreeSet::from(["field", "divisor"]),
-                    BTreeSet::from(["field"])
-                )
-            ),
-            (
-                "parseTimestamp",
-                (BTreeSet::from(["field"]), BTreeSet::from(["format"])),
+                "setTimeInterval",
+                (BTreeSet::new(), BTreeSet::from(["start"]))
             ),
         ])
     );
@@ -832,12 +946,12 @@ fn assigned_calls_warn_for_reads_dropped_by_prior_projection() {
 #[test]
 fn composite_aggregate_reads_keep_local_fields_scoped() {
     for query in [
-        "select(@timestamp)|n:=stats({x:=1|count()})",
-        "select(@timestamp)|n:=stats({x:=@timestamp|sum(x)})",
+        "select(@timestamp)|stats({x:=1|n:=count()})",
+        "select(@timestamp)|stats({x:=@timestamp|n:=sum(x)})",
         "select(@timestamp)|stats({x:=1|count()})",
         "select(@timestamp)|stats({x:=@timestamp|sum(x)})",
-        "select(@timestamp)|n:=stats({case {true|x:=@timestamp;*|x:=@timestamp}|sum(x)})",
-        "select(a)|n:=stats({b:=a|b match {yes => true; * => true}|count()})",
+        "select(@timestamp)|stats({case {true|x:=@timestamp;*|x:=@timestamp}|n:=sum(x)})",
+        "select(a)|stats({b:=a|b match {yes => true; * => true}|n:=count()})",
     ] {
         let result = check(query);
         assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
@@ -850,11 +964,11 @@ fn composite_aggregate_reads_keep_local_fields_scoped() {
         );
     }
     for (query, input) in [
-        ("select(a)|n:=stats({x:=b|sum(x)})", "b"),
+        ("select(a)|stats({x:=b|n:=sum(x)})", "b"),
         ("select(a)|stats({x:=b|sum(x)})", "b"),
-        ("select(a)|n:=stats({x:=x+1|sum(x)})", "x"),
+        ("select(a)|stats({x:=x+1|n:=sum(x)})", "x"),
         (
-            "select(a)|n:=stats({b match {yes => true; * => true}|count()})",
+            "select(a)|stats({b match {yes => true; * => true}|n:=count()})",
             "b",
         ),
         (
@@ -1049,4 +1163,29 @@ fn implicit_structured_bindings_keep_longer_member_paths_read_only() {
         r#"objectArray:eval("items.nested[]",asArray="out[]",function={select(a)|array:reduceRow("values[]",function={items.nested.foo:=1|sum(items)},var=items)|out:=1})"#,
         "CQL_UNSUPPORTED_PSEUDO_WRITE",
     );
+}
+
+#[test]
+fn set_time_interval_requires_named_start() {
+    for query in [
+        "setTimeInterval(1d) | count()",
+        "setTimeInterval(1m)",
+        r#"setTimeInterval("1h", end="30min")"#,
+    ] {
+        invalid(query, "CQL_ARGUMENT_COUNT");
+    }
+    for query in [
+        "setTimeInterval(start=1d) | count()",
+        "setTimeInterval(start=7d, end=1d) | count()",
+        r#"setTimeInterval(start="1h", end="30min") | count()"#,
+        "setTimeInterval(start=1746054000000, end=1746780124517)",
+    ] {
+        ready(query);
+        assert!(
+            check(query)
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_QUERY_TIME_OVERRIDE")
+        );
+    }
 }

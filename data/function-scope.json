@@ -3982,6 +3982,9 @@
               "case_id": "groupBy-composite",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..1,000,000 or max."
           ]
         },
         {
@@ -4220,6 +4223,9 @@
               "case_id": "head",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max."
           ]
         },
         {
@@ -5264,7 +5270,7 @@
           ],
           "assessment_status": "offline_tested",
           "reason": "The linked synthetic cases pass raw checking and public typed lowering with exact canonical rendering.",
-          "qualification": "Only the linked filtering argument shapes are checked. Retaining enrichment forms and unlinked output exports are outside that evidence.",
+          "qualification": "Negation of the transform has no effect; argument, placement and output checks still apply.",
           "assessment_evidence": [
             {
               "kind": "fixture",
@@ -6571,15 +6577,20 @@
             "The page explicitly demonstrates math:mod(x, 3, as=remainder).",
             "The omitted-name table annotates only field and the grammar subset allows only one unnamed argument; preserve the documentation discrepancy rather than inferring arbitrary varargs."
           ],
-          "assessment_status": "offline_tested",
-          "reason": "The linked synthetic cases pass raw checking and public typed lowering with exact canonical rendering.",
-          "qualification": "The linked math:mod case checks the documented two-operand exception only; it does not permit arbitrary positional arguments.",
+          "assessment_status": "unsupported",
+          "reason": "The profile requires a named divisor.",
+          "qualification": "The documented unnamed form is rejected by the profile with CQL_ARGUMENT_COUNT.",
           "assessment_evidence": [
             {
-              "kind": "fixture",
+              "kind": "control",
               "file": "tests/fixtures/function-coverage.json",
-              "case_id": "math-mod-two-unnamed",
-              "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
+              "case_id": "math:mod-unnamed-argument",
+              "test": "invalid_categories_and_unresolved_forms_keep_their_distinct_outcomes"
+            },
+            {
+              "kind": "reference",
+              "url": "https://library.humio.com/crowdstrike-query-language/functions-math-mod.html",
+              "fact": "The page explicitly demonstrates math:mod(x, 3, as=remainder)."
             }
           ]
         }
@@ -9958,15 +9969,20 @@
             "The documented argument name may be omitted: start.",
             "This is named-argument omission, not permission to omit a required value or add arbitrary positional values."
           ],
-          "assessment_status": "offline_tested",
-          "reason": "The linked synthetic cases pass raw checking and public typed lowering with exact canonical rendering.",
-          "qualification": "Only omission of the documented argument name in the linked shapes is checked; its value is retained, and arbitrary additional unnamed arguments are not inferred.",
+          "assessment_status": "unsupported",
+          "reason": "The profile requires a named start argument.",
+          "qualification": "The documented unnamed form is rejected by the profile with CQL_ARGUMENT_COUNT.",
           "assessment_evidence": [
             {
-              "kind": "fixture",
+              "kind": "control",
               "file": "tests/fixtures/function-coverage.json",
-              "case_id": "setTimeInterval-omitted-name",
-              "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
+              "case_id": "setTimeInterval-unnamed-argument",
+              "test": "invalid_categories_and_unresolved_forms_keep_their_distinct_outcomes"
+            },
+            {
+              "kind": "reference",
+              "url": "https://library.humio.com/crowdstrike-query-language/functions-settimeinterval.html",
+              "fact": "The documented argument name may be omitted: start."
             }
           ]
         }
@@ -10199,6 +10215,9 @@
               "case_id": "sort",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max."
           ]
         },
         {
@@ -10775,6 +10794,10 @@
               "case_id": "table",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max.",
+            "type accepts hex, number or string."
           ]
         },
         {
@@ -10825,6 +10848,9 @@
               "case_id": "tail",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "limit is 1..200,000 or max."
           ]
         },
         {
@@ -11074,6 +11100,9 @@
               "case_id": "text-editDistanceAsArray",
               "test": "qualified_synthetic_forms_check_and_round_trip_through_public_typed_lowering"
             }
+          ],
+          "constraints": [
+            "asArray must end in [], for example \"distances[]\"."
           ]
         }
       ],
@@ -12503,7 +12532,7 @@
           "conditions": [],
           "assessment_status": "offline_tested",
           "reason": "The linked synthetic cases pass raw checking and public typed lowering with exact canonical rendering.",
-          "qualification": "Only the argument values, nesting and placement of the linked synthetic cases are exercised; other optional-argument combinations and overloads are not implied.",
+          "qualification": "The limit is an integer from 1 to 24576. Only the argument values, nesting and placement of the linked synthetic cases are exercised; other optional-argument combinations and overloads are not implied.",
           "assessment_evidence": [
             {
               "kind": "fixture",
@@ -13271,9 +13300,9 @@
   ],
   "assessment_summary": {
     "forms": 519,
-    "offline_tested": 497,
+    "offline_tested": 495,
     "runtime_pending": 7,
     "unqualified": 14,
-    "unsupported": 1
+    "unsupported": 3
   }
 }

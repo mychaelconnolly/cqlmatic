@@ -492,7 +492,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
             AssessOutcome::Inconclusive,
             Diagnostic::warning(
                 "RESULT_EMPTY",
-                "Zero rows are not evidence of absence through this path.",
+                "Zero rows are not evidence of absence through this path. A completed search with zero results shows no matches only after a positive control: rerun without the selective filter or field and confirm a non-zero count.",
             ),
         );
         return result;
@@ -511,7 +511,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
             AssessOutcome::Advisory,
             Diagnostic::warning(
                 "RESULT_ZERO_COUNT",
-                "A zero aggregate count is not evidence that the underlying data is absent.",
+                "A zero aggregate count is not evidence that the underlying data is absent. A completed search with zero results shows no matches only after a positive control: rerun without the selective filter or field and confirm a non-zero count.",
             ),
         );
     }
@@ -866,7 +866,9 @@ fn inspect_pipeline(
     tables: &mut BTreeMap<String, Inspection>,
     nested: bool,
 ) -> Inspection {
-    for (index, step) in pipeline.steps.iter().enumerate() {
+    let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+    for (index, step) in semantic_steps.iter().enumerate() {
+        let step = step.as_ref();
         let keeps_bound = !nested && keeps_row_bound(step);
         for cap in &mut state.caps {
             cap.final_stage = false;
@@ -1014,7 +1016,9 @@ fn nests(value: &Value) -> bool {
 }
 
 fn rejects_all(pipeline: &Pipeline) -> bool {
-    for step in pipeline.steps.iter().rev() {
+    let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
+    for step in semantic_steps.iter().rev() {
+        let step = step.as_ref();
         if matches!(step, Step::Filter(Filter::Bool(false))) {
             return true;
         }
@@ -1814,8 +1818,9 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
             None => (spec.default, CapKind::Silent, None),
             Some(Some("max")) => (0, CapKind::Unverified, spec.max_setting),
             // A negative, parameterized or otherwise non-literal limit has no known value.
-            Some(text) => text
-                .and_then(|text| text.parse().ok())
+            Some(_) => limit
+                .and_then(|value| value.unsigned_integer())
+                .and_then(|value| usize::try_from(value).ok())
                 .map_or((0, CapKind::Unverified, None), |cap| {
                     (cap, spec.numeric, None)
                 }),
@@ -1837,7 +1842,7 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
                     .unwrap()
                     .arguments
                     .get("rest")
-                    .is_some_and(|v| !matches!(v, Value::Bool(false)) && v.text() != Some("false")),
+                    .is_some_and(|v| v.boolean() != Some(false)),
             unit: if spec.name == "groupBy" {
                 group_unit(&resolved.as_ref().unwrap().arguments)
             } else {
@@ -1856,12 +1861,12 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
             },
             values_observable: !nested
                 && resolved.as_ref().is_none_or(|r| {
-                    r.arguments.get("multival").is_none_or(|v| {
-                        !matches!(v, Value::Bool(false)) && v.text() != Some("false")
-                    }) && r
-                        .arguments
-                        .get("separator")
-                        .is_none_or(|v| v.text() == Some("\n"))
+                    r.arguments
+                        .get("multival")
+                        .is_none_or(|v| v.boolean() != Some(false))
+                        && r.arguments
+                            .get("separator")
+                            .is_none_or(|v| v.text() == Some("\n"))
                 }),
         });
     } else if resolved
@@ -2055,11 +2060,14 @@ fn group_unit(args: &BTreeMap<String, &Value>) -> CapUnit {
             ..
         } => {
             attributes.is_empty()
-                && pipeline.steps.iter().all(|step| match step {
-                    Step::Filter(filter) => comparison_only(filter),
-                    Step::Call(call) => keeps_keys(call),
-                    _ => false,
-                })
+                && pipeline
+                    .steps
+                    .iter()
+                    .all(|step| match step.semantic().as_ref() {
+                        Step::Filter(filter) => comparison_only(filter),
+                        Step::Call(call) => keeps_keys(call),
+                        _ => false,
+                    })
         }
         _ => false,
     });
@@ -2135,13 +2143,16 @@ fn selects_value(value: &Value, field: &str) -> bool {
             ..
         } => {
             attributes.is_empty()
-                && pipeline.steps.iter().all(|step| match step {
-                    Step::Filter(filter) => comparison_only(filter),
-                    Step::Call(call) => {
-                        plain_call(call, &["head", "tail", "sort"]) || selector(call)
-                    }
-                    _ => false,
-                })
+                && pipeline
+                    .steps
+                    .iter()
+                    .all(|step| match step.semantic().as_ref() {
+                        Step::Filter(filter) => comparison_only(filter),
+                        Step::Call(call) => {
+                            plain_call(call, &["head", "tail", "sort"]) || selector(call)
+                        }
+                        _ => false,
+                    })
         }
         _ => false,
     }

@@ -386,12 +386,12 @@ fn negated_disjunction_and_presence_do_not_constrain_record_kind() {
 }
 
 #[test]
-fn single_literal_in_and_early_match_or_case_separate_record_kinds() {
+fn single_literal_in_and_grouped_conditionals_separate_record_kinds() {
     let pack = datasets(&["traffic", "event"]);
     for query in [
         r#"#repo=fw_repo | in(#event.dataset, values=["traffic"]) | top(dst)"#,
-        r#"#repo=fw_repo | #event.dataset match { traffic => top(dst); event => top(dst) }"#,
-        r#"#repo=fw_repo | case { #event.dataset=traffic | top(dst); #event.dataset=event | top(dst) }"#,
+        r#"#repo=fw_repo | #event.dataset match { traffic => true; event => true } | groupBy([#event.dataset, dst])"#,
+        r#"#repo=fw_repo | case { #event.dataset=traffic; #event.dataset=event } | groupBy([#event.dataset, dst])"#,
     ] {
         let result = check(query, Some(&pack), false);
         assert_eq!(
@@ -408,10 +408,10 @@ fn single_literal_in_and_early_match_or_case_separate_record_kinds() {
 fn catch_all_match_arm_does_not_separate_record_kinds() {
     let pack = datasets(&["traffic", "event"]);
     for query in [
-        "#repo=fw_repo | #event.dataset match { * => top(dst) }",
-        "#repo=fw_repo | #event.dataset match { traffic => top(dst); * => top(dst) }",
-        "#repo=fw_repo | #event.dataset match { tra* => top(dst); event => top(dst) }",
-        "#repo=fw_repo | #event.dataset match { /traffic/ => top(dst); event => top(dst) }",
+        "#repo=fw_repo | #event.dataset match { * => true } | top(dst)",
+        "#repo=fw_repo | #event.dataset match { traffic => true; * => true } | top(dst)",
+        "#repo=fw_repo | #event.dataset match { tra* => true; event => true } | top(dst)",
+        "#repo=fw_repo | #event.dataset match { /traffic/ => true; event => true } | top(dst)",
     ] {
         let result = check(query, Some(&pack), false);
         assert_eq!(
@@ -574,8 +574,8 @@ fn aggregation_before_kind_grouping_cannot_clear_ambiguity() {
 fn aggregation_before_kind_case_match_or_top_cannot_clear_ambiguity() {
     let pack = datasets(&["traffic", "event"]);
     for query in [
-        "#repo=fw_repo | top(dst) | #event.dataset match { traffic => top(dst); event => top(dst) }",
-        "#repo=fw_repo | top(dst) | case { #event.dataset=traffic | top(dst); #event.dataset=event | top(dst) }",
+        "#repo=fw_repo | top(dst) | #event.dataset match { traffic => true; event => true } | groupBy([#event.dataset, dst])",
+        "#repo=fw_repo | top(dst) | case { #event.dataset=traffic; #event.dataset=event } | groupBy([#event.dataset, dst])",
         "#repo=fw_repo | top(dst) | top(#event.dataset)",
     ] {
         let result = check(query, Some(&pack), false);
@@ -853,6 +853,38 @@ fn multi_value_truncated_kind_facet_discloses_unknown_kinds_in_both_outcomes() {
             diagnostic.message.contains("other kinds may exist"),
             "{}",
             diagnostic.message
+        );
+    }
+}
+
+#[test]
+fn converted_ignore_case_keeps_mixed_kind_safeguard() {
+    let pack = datasets(&["TRAFFIC", "traffic"]);
+    for flag in ["true", "\"true\"", "TRUE"] {
+        let q = format!(
+            "#repo=fw_repo | in(#event.dataset, values=[\"traffic\"], ignoreCase={flag}) | top(dst)"
+        );
+        let result = check(&q, Some(&pack), false);
+        ambiguity(&result);
+        let strict = app::check(
+            CheckRequest {
+                schema_version: 1,
+                id: None,
+                query: q,
+                context: Context {
+                    require_observed: true,
+                    ..Context::default()
+                },
+            },
+            Some(&pack),
+        );
+        assert!(
+            strict
+                .grounding
+                .missing
+                .iter()
+                .any(|s| s.contains("@record-kind")),
+            "{strict:?}"
         );
     }
 }

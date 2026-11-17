@@ -1,0 +1,25 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"result\": {\"details\": {\"body\": {\"errors\": [{\"message\": \"[GET /humio/api/v1/repositories/{repository}/queryjobs/{id}] GetSearchStatusV1 (status 400): {}\"}]}, \"status_code\": 400}, \"error\": \"Failed to poll NGSIEM search status: Invalid request. Check your filter syntax \\u2014 FQL uses + for AND, , for OR, and values must be quoted. API said: [GET /humio/api/v1/repositories/{repository}/queryjobs/{id}] GetSearchStatusV1 (status 400): {}. Trace ID: \"}, \"trace_id\": \"00000000-0000-0000-0000-000000000000\"}\n"
+    }
+  ],
+  "structuredContent": {
+    "result": {
+      "details": {
+        "body": {
+          "errors": [
+            {
+              "message": "[GET /humio/api/v1/repositories/{repository}/queryjobs/{id}] GetSearchStatusV1 (status 400): {}"
+            }
+          ]
+        },
+        "status_code": 400
+      },
+      "error": "Failed to poll NGSIEM search status: Invalid request. Check your filter syntax \u2014 FQL uses + for AND, , for OR, and values must be quoted. API said: [GET /humio/api/v1/repositories/{repository}/queryjobs/{id}] GetSearchStatusV1 (status 400): {}. Trace ID: "
+    },
+    "trace_id": "00000000-0000-0000-0000-000000000000"
+  },
+  "isError": true
+}

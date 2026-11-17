@@ -78,6 +78,14 @@ pub enum Step {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Pipeline {
     pub steps: Vec<Step>,
+    pub advisories: Vec<(usize, Advisory)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Advisory {
+    pub code: &'static str,
+    pub message: String,
+    pub informational: bool,
 }
 
 pub fn quote(s: &str) -> String {
@@ -152,6 +160,43 @@ pub fn field(s: &str) -> String {
 }
 
 impl Value {
+    pub fn string_array(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Array(values) => values.iter().map(Self::string_value).collect(),
+            value => Some(vec![value.string_value()?]),
+        }
+    }
+    pub fn string_value(&self) -> Option<String> {
+        match self {
+            Self::Bool(value) => Some(value.to_string()),
+            Self::Unary { op, value } if op == "-" && matches!(value.as_ref(), Self::Number(_)) => {
+                value.text().map(|number| format!("-{number}"))
+            }
+            _ => self.text().map(str::to_owned),
+        }
+    }
+    pub fn boolean(&self) -> Option<bool> {
+        if let Self::Bool(value) = self {
+            return Some(*value);
+        }
+        match self.text()? {
+            text if text.eq_ignore_ascii_case("true") => Some(true),
+            text if text.eq_ignore_ascii_case("false") => Some(false),
+            _ => None,
+        }
+    }
+    pub fn unsigned_integer(&self) -> Option<u64> {
+        let text = self.text()?;
+        let whole = if let Some((whole, fraction)) = text.split_once('.') {
+            if fraction.is_empty() || !fraction.chars().all(|c| c == '0') {
+                return None;
+            }
+            whole
+        } else {
+            text
+        };
+        whole.parse().ok()
+    }
     pub fn text(&self) -> Option<&str> {
         match self {
             Self::Word(s) | Self::String(s) | Self::Number(s) | Self::Parameter(s) => Some(s),
@@ -228,6 +273,23 @@ impl Pattern {
     }
 }
 impl Filter {
+    pub fn negated_transform(&self) -> Option<&Call> {
+        let Self::Not(inner) = self else {
+            return None;
+        };
+        match inner.as_ref() {
+            Self::Not(_) => inner.negated_transform(),
+            Self::Call(call)
+                if crate::catalog::function(&call.name).is_some_and(|spec| {
+                    spec.effect == crate::catalog::Effect::Transform
+                        && !matches!(spec.name, "eval" | "ioc:lookup")
+                }) =>
+            {
+                Some(call)
+            }
+            _ => None,
+        }
+    }
     pub fn has_call(&self) -> bool {
         match self {
             Self::Call(_) => true,
@@ -263,6 +325,15 @@ impl Filter {
     }
 }
 impl Step {
+    /// The executable step; rendering retains the original negation spelling.
+    pub fn semantic(&self) -> std::borrow::Cow<'_, Step> {
+        if let Self::Filter(filter) = self
+            && let Some(call) = filter.negated_transform()
+        {
+            return std::borrow::Cow::Owned(Self::Call(call.clone()));
+        }
+        std::borrow::Cow::Borrowed(self)
+    }
     pub fn render(&self) -> String {
         match self {
             Self::Filter(f) => f.render(),

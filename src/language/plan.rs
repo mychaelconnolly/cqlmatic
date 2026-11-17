@@ -172,6 +172,9 @@ pub fn predicate(p: &Predicate, depth: usize) -> Result<Filter> {
             let resolved = crate::catalog::resolve(&call).expect("lowered known function");
             if resolved.function.resolved_effect(&resolved.arguments)
                 != crate::catalog::Effect::Filter
+                && !(*negate
+                    && resolved.function.effect == crate::catalog::Effect::Transform
+                    && !matches!(resolved.function.name, "eval" | "ioc:lookup"))
             {
                 if resolved.function.effect == crate::catalog::Effect::Filter
                     || resolved.function.name == "matchAsArray"
@@ -499,12 +502,10 @@ fn match_pattern(pattern: &MatchPattern) -> Result<Pattern> {
                     "Regex literals cannot contain raw line breaks; use escaped characters.",
                 ));
             }
-            if flags.chars().any(|ch| !"imd".contains(ch))
-                || flags.chars().collect::<BTreeSet<_>>().len() != flags.len()
-            {
-                return Err(Diagnostic::unsupported(
-                    "CQL_UNSUPPORTED_REGEX_FLAGS",
-                    "Field-match regex flags must be distinct i, m or d.",
+            if flags.chars().any(|ch| !"gmidF".contains(ch)) {
+                return Err(Diagnostic::error(
+                    "CQL_REGEX_FLAGS",
+                    "Regex literal flags must be g, m, i, d or F.",
                 ));
             }
             if let Err((unknown, message)) = super::validate::regex_analysis(pattern) {

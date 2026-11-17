@@ -2,6 +2,8 @@
 
 CQLmatic is an offline construction, reference and review tool. The calling analyst or agent interprets the question and uses an existing authorized search client to execute it. CQLmatic makes no model calls. No model, installed skill or particular agent host is required. See the [documentation index](README.md) for setup, [query reference](QUERY-REFERENCE.md) for construction, and [contracts](CONTRACTS.md) for JSON interfaces. `ready` means the supported static rules and chosen grounding policy passed; it does not mean the query ran or answered the question.
 
+See [hosted search outcomes](MCP-COMPANION.md#how-to-tell-whether-a-hosted-search-finished) for completion and error shapes, retry guidance and the positive control required for zero results.
+
 ## Establish the question and context
 
 Record the intended result before constructing CQL: events or aggregates, keys, evidence columns, thresholds, exclusions, matching mode, missing/null policy, exactness, ordering and ties. Obtain the searchable target, source selectors, field meanings, array shapes and an explicit time window/timezone. A searchable view and a `#repo` tag are different namespaces. Preserve the confirmed `environment.view` as the execution target (MCP `repository`); keep source selectors in CQL and never silently broaden the target to `search-all`. Use absolute UTC bounds for the API/MCP handoff after resolving the requested timezone. Check every independent source separately.
@@ -69,7 +71,7 @@ When executing through the read-only `falcon_search_ngsiem` MCP tool, save its *
 cqlmatic assess --query-file .local/query.cql --result .local/mcp-result.json --pack .local/pack.json
 ```
 
-Review `no-findings`, `advisory`, `inconclusive` or `error` and any findings, including empty results, caps, incomplete results, null fields, missing key coverage and unattested completeness. Assessment never certifies query correctness. A timeout or `inconclusive` result is not “no results”; narrow, re-run or clarify before reporting. See [result assessment](RESULT-ASSESSMENT.md) for cap and completeness findings, the [MCP companion workflow](MCP-COMPANION.md) for the probe loop and exact-result handoff, and [troubleshooting](TROUBLESHOOTING.md) for recovery.
+Review `no-findings`, `advisory`, `inconclusive` or `error` and any findings, including empty results, caps, incomplete results, null fields, missing key coverage and unattested completeness. Assessment never certifies query correctness. A timeout or `inconclusive` result is not “no results”; narrow the query or time range after a hosted timeout. A completed search with zero results shows no matches only after a positive control: run the query again without the selective filter or field and confirm a non-zero count. Keep the original source, window and authorized limits. A non-zero control count shows data exists there; check the original field name and value next. See [result assessment](RESULT-ASSESSMENT.md) for cap and completeness findings, the [MCP companion workflow](MCP-COMPANION.md) for the probe loop and exact-result handoff, and [troubleshooting](TROUBLESHOOTING.md) for recovery.
 
 Assessment reuses pack measurements only; saved-query ledger positives are not population rates. Generation/checking may use qualifying ledger fields for strict grounding, with the caller's query/result/target/window assertion and matching active-pack safeguards retained.
 

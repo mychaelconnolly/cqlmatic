@@ -170,7 +170,7 @@ fn composite_dynamic_writes_and_retained_removals_cannot_restore_observations() 
         "stats({parseJson()|count(as=n)})|select(n)",
         "stats({head(1)|drop(user)|count(as=n)})|select(n)",
         "stats({case{*|parseJson()}|count(as=n)})|select(n)",
-        "stats({parseJson()|case{*|count(as=n)}})|select(n)",
+        "stats({parseJson()|case{*|v:=1}|count(as=n)})|select(n)",
     ] {
         let result = check(query, true);
         assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
@@ -340,11 +340,20 @@ fn branch_origin_and_conditional_production_never_waive_incoming_evidence() {
     for q in [
         "#repo=example | case { * | readFile(\"lookup.csv\") } | user=*",
         "#repo=example | case { user=a | readFile(\"lookup.csv\"); * } | user=*",
-        "#repo=example | case { user=a | unmeasured := \"x\"; * } | unmeasured=*",
     ] {
         let r = check(q, true);
-        assert_eq!(r.outcome, Outcome::NeedsContext, "{q}: {:?}", r.grounding);
+        assert_eq!(r.outcome, Outcome::Invalid, "{q}: {r:?}");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_BRANCH_FUNCTION")
+        );
     }
+    let r = check(
+        "#repo=example | case { user=a | unmeasured := \"x\"; * } | unmeasured=*",
+        true,
+    );
+    assert_eq!(r.outcome, Outcome::NeedsContext);
     for name in ["as", "asArray", "var"] {
         let r = check(&format!("#repo=example | eval({name}=unmeasured)"), true);
         assert_eq!(r.outcome, Outcome::NeedsContext);
@@ -498,4 +507,50 @@ fn known_absence_on_a_branch_does_not_introduce_an_incoming_field_requirement() 
         assert_eq!(r.outcome, Outcome::Ready, "{q}: {:?}", r.grounding);
         assert_eq!(r.grounding.basis["example:*:x"], "query-produced");
     }
+}
+
+#[test]
+fn core_v3_previous_revision_loads_and_refresh_preserves_parent_binding() {
+    let mut old = historical();
+    old.profile_id = PROFILE.into();
+    old.producer_version = "0.1.7".into();
+    old.knowledge_revision =
+        "29db942fa5364af3a454e8e6525d20b7d9337075958807280f3d998dc8504357".into();
+    old.content_digest = old.digest().unwrap();
+    let bytes = serde_json::to_vec(&old).unwrap();
+    let loaded: Pack = serde_json::from_slice(&bytes).unwrap();
+    loaded.validate().unwrap();
+    assert_eq!(serde_json::to_vec(&loaded).unwrap(), bytes);
+    let candidate = Pack::new(
+        old.environment.clone(),
+        "2030-01-01T00:00:00Z".into(),
+        environment::PackData::default(),
+    )
+    .unwrap();
+    let merged = environment::merge(&loaded, &candidate).unwrap();
+    assert_eq!(merged.data.sources, old.data.sources);
+    assert_eq!(merged.data.fields, old.data.fields);
+    assert_eq!(merged.data.values, old.data.values);
+    for record in &old.data.provenance {
+        assert!(merged.data.provenance.contains(record));
+    }
+    let parent = merged
+        .data
+        .provenance
+        .iter()
+        .find(|record| record["source_hash"] == old.content_digest)
+        .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(parent["notes"].as_str().unwrap()).unwrap();
+    assert_eq!(metadata["profile_id"], old.profile_id);
+    assert_eq!(metadata["knowledge_revision"], old.knowledge_revision);
+    assert_eq!(parent["coverage_status"], "declared-only");
+    assert_eq!(loaded.content_digest, old.content_digest);
+    let mut unknown = loaded.clone();
+    unknown.knowledge_revision = "f".repeat(64);
+    unknown.content_digest = unknown.digest().unwrap();
+    assert_eq!(unknown.validate().unwrap_err().code, "PACK_PROFILE");
+    let mut tampered = loaded;
+    tampered.knowledge_revision = environment::KNOWLEDGE_REVISION.into();
+    assert_eq!(tampered.validate().unwrap_err().code, "PACK_DIGEST");
 }

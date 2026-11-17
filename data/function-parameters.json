@@ -1930,8 +1930,8 @@
           "choices": [
             "max"
           ],
-          "minimum": null,
-          "maximum": null,
+          "minimum": 1,
+          "maximum": 1000000,
           "default": "20,000",
           "omittable_name": false
         }
@@ -2093,8 +2093,8 @@
           "choices": [
             "max"
           ],
-          "minimum": 0,
-          "maximum": null,
+          "minimum": 1,
+          "maximum": 200000,
           "default": "200",
           "omittable_name": true
         }
@@ -4963,8 +4963,8 @@
           "choices": [
             "max"
           ],
-          "minimum": null,
-          "maximum": null,
+          "minimum": 1,
+          "maximum": 200000,
           "default": "200",
           "omittable_name": false
         },
@@ -5208,8 +5208,8 @@
           "choices": [
             "max"
           ],
-          "minimum": null,
-          "maximum": null,
+          "minimum": 1,
+          "maximum": 200000,
           "default": "200",
           "omittable_name": false
         },
@@ -5246,7 +5246,6 @@
         {
           "name": "type",
           "choices": [
-            "any",
             "hex",
             "number",
             "string"
@@ -5268,7 +5267,7 @@
             "max"
           ],
           "minimum": 1,
-          "maximum": null,
+          "maximum": 200000,
           "default": "200",
           "omittable_name": true
         }
@@ -6194,7 +6193,7 @@
           "name": "limit",
           "choices": [],
           "minimum": 1,
-          "maximum": null,
+          "maximum": 24576,
           "default": "10",
           "omittable_name": false
         },

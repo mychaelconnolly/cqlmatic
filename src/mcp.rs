@@ -23,6 +23,11 @@ pub struct Normalized {
 }
 
 pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
+    normalize_classified(raw, true)
+}
+
+// `hosted` classifies an error object inside `result`; without it such an answer is a shape error.
+fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
     if raw.len() > MAX_RESULT_BYTES {
         return Err(Diagnostic::error(
             "MCP_TOO_LARGE",
@@ -35,15 +40,15 @@ pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
     let body = if object.contains_key("content") {
-        parse_envelope(object)?
+        parse_envelope(object, hosted)?
     } else {
         value
     };
 
-    parse_result(body, raw)
+    parse_result(body, raw, hosted)
 }
 
-fn parse_envelope(object: &Map<String, Value>) -> Result<Value, Diagnostic> {
+fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
     // structuredContent is optional; when present it must equal the parsed text payload.
     if object
         .keys()
@@ -77,6 +82,18 @@ fn parse_envelope(object: &Map<String, Value>) -> Result<Value, Diagnostic> {
             )?;
             if inner.contains_key("content") || inner.contains_key("isError") {
                 return Err(shape("Nested MCP text envelopes are not supported"));
+            }
+            if hosted && inner.get("result").is_some_and(Value::is_object) {
+                if object
+                    .get("structuredContent")
+                    .is_some_and(|value| value != &Value::Object(inner.clone()))
+                {
+                    return Err(shape(
+                        "MCP structuredContent does not match the text content",
+                    ));
+                }
+                return Err(hosted_result_error(&inner)
+                    .unwrap_or_else(|| shape("MCP search result must have a result array")));
             }
         }
         if has_deadline(text) {
@@ -114,11 +131,15 @@ fn parse_envelope(object: &Map<String, Value>) -> Result<Value, Diagnostic> {
     Ok(body)
 }
 
-fn parse_result(value: Value, raw: &[u8]) -> Result<Normalized, Diagnostic> {
+fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
     let mut object = match value {
         Value::Object(object) => object,
         _ => return Err(shape("MCP search result must be an object")),
     };
+
+    if hosted && let Some(diagnostic) = hosted_result_error(&object) {
+        return Err(diagnostic);
+    }
 
     let errors = ["error", "errors"]
         .into_iter()
@@ -204,6 +225,123 @@ fn parse_result(value: Value, raw: &[u8]) -> Result<Normalized, Diagnostic> {
         trace_id,
         raw_sha256: sha256_hex(raw),
     })
+}
+
+/// Recognize the hosted search tool's final error answer from its exact decoded shape.
+pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
+    hosted_body_ending(hosted_answer_body(raw)?.as_object()?)
+}
+
+pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
+    let Some(value) = hosted_answer_body(raw) else {
+        return false;
+    };
+    value
+        .get("trace_id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+        || value
+            .as_object()
+            .is_some_and(|body| hosted_body_ending(body) == Some("timed-out"))
+}
+
+fn hosted_answer_body(raw: &[u8]) -> Option<Value> {
+    if raw.len() > MAX_RESULT_BYTES {
+        return None;
+    }
+    let mut value = parse_repeated_json(raw, "Invalid hosted answer").ok()?;
+    if value.as_object()?.contains_key("content") {
+        let object = value.as_object()?;
+        if object
+            .keys()
+            .any(|k| !matches!(k.as_str(), "content" | "isError" | "structuredContent"))
+            || object.get("isError").is_some_and(|v| !v.is_boolean())
+        {
+            return None;
+        }
+        let content = object.get("content")?.as_array()?;
+        if content.len() != 1 {
+            return None;
+        }
+        let item = content[0].as_object()?;
+        if item.len() != 2 || item.get("type")?.as_str()? != "text" {
+            return None;
+        }
+        let body = parse_repeated_json(
+            item.get("text")?.as_str()?.as_bytes(),
+            "Invalid hosted answer",
+        )
+        .ok()?;
+        if object.get("structuredContent").is_some_and(|v| *v != body) {
+            return None;
+        }
+        value = body;
+    }
+    Some(value)
+}
+
+fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
+    if object
+        .keys()
+        .any(|k| !matches!(k.as_str(), "result" | "trace_id"))
+        || object.get("trace_id").is_some_and(|v| !v.is_string())
+    {
+        return None;
+    }
+    let result = object.get("result")?.as_object()?;
+    let text = result.get("error")?.as_str()?;
+    let details = result.get("details")?.as_object()?;
+    if result.len() == 3
+        && result.get("operation")?.as_str()? == "GetSearchStatusV1"
+        && text.starts_with("NGSIEM search timed out after ")
+        && details.len() == 2
+    {
+        let id = details.get("job_id")?.as_str()?;
+        if !id.is_empty()
+            && id.chars().count() <= 256
+            && !id.chars().any(char::is_control)
+            && details.get("timeout_seconds")?.as_u64()? >= 1
+        {
+            return Some("timed-out");
+        }
+    }
+    if result.len() != 2 || details.len() != 2 || !details.get("body")?.is_object() {
+        return None;
+    }
+    match details.get("status_code")?.as_i64()? {
+        0 if text
+            .starts_with("Failed to start NGSIEM search: Request failed with status code 0 ")
+            && text.contains("MsaspecResponseFields")
+            && text.contains("TextConsumer") =>
+        {
+            Some("not-started")
+        }
+        400 if text.starts_with("Failed to poll NGSIEM search status:") => {
+            Some("failed-after-start")
+        }
+        _ => None,
+    }
+}
+
+fn hosted_result_error(object: &Map<String, Value>) -> Option<Diagnostic> {
+    let text = object.get("result")?.as_object()?.get("error")?.as_str()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let prefix = if hosted_body_ending(object) == Some("not-started") {
+        "The hosted search was rejected at start and did not run"
+    } else if hosted_body_ending(object) == Some("timed-out") {
+        return Some(Diagnostic::error(
+            "MCP_DEADLINE",
+            "The hosted search was accepted and cut off before completion; no rows were returned.",
+        ));
+    } else {
+        "MCP search tool error"
+    };
+    Some(Diagnostic::error(
+        "MCP_TOOL_ERROR",
+        format!("{prefix}: {}", text.chars().take(300).collect::<String>()),
+    ))
 }
 
 fn error_has_deadline(value: &Value) -> bool {
@@ -529,6 +667,9 @@ fn raw_hex(raw: &[u8]) -> String {
     encoded
 }
 fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, Diagnostic> {
+    Ok(normalize(&answer_bytes(answer)?))
+}
+fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
     if answer.raw_hex.len() > MAX_CAPTURE_BYTES * 2 || !answer.raw_hex.len().is_multiple_of(2) {
         return Err(tampered());
     }
@@ -548,7 +689,13 @@ fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, 
     if sha256_hex(&raw) != answer.raw_sha256 {
         return Err(tampered());
     }
-    Ok(normalize(&raw))
+    Ok(raw)
+}
+// A checkpoint from an earlier release keeps the diagnostic that release recorded for an answer
+// whose `result` is an error object.
+fn earlier_hosted_diagnostic(producer: &str, raw: &[u8], saved: &Diagnostic) -> bool {
+    producer != env!("CARGO_PKG_VERSION")
+        && normalize_classified(raw, false).is_err_and(|earlier| same_diagnostic(saved, &earlier))
 }
 fn same_diagnostic(a: &Diagnostic, b: &Diagnostic) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
@@ -810,10 +957,10 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
             state.session.is_none()
                 && matches!(
                     state.producer_version.as_str(),
-                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6"
+                    "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
                 )
         }
-        3 => state.producer_version == "0.1.6",
+        3 => matches!(state.producer_version.as_str(), "0.1.6" | "0.1.7"),
         _ => false,
     };
     if state.format != "cqlmatic-mcp-state"
@@ -898,10 +1045,13 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
                     && answer.trace_id == value.trace_id => {}
             Err(d)
                 if answer.outcome == "failed"
-                    && answer
-                        .diagnostic
-                        .as_ref()
-                        .is_some_and(|saved| same_diagnostic(saved, &d))
+                    && answer.diagnostic.as_ref().is_some_and(|saved| {
+                        same_diagnostic(saved, &d)
+                            || (matches!(d.code.as_str(), "MCP_DEADLINE" | "MCP_TOOL_ERROR")
+                                && answer_bytes(answer).is_ok_and(|raw| {
+                                    earlier_hosted_diagnostic(&state.producer_version, &raw, saved)
+                                }))
+                    })
                     && answer.trace_id.is_none() => {}
             _ => return Err(tampered()),
         }

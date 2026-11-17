@@ -1564,7 +1564,7 @@ fn assigned_aggregates_use_the_assignment_name_for_outputs_and_counts() {
     );
     assert_eq!(replaced.outcome, AssessOutcome::NoFindings);
     assert!(!replaced.columns.contains_key("old"));
-    let shorthand = assess_accepted("stats(count)", json!({"result":[{"_count":0}]}));
+    let shorthand = assess_accepted("stats(count())", json!({"result":[{"_count":0}]}));
     finding(&shorthand, "RESULT_ZERO_COUNT", Severity::Warning);
 }
 
@@ -2667,7 +2667,7 @@ fn per_column_statistics_and_findings_are_bounded_with_a_summary() {
 fn final_row_limits_exceeded_by_returned_rows_are_inconclusive() {
     for (query, returned) in [
         ("#repo=fw_repo | head(5)", 10),
-        ("head(0)", 10),
+        ("head(1)", 10),
         ("head()", 201),
         ("tail(5)", 6),
         ("sort(x, limit=5)", 6),
@@ -3305,9 +3305,9 @@ fn rows_beyond_an_explicit_limit_after_unproven_stages_are_inconclusive() {
 }
 
 #[test]
-fn assigned_row_limits_bound_the_result_like_their_call_forms() {
+fn row_limits_bound_projection_filters_and_assigned_renames() {
     let rows = |n: usize| json!({"result": (0..n).map(|i| json!({"a": format!("x{i}")})).collect::<Vec<_>>()});
-    let exceeded = assess("a := table([a], limit=1) | select(a)", rows(2));
+    let exceeded = assess("table([a], limit=1) | select(a)", rows(2));
     assert_eq!(
         exceeded.outcome,
         AssessOutcome::Inconclusive,
@@ -3322,7 +3322,7 @@ fn assigned_row_limits_bound_the_result_like_their_call_forms() {
         "{:?}",
         exceeded.findings
     );
-    let unproven = assess("a := table([a], limit=1) | in(a, values=[x0, x1])", rows(2));
+    let unproven = assess("table([a], limit=1) | in(a, values=[x0, x1])", rows(2));
     assert_eq!(
         unproven.outcome,
         AssessOutcome::Inconclusive,
@@ -3346,10 +3346,10 @@ fn assigned_row_limits_bound_the_result_like_their_call_forms() {
             result.findings
         );
     }
-    // The final assigned form and results within the limit keep their earlier behaviour.
-    let final_form = assess("a := table([a], limit=1)", rows(2));
+    // Final calls and results within the limit retain their bounds.
+    let final_form = assess("table([a], limit=1)", rows(2));
     finding(&final_form, "RESULT_CAP_EXCEEDED", Severity::Warning);
-    let within = assess("a := table([a], limit=2) | select(a)", rows(2));
+    let within = assess("table([a], limit=2) | select(a)", rows(2));
     assert!(
         within
             .findings
@@ -3489,4 +3489,131 @@ fn grouping_keys_and_selector_children_carry_separate_collected_fields() {
             result.findings
         );
     }
+}
+
+#[test]
+fn hosted_result_errors_are_inconclusive_without_rows() {
+    for (raw, code) in [
+        (
+            include_str!("fixtures/mcp/hosted-timeout.json"),
+            "RESULT_TIMEOUT",
+        ),
+        (
+            include_str!("fixtures/mcp/hosted-rejected.json"),
+            "RESULT_ERROR",
+        ),
+        (
+            include_str!("fixtures/mcp/hosted-poll-failed.json"),
+            "RESULT_ERROR",
+        ),
+    ] {
+        let body: Value = serde_json::from_str(raw).unwrap();
+        for value in [
+            body,
+            json!({"content":[{"type":"text","text":raw}]}),
+            json!({"content":[{"type":"text","text":raw}],"isError":true}),
+            json!({"content":[{"type":"text","text":raw}],"isError":false}),
+        ] {
+            let result = assess("count()", value);
+            assert_eq!(result.outcome, AssessOutcome::Inconclusive);
+            assert_eq!(result.rows, 0);
+            finding(&result, code, Severity::Warning);
+        }
+    }
+}
+
+#[test]
+fn empty_and_zero_messages_require_a_positive_control() {
+    for (body, code) in [
+        (json!({"result":[]}), "RESULT_EMPTY"),
+        (json!({"result":[{"_count":"0"}]}), "RESULT_ZERO_COUNT"),
+    ] {
+        let result = assess("count()", body);
+        let message = &result
+            .findings
+            .iter()
+            .find(|f| f.code == code)
+            .unwrap()
+            .message;
+        assert!(message.contains("positive control"));
+        assert!(message.contains("without the selective filter or field"));
+        assert!(message.contains("confirm a non-zero count"));
+    }
+}
+
+#[test]
+fn negated_transforms_have_plain_field_effects() {
+    for call in [
+        "rename(x, as=y)",
+        "drop([x])",
+        "select([x])",
+        "lower(x, as=y)",
+        "parseJson(x)",
+        "splitString(x, by=\",\", as=y)",
+        "setField(target=\"y\", value=1)",
+        "kvParse(x)",
+    ] {
+        let plain = format!("x:=1 | {call} | y=*");
+        let negated = format!("x:=1 | !{call} | y=*");
+        let checked = |q: &str| {
+            app::check(
+                CheckRequest {
+                    schema_version: 1,
+                    id: None,
+                    query: q.into(),
+                    context: Context::default(),
+                },
+                None,
+            )
+        };
+        assert_eq!(
+            checked(&plain).validation.status,
+            Acceptance::Accepted,
+            "{plain}"
+        );
+        let negated_check = checked(&negated);
+        assert_eq!(
+            negated_check.validation.status,
+            Acceptance::Accepted,
+            "{negated}"
+        );
+        assert_eq!(
+            negated_check
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == "CQL_NEGATION_NO_EFFECT")
+                .count(),
+            1,
+            "{negated}"
+        );
+        assert!(
+            cqlmatic::language::parser::parse(&negated)
+                .unwrap()
+                .render()
+                .contains(&format!("!{call}")),
+            "{negated}"
+        );
+        assert_eq!(
+            serde_json::to_value(checked(&plain).grounding).unwrap(),
+            serde_json::to_value(checked(&negated).grounding).unwrap(),
+            "{call}"
+        );
+        let a = assess(&plain, json!({"result":[{"y":"a"}]}));
+        let b = assess(&negated, json!({"result":[{"y":"a"}]}));
+        assert_eq!(
+            serde_json::to_value(a.findings).unwrap(),
+            serde_json::to_value(b.findings).unwrap(),
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn converted_boolean_caps_equal_canonical_caps() {
+    let a = assess("top(x, rest=false)", rows(10));
+    let b = assess("top(x, rest=FALSE)", rows(10));
+    assert_eq!(
+        serde_json::to_value(a.findings).unwrap(),
+        serde_json::to_value(b.findings).unwrap()
+    );
 }

@@ -752,7 +752,7 @@ fn strict_requests_and_unicode_diagnostics_survive_the_cli_boundary() {
 fn effects_and_expression_names_cannot_change_the_requested_operation() {
     for query in [
         "x := count() + 1",
-        "x := createEvents([\"injected\"])",
+        "x := createEvents([\"injected\"]) + 1",
         "eval(x=readFile(\"file\"))",
         "groupBy([user], function=unknownAggregate())",
     ] {

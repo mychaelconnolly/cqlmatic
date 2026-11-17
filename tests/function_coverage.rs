@@ -604,7 +604,7 @@ fn invalid_categories_and_unresolved_forms_keep_their_distinct_outcomes() {
                 .and_then(|pipeline| generate(&pipeline))
             {
                 Ok(generated) if generated.outcome == control.outcome => {
-                    assert!(generated.query.is_none());
+                    assert_eq!(generated.query.is_some(), control.outcome == Outcome::Ready);
                 }
                 other => failures.push(format!("{} typed: {other:?}", control.id)),
             }

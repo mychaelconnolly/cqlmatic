@@ -13,6 +13,75 @@ fn check(query: &str) -> Analysis {
 }
 
 #[test]
+fn free_text_must_precede_the_first_aggregate() {
+    for query in [
+        r#""Lorem ipsum dolor" | tail(200) | "sit amet, consectetur""#,
+        "x=1 | groupBy(y) | head 10",
+        "x=1 | groupBy(y) | sort -_count | head 10",
+        "x=1 | count() | foo",
+        "x=1 | sort(y) | foo",
+        "x=1 | table([a]) | foo",
+        "x=1 | groupBy(y) | /foo/",
+        "x=1 | groupBy(y) | NOT foo",
+        "x=1 | groupBy(y) | a=1 OR foo",
+        r#"x=1 | count() | wildcard("a*")"#,
+        "groupBy(k) | case { foo; * }",
+        "head(1) | series(user, startmatch={foo})",
+        r#"createEvents(["a=1"]) | foo"#,
+        "count() | a=1 AND (b=2 OR NOT /foo/)",
+        "count() | k match { a => foo; * => * }",
+        r#"readFile("lookup.csv") | foo"#,
+        r#"readPersistedAggregation("hourly") | foo"#,
+        "correlate(A: { x=1 }) | foo",
+        "n := count() | foo",
+        "count() | wildcard(\"a*\", field=y) | foo",
+        "count() | selfJoinFilter(field=k, where=[{foo}])",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Rejected,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "CQL_FREE_TEXT_AFTER_AGGREGATE"
+                    && diagnostic.severity == Severity::Error
+                    && diagnostic.message.contains("Free-text")
+            }),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    for query in [
+        r#""Lorem ipsum dolor" | "sit amet" | tail(200)"#,
+        "x=1 | eval(z=1) | foo",
+        "x=1 | tail(200) | y=2",
+        "count() | *",
+        "count() | _count=*",
+        "count() | case { _count>1; * }",
+        "x=1 | groupBy(y) | @rawstring=/foo/",
+        "groupBy(k) | join({foo}, field=k)",
+        r#"x=1 | count() | wildcard("a*", field=y)"#,
+        r#"count() | wildcard("a*", field=[])"#,
+        "foo | groupBy(k)",
+        r#"wildcard("a*") | count()"#,
+        r#"createEvents(["a=1"]) | a=1"#,
+        "case { a=1 | v:=1; foo } | count()",
+        "defineTable(name=t, query={foo | count()}, include=[_count]) | foo",
+        "groupBy(k) | join({foo}, field=k) | _count=*",
+        "head(1) | series(user, startmatch={user=*})",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn saved_query_calls_require_resource_resolution() {
     for query in [
         "$helper()",
@@ -60,6 +129,17 @@ fn dollar_text_in_patterns_strings_regex_and_comments_remains_supported() {
         "$100",
         "message=$helper",
         "message=$falcon/helper:saved",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.outcome,
+            Outcome::Invalid,
+            "{query}: {:?}",
+            result.diagnostics
+        );
+        assert!(result.diagnostics.iter().any(|d| d.code == "CQL_SYNTAX"));
+    }
+    for query in [
         "\"$helper()\"",
         "message=\"$falcon/helper:notAFunction(field=ProductType)\"",
         "result := \"$helper()\"",
@@ -79,10 +159,17 @@ fn dollar_text_in_patterns_strings_regex_and_comments_remains_supported() {
 
 #[test]
 fn unresolved_parameters_are_coverage_gaps_in_typed_and_nested_arguments() {
+    let quoted_name = check("message=?\"Search Text\"");
+    assert_eq!(quoted_name.outcome, Outcome::Invalid);
+    assert!(
+        quoted_name
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_SYNTAX")
+    );
     for query in [
         "host=?host",
         "size > ?threshold",
-        "message=?\"Search Text\"",
         "result := ?value + 1",
         "count(field=?field)",
         "count(distinct=?distinct)",
@@ -141,7 +228,7 @@ fn unresolved_parameters_are_coverage_gaps_in_typed_and_nested_arguments() {
 }
 
 #[test]
-fn parameter_defaults_remain_outside_the_profile() {
+fn parameter_defaults_supply_complete_values() {
     for query in [
         "?{text=\"*\"}",
         "host=?{host=\"alpha\"}",
@@ -150,7 +237,7 @@ fn parameter_defaults_remain_outside_the_profile() {
         let result = check(query);
         assert_eq!(
             result.outcome,
-            Outcome::Unsupported,
+            Outcome::Ready,
             "{query}: {:?}",
             result.diagnostics
         );
@@ -164,7 +251,6 @@ fn parameters_preserve_independent_errors() {
         ("count(field=?field, unknown=true)", "CQL_ARGUMENT_UNKNOWN"),
         ("in(values=?values)", "CQL_ARGUMENT_REQUIRED"),
         ("sort(field=?field, limit=false)", "CQL_ARGUMENT_TYPE"),
-        ("in(field=host, values=[?value, 1])", "CQL_ARGUMENT_TYPE"),
         ("sort(order=[?order, invalid])", "CQL_ARGUMENT_VALUE"),
         (
             "bucket(span=\"1m\",function=window(count(),span=?s,buckets=2))",

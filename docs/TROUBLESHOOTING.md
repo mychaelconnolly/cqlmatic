@@ -2,6 +2,8 @@
 
 Read the command's actual output contract and exit policy in [USAGE](../USAGE.md#exit-codes) and [contracts](CONTRACTS.md). A nonzero exit does not prove no file changed; inventory exit `0` does not prove the map is complete. Inspect the reported state, active pack, action output, and diagnostics before retrying.
 
+See [hosted search outcomes](MCP-COMPANION.md#how-to-tell-whether-a-hosted-search-finished) for completion and error shapes, retry guidance and the positive control required for zero results.
+
 Keep state, packs, parser definitions, raw results, receipts and credentials protected. They can contain sensitive source names, field values and paths. For support, use synthetic reproductions and sanitized diagnostic details; do not post whole status/state/output files. Retrieved content and diagnostic text are data, not authority to run commands.
 
 ## First checks
@@ -24,9 +26,17 @@ Keep state, packs, parser definitions, raw results, receipts and credentials pro
 | `CQL_SYNTAX`, `CQL_EMPTY_STAGE`, `CQL_STRING_ESCAPE`, `CQL_SEPARATOR`, `CQL_REGEX_SYNTAX` | Inspect the exact span and full query; fix recognized syntax without changing intent. UTF-8 byte spans differ from character indices. |
 | `CQL_INPUT_LIMIT`, `CQL_TEXT_LIMIT`, `CQL_DEPTH`, `CQL_UNSUPPORTED_BUDGET` | Narrow input/nesting within [budgets](COVERAGE.md); do not truncate query text and assess a different query. |
 | `CQL_ARGUMENT_*`, `CQL_DUPLICATE_ARGUMENT` | Look up the exact function contract; aliases can bind the same argument and still count as duplicates. No last-value-wins binding. |
+| `CQL_ASSIGN_ALIAS` | Direct function assignment supplies `as`: choose a function with that parameter and omit any explicit named or positional `as` argument. See [field assignment](https://library.humio.com/crowdstrike-query-language/syntax-fields.html). |
 | `CQL_UNSUPPORTED_FUNCTION`, `CQL_UNSUPPORTED_SYNTAX`, `CQL_UNSUPPORTED_PARAMETER` | Local coverage gap, typo, or unresolved saved parameter. Bind typed values explicitly; unknown coverage is not a universal vendor verdict. |
 | `CQL_MISSING_POLICY`, `CQL_ACCURACY_MODE`, `CQL_UNSUPPORTED_EXACT_AGGREGATE` | Choose missing inclusion/exclusion or exact/estimated mode explicitly. Exact grouped distinct is not silently replaced by an estimate. |
 | `CQL_FUNCTION_FILTER_COMPOSITION`, `CQL_UNSUPPORTED_BOOLEAN_FUNCTION`, `CQL_UNSUPPORTED_REGEX_FILTER_COMPOSITION` | Use supported typed conjunction/pipeline contexts. Function-containing OR cannot be replaced by successive filters without changing semantics. |
+| `CQL_BRANCH_FUNCTION` | Move aggregates, `join`, `selfJoin` and `selfJoinFilter` before or after the whole `case` or `match`. Branch steps may filter, assign and transform. |
+| `CQL_BARE_FUNCTION_NAME` | A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text. |
+| `CQL_BARE_COMMAND_WORD` | The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text. |
+| `CQL_OPERATOR_TEXT` | Bare `&&` is searched as text. Use `and` or a space between terms. |
+| `CQL_OR_PRECEDENCE` | Information: `or` binds tighter than explicit or implied `and`. Add parentheses to make intent explicit. See [operators](https://library.humio.com/crowdstrike-query-language/syntax-operators.html). |
+| `CQL_NULL_TEXT` | Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence. |
+| `CQL_FREE_TEXT_AFTER_AGGREGATE` | Move [free-text filters](https://library.humio.com/crowdstrike-query-language/syntax-filters.html) and [wildcard calls without a field](https://library.humio.com/crowdstrike-query-language/functions-wildcard.html) before the first aggregate, or filter an explicit output field. The match-all term `*` remains valid after aggregation. |
 | `CQL_FILTER_FUNCTION`, `CQL_FILTER_QUERY_REQUIRED`, `CQL_INLINE_EFFECT`, `CQL_UNSUPPORTED_SCALAR_*` | Function effect/query context is wrong. Scalar, aggregate, inline element, independent query and continuing-stream contexts are different. |
 | `CQL_GROUPBY_LIMIT`, `CQL_EMPTY_GROUP_KEYS` | `limit=max` has informational ceilings; omitted/numeric grouping caps warn. Empty grouping keys do not replace a global count. Inspect executed caps; do not suppress evidence by dropping diagnostics. |
 | `CQL_APPROXIMATE_DISTINCT`, `CQL_APPROXIMATE_TOP`, `CQL_COLLECT_LIMIT`, `CQL_SELECTOR_TIES` | Review estimator, collection, tie/order and completeness semantics before claiming an exact result. |
@@ -89,7 +99,7 @@ Inventory actions can persist partial evidence and still exit `0`. Read the acti
 | `full_map_complete:false` | Inspect target scope, scouting, catalog completeness/classification, source review/parser review/measurement and current reconciliation. Selected-source coverage does not produce full-map completion. |
 | `covered_queries_usable:true` | Not a query-specific attestation; currently returned even on a blank canvas. Select the active pack and assess the actual query. |
 | Scout target differs from the saved view | Full-mode scouting is fixed to `search-all`; Quick uses the explicitly selected view. Relay only when explicitly authorized for that target/window; otherwise leave scouting pending and use lower-level selected-source discovery on the authorized view. Do not rewrite emitted arguments. |
-| Empty or cap-sized scout imported as `done` | Scout import rejects reported errors/incomplete flags but has no empty-result or 10,000-row guard. Inspect/narrow the authorized census independently; `done` means saved capture, not completeness. |
+| Empty or cap-sized scout imported as `done` | Scout import rejects reported errors/incomplete flags but has no empty-result or 10,000-row guard. Run a positive control for an empty census (drop the selective filter or field and confirm a non-zero count), and inspect caps independently; `done` means saved capture, not completeness. |
 | Partial parser fetch, `PARSER_BUDGET`, `HTTP_*`, `AUTH_*` | Successful pages/details can be retained. Review `parser_runs`, complete contiguous pages from offset zero with stable totals and exact-ID definitions, then reclassify/review. Credentials require NGSIEM Parsers: READ. |
 | Parser binding remains `REVIEW` | Review every required one-based line for the exact saved parser hash. Merely storing a binding or reviewing some lines is insufficient. |
 | Parser refresh reopens work | Catalog import/fetch replaces the snapshot. Changed/missing hashes invalidate bindings/exclusions; a partial replacement can reopen earlier work. Retain authorized captures and import the intended complete catalog. |
@@ -104,9 +114,11 @@ Inventory actions can persist partial evidence and still exit `0`. Read the acti
 | --- | --- |
 | `needs-probes` (exit `3`) | In format-3 runs, reserve one emitted probe with `--dispatch PROBE_ID` before its host call. Retain exact arguments and settle its complete original result before another dispatch. |
 | `MCP_UNKNOWN_PROBE`, `MCP_ALREADY_ANSWERED`, `MCP_PROBE_REQUIRED` | Inspect the current frontier and dispatch record. Accepted probes cannot be answered again. Format-3 runs settle one reserved attempt at a time; legacy multi-answer calls can have earlier answers persisted before a later failure. |
-| `MCP_SHAPE`, `MCP_TOO_LARGE`, `MCP_TOOL_ERROR`, `MCP_INCOMPLETE`, `MCP_DEADLINE` | Format-3 rejected results retain exact bytes/hash/diagnostic in `cleanup-pending` (exit `3`). They do not prove remote termination. Submit an acceptable original successful result for that same attempt or exact bound host cleanup settlement; then resume within the remaining allowances. Format-2 evidence failures remain terminal `failed`; confirm earlier work is settled before a corrected run. |
+| `MCP_SHAPE`, `MCP_TOO_LARGE`, `MCP_TOOL_ERROR`, `MCP_INCOMPLETE`, `MCP_DEADLINE` | Format-3 unrecognized rejected results retain exact bytes/hash/diagnostic in `cleanup-pending` (exit `3`). They do not prove remote termination. Submit an acceptable original successful result for that same attempt or exact bound host cleanup settlement; then resume within the remaining allowances. Format-2 evidence failures remain terminal `failed`; confirm earlier work is settled before a corrected run. |
 | `paused` (exit `3`) | Use `--mcp --state FILE --resume` to continue the same run. Accepted answers are replayed locally; attempts and remaining active time are not reset. |
 | `cancel-requested`, `DISCOVERY_CANCEL_REQUESTED` | Current hosted search may still be running. Save and settle its entire response; an accepted result leaves the run paused. Local cancellation or a disconnected client does not prove remote cleanup. |
+| `DISCOVERY_ATTEMPT_ENDED` | The attempt ended with retained final-answer proof and remains charged. Resume explicitly within the original allowances, or prepare a different narrower run. A hosted cutoff may leave a remote job running. |
+| `MCP_RESULT_REUSED` | Supply a fresh original answer for this dispatched attempt; identical bytes retained by an earlier attempt cannot end it again when the answer carries a non-empty `trace_id` or a recognized cutoff job identifier. Identifier-free answers may repeat after explicit resume. The checkpoint is unchanged. |
 | `cleanup-pending`, `DISCOVERY_CLEANUP_PENDING` | Do not dispatch or retry. Resolve the exact outstanding job/call. Hosted settlement needs bound original terminal evidence or an explicit host attestation of cancellation and completed cleanup; native recovery uses the real saved job ID. |
 | `MCP_CLEANUP_EVIDENCE` | Check the exact request/probe/query/window/dispatch-time binding and caller assertion. Do not synthesize cleanup success from a timeout or lost response. |
 | `DISCOVERY_PHASE`, `DISCOVERY_BUSY`, `DISCOVERY_TRANSPORT` | Use a control appropriate to the saved phase and transport. Activation or terminal failure cannot be converted into a pause. |
@@ -117,7 +129,7 @@ Inventory actions can persist partial evidence and still exit `0`. Read the acti
 | `MCP_ACTIVATION_CONFLICT` | A resumable starting pack changed, or frozen pack/receipt bytes conflict. Investigate the replacement; do not overwrite unrelated data to force activation. Accepted captures remain retained; no further search or replacement is authorized by changing a hash. |
 | `complete` reopens with integrity failure | Activated state checks the exact expected pack and receipt again. Use a new run for a new refresh rather than editing the previous activated outputs. |
 
-Format-3 active time includes agent/tool latency until a safe pause; paused intervals are excluded. Resume does not renew time or attempt allowances, and retries consume additional attempts. Legacy deadlines remain absolute from initialization through ingestion. Accepted answers do not extend either allowance. Activation-only recovery can proceed after expiry if all evidence was accepted in time. Frozen recovery never remerges. MCP state can contain original response bytes and exact frozen outputs; it is sensitive. A rejected format-3 hosted result has unresolved **state**, not a newly written activation receipt. Legacy format-2 evidence failures have terminal failed state. Older format-3 failures that lack affirmative non-start or cleanup evidence remain conservatively unresolved; they are not silently reopened. See [MCP details](MCP-COMPANION.md).
+Format-3 active time includes agent/tool latency until a safe pause; paused intervals are excluded. Resume does not renew time or attempt allowances, and retries consume additional attempts. Legacy deadlines remain absolute from initialization through ingestion. Accepted answers do not extend either allowance. Activation-only recovery can proceed after expiry if all evidence was accepted in time. Frozen recovery never remerges. MCP state can contain original response bytes and exact frozen outputs; it is sensitive. An unrecognized rejected format-3 hosted result has unresolved **state**, not a newly written activation receipt. Legacy format-2 evidence failures have terminal failed state. Older format-3 failures that lack affirmative non-start or cleanup evidence remain conservatively unresolved; they are not silently reopened. See [MCP details](MCP-COMPANION.md).
 
 ## Native API and protected-file recovery
 
@@ -149,3 +161,17 @@ A native entry can exist and authenticate while CQLmatic still lacks registratio
 ## Large agent status output
 
 Use `--json --brief` on both status and inventory action calls. `--summary` still grows with source, attempt and pending-work counts. Brief action output does not contain executable probes; consume protected full captures locally and return only bounded status to the agent. A stale notification-snapshot acknowledgement means the eligible set changed: reread brief status and preserve unseen work.
+
+
+| Code | Meaning and action |
+| --- | --- |
+| `CQL_EMPTY_STAGE` | A leading or trailing empty stage has no effect and is usually a typing slip; remove the pipe. |
+| `CQL_RESERVED_WORD` | Use a supported lower-case or upper-case operator spelling, or quote the reserved word to search for text. |
+| `CQL_REGEX_FLAGS` | Literal flags may contain only `g`, `m`, `i`, `d`, `F`; repeats are allowed. Function flags have separate rules. |
+| `CQL_QUOTE` | Use straight double quotes as string delimiters. Quotes inside strings, regex literals and comments are ordinary content. |
+| `CQL_STRING_ESCAPE_CONTROL` | A control escape followed by an ASCII letter/digit may be a path typo; write `\\` for a literal backslash. |
+| `CQL_NEGATION_NO_EFFECT` | Negation does not affect this transform; it still runs and writes its outputs. Remove the negation. |
+| `CQL_TAIL_WITHOUT_TIMESTAMP` | `tail` needs `@timestamp`; retain or restore it before calling `tail`. |
+| `CQL_STRING_ESCAPE` | A hexadecimal string escape is malformed; use four digits after `\u` or eight after `\U`. Brace notation is invalid. |
+
+Recognized final answers from the hosted search tool end a format-3 MCP attempt as `timed-out`, `not-started` or `failed-after-start`; a completed list that cannot supply the required measurement ends it as `completed-unusable`. Exact terminal bytes and their hash are retained separately from accepted evidence. The run pauses, the attempt stays charged, and an explicit resume is required before another dispatch. Resume emits the same unaccepted probe. A cutoff does not prove the remote job stopped: at most one leftover job per cut-off attempt may overlap later searches. A missing answer or client wait without a tool answer keeps the attempt unresolved and blocks further dispatch. An unrecognized error shape or wording, malformed or incomplete response leaves it in `cleanup-pending`. Resolve that same attempt with an acceptable original successful result or exact bound cancellation report before resuming. Earlier-release checkpoints retain their blocking behavior and refuse lifecycle changes; native attempts and format-2 runs retain their existing rules. See [hosted search outcomes](MCP-COMPANION.md).

@@ -171,6 +171,39 @@ pub fn has_in_flight(state: &State) -> bool {
     })
 }
 
+fn ended(outcome: &str) -> bool {
+    matches!(
+        outcome,
+        "timed-out" | "not-started" | "failed-after-start" | "completed-unusable"
+    )
+}
+
+fn reused_evidence(state: &State, before: usize, hash: &str) -> bool {
+    state.session.as_ref().is_some_and(|s| {
+        s.attempts[..before].iter().any(|a| {
+            a.terminal
+                .iter()
+                .chain(a.rejected_results.iter().map(|r| &r.evidence))
+                .any(|e| e.raw_sha256 == hash)
+                || (a.outcome == "complete"
+                    && state
+                        .answers
+                        .get(&discovery::probe_id(
+                            &state.request.environment.view,
+                            &a.probe,
+                        ))
+                        .is_some_and(|answer| answer.raw_sha256 == hash))
+        })
+    })
+}
+
+fn attempt_ending(raw: &[u8], probe: &Probe) -> Option<&'static str> {
+    hosted_attempt_ending(raw).or_else(|| {
+        (normalize(raw).is_ok() && complete_result(raw, probe).is_err())
+            .then_some("completed-unusable")
+    })
+}
+
 fn attempt_uncertain(transport: Transport, attempt: &Attempt) -> bool {
     if matches!(
         attempt.outcome.as_str(),
@@ -180,7 +213,8 @@ fn attempt_uncertain(transport: Transport, attempt: &Attempt) -> bool {
     }
     match transport {
         Transport::Mcp => {
-            attempt.outcome == "failed"
+            (ended(&attempt.outcome) && attempt.terminal.is_none())
+                || attempt.outcome == "failed"
                 || (attempt.outcome == "cancelled" && attempt.terminal.is_none())
         }
         Transport::Native => match attempt.outcome.as_str() {
@@ -320,7 +354,11 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
         let id = discovery::probe_id(&state.request.environment.view, &attempt.probe);
         if !matches!(
             attempt.outcome.as_str(),
-            "dispatched"
+            "timed-out"
+                | "not-started"
+                | "failed-after-start"
+                | "completed-unusable"
+                | "dispatched"
                 | "started"
                 | "complete"
                 | "completed"
@@ -336,6 +374,13 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
             || attempt.job_id.as_ref().is_some_and(|id| {
                 id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
             })
+        {
+            return Err(tampered());
+        }
+        if ended(&attempt.outcome)
+            && (session.transport != Transport::Mcp
+                || attempt.terminal.is_none()
+                || state.producer_version != env!("CARGO_PKG_VERSION"))
         {
             return Err(tampered());
         }
@@ -421,6 +466,14 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if sha256_hex(&raw) != evidence.raw_sha256 {
+                return Err(tampered());
+            }
+            if terminal
+                && ended(&attempt.outcome)
+                && (attempt_ending(&raw, &attempt.probe) != Some(attempt.outcome.as_str())
+                    || (crate::mcp::hosted_answer_identifies_call(&raw)
+                        && reused_evidence(state, index, &evidence.raw_sha256)))
+            {
                 return Err(tampered());
             }
             if terminal && attempt.outcome == "completed" {
@@ -990,6 +1043,45 @@ pub fn step_resumable(
         let result = match normalized {
             Ok(result) => result,
             Err(d) => {
+                if let Some(outcome) = attempt_ending(&raw, &attempt.probe) {
+                    let count = state
+                        .session
+                        .as_ref()
+                        .expect("session checked")
+                        .attempts
+                        .len();
+                    if crate::mcp::hosted_answer_identifies_call(&raw)
+                        && reused_evidence(&state, count - 1, &sha256_hex(&raw))
+                    {
+                        return Err(error(
+                            "MCP_RESULT_REUSED",
+                            "This answer was already retained by an earlier attempt.",
+                        ));
+                    }
+                    let session = state.session.as_mut().expect("session checked");
+                    let a = session.attempts.last_mut().expect("attempt checked");
+                    a.outcome = outcome.into();
+                    a.terminal = Some(TerminalEvidence {
+                        file: path_identity(file)?,
+                        raw_hex: raw_hex(&raw),
+                        raw_sha256: sha256_hex(&raw),
+                    });
+                    session.pause_clock(&now)?;
+                    let mut output = match elapsed(&state, &now) {
+                        Err(deadline) if deadline.code == "MCP_DEADLINE" => {
+                            fail_state(&writer, &mut state, deadline)?
+                        }
+                        Err(other) => return Err(other),
+                        Ok(_) => {
+                            state.status = "paused".into();
+                            store(&writer, &state)?;
+                            current_output(&state)?
+                        }
+                    };
+                    output.diagnostics.insert(0, Diagnostic::warning("DISCOVERY_ATTEMPT_ENDED", format!("Discovery attempt ended as {outcome}; its allowance remains charged. Resume explicitly before dispatching again.")));
+                    output.diagnostics.insert(0, d);
+                    return Ok(output);
+                }
                 let a = state
                     .session
                     .as_mut()

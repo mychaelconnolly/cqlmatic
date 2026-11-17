@@ -2278,11 +2278,12 @@
       "function": "math:mod",
       "primary": false,
       "forms": [
-        "two_unnamed_operands"
+        "documented_signature",
+        "omitted_argument_name"
       ],
       "placement": "pipeline",
-      "query": "math:mod(\"value\", 3, as=\"remainder\")",
-      "canonical": "math:mod(\"value\", 3, as=\"remainder\")",
+      "query": "math:mod(\"value\", divisor=3, as=\"remainder\")",
+      "canonical": "math:mod(\"value\", divisor=3, as=\"remainder\")",
       "inputs": [
         "value"
       ],
@@ -2933,8 +2934,8 @@
         "documented_signature"
       ],
       "placement": "pipeline",
-      "query": "parseTimestamp(\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")",
-      "canonical": "parseTimestamp(\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")"
+      "query": "parseTimestamp(field=\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")",
+      "canonical": "parseTimestamp(field=\"time_text\", format=\"yyyy-MM-dd HH:mm:ss\", timezone=\"UTC\", timezoneAs=\"zone\", as=\"stamp\")"
     },
     {
       "id": "parseUri",
@@ -3554,11 +3555,11 @@
       "function": "setTimeInterval",
       "primary": false,
       "forms": [
-        "omitted_argument_name"
+        "documented_signature"
       ],
       "placement": "query-preamble",
-      "query": "setTimeInterval(\"7d\") | count()",
-      "canonical": "setTimeInterval(\"7d\") | count()"
+      "query": "setTimeInterval(start=\"7d\") | count()",
+      "canonical": "setTimeInterval(start=\"7d\") | count()"
     },
     {
       "id": "shannonEntropy",
@@ -3744,7 +3745,7 @@
         "documented_signature"
       ],
       "placement": "pipeline",
-      "query": "stats(count)",
+      "query": "stats(count())",
       "canonical": "stats(count())"
     },
     {
@@ -3971,8 +3972,8 @@
         "documented_signature"
       ],
       "placement": "pipeline",
-      "query": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances\")",
-      "canonical": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances\")",
+      "query": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances[]\")",
+      "canonical": "text:editDistanceAsArray(target=message, references=[\"a\", \"b\"], maxDistance=5, asArray=\"distances[]\")",
       "inputs": [
         "message"
       ],
@@ -4586,8 +4587,8 @@
         "expression"
       ],
       "placement": "scalar-predicate",
-      "query": "matched := wildcard(\"a*\", field=\"message\")",
-      "canonical": "matched := wildcard(\"a*\", field=\"message\")"
+      "query": "matched := if(wildcard(\"a*\", field=\"message\"), then=true, else=false)",
+      "canonical": "matched := if(wildcard(\"a*\", field=\"message\"), then=true, else=false)"
     },
     {
       "id": "wildcard-negated",
@@ -4988,7 +4989,7 @@
     },
     {
       "id": "transform-scalar-context",
-      "query": "result := parseJson()",
+      "query": "result := 1 + parseJson()",
       "outcome": "unsupported",
       "typed": true,
       "diagnostic": "CQL_UNSUPPORTED_SCALAR_FUNCTION"
@@ -5010,7 +5011,30 @@
         "negated"
       ],
       "query": "!matchAsArray(\"synthetic.csv\", field=\"user\", nrows=1, asArray=\"matches[]\", strict=false)",
-      "outcome": "unsupported",
+      "outcome": "ready",
+      "typed": true,
+      "diagnostic": "CQL_NEGATION_NO_EFFECT"
+    },
+    {
+      "id": "math:mod-unnamed-argument",
+      "function": "math:mod",
+      "forms": [
+        "two_unnamed_operands"
+      ],
+      "query": "math:mod(x, 3)",
+      "outcome": "invalid",
+      "diagnostic": "CQL_ARGUMENT_COUNT",
+      "typed": true
+    },
+    {
+      "id": "setTimeInterval-unnamed-argument",
+      "function": "setTimeInterval",
+      "forms": [
+        "omitted_argument_name"
+      ],
+      "query": "setTimeInterval(1d) | count()",
+      "outcome": "invalid",
+      "diagnostic": "CQL_ARGUMENT_COUNT",
       "typed": true
     }
   ]

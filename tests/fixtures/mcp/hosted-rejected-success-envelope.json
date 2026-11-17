@@ -1,0 +1,25 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"result\": {\"details\": {\"body\": {\"errors\": [{\"message\": \"\\u0026{[] \\u003cnil\\u003e} (*models.MsaspecResponseFields) is not supported by the TextConsumer, can be resolved by supporting TextUnmarshaler interface\"}]}, \"status_code\": 0}, \"error\": \"Failed to start NGSIEM search: Request failed with status code 0 API said: \\u0026{[] \\u003cnil\\u003e} (*models.MsaspecResponseFields) is not supported by the TextConsumer, can be resolved by supporting TextUnmarshaler interface. Trace ID: \"}, \"trace_id\": \"00000000-0000-0000-0000-000000000000\"}\n"
+    }
+  ],
+  "structuredContent": {
+    "result": {
+      "details": {
+        "body": {
+          "errors": [
+            {
+              "message": "&{[] <nil>} (*models.MsaspecResponseFields) is not supported by the TextConsumer, can be resolved by supporting TextUnmarshaler interface"
+            }
+          ]
+        },
+        "status_code": 0
+      },
+      "error": "Failed to start NGSIEM search: Request failed with status code 0 API said: &{[] <nil>} (*models.MsaspecResponseFields) is not supported by the TextConsumer, can be resolved by supporting TextUnmarshaler interface. Trace ID: "
+    },
+    "trace_id": "00000000-0000-0000-0000-000000000000"
+  },
+  "isError": false
+}
