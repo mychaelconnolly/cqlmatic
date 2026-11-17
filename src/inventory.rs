@@ -1517,7 +1517,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
-            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value: use unresolved, then lifetime-expired once the retained provider lifetime has elapsed."}));
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later."}));
     } else if blocker == "awaiting-host-settlement" {
         notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
             "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
@@ -3662,7 +3662,7 @@ pub(crate) fn validate_refresh_settlement(
                 .as_deref()
                 .ok_or_else(|| fail("No dispatched refresh lifetime exists."))?,
         )?;
-        let started = environment::parse_time(report.search_started_at.as_deref().ok_or_else(|| fail("Lifetime reconciliation requires host evidence of actual provider search start, not client dispatch time."))?)?;
+        let started = environment::parse_time(report.search_started_at.as_deref().ok_or_else(|| fail("Lifetime reconciliation requires host-attested search_started_at. For a recognized poll failure from the hosted search tool, use the answer's arrival time and wait the retained provider lifetime."))?)?;
         if started < dispatched
             || recorded - started
                 < time::Duration::seconds(attempt.search_lifetime_seconds()? as i64)
@@ -4090,7 +4090,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         .iter()
         .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
     {
-        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search; a lost response or client wait without a tool answer remains unresolved. A hosted timeout answer maps to timed-out; Failed to start maps to not-started. A started-then-failed answer has no matching termination value: use unresolved, then lifetime-expired once the retained provider lifetime has elapsed.".into());
+        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
     }
     let prepared = state
         .refresh_attempts

@@ -404,6 +404,105 @@ fn lost_or_uncertain_dispatch_blocks_new_search_until_exact_safe_settlement() {
 }
 
 #[test]
+fn refresh_poll_failure_settles_at_the_retained_lifetime_from_arrival() {
+    let raw = include_bytes!("fixtures/mcp/hosted-poll-failed.json");
+    let answer: Value = serde_json::from_slice(raw).unwrap();
+    let early = "2026-01-02T00:01:00Z";
+    let expired = "2026-01-02T00:01:01Z";
+    let mut state = self::state();
+    let reminder = serde_json::to_value(&state.refresh_reminder).unwrap();
+    let id = prepared(&mut state);
+    state
+        .dispatch_refresh(&id, "synthetic-session", NOW)
+        .unwrap();
+    let hint = "set search_started_at to the answer's arrival time";
+    let status = assess_at(&state, &[], LATER).unwrap();
+    assert!(status.next_actions.iter().any(|text| text.contains(hint)));
+
+    let mut report: Value =
+        serde_json::from_slice(&settlement(&state, &id, "unresolved", LATER)).unwrap();
+    report["search_started_at"] = json!(LATER);
+    report["evidence"] = json!(format!(
+        "Saved poll failure SHA-256 {} with trace ID {}",
+        cqlmatic::sha256_hex(raw),
+        answer["trace_id"]
+    ));
+    let unresolved = serde_json::to_vec(&report).unwrap();
+    state.settle_refresh(&id, &unresolved, LATER).unwrap();
+    let brief = brief(&assess_at(&state, &[], LATER).unwrap(), None);
+    let notice = &brief["notices"][0];
+    assert_eq!(notice["code"], "REFRESH_SETTLEMENT_REQUIRED");
+    assert!(notice["message"].as_str().unwrap().contains(hint));
+
+    report["termination"] = json!("lifetime-expired");
+    report["recorded_at"] = json!(early);
+    let error = state
+        .settle_refresh(&id, &serde_json::to_vec(&report).unwrap(), early)
+        .unwrap_err();
+    assert!(error.message.contains("lifetime has not elapsed"));
+    assert!(state.refresh_blocked());
+    assert!(
+        state
+            .prepare_refresh("synthetic-session".into(), &host(), false, early)
+            .is_err()
+    );
+
+    report["recorded_at"] = json!(expired);
+    state
+        .settle_refresh(&id, &serde_json::to_vec(&report).unwrap(), expired)
+        .unwrap();
+    assert!(!state.refresh_blocked());
+    assert_eq!(state.refresh_attempts.len(), 1);
+    let attempt = &state.refresh_attempts[0];
+    assert_eq!(attempt.phase, RefreshPhase::Settled);
+    assert_eq!(attempt.settlement_history.len(), 1);
+    assert_eq!(attempt.settlement_history[0].bytes().unwrap(), unresolved);
+    assert!(attempt.result.is_none());
+    assert!(state.import_refresh(&id, raw, expired).is_err());
+    assert_eq!(
+        serde_json::to_value(&state.refresh_reminder).unwrap(),
+        reminder
+    );
+}
+
+#[test]
+fn refresh_lifetime_settlement_rejects_invalid_starts_and_unknown_termination() {
+    let mut state = self::state();
+    let id = prepared(&mut state);
+    state
+        .dispatch_refresh(&id, "synthetic-session", NOW)
+        .unwrap();
+    let recorded = "2026-01-02T00:01:01Z";
+    let mut report: Value =
+        serde_json::from_slice(&settlement(&state, &id, "lifetime-expired", recorded)).unwrap();
+    for start in [
+        None,
+        Some("2026-01-01T23:59:59Z"),
+        Some("2026-01-02T00:01:02Z"),
+    ] {
+        if let Some(start) = start {
+            report["search_started_at"] = json!(start);
+        } else {
+            report.as_object_mut().unwrap().remove("search_started_at");
+        }
+        let error = state
+            .settle_refresh(&id, &serde_json::to_vec(&report).unwrap(), recorded)
+            .unwrap_err();
+        if start.is_none() {
+            assert!(error.message.contains("use the answer's arrival time"));
+        }
+    }
+    report["search_started_at"] = json!(LATER);
+    report["termination"] = json!("failed-after-start");
+    let error = state
+        .settle_refresh(&id, &serde_json::to_vec(&report).unwrap(), recorded)
+        .unwrap_err();
+    assert!(error.message.contains("strict exact-attempt"));
+    assert!(state.refresh_blocked());
+    assert!(state.refresh_attempts[0].settlement.is_none());
+}
+
+#[test]
 fn settle_before_dispatch_requires_exact_not_started_evidence() {
     let mut state = self::state();
     let id = prepared(&mut state);

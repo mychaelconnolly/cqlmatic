@@ -4,7 +4,7 @@ use cqlmatic::{
         self, CapabilityEvidence, CapabilityOutcome, CapabilityRun, CaseId, ResourceBindings,
     },
     contracts::{CheckRequest, Cloud, Context, EnvironmentId, Outcome},
-    inventory::{InventoryState, RefreshTermination},
+    inventory::{InventoryState, RefreshPhase, RefreshTermination},
     sha256_hex,
 };
 use serde_json::{Value, json};
@@ -407,6 +407,133 @@ fn pause_waits_for_safe_termination_and_never_renews_either_budget() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn capability_poll_failure_settlement_keeps_the_capture_and_original_allowance() {
+    let raw = include_bytes!("fixtures/mcp/hosted-poll-failed.json");
+    let answer: Value = serde_json::from_slice(raw).unwrap();
+    let case = CaseId::MathSqrt;
+    let arrival = "2026-01-01T00:00:04Z";
+    let expired = "2026-01-01T00:00:05Z";
+    let resumed = "2026-01-01T00:00:07Z";
+    for record_unresolved in [false, true] {
+        let mut run = run(case, 3, 6);
+        dispatch(&mut run, case, START);
+        submit(
+            &mut run,
+            RefreshTermination::Completed,
+            Some(&result(case)),
+            ONE,
+        );
+        assert!(qualifies(
+            &run,
+            case,
+            Some("synthetic-auth"),
+            &environment(),
+            TWO
+        ));
+        let id = dispatch(&mut run, case, TWO);
+        let mut report: Value = serde_json::from_slice(&settlement(
+            &run,
+            RefreshTermination::Unresolved,
+            None,
+            arrival,
+        ))
+        .unwrap();
+        report["search_started_at"] = json!(arrival);
+        report["evidence"] = json!(format!(
+            "Saved poll failure SHA-256 {} with trace ID {}",
+            sha256_hex(raw),
+            answer["trace_id"]
+        ));
+        let unresolved = serde_json::to_vec(&report).unwrap();
+        if record_unresolved {
+            run.submit(
+                &id,
+                "synthetic-auth",
+                Some(raw),
+                &unresolved,
+                arrival,
+                arrival,
+            )
+            .unwrap();
+        }
+        run.pause(arrival).unwrap();
+
+        report["termination"] = json!("failed-after-start");
+        let error = run
+            .submit(
+                &id,
+                "synthetic-auth",
+                Some(raw),
+                &serde_json::to_vec(&report).unwrap(),
+                arrival,
+                arrival,
+            )
+            .unwrap_err();
+        assert!(error.message.contains("strict exact-attempt"));
+        report["termination"] = json!("lifetime-expired");
+        let error = run
+            .submit(
+                &id,
+                "synthetic-auth",
+                Some(raw),
+                &serde_json::to_vec(&report).unwrap(),
+                arrival,
+                arrival,
+            )
+            .unwrap_err();
+        assert!(error.message.contains("lifetime has not elapsed"));
+        assert!(run.blocked());
+        assert!(!run.paused());
+
+        report["recorded_at"] = json!(expired);
+        run.submit(
+            &id,
+            "synthetic-auth",
+            Some(raw),
+            &serde_json::to_vec(&report).unwrap(),
+            arrival,
+            expired,
+        )
+        .unwrap();
+        run.validate(0).unwrap();
+        assert!(!run.blocked());
+        assert!(run.paused());
+        assert_eq!(run.attempts.len(), 2);
+        let attempt = &run.attempts[1];
+        assert_eq!(attempt.reservation.phase, RefreshPhase::Settled);
+        let history = &attempt.reservation.settlement_history;
+        assert_eq!(history.len(), usize::from(record_unresolved));
+        if let Some(previous) = history.first() {
+            assert_eq!(previous.bytes().unwrap(), unresolved);
+        }
+        let capture = attempt.capture.as_ref().unwrap();
+        assert_eq!(capture.bytes().unwrap(), raw);
+        assert_eq!(capture.retrieved_at, arrival);
+        assert_eq!(attempt.outcome, CapabilityOutcome::Unknown);
+        assert!(!qualifies(
+            &run,
+            case,
+            Some("synthetic-auth"),
+            &environment(),
+            expired
+        ));
+
+        run.resume("synthetic-auth", resumed).unwrap();
+        assert_eq!(run.remaining_seconds(resumed).unwrap(), 1.0);
+        assert!(
+            run.dispatch(
+                case,
+                "synthetic-auth",
+                "synthetic-session",
+                "2026-01-01T00:00:07.000000001Z"
+            )
+            .is_err()
+        );
+        dispatch(&mut run, case, resumed);
+    }
 }
 
 #[test]
