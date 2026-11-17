@@ -365,7 +365,7 @@ cqlmatic env capture --client CLIENT --server SERVER
 
 For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for the Copilot clients. A client whose hook does not pass the tool's result can use the pass-through below.
 
-`claude-code`, `codex`, `copilot-cli` and the OpenCode plugin below have been run against their clients. The other formats follow each client's published hook payload and have not been run against it; when one records nothing, `captures/tally.json` shows whether its searches arrived.
+`claude-code`, `codex`, `copilot-cli` and the OpenCode plugin below have been run against their clients. The other formats follow each client's published hook payload and have not been run against it; when one records nothing, `state.json.captures/tally.json` shows whether its searches arrived.
 
 Hook entries differ by client. `claude-code`, `codex` and `qwen-code`:
 
@@ -461,7 +461,7 @@ The search is `falcon_search_ngsiem` called directly or through the hosted serve
 
 | Search | Effect | Count in `tally.json` |
 | --- | --- | --- |
-| Names one confirmed expected source and meets every saved-query rule above | Captured observation, labelled `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `captures/` beside the state | `recorded` |
+| Names one confirmed expected source and meets every saved-query rule above | Captured observation, labelled `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `state.json.captures/`, a folder named after the state file and beside it | `recorded` |
 | Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window without UTC `Z` times, or 10,000 rows or more | None; nothing is written | `not-creditable` |
 | Is creditable, but later-starting captures of the same source already show every field it returned | None; nothing is written | `already-covered` |
 | Is creditable but could not be saved: the capture list is full, the inventory stayed busy, or a file could not be written | None | `not-recorded` |
@@ -477,9 +477,9 @@ Captured observations are listed in full status as `captured_observations` and c
 - **Lighter evidence.** They support `generate`/`check --require-observed` for their exact positive fields, source and target under the same ordering rules as an import, with the basis `captured search observation` and the warning `CQL_CAPTURED_OBSERVATION`. They are not inventory evidence: recording one does not change the reconciliation fingerprint, update the active pack, complete discovery or confirm a pending source.
 - **Any window length.** A search without `end` is recorded with the capture time as its end, and the window may be longer than the seven days an import allows. Times still need the UTC `Z` form.
 - **Replacement.** When a capture is recorded, an earlier capture of the same source is dropped once captures with the same or a later window start show every field it showed. The list holds at most 1000 captures, separately from the import ledger.
-- **Tidying.** After a capture is recorded, copies in `captures/` that no saved observation is about, and audit records of dropped captures, are removed once they are ten minutes old. This also clears what an interrupted capture left behind.
+- **Tidying.** After a capture is recorded, copies in that folder and audit records of this state's captures are removed once they are ten minutes old and no saved observation's audit record names them. Other states in the same directory are untouched. This also clears what an interrupted capture left behind.
 
-Captured observations are as unverified as imported ones: the payload is taken as the client supplied it. `captures/tally.json` holds the counts by outcome.
+Captured observations are as unverified as imported ones: the payload is taken as the client supplied it. `state.json.captures/tally.json` holds the counts by outcome.
 
 See [setup](SETUP.md), [MCP relay details](MCP-COMPANION.md), [application flow](FLOW.md), and [troubleshooting](TROUBLESHOOTING.md).
 

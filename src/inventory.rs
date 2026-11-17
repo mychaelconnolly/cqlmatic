@@ -3017,8 +3017,8 @@ impl InventoryState {
         {
             observation.validate()?;
             if !observations.insert(&observation.id)
-                || captured
-                    != (observation.caller_assertion == QueryResultAssertion::ClientHookCapture)
+                || (captured
+                    && observation.caller_assertion != QueryResultAssertion::ClientHookCapture)
                 || !self.sources.iter().any(|s| s.id == observation.source_id)
                 || self
                     .target

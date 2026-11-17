@@ -1,7 +1,8 @@
 //! Records inventory evidence from a client's post-tool hook payload.
 //!
 //! A hook's output and exit status can reach the model, so this command prints nothing and
-//! always exits 0. Each search it sees is counted by outcome in `captures/tally.json`.
+//! always exits 0. Each search it sees is counted by outcome in `tally.json`, in the
+//! `<state file>.captures` folder beside the state.
 use crate::{inventory_cli, setup_cli};
 use clap::{Args, ValueEnum};
 use cqlmatic::{
@@ -15,7 +16,7 @@ use cqlmatic::{
 };
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -110,10 +111,13 @@ pub(crate) fn record(state: Option<PathBuf>, call: Call) -> Result<(), Diagnosti
     let Some(environment) = state.target.as_ref().map(|target| &target.environment) else {
         return Ok(());
     };
-    let directory = path
-        .parent()
-        .expect("An absolute state path has a parent")
-        .join("captures");
+    // Each state file has its own folder, so states sharing a directory keep separate copies.
+    let mut name = path
+        .file_name()
+        .expect("A state path names a file")
+        .to_os_string();
+    name.push(".captures");
+    let directory = path.with_file_name(name);
     setup_cli::protect_directory(&directory)?;
     let outcome = observe(&path, &directory, &state, environment, search);
     let counted = tally(&directory, outcome);
@@ -220,11 +224,14 @@ fn copy_name(retrieved_at: &str, digest: &str) -> String {
     format!("{}-{}", retrieved_at.replace([':', '-'], ""), &digest[..12])
 }
 
-/// Removes what a stopped capture, a failed save or a dropped capture left behind: aged copies
-/// that no saved observation is about, and aged audit records of captures the state no longer
-/// holds. Failures are ignored; the next capture tries again.
+/// Removes what a stopped capture, a failed save or a dropped capture left behind in this
+/// state's own folder: aged copies, and aged audit records of its captures, that no saved
+/// observation refers to. Failures are ignored; the next capture tries again.
 fn tidy(path: &Path, directory: &Path) {
-    let Ok(Some(state)) = inventory_cli::load_existing(path) else {
+    let (Ok(Some(state)), Ok(directory)) = (
+        inventory_cli::load_existing(path),
+        fs::canonicalize(directory),
+    ) else {
         return;
     };
     let aged = |file: &Path| {
@@ -235,82 +242,87 @@ fn tidy(path: &Path, directory: &Path) {
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age >= UNREFERENCED_AFTER)
     };
-    let files = |directory: &Path, extension: &str| {
+    let files = |directory: &Path, extensions: &[&str]| {
         fs::read_dir(directory)
             .into_iter()
             .flatten()
             .filter_map(|entry| Some(entry.ok()?.path()))
-            .filter(|file| file.extension().is_some_and(|found| found == extension) && aged(file))
+            .filter(|file| {
+                file.extension()
+                    .is_some_and(|found| extensions.iter().any(|extension| found == *extension))
+                    && aged(file)
+            })
             .collect::<Vec<_>>()
     };
-    let held = |file: &Path| {
-        let name = file.file_stem().unwrap_or_default().to_string_lossy();
-        state.captured_observations.iter().any(|observation| {
-            copy_name(&observation.retrieved_at, &observation.result_sha256) == name
-        })
-    };
-    // Copies are named `<time>-<twelve digits of the result's hash>`.
-    let copy = |file: &Path| {
-        file.file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.rsplit_once('-'))
-            .is_some_and(|(_, digits)| {
-                digits.len() == 12 && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
-            })
-    };
-    for result in files(directory, "json") {
-        if !copy(&result) || held(&result) {
-            continue;
-        }
-        // The name is a hint. Remove a result only when its bytes belong to no observation.
-        let Some(bytes) = saved_result(&result) else {
-            continue;
-        };
-        let digest = cqlmatic::sha256_hex(&bytes);
-        if state
-            .captured_observations
-            .iter()
-            .chain(&state.query_observations)
-            .all(|observation| observation.result_sha256 != digest)
-        {
-            let _ = fs::remove_file(&result);
-            let _ = fs::remove_file(result.with_extension("cql"));
-        }
-    }
-    for query in files(directory, "cql") {
-        if copy(&query) && !held(&query) && !query.with_extension("json").exists() {
-            let _ = fs::remove_file(query);
-        }
-    }
-    let Some(audits) = path
-        .parent()
-        .map(|parent| parent.join("query-observations"))
-    else {
-        return;
-    };
-    for audit in files(&audits, "json") {
-        if state
-            .captured_observations
-            .iter()
-            .chain(&state.query_observations)
-            .any(|observation| Path::new(&observation.audit_path) == audit)
-        {
-            continue;
-        }
-        // Audit records of imports are left alone.
-        let captured = fs::File::open(&audit)
+    let record = |audit: &Path| {
+        fs::File::open(audit)
             .ok()
             .and_then(|file| serde_json::from_reader::<_, Value>(file.take(MAX_AUDIT_BYTES)).ok())
-            .is_some_and(|record| {
-                record["observation"]["caller_assertion"] == "client-hook-capture"
-            });
-        if captured {
-            let _ = fs::remove_file(&audit);
-            // The writer that created the record left its lock file beside it.
-            if let Some(name) = audit.file_name() {
-                let lock = format!(".{}.lock", name.to_string_lossy());
-                let _ = fs::remove_file(audit.with_file_name(lock));
-            }
+    };
+    let observations = || {
+        state
+            .captured_observations
+            .iter()
+            .chain(&state.query_observations)
+    };
+
+    // Copies are named `<time>-<twelve digits of the result's hash>`; a current capture's are kept
+    // by name alone.
+    let copies = files(&directory, &["json", "cql"])
+        .into_iter()
+        .filter(|file| {
+            let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+            stem.rsplit_once('-').is_some_and(|(_, digits)| {
+                digits.len() == 12 && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
+            }) && !state
+                .captured_observations
+                .iter()
+                .any(|capture| copy_name(&capture.retrieved_at, &capture.result_sha256) == stem)
+        })
+        .collect::<Vec<_>>();
+    // Audit records of this state's captures that no saved observation refers to. Records of
+    // imports and of other states' captures are left alone.
+    let audits = path
+        .parent()
+        .map(|parent| files(&parent.join("query-observations"), &["json"]))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|audit| {
+            !observations().any(|observation| Path::new(&observation.audit_path) == audit)
+                && record(audit).is_some_and(|record| {
+                    record["observation"]["caller_assertion"] == "client-hook-capture"
+                        && record["query_file"]
+                            .as_str()
+                            .is_some_and(|query| Path::new(query).parent() == Some(&directory))
+                })
+        })
+        .collect::<Vec<_>>();
+    if copies.is_empty() && audits.is_empty() {
+        return;
+    }
+
+    // An audit record names the files its observation refers to. Those stay, whichever
+    // observation it is; when one record cannot be read, nothing is removed.
+    let mut named = BTreeSet::new();
+    for observation in observations() {
+        let Some(record) = record(Path::new(&observation.audit_path)) else {
+            return;
+        };
+        for file in ["query_file", "result_file"] {
+            named.insert(record[file].as_str().map(PathBuf::from));
+        }
+    }
+    for copy in copies {
+        if !named.contains(&Some(copy.clone())) {
+            let _ = fs::remove_file(copy);
+        }
+    }
+    for audit in audits {
+        let _ = fs::remove_file(&audit);
+        // The writer that created the record left its lock file beside it.
+        if let Some(name) = audit.file_name() {
+            let lock = format!(".{}.lock", name.to_string_lossy());
+            let _ = fs::remove_file(audit.with_file_name(lock));
         }
     }
 }
@@ -626,7 +638,7 @@ mod tests {
         .unwrap();
         apply(&path, confirm).unwrap();
         let state = inventory_cli::load_existing(&path).unwrap().unwrap();
-        let directory = root.join("workflow/captures");
+        let directory = root.join("workflow/state.json.captures");
         setup_cli::protect_directory(&directory).unwrap();
         let search = Search {
             repository: "third-party".into(),
