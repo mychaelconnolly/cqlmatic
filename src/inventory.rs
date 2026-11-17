@@ -1534,7 +1534,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if discovery_recovery > 0 {
         notices.push(json!({"code":"DISCOVERY_RECOVERY_RECORDED","severity":"warning",
-            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the exact saved attempt before another search. Recorded state does not establish current backend execution."}));
+            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the exact saved attempt before another search. Recorded state does not establish current backend execution. Runs written by 0.1.6 or 0.1.7 are rechecked from their saved checkpoints on the next inventory search action."}));
     } else if !discovery_work.is_empty() {
         notices.push(json!({"code":"DISCOVERY_UNFINISHED_RECORDED","severity":"info",
             "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
@@ -2016,6 +2016,24 @@ impl InventoryState {
                 RefreshPhase::Prepared | RefreshPhase::Dispatched | RefreshPhase::Unresolved
             )
         })
+    }
+
+    /// Record an exhausted earlier-release run after verifying its retained checkpoint.
+    pub fn record_expired_discovery(&mut self, run_index: usize, now: &str) -> bool {
+        let run = &mut self.discovery_runs[run_index];
+        if run.status == "failed" {
+            return false;
+        }
+        run.status = "failed".into();
+        self.failures.push(InventoryFailure {
+            stage: "discovery".into(),
+            source_id: None,
+            message: format!(
+                "Earlier discovery run_index {run_index} exhausted its active-time allowance and retained a final answer from the hosted search tool."
+            ),
+            recorded_at: now.into(),
+        });
+        true
     }
 
     pub fn inventory_notifications(&self) -> Vec<PendingInventoryWork> {

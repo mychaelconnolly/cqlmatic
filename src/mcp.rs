@@ -492,9 +492,9 @@ const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 #[path = "discovery_session.rs"]
 mod session;
 pub use session::{
-    Transport, bind_inventory_owner, dispatch, dispatch_inventory, has_in_flight,
-    init_inventory_resumable, init_resumable, inspect_inventory_owner, is_resumable, pause,
-    recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
+    Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
+    has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner, is_resumable,
+    pause, recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
     run_native, settle_cancelled, step_resumable,
 };
 
@@ -670,11 +670,13 @@ fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, 
     Ok(normalize(&answer_bytes(answer)?))
 }
 fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
-    if answer.raw_hex.len() > MAX_CAPTURE_BYTES * 2 || !answer.raw_hex.len().is_multiple_of(2) {
+    capture_bytes(&answer.raw_hex, &answer.raw_sha256)
+}
+fn capture_bytes(raw_hex: &str, raw_sha256: &str) -> Result<Vec<u8>, Diagnostic> {
+    if raw_hex.len() > MAX_CAPTURE_BYTES * 2 || !raw_hex.len().is_multiple_of(2) {
         return Err(tampered());
     }
-    let raw = answer
-        .raw_hex
+    let raw = raw_hex
         .as_bytes()
         .as_chunks::<2>()
         .0
@@ -686,7 +688,7 @@ fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
                 .ok_or_else(tampered)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if sha256_hex(&raw) != answer.raw_sha256 {
+    if sha256_hex(&raw) != raw_sha256 {
         return Err(tampered());
     }
     Ok(raw)
@@ -1908,6 +1910,101 @@ mod recovery_tests {
         assert_eq!(history.status, "activated");
         assert!(!has_in_flight(&history));
         assert_eq!(fs::read(&run.state).unwrap(), before);
+    }
+
+    #[test]
+    fn earlier_discovery_relief_recomputes_across_inventory_snapshot_faults() {
+        use crate::inventory::{
+            DiscoveryMode, DiscoveryRun, InventoryState, QuickDepth, TargetScope,
+        };
+        let run = ready_kind(false, true);
+        let mut saved = serde_json::to_value(read_state(&run.state).unwrap()).unwrap();
+        saved["producer_version"] = json!("0.1.7");
+        saved["status"] = json!("cleanup-pending");
+        saved["answers"] = json!({});
+        let raw = include_bytes!("../tests/fixtures/mcp/hosted-poll-failed.json");
+        let mut attempt = saved["session"]["attempts"][0].clone();
+        attempt["outcome"] = json!("cleanup-pending");
+        attempt["rejected_results"] = json!([{"evidence":{
+            "file":run.directory.join("answer.json"),"raw_hex":raw_hex(raw),"raw_sha256":sha256_hex(raw)
+        },"diagnostic":Diagnostic::error("MCP_SHAPE", "Synthetic rejection")}]);
+        saved["session"]["attempts"] = json!([attempt]);
+        saved["session"]["periods"][0]["end"] = Value::Null;
+        fs::write(&run.state, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let relay = inspect_state(&run.state).unwrap();
+        let before = fs::read(&run.state).unwrap();
+        let request = relay.request;
+        let now = (environment::parse_time(&relay.created_at).unwrap()
+            + time::Duration::seconds(request.max_seconds as i64))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+        let mut inventory = InventoryState::new(&relay.created_at).unwrap();
+        inventory
+            .confirm(
+                request.environment.clone(),
+                TargetScope::SelectedSources,
+                "Synthetic discovery target".into(),
+                request.sources.clone(),
+                &relay.created_at,
+            )
+            .unwrap();
+        inventory.discovery_runs.push(DiscoveryRun {
+            state_path: run.state.to_str().unwrap().into(),
+            pack_path: run.pack.to_str().unwrap().into(),
+            receipt_path: run.receipt.to_str().unwrap().into(),
+            start: request.start.clone(),
+            end: request.end.clone(),
+            source_ids: request.sources.iter().map(discovery::source_id).collect(),
+            value_fields: request.value_fields.clone(),
+            max_queries: request.max_queries,
+            max_seconds: request.max_seconds,
+            answered: 0,
+            elapsed_seconds: 0.0,
+            status: "cleanup-pending".into(),
+            mode: DiscoveryMode::Full,
+            quick_depth: QuickDepth::SourcesOnly,
+        });
+        let path = run.directory.join("inventory.json");
+        let writer = storage::Writer::acquire(&path).unwrap();
+        let _relay_guard = storage::Writer::acquire(&run.state).unwrap();
+        let initial = serde_json::to_vec(&inventory).unwrap();
+        let read_inventory =
+            || serde_json::from_slice::<InventoryState>(&fs::read(&path).unwrap()).unwrap();
+        let commit_scout = || {
+            let mut inventory = read_inventory();
+            assert!(earlier_release_ended(
+                &inspect_state(&run.state).unwrap(),
+                &now
+            ));
+            inventory
+                .prepare_scout_with_budget(
+                    request.environment.clone(),
+                    request.start.clone(),
+                    request.end.clone(),
+                    Some(60),
+                )
+                .unwrap();
+            inventory.record_expired_discovery(0, &now);
+            writer.commit_bytes(&serde_json::to_vec(&inventory).unwrap(), MAX_PACK_BYTES)
+        };
+        for (stage, code, visible) in [
+            ("before-rename", "TEST_INTERRUPTED", false),
+            ("directory-sync", "PACK_DURABILITY", true),
+        ] {
+            writer.commit_bytes(&initial, MAX_PACK_BYTES).unwrap();
+            storage::inject_snapshot_fault(&path, stage);
+            assert_eq!(commit_scout().unwrap_err().code, code);
+            let after = read_inventory();
+            assert_eq!(after.scout_plan.is_some(), visible);
+            assert_eq!(after.discovery_runs[0].status == "failed", visible);
+            assert_eq!(after.failures.len(), usize::from(visible));
+            assert_eq!(fs::read(&run.state).unwrap(), before);
+            commit_scout().unwrap();
+            assert!(read_inventory().scout_plan.is_some());
+            assert_eq!(read_inventory().discovery_runs[0].status, "failed");
+            assert_eq!(read_inventory().failures.len(), 1);
+            assert_eq!(fs::read(&run.state).unwrap(), before);
+        }
     }
 
     #[test]
