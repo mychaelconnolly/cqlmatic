@@ -454,7 +454,8 @@ The search is `falcon_search_ngsiem` called directly or through the hosted serve
 | Search | Effect | Count in `tally.json` |
 | --- | --- | --- |
 | Names one confirmed expected source and meets every saved-query rule above | Query observation with `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `captures/` beside the state | `recorded` |
-| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window over seven days or without UTC `Z` times, 10,000 rows or more, or a full ledger | None | `not-creditable` |
+| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window over seven days or without UTC `Z` times, or 10,000 rows or more | None; nothing is written | `not-creditable` |
+| Is creditable but could not be saved: the ledger is full, the inventory stayed busy, or a file could not be written | None | `not-recorded` |
 | Returned rows and names one source that is not a confirmed expected source | Pending inventory work for that source and the query's input fields, as `record-inventory-hints` | `new-source-lead`, `nothing-new` when already queued, or `not-recorded` when the state refused the change |
 | Has a query CQLmatic cannot parse | None | `query-not-read` |
 | Names no source, or more than one | None | `no-single-source` |

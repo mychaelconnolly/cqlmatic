@@ -8,7 +8,7 @@ use cqlmatic::{
     app,
     contracts::{Diagnostic, EnvironmentId},
     discovery,
-    inventory::{InventoryAction, InventoryState, QueryResultAssertion},
+    inventory::{InventoryAction, InventoryState, QueryObservation, QueryResultAssertion},
     mcp,
     setup::SEARCH_TOOL,
     storage,
@@ -148,14 +148,37 @@ fn observe(
         };
     }
     let retrieved_at = discovery::timestamp();
+    // A call without `end` searched up to the moment it ran.
+    let end = search.end.unwrap_or_else(|| retrieved_at.clone());
+    // Judge the search before anything is written; most that fail here are aggregates.
+    if QueryObservation::from_result(
+        search.query.as_bytes(),
+        &body,
+        environment.clone(),
+        source.clone(),
+        search.start.clone(),
+        end.clone(),
+        retrieved_at.clone(),
+        QueryResultAssertion::ClientHookCapture,
+        path.to_string_lossy().into_owned(),
+    )
+    .is_err()
+    {
+        return "not-creditable";
+    }
     let digest = cqlmatic::sha256_hex(&body);
     let name = format!("{}-{}", retrieved_at.replace([':', '-'], ""), &digest[..12]);
     let query_file = directory.join(format!("{name}.cql"));
     let result_file = directory.join(format!("{name}.json"));
-    let query_created = private_file(&query_file, search.query.as_bytes()).is_ok();
-    let result_created = query_created && private_file(&result_file, &body).is_ok();
-    let failure = if result_created {
-        apply(
+    let mut created = Vec::new();
+    if private_file(&query_file, search.query.as_bytes()).is_ok() {
+        created.push(query_file.as_path());
+        if private_file(&result_file, &body).is_ok() {
+            created.push(result_file.as_path());
+        }
+    }
+    let imported = created.len() == 2
+        && apply(
             path,
             InventoryAction::ImportQueryObservations {
                 query_file: query_file.to_string_lossy().into_owned(),
@@ -163,21 +186,26 @@ fn observe(
                 environment: environment.clone(),
                 source,
                 start: search.start,
-                // A call without `end` searched up to the moment it ran.
-                end: search.end.unwrap_or_else(|| retrieved_at.clone()),
+                end,
                 retrieved_at: retrieved_at.clone(),
                 caller_assertion: QueryResultAssertion::ClientHookCapture,
             },
         )
-        .err()
-        .map(|failure| failure.code)
-    } else {
-        Some("CAPTURE_WRITE".into())
-    };
-    let Some(failure) = failure else {
+        .is_ok();
+    if imported {
         return "recorded";
-    };
-    // An error can follow a replaced state, so ask the state whether the observation was saved.
+    }
+    after_failed_import(path, &retrieved_at, &digest, &created)
+}
+
+/// Settles a failed import. The error can follow a replaced state, so the copies this call
+/// created are removed only when the saved state holds no observation of them.
+fn after_failed_import(
+    path: &Path,
+    retrieved_at: &str,
+    digest: &str,
+    created: &[&Path],
+) -> &'static str {
     let saved = inventory_cli::load_existing(path).map(|state| {
         state.is_some_and(|state| {
             state.query_observations.iter().any(|observation| {
@@ -187,22 +215,14 @@ fn observe(
     });
     match saved {
         Ok(true) => "recorded",
+        Ok(false) => {
+            for file in created {
+                let _ = fs::remove_file(file);
+            }
+            "not-recorded"
+        }
         // Unknown: keep the copies an observation may refer to.
         Err(_) => "not-recorded",
-        Ok(false) => {
-            // This call created these files, so no saved observation refers to them.
-            if query_created {
-                let _ = fs::remove_file(&query_file);
-            }
-            if result_created {
-                let _ = fs::remove_file(&result_file);
-            }
-            if matches!(failure.as_str(), "PACK_BUSY" | "CAPTURE_WRITE") {
-                "not-recorded"
-            } else {
-                "not-creditable"
-            }
-        }
     }
 }
 
@@ -448,4 +468,77 @@ fn saved_result(path: &Path) -> Option<Vec<u8>> {
         .read_to_end(&mut bytes)
         .ok()?;
     (bytes.len() as u64 <= limit).then_some(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_failed_import_removes_copies_only_when_the_state_holds_no_observation_of_them() {
+        let root =
+            std::env::temp_dir().join(format!("cqlmatic-capture-unit-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let path = root.join("workflow/state.json");
+        let environment: EnvironmentId = serde_json::from_value(json!({
+            "cloud": "us1", "tenant": "00000000000000000000000000000000", "view": "third-party"
+        }))
+        .unwrap();
+        let confirm = serde_json::from_value(json!({
+            "kind": "confirm-target", "environment": environment, "scope": "selected-sources",
+            "context": "Synthetic capture target", "expected_sources": [{"type": "synthetic"}]
+        }))
+        .unwrap();
+        apply(&path, confirm).unwrap();
+        let state = inventory_cli::load_existing(&path).unwrap().unwrap();
+        let directory = root.join("workflow/captures");
+        setup_cli::protect_directory(&directory).unwrap();
+        let search = Search {
+            repository: "third-party".into(),
+            query: "#type=synthetic | head(5)".into(),
+            start: "2026-01-01T00:00:00Z".into(),
+            end: Some("2026-01-01T01:00:00Z".into()),
+            body: Some(br#"{"result":[{"user":"ann"}]}"#.to_vec()),
+        };
+        assert_eq!(
+            observe(&path, &directory, &state, &environment, search),
+            "recorded"
+        );
+        let saved = inventory_cli::load_existing(&path)
+            .unwrap()
+            .unwrap()
+            .query_observations
+            .remove(0);
+        let copies = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        let copies = copies.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        assert_eq!(copies.len(), 2);
+        let settle = |retrieved_at: &str| {
+            after_failed_import(&path, retrieved_at, &saved.result_sha256, &copies)
+        };
+
+        // The import reported an error after the state had been replaced.
+        assert_eq!(settle(&saved.retrieved_at), "recorded");
+        assert!(copies.iter().all(|copy| copy.exists()));
+
+        // A state that cannot be read leaves the answer unknown.
+        let bytes = fs::read(&path).unwrap();
+        fs::write(&path, b"{").unwrap();
+        assert_eq!(settle("2026-01-01T02:00:00Z"), "not-recorded");
+        assert!(copies.iter().all(|copy| copy.exists()));
+
+        // The state holds no observation of these copies.
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(settle("2026-01-01T02:00:00Z"), "not-recorded");
+        assert!(copies.iter().all(|copy| !copy.exists()));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
