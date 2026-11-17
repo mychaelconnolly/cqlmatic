@@ -39,6 +39,7 @@ The native framing and exit rules below describe the executable itself. npm can 
 | --- | --- | --- |
 | `setup` | `--request FILE`, `--state FILE`, `--json` | Terminal wizard without a request; strict setup action with one; no-request JSON/nonterminal invocation reads saved status. Native Codex, VS Code Local, Claude Code and Copilot adapters preview and apply reviewed configuration; other hosts use tracked external selection and saved report import. |
 | `env inventory` | `--request FILE`, `--state FILE`, `--json`, `--brief` or `--summary` | Terminal guided inventory; actions save workflow evidence and may fetch parser metadata or prepare/resume MCP discovery. No-request JSON/nonterminal invocation reports status. |
+| `env capture` | `--client CLIENT`, `--server NAME`, `--state FILE` | Reads from stdin the payload an agent's client passes to a hook after a tool call, and records a finished search in the confirmed inventory. Silent; always exits 0. See [Scrappy mode](docs/INVENTORY.md#scrappy-mode-capture-the-agents-searches). |
 | `status` | `--request FILE`, `--state FILE`, `--json`, `--brief` or `--summary` | Offline checklist. The request may select `state`; do not also select it with `--state`. |
 
 Use a dedicated private state directory. Default OS-specific locations and every action are described in [setup](docs/SETUP.md) and [inventory](docs/INVENTORY.md). Setup actions use `action.type`; inventory actions use `action.kind`. Inventory has no caller `id` field.

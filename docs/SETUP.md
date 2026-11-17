@@ -150,7 +150,7 @@ Settings can switch to Full later without discarding saved evidence. Quick evide
 The agent skill tells your assistant how to work with CQLmatic: which commands to run, how to hand search results back, and what the saved evidence does and does not show. Install it once per client after setup:
 
 ```sh
-cqlmatic skill install --client claude-code
+cqlmatic skill install --client CLIENT
 ```
 
 | `--client` | Skill directory |

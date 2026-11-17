@@ -339,6 +339,132 @@ A selected confirmed inventory's validated caller-attested ledger can supply qua
 
 The field ledger and unverified-lead list are each bounded to 1000 entries. Leads are deduplicated by exact source and field; they remain suggestions, with no observed/declared status or completion effect. Query observations retain exact field namespaces and at most 4000 fields per record. Later bounded discovery remains necessary for unresolved evidence and broader coverage.
 
+### Scrappy mode: capture the agent's searches
+
+After a target is confirmed, for example by Quick discovery, a hook in the agent's client can add to the same ledger from the searches the agent already runs. The client passes each finished search to `cqlmatic env capture`, which reads the query and its complete result directly. Nothing is sent back through the model, and no search is executed.
+
+Any client that can run a command after a tool call, and hand it the call's name, arguments and result, can use this. Register the command for tool calls of the CrowdStrike MCP server:
+
+```sh
+cqlmatic env capture --client CLIENT --server SERVER
+```
+
+`--client` names the payload format. `--server` is the server's name exactly as that client spells it. `--state FILE` selects a state other than the default.
+
+| `--client` | Hook event and where it is registered | `SERVER` |
+| --- | --- | --- |
+| `claude-code` | `PostToolUse` in `~/.claude/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
+| `cline` | A `PostToolUse` script in `~/.cline/hooks/` or `~/Documents/Cline/Hooks/` | As in tool names, `SERVER__TOOL` |
+| `codex` | `PostToolUse` in `~/.codex/hooks.json`; review and trust the new hook with `/hooks` before it runs | As in tool names, `mcp__SERVER__TOOL`, with hyphens written as underscores |
+| `copilot-cli`, `copilot-app`, `copilot-vscode` | `postToolUse` in a `*.json` file under `~/.copilot/hooks/` | As in tool names, `SERVER-TOOL` |
+| `cursor` | `afterMCPExecution` in `~/.cursor/hooks.json` | The server's key in `mcp.json` |
+| `gemini-cli` | `AfterTool` in `~/.gemini/settings.json` | The server's configured name |
+| `kiro` | `PostToolUse` in a `*.json` file under `~/.kiro/hooks/` | As in tool IDs, `mcp_SERVER_TOOL` (lowercase), or `@SERVER/TOOL` in Amazon Q Developer CLI |
+| `qwen-code` | `PostToolUse` in `~/.qwen/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
+| `generic` | Any other client, plugin or wrapper script: a JSON object on stdin with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response` | As given in `tool_name` |
+
+For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for the Copilot clients. A client whose hook does not pass the tool's result cannot use this command.
+
+`claude-code`, `codex`, `copilot-cli` and the OpenCode plugin below have been run against their clients. The other formats follow each client's published hook payload and have not been run against it; when one records nothing, `captures/tally.json` shows whether its searches arrived.
+
+Hook entries differ by client. `claude-code`, `codex` and `qwen-code`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__SERVER__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cqlmatic env capture --client CLIENT --server SERVER",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`gemini-cli` uses the same form with the event `AfterTool`, the matcher `mcp_SERVER_.*` and no `async` field.
+
+`copilot-cli`, `copilot-app` and `copilot-vscode`:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "cqlmatic env capture --client copilot-cli --server SERVER",
+        "powershell": "cqlmatic env capture --client copilot-cli --server SERVER"
+      }
+    ]
+  }
+}
+```
+
+`cursor`:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "afterMCPExecution": [
+      { "command": "cqlmatic env capture --client cursor --server SERVER" }
+    ]
+  }
+}
+```
+
+`kiro`:
+
+```json
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "cqlmatic-capture",
+      "trigger": "PostToolUse",
+      "matcher": "@SERVER",
+      "action": {
+        "type": "command",
+        "command": "cqlmatic env capture --client kiro --server SERVER"
+      }
+    }
+  ]
+}
+```
+
+`cline` runs an executable file named `PostToolUse` and reads a JSON object from its output:
+
+```sh
+#!/bin/sh
+cqlmatic env capture --client cline --server SERVER
+echo '{}'
+```
+
+OpenCode has no command hook. Copy the [capture plugin](../examples/capture/opencode-plugin.js) into `~/.config/opencode/plugins/` and set its `SERVER`; it passes each finished search to `cqlmatic env capture --client generic`.
+
+The search is `falcon_search_ngsiem` called directly or through the hosted server's `execute_tool`. The command prints nothing and always exits 0, so it cannot interrupt the agent. Register the hook only for the server that reaches the confirmed target: a search whose `repository` differs from the confirmed view is skipped, and CQLmatic cannot tell two tenants with the same view name apart.
+
+| Search | Effect | Count in `tally.json` |
+| --- | --- | --- |
+| Names one confirmed expected source and meets every saved-query rule above | Query observation with `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `captures/` beside the state | `recorded` |
+| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window over seven days or without UTC `Z` times, or 10,000 rows or more | None; nothing is written | `not-creditable` |
+| Is creditable but could not be saved: the ledger is full, the inventory stayed busy, or a file could not be written | None | `not-recorded` |
+| Returned rows and names one source that is not a confirmed expected source | Pending inventory work for that source and the query's input fields, as `record-inventory-hints` | `new-source-lead`, `nothing-new` when already queued, or `not-recorded` when the state refused the change |
+| Has a query CQLmatic cannot parse | None | `query-not-read` |
+| Names no source, or more than one | None | `no-single-source` |
+| Completed without rows | None | `no-rows` |
+| Failed, was cut off, or its result could not be read | None | `search-failed` |
+| Used another repository | None | `other-view` |
+
+A search without `end` is recorded with the capture time as its end. Captured observations follow the same rules and limits as imported ones and are equally unverified: the payload is taken as the client supplied it. They do not update the active pack, complete discovery or confirm a pending source. `captures/tally.json` holds the counts by outcome.
+
 See [setup](SETUP.md), [MCP relay details](MCP-COMPANION.md), [application flow](FLOW.md), and [troubleshooting](TROUBLESHOOTING.md).
 
 Recognized final answers from the hosted search tool end a format-3 MCP attempt as `timed-out`, `not-started` or `failed-after-start`; a completed list that cannot supply the required measurement ends it as `completed-unusable`. Exact terminal bytes and their hash are retained separately from accepted evidence. The run pauses, the attempt stays charged, and an explicit resume is required before another dispatch. Resume emits the same unaccepted probe. A cutoff does not prove the remote job stopped: at most one leftover job per cut-off attempt may overlap later searches. A missing answer or client wait without a tool answer keeps the attempt unresolved and blocks further dispatch. An unrecognized error shape or wording, malformed or incomplete response leaves it in `cleanup-pending`. Resolve that same attempt with an acceptable original successful result or exact bound cancellation report before resuming. Earlier-release checkpoints retain their blocking behavior and refuse lifecycle changes; native attempts and format-2 runs retain their existing rules. See [hosted search outcomes](MCP-COMPANION.md).
