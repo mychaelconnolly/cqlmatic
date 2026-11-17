@@ -140,8 +140,14 @@ impl StageOrder {
                         "This filter reads only fields that the preceding transformations did not write. Filter first, so that the transformations run on fewer events.",
                     ));
                 }
-                // After a transformation a named field may no longer hold the event's own value.
-                if narrowed && !self.transformed && unfielded_regex(filter) {
+                // Once a stage has written a field, a named field may no longer hold the
+                // event's own value, which is what a regex with no field searches.
+                if narrowed
+                    && !self.transformed
+                    && !self.fixed_order
+                    && self.touched.is_empty()
+                    && unfielded_regex(filter)
+                {
                     notes.push((
                         "CQL_REGEX_ALL_FIELDS",
                         "A regex with no field searches the fields of each event, which is slower than a regex on one field. If the text is in a known field, field=/regex/ is faster.",

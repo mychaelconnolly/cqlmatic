@@ -159,6 +159,8 @@ fn case_insensitive_wildcards_and_unfielded_regexes_are_noted() {
     assert!(notes("#repo=example | CommandLine=/powershell/i").is_empty());
     // After an assignment a named field may differ from the event's own value.
     assert!(notes(r#"#repo=example | a := "other" | /needle/"#).is_empty());
+    assert!(notes(r#"#repo=example | case { a := "other" } | /needle/"#).is_empty());
+    assert!(notes(r"#repo=example | b=/(?<a>x)/ | /needle/").is_empty());
     // Function arguments and conditional branches carry no notes.
     for query in [
         "groupBy(k, function={x=1 | /foo/ | count()})",
