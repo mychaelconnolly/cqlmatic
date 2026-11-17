@@ -26,6 +26,10 @@ use std::{
 const DEFAULT_REPOSITORY: &str = "search-all";
 const MAX_PAYLOAD_BYTES: u64 = 2 * mcp::MAX_RESULT_BYTES as u64;
 const MAX_TALLY_BYTES: u64 = 65_536;
+const MAX_AUDIT_BYTES: u64 = 1_048_576;
+/// A file no saved observation refers to may be removed once it is this old. A running capture
+/// finishes well within it.
+const UNREFERENCED_AFTER: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Args)]
 pub struct CaptureArgs {
@@ -104,7 +108,11 @@ fn capture(args: &CaptureArgs, payload: &[u8]) -> Result<(), Diagnostic> {
         .join("captures");
     setup_cli::protect_directory(&directory)?;
     let outcome = observe(&path, &directory, &state, environment, search);
-    tally(&directory, outcome)
+    let counted = tally(&directory, outcome);
+    if matches!(outcome, "recorded" | "not-recorded") {
+        tidy(&path, &directory);
+    }
+    counted
 }
 
 fn observe(
@@ -151,7 +159,7 @@ fn observe(
     // A call without `end` searched up to the moment it ran.
     let end = search.end.unwrap_or_else(|| retrieved_at.clone());
     // Judge the search before anything is written; most that fail here are aggregates.
-    if QueryObservation::from_result(
+    let Ok(observation) = QueryObservation::from_result(
         search.query.as_bytes(),
         &body,
         environment.clone(),
@@ -161,13 +169,14 @@ fn observe(
         retrieved_at.clone(),
         QueryResultAssertion::ClientHookCapture,
         path.to_string_lossy().into_owned(),
-    )
-    .is_err()
-    {
+    ) else {
         return "not-creditable";
+    };
+    if state.capture_is_covered(&observation).unwrap_or(false) {
+        return "already-covered";
     }
-    let digest = cqlmatic::sha256_hex(&body);
-    let name = format!("{}-{}", retrieved_at.replace([':', '-'], ""), &digest[..12]);
+    let digest = observation.result_sha256;
+    let name = copy_name(&retrieved_at, &digest);
     let query_file = directory.join(format!("{name}.cql"));
     let result_file = directory.join(format!("{name}.json"));
     let mut created = Vec::new();
@@ -198,6 +207,106 @@ fn observe(
     after_failed_import(path, &retrieved_at, &digest, &created)
 }
 
+/// The name shared by a captured search's query and result copies.
+fn copy_name(retrieved_at: &str, digest: &str) -> String {
+    format!("{}-{}", retrieved_at.replace([':', '-'], ""), &digest[..12])
+}
+
+/// Removes what a stopped capture, a failed save or a dropped capture left behind: aged copies
+/// that no saved observation is about, and aged audit records of captures the state no longer
+/// holds. Failures are ignored; the next capture tries again.
+fn tidy(path: &Path, directory: &Path) {
+    let Ok(Some(state)) = inventory_cli::load_existing(path) else {
+        return;
+    };
+    let aged = |file: &Path| {
+        fs::symlink_metadata(file)
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= UNREFERENCED_AFTER)
+    };
+    let files = |directory: &Path, extension: &str| {
+        fs::read_dir(directory)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| Some(entry.ok()?.path()))
+            .filter(|file| file.extension().is_some_and(|found| found == extension) && aged(file))
+            .collect::<Vec<_>>()
+    };
+    let held = |file: &Path| {
+        let name = file.file_stem().unwrap_or_default().to_string_lossy();
+        state.captured_observations.iter().any(|observation| {
+            copy_name(&observation.retrieved_at, &observation.result_sha256) == name
+        })
+    };
+    // Copies are named `<time>-<twelve digits of the result's hash>`.
+    let copy = |file: &Path| {
+        file.file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.rsplit_once('-'))
+            .is_some_and(|(_, digits)| {
+                digits.len() == 12 && digits.bytes().all(|digit| digit.is_ascii_hexdigit())
+            })
+    };
+    for result in files(directory, "json") {
+        if !copy(&result) || held(&result) {
+            continue;
+        }
+        // The name is a hint. Remove a result only when its bytes belong to no observation.
+        let Some(bytes) = saved_result(&result) else {
+            continue;
+        };
+        let digest = cqlmatic::sha256_hex(&bytes);
+        if state
+            .captured_observations
+            .iter()
+            .chain(&state.query_observations)
+            .all(|observation| observation.result_sha256 != digest)
+        {
+            let _ = fs::remove_file(&result);
+            let _ = fs::remove_file(result.with_extension("cql"));
+        }
+    }
+    for query in files(directory, "cql") {
+        if copy(&query) && !held(&query) && !query.with_extension("json").exists() {
+            let _ = fs::remove_file(query);
+        }
+    }
+    let Some(audits) = path
+        .parent()
+        .map(|parent| parent.join("query-observations"))
+    else {
+        return;
+    };
+    for audit in files(&audits, "json") {
+        if state
+            .captured_observations
+            .iter()
+            .chain(&state.query_observations)
+            .any(|observation| Path::new(&observation.audit_path) == audit)
+        {
+            continue;
+        }
+        // Audit records of imports are left alone.
+        let captured = fs::File::open(&audit)
+            .ok()
+            .and_then(|file| serde_json::from_reader::<_, Value>(file.take(MAX_AUDIT_BYTES)).ok())
+            .is_some_and(|record| {
+                record["observation"]["caller_assertion"] == "client-hook-capture"
+            });
+        if captured {
+            let _ = fs::remove_file(&audit);
+            // The writer that created the record left its lock file beside it.
+            if let Some(name) = audit.file_name() {
+                let lock = format!(".{}.lock", name.to_string_lossy());
+                let _ = fs::remove_file(audit.with_file_name(lock));
+            }
+        }
+    }
+}
+
 /// Settles a failed import. The error can follow a replaced state, so the copies this call
 /// created are removed only when the saved state holds no observation of them.
 fn after_failed_import(
@@ -208,7 +317,7 @@ fn after_failed_import(
 ) -> &'static str {
     let saved = inventory_cli::load_existing(path).map(|state| {
         state.is_some_and(|state| {
-            state.query_observations.iter().any(|observation| {
+            state.captured_observations.iter().any(|observation| {
                 observation.retrieved_at == retrieved_at && observation.result_sha256 == digest
             })
         })
@@ -510,11 +619,15 @@ mod tests {
             observe(&path, &directory, &state, &environment, search),
             "recorded"
         );
-        let saved = inventory_cli::load_existing(&path)
-            .unwrap()
-            .unwrap()
-            .query_observations
-            .remove(0);
+        // A capture is its own category: no imported observation, no change to the evidence
+        // that reconciliation commits to.
+        let mut after = inventory_cli::load_existing(&path).unwrap().unwrap();
+        assert!(after.query_observations.is_empty());
+        assert_eq!(
+            after.evidence_digest().unwrap(),
+            state.evidence_digest().unwrap()
+        );
+        let saved = after.captured_observations.remove(0);
         let copies = fs::read_dir(&directory)
             .unwrap()
             .map(|entry| entry.unwrap().path())

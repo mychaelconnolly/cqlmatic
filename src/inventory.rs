@@ -911,6 +911,11 @@ pub struct InventoryState {
     pub unverified_leads: Vec<UnverifiedFieldLead>,
     #[serde(default)]
     pub query_observations: Vec<QueryObservation>,
+    /// Searches a client hook passed to `env capture`. They support field grounding but are not
+    /// inventory evidence: they are left out of the reconciliation fingerprint and replace
+    /// one another.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captured_observations: Vec<QueryObservation>,
     #[serde(default)]
     pub refresh_settings: RefreshSettings,
     #[serde(default)]
@@ -1027,6 +1032,7 @@ pub struct InventoryStatus {
     pub quick_depth: QuickDepth,
     pub unverified_lead_count: usize,
     pub query_observation_count: usize,
+    pub captured_observation_count: usize,
     pub refresh_settings: RefreshSettings,
     pub automatic_refresh_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1040,6 +1046,7 @@ pub struct InventoryStatus {
     pub settings_attention: bool,
     pub unverified_leads: Vec<UnverifiedFieldLead>,
     pub query_observations: Vec<QueryObservation>,
+    pub captured_observations: Vec<QueryObservation>,
     pub message: String,
     pub target: Progress,
     pub environment: Option<EnvironmentId>,
@@ -1063,6 +1070,17 @@ pub struct InventoryStatus {
 }
 
 impl QueryObservation {
+    /// Orders captures of one source. A later window start outranks more pack measurements, so
+    /// a capture is only ever replaced by one that starts no earlier.
+    fn capture_rank(
+        &self,
+    ) -> Result<(time::OffsetDateTime, time::OffsetDateTime, &str), Diagnostic> {
+        Ok((
+            environment::parse_time(&self.start)?,
+            environment::parse_time(&self.retrieved_at)?,
+            &self.id,
+        ))
+    }
     fn digest(&self) -> Result<String, Diagnostic> {
         let mut copy = self.clone();
         copy.id.clear();
@@ -1072,12 +1090,24 @@ impl QueryObservation {
     }
     pub fn validate(&self) -> Result<(), Diagnostic> {
         environment::validate_identity(&self.environment)?;
-        let request: DiscoverRequest = serde_json::from_value(json!({
-            "schema_version":1,"environment":self.environment,"start":self.start,"end":self.end,
-            "sources":[{"type":"observation-validation"}],"max_queries":1,"max_seconds":1
-        }))
-        .map_err(|_| fail("Invalid query observation window."))?;
-        discovery::validate_request(&request)?;
+        if self.caller_assertion == QueryResultAssertion::ClientHookCapture {
+            // The agent chose this window for its own search, so its length is not limited.
+            if !self.start.ends_with('Z')
+                || !self.end.ends_with('Z')
+                || environment::parse_time(&self.start)? >= environment::parse_time(&self.end)?
+            {
+                return Err(fail(
+                    "Captured searches need increasing absolute UTC windows.",
+                ));
+            }
+        } else {
+            let request: DiscoverRequest = serde_json::from_value(json!({
+                "schema_version":1,"environment":self.environment,"start":self.start,"end":self.end,
+                "sources":[{"type":"observation-validation"}],"max_queries":1,"max_seconds":1
+            }))
+            .map_err(|_| fail("Invalid query observation window."))?;
+            discovery::validate_request(&request)?;
+        }
         if environment::parse_time(&self.retrieved_at)? < environment::parse_time(&self.end)? {
             return Err(fail(
                 "Query result retrieval must not precede its completed window.",
@@ -1393,7 +1423,7 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
-            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,
+            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
             "pending_inventory":status.pending_inventory.len(),"inventory_notifications":status.inventory_notification_count},
         "refresh_settings":status.refresh_settings,"automatic_refresh_available":status.automatic_refresh_available,
         "refresh_reminder":status.refresh_reminder,"refresh_blocked":status.refresh_blocked,
@@ -1590,7 +1620,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
             "discovery_recovery":discovery_recovery,"discovery_unfinished":discovery_work.len(),
-            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,
+            "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
             "pending_inventory":status.pending_inventory.iter().filter(|work| work.resolution.is_none()).count(),
             "inventory_notifications":status.inventory_notification_count,
             "refresh_attempts":status.refresh_attempts.len()},
@@ -2815,6 +2845,7 @@ impl InventoryState {
             quick_depth: QuickDepth::SourcesAndFields,
             unverified_leads: vec![],
             query_observations: vec![],
+            captured_observations: vec![],
             refresh_settings: RefreshSettings::default(),
             refresh_attempts: vec![],
             capability_runs: vec![],
@@ -2849,6 +2880,8 @@ impl InventoryState {
         };
         copy.refresh_attempts.clear();
         copy.capability_runs.clear();
+        // Captured searches are not inventory evidence.
+        copy.captured_observations.clear();
         copy.schema_version =
             copy.field_evidence_schema_version
                 .unwrap_or(if copy.schema_version == 4 {
@@ -2955,9 +2988,12 @@ impl InventoryState {
                 return Err(fail("Scouting row count differs from saved evidence."));
             }
         }
-        if self.unverified_leads.len() > 1000 || self.query_observations.len() > 1000 {
+        if self.unverified_leads.len() > 1000
+            || self.query_observations.len() > 1000
+            || self.captured_observations.len() > 1000
+        {
             return Err(fail(
-                "Inventory leads and query observations are limited to 1000 entries each.",
+                "Inventory leads, query observations and captured observations are limited to 1000 entries each.",
             ));
         }
         let mut leads = BTreeSet::new();
@@ -2969,9 +3005,20 @@ impl InventoryState {
             }
         }
         let mut observations = BTreeSet::new();
-        for observation in &self.query_observations {
+        for (observation, captured) in self
+            .query_observations
+            .iter()
+            .map(|observation| (observation, false))
+            .chain(
+                self.captured_observations
+                    .iter()
+                    .map(|capture| (capture, true)),
+            )
+        {
             observation.validate()?;
             if !observations.insert(&observation.id)
+                || captured
+                    != (observation.caller_assertion == QueryResultAssertion::ClientHookCapture)
                 || !self.sources.iter().any(|s| s.id == observation.source_id)
                 || self
                     .target
@@ -3296,16 +3343,63 @@ impl InventoryState {
         *self = candidate;
         Ok(())
     }
+    /// Whether captures of the same source that rank after `candidate` already show every field
+    /// it shows.
+    pub fn capture_is_covered(&self, candidate: &QueryObservation) -> Result<bool, Diagnostic> {
+        let rank = candidate.capture_rank()?;
+        let mut shown = BTreeSet::new();
+        for capture in &self.captured_observations {
+            if capture.source_id == candidate.source_id && capture.capture_rank()? > rank {
+                shown.extend(capture.fields.iter().map(|field| &field.field));
+            }
+        }
+        Ok(candidate
+            .fields
+            .iter()
+            .all(|field| shown.contains(&field.field)))
+    }
+    /// Drops every capture whose fields later-ranked captures of its source all show, and
+    /// returns how many were dropped.
+    pub fn drop_covered_captures(&mut self) -> Result<usize, Diagnostic> {
+        let mut captures = vec![];
+        for (index, capture) in self.captured_observations.iter().enumerate() {
+            captures.push((capture.capture_rank()?, index));
+        }
+        captures.sort();
+        let mut shown = BTreeMap::<&str, BTreeSet<&str>>::new();
+        let mut covered = BTreeSet::new();
+        for (_, index) in captures.into_iter().rev() {
+            let capture = &self.captured_observations[index];
+            let fields = shown.entry(&capture.source_id).or_default();
+            if capture
+                .fields
+                .iter()
+                .all(|field| fields.contains(field.field.as_str()))
+            {
+                covered.insert(index);
+            } else {
+                fields.extend(capture.fields.iter().map(|field| field.field.as_str()));
+            }
+        }
+        let mut index = 0;
+        self.captured_observations.retain(|_| {
+            index += 1;
+            !covered.contains(&(index - 1))
+        });
+        Ok(covered.len())
+    }
     pub fn record_query_observation(
         &mut self,
         observation: QueryObservation,
     ) -> Result<(), Diagnostic> {
         let mut candidate = self.clone();
-        if let Some(existing) = candidate
-            .query_observations
-            .iter()
-            .find(|p| p.id == observation.id)
-        {
+        let captured = observation.caller_assertion == QueryResultAssertion::ClientHookCapture;
+        let ledger = if captured {
+            &mut candidate.captured_observations
+        } else {
+            &mut candidate.query_observations
+        };
+        if let Some(existing) = ledger.iter().find(|p| p.id == observation.id) {
             if existing != &observation {
                 return Err(fail(
                     "Query observation identity conflicts with retained evidence.",
@@ -3313,7 +3407,10 @@ impl InventoryState {
             }
             return Ok(());
         }
-        candidate.query_observations.push(observation);
+        ledger.push(observation);
+        if captured {
+            candidate.drop_covered_captures()?;
+        }
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -4058,6 +4155,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         quick_depth: state.quick_depth,
         unverified_lead_count: state.unverified_leads.len(),
         query_observation_count: state.query_observations.len(),
+        captured_observation_count: state.captured_observations.len(),
         refresh_settings: state.refresh_settings.clone(),
         automatic_refresh_available: AUTOMATIC_REFRESH_AVAILABLE,
         refresh_reminder: None,
@@ -4103,6 +4201,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         pending_inventory,
         unverified_leads: state.unverified_leads.clone(),
         query_observations: state.query_observations.clone(),
+        captured_observations: state.captured_observations.clone(),
         message: if state.discovery_mode == DiscoveryMode::Quick {
             "Quick discovery covers only the selected sources, window and depth. Parser review and a full environment map remain separate work.".into()
         } else {

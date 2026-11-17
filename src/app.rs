@@ -12,6 +12,8 @@ pub struct GroundingEvidence<'a> {
     pub environment: &'a EnvironmentId,
     pub active_pack: Option<&'a Pack>,
     pub query_observations: &'a [QueryObservation],
+    /// Searches a client hook passed to `env capture`, reported as their own kind of basis.
+    pub captured_observations: &'a [QueryObservation],
     pub capabilities: Option<crate::capability::CapabilityEvidence<'a>>,
 }
 
@@ -561,6 +563,15 @@ fn finish(
         }
         if evidence
             .split(" | ")
+            .any(|basis| basis.starts_with("captured search observation;"))
+        {
+            result.diagnostics.push(Diagnostic::warning(
+                "CQL_CAPTURED_OBSERVATION",
+                format!("{key}: {evidence}; the search and its result were passed on by a client hook, not independent execution attestation."),
+            ));
+        }
+        if evidence
+            .split(" | ")
             .any(|basis| basis.starts_with("observed with accepted partial coverage;"))
         {
             result.diagnostics.push(Diagnostic::warning(
@@ -579,6 +590,7 @@ fn finish(
                     "query-produced" | "language-built-in" | "observed in a bounded sample"
                 ) && !basis.starts_with("observed with accepted partial coverage;")
                     && !basis.starts_with("caller-attested query observation;")
+                    && !basis.starts_with("captured search observation;")
             })
         {
             result.diagnostics.push(Diagnostic::warning(
@@ -2728,9 +2740,15 @@ fn ground(
             return g;
         }
         if evidence.query_observations.len() > 1000
-            || evidence.query_observations.iter().any(|observation| {
-                observation.validate().is_err() || &observation.environment != evidence.environment
-            })
+            || evidence.captured_observations.len() > 1000
+            || evidence
+                .query_observations
+                .iter()
+                .chain(evidence.captured_observations)
+                .any(|observation| {
+                    observation.validate().is_err()
+                        || &observation.environment != evidence.environment
+                })
         {
             g.conflicting
                 .push("Query observation integrity, identity or budget validation failed.".into());
@@ -3169,13 +3187,18 @@ fn query_observation_basis(
     }
     let source_id = crate::discovery::source_id(&r.scope);
     let mut matching = false;
-    for observation in evidence.query_observations.iter().filter(|observation| {
-        observation.source_id == source_id
-            && r.target
-                .as_ref()
-                .is_some_and(|target| target == &observation.environment.view)
-            && !r.array
-    }) {
+    for observation in evidence
+        .query_observations
+        .iter()
+        .chain(evidence.captured_observations)
+        .filter(|observation| {
+            observation.source_id == source_id
+                && r.target
+                    .as_ref()
+                    .is_some_and(|target| target == &observation.environment.view)
+                && !r.array
+        })
+    {
         let Some(field) = observation
             .fields
             .iter()
@@ -3191,7 +3214,14 @@ fn query_observation_basis(
             })
         {
             return Ok(Some(format!(
-                "caller-attested query observation; id={}; positive_rows={}; retrieved_at={}; observation_window={}/{}",
+                "{}; id={}; positive_rows={}; retrieved_at={}; observation_window={}/{}",
+                if observation.caller_assertion
+                    == crate::inventory::QueryResultAssertion::ClientHookCapture
+                {
+                    "captured search observation"
+                } else {
+                    "caller-attested query observation"
+                },
                 observation.id,
                 field.positive_rows,
                 observation.retrieved_at,

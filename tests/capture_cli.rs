@@ -159,7 +159,7 @@ fn capture_credits_a_plain_search_in_every_claude_code_result_form() {
     dir.capture(notice(&outside));
 
     let state = dir.saved();
-    let observations = state["query_observations"].as_array().unwrap();
+    let observations = state["captured_observations"].as_array().unwrap();
     let fields = |index: usize| {
         observations[index]["fields"]
             .as_array()
@@ -169,6 +169,8 @@ fn capture_credits_a_plain_search_in_every_claude_code_result_form() {
             .collect::<Vec<_>>()
     };
     assert_eq!(observations.len(), 3, "{state}");
+    // Captures are kept apart from imported observations.
+    assert_eq!(state["query_observations"], json!([]));
     assert_eq!(fields(0), ["bytes", "user"]);
     assert_eq!(fields(1), ["user"]);
     assert_eq!(fields(2), ["host"]);
@@ -258,6 +260,7 @@ fn capture_flags_an_unmapped_source_and_counts_what_it_skips() {
         })
     );
     assert_eq!(dir.saved()["query_observations"], json!([]));
+    assert!(dir.saved()["captured_observations"].is_null());
     let leftovers = fs::read_dir(dir.0.join("workflow/captures"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -325,7 +328,7 @@ fn capture_reads_codex_and_generic_payloads() {
     );
 
     let state = dir.saved();
-    let fields = state["query_observations"]
+    let fields = state["captured_observations"]
         .as_array()
         .unwrap()
         .iter()
@@ -414,7 +417,7 @@ fn capture_reads_copilot_cli_and_cursor_payloads() {
     );
 
     let state = dir.saved();
-    let fields = state["query_observations"]
+    let fields = state["captured_observations"]
         .as_array()
         .unwrap()
         .iter()
@@ -557,7 +560,7 @@ fn capture_reads_cline_gemini_kiro_and_qwen_payloads() {
     );
 
     let state = dir.saved();
-    let fields = state["query_observations"]
+    let fields = state["captured_observations"]
         .as_array()
         .unwrap()
         .iter()
@@ -565,4 +568,121 @@ fn capture_reads_cline_gemini_kiro_and_qwen_payloads() {
         .collect::<Vec<_>>();
     assert_eq!(fields, ["a", "b", "c", "d", "e", "f", "g"], "{state}");
     assert_eq!(dir.tally(), json!({"recorded": 7, "search-failed": 3}));
+}
+
+/// Makes a file look old enough for the tidy-up to consider it.
+fn age(path: &Path) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+}
+
+fn names(directory: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('.'))
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[test]
+fn capture_replaces_covered_captures_and_tidies_what_nothing_refers_to() {
+    let dir = Temp::new();
+    dir.confirm();
+    let window = |start: i64, end: Option<i64>, rows: Value| {
+        let mut payload = search("#type=synthetic | head(5)", json!(body(rows)));
+        let arguments = &mut payload["tool_input"]["arguments"];
+        arguments["start"] = json!(hours_ago(start));
+        match end {
+            Some(end) => arguments["end"] = json!(hours_ago(end)),
+            None => drop(arguments.as_object_mut().unwrap().remove("end")),
+        }
+        payload
+    };
+    let captures = dir.0.join("workflow/captures");
+    let audits = dir.0.join("workflow/query-observations");
+
+    // A thirty-day search is credited, then replaced by a later-starting one showing more.
+    dir.capture(window(24 * 30, Some(3), json!([{"a": "1", "b": "1"}])));
+    let mut replaced = names(&captures);
+    replaced.retain(|name| name != "tally.json");
+    assert_eq!(replaced.len(), 2);
+    let replaced_audit = names(&audits);
+    dir.capture(window(2, Some(1), json!([{"a": "1", "b": "1", "c": "1"}])));
+    // An earlier-starting search that shows nothing new writes nothing.
+    dir.capture(window(5, Some(4), json!([{"a": "1"}])));
+    let fields = |state: &Value| {
+        state["captured_observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|observation| observation["fields"].as_array().unwrap().len())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fields(&dir.saved()), [3]);
+    assert_eq!(dir.tally(), json!({"recorded": 2, "already-covered": 1}));
+
+    // Nothing recent is removed: both captures' copies and audit records are still here.
+    assert_eq!(names(&captures).len(), 5, "{:?}", names(&captures));
+    assert_eq!(names(&audits).len(), 2);
+    for directory in [&captures, &audits] {
+        for name in names(directory) {
+            age(&directory.join(name));
+        }
+    }
+    let plant = |path: PathBuf, text: &str, old: bool| {
+        fs::write(&path, text).unwrap();
+        if old {
+            age(&path);
+        }
+    };
+    plant(
+        captures.join("20260101T000000Z-0123456789ab.json"),
+        "{}",
+        true,
+    );
+    plant(
+        captures.join("20260101T000000Z-0123456789ab.cql"),
+        "x",
+        true,
+    );
+    plant(
+        captures.join("20260103T000000Z-0123456789ab.cql"),
+        "x",
+        true,
+    );
+    plant(
+        captures.join("20260102T000000Z-0123456789ab.json"),
+        "{}",
+        false,
+    );
+    plant(captures.join("notes.json"), "{}", true);
+    plant(
+        audits.join("imported.json"),
+        r#"{"observation":{"caller_assertion":"exact-query-result-target-window"}}"#,
+        true,
+    );
+
+    dir.capture(window(1, None, json!([{"d": "1"}])));
+    assert_eq!(fields(&dir.saved()), [3, 1]);
+    let kept = names(&captures);
+    assert!(replaced.iter().all(|name| !kept.contains(name)), "{kept:?}");
+    assert_eq!(
+        kept.iter()
+            .filter(|name| name.contains("0123456789ab") || *name == "notes.json")
+            .collect::<Vec<_>>(),
+        ["20260102T000000Z-0123456789ab.json", "notes.json"]
+    );
+    // The held capture's aged copies stay, beside the new capture's and the tally.
+    assert_eq!(kept.len(), 2 + 2 + 2 + 1, "{kept:?}");
+    let kept = names(&audits);
+    assert!(!kept.contains(&replaced_audit[0]), "{kept:?}");
+    assert!(kept.contains(&"imported.json".to_owned()));
+    assert_eq!(kept.len(), 3, "{kept:?}");
+    assert!(!audits.join(format!(".{}.lock", replaced_audit[0])).exists());
 }

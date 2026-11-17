@@ -333,7 +333,7 @@ Both originals and their ancestry must pass private-file checks before reading. 
 
 Replaying the same protected original files and hashes for the same environment, source, window and retrieval instant verifies the originals and retained audit. Exact replay can also restore a missing audit. A successful replay preserves current-version inventory state. Changing only the retrieval instant for the same capture is a conflict. When separate captures return identical bytes, save each to its own protected file and record its distinct retrieval instant. Different files supplied for an identical audit key conflict.
 
-Full status exposes `unverified_leads` and caller-attested `query_observations`, including exact source/window/time and per-field positive row counts. Compact status exposes their counts only. These additive evidence lists contain no original query text, literal values or raw result rows.
+Full status exposes `unverified_leads`, caller-attested `query_observations` and hook-recorded `captured_observations` (see [Scrappy mode](#scrappy-mode-capture-the-agents-searches)), including exact source/window/time and per-field positive row counts. Compact status exposes their counts only. These additive evidence lists contain no original query text, literal values or raw result rows.
 
 A selected confirmed inventory's validated caller-attested ledger can supply qualifying fields to `generate`/`check --require-observed` without a pack. Full and Quick modes can fill missing target context while respecting explicit request and pack identities. Both modes can queue new source/field hints; only Quick appends to the legacy query-lead list. Assessment writes neither list. `--inventory-state FILE` selects either mode's inventory. Other fields still need evidence, and later or unordered contradictory pack measurements and strict record-kind safeguards remain applicable. Assessment does not turn ledger counts into population rates. Generation/checking do not choose an execution window; inspect the stored observation window for the intended search. A positive field count does not establish array-member shape.
 
@@ -341,7 +341,7 @@ The field ledger and unverified-lead list are each bounded to 1000 entries. Lead
 
 ### Scrappy mode: capture the agent's searches
 
-After a target is confirmed, for example by Quick discovery, a hook in the agent's client can add to the same ledger from the searches the agent already runs. The client passes each finished search to `cqlmatic env capture`, which reads the query and its complete result directly. Nothing is sent back through the model, and no search is executed.
+After a target is confirmed, for example by Quick discovery, a hook in the agent's client can record field evidence from the searches the agent already runs. These captured observations are a category of their own, kept apart from imported query observations. The client passes each finished search to `cqlmatic env capture`, which reads the query and its complete result directly. Nothing is sent back through the model, and no search is executed.
 
 Any client that can run a command after a tool call, and hand it the call's name, arguments and result, can use this. Register the command for tool calls of the CrowdStrike MCP server:
 
@@ -453,9 +453,10 @@ The search is `falcon_search_ngsiem` called directly or through the hosted serve
 
 | Search | Effect | Count in `tally.json` |
 | --- | --- | --- |
-| Names one confirmed expected source and meets every saved-query rule above | Query observation with `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `captures/` beside the state | `recorded` |
-| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window over seven days or without UTC `Z` times, or 10,000 rows or more | None; nothing is written | `not-creditable` |
-| Is creditable but could not be saved: the ledger is full, the inventory stayed busy, or a file could not be written | None | `not-recorded` |
+| Names one confirmed expected source and meets every saved-query rule above | Captured observation, labelled `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `captures/` beside the state | `recorded` |
+| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window without UTC `Z` times, or 10,000 rows or more | None; nothing is written | `not-creditable` |
+| Is creditable, but later-starting captures of the same source already show every field it returned | None; nothing is written | `already-covered` |
+| Is creditable but could not be saved: the capture list is full, the inventory stayed busy, or a file could not be written | None | `not-recorded` |
 | Returned rows and names one source that is not a confirmed expected source | Pending inventory work for that source and the query's input fields, as `record-inventory-hints` | `new-source-lead`, `nothing-new` when already queued, or `not-recorded` when the state refused the change |
 | Has a query CQLmatic cannot parse | None | `query-not-read` |
 | Names no source, or more than one | None | `no-single-source` |
@@ -463,7 +464,14 @@ The search is `falcon_search_ngsiem` called directly or through the hosted serve
 | Failed, was cut off, or its result could not be read | None | `search-failed` |
 | Used another repository | None | `other-view` |
 
-A search without `end` is recorded with the capture time as its end. Captured observations follow the same rules and limits as imported ones and are equally unverified: the payload is taken as the client supplied it. They do not update the active pack, complete discovery or confirm a pending source. `captures/tally.json` holds the counts by outcome.
+Captured observations are listed in full status as `captured_observations` and counted in compact status. They differ from imported query observations in four ways:
+
+- **Lighter evidence.** They support `generate`/`check --require-observed` for their exact positive fields, source and target under the same ordering rules as an import, with the basis `captured search observation` and the warning `CQL_CAPTURED_OBSERVATION`. They are not inventory evidence: recording one does not change the reconciliation fingerprint, update the active pack, complete discovery or confirm a pending source.
+- **Any window length.** A search without `end` is recorded with the capture time as its end, and the window may be longer than the seven days an import allows. Times still need the UTC `Z` form.
+- **Replacement.** When a capture is recorded, an earlier capture of the same source is dropped once captures with the same or a later window start show every field it showed. The list holds at most 1000 captures, separately from the import ledger.
+- **Tidying.** After a capture is recorded, copies in `captures/` that no saved observation is about, and audit records of dropped captures, are removed once they are ten minutes old. This also clears what an interrupted capture left behind.
+
+Captured observations are as unverified as imported ones: the payload is taken as the client supplied it. `captures/tally.json` holds the counts by outcome.
 
 See [setup](SETUP.md), [MCP relay details](MCP-COMPANION.md), [application flow](FLOW.md), and [troubleshooting](TROUBLESHOOTING.md).
 
