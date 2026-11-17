@@ -783,7 +783,7 @@ fn api_and_mcp_emit_identical_stratified_probes_and_population_rates() {
         Some(high.unwrap().min(r.max_queries))
     );
     assert_eq!(output.cost.searches.limit, r.max_queries);
-    assert_eq!(output.cost.answer_bytes, 0);
+    assert_eq!(output.cost.answer_bytes, Some(0));
     let mut answer_bytes = 0;
     while output.status == "needs-probes" {
         rounds += 1;
@@ -811,7 +811,7 @@ fn api_and_mcp_emit_identical_stratified_probes_and_population_rates() {
         output = mcp::step(&state, &answers).unwrap();
         assert_eq!(output.cost.searches.used, relayed.len());
         assert_eq!(output.cost.searches.ready, output.probes.len());
-        assert_eq!(output.cost.answer_bytes, answer_bytes);
+        assert_eq!(output.cost.answer_bytes, Some(answer_bytes));
     }
     assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
     assert!((low as usize..=high.unwrap() as usize).contains(&relayed.len()));

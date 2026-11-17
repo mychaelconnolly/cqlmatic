@@ -566,8 +566,10 @@ pub struct VerifiedCompletion {
 #[derive(Debug, Serialize)]
 pub struct Cost {
     pub searches: Searches,
-    /// Bytes of every answer handed back so far.
-    pub answer_bytes: usize,
+    /// Bytes of every answer handed back so far. Absent for a native run, whose answers are
+    /// fetched by this program and never handed back.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_bytes: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1161,14 +1163,20 @@ fn cost(state: &State, ready: usize) -> Cost {
             limit,
         },
         answer_bytes: state
-            .answers
-            .values()
-            .map(|answer| answer.raw_hex.len() / 2)
-            .sum::<usize>()
-            + state
-                .session
-                .as_ref()
-                .map_or(0, |session| session.answer_bytes()),
+            .session
+            .as_ref()
+            .is_none_or(|session| session.transport != Transport::Native)
+            .then(|| {
+                state
+                    .answers
+                    .values()
+                    .map(|answer| answer.raw_hex.len() / 2)
+                    .sum::<usize>()
+                    + state
+                        .session
+                        .as_ref()
+                        .map_or(0, |session| session.answer_bytes())
+            }),
     }
 }
 fn progress(
