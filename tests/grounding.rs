@@ -727,13 +727,23 @@ fn lenient_warning_requires_reliance_on_weak_deployment_evidence() {
     let mut d = data();
     d.fields[0]["refresh_status"] = json!("not-reobserved");
     let result = analyze(d, false);
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "CQL_GROUNDING_LENIENT"
-                && d.message.contains("historical; not re-observed"))
-    );
+    let lenient: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "CQL_GROUNDING_LENIENT")
+        .collect();
+    assert_eq!(lenient.len(), 1, "{:?}", result.diagnostics);
+    let weak: Vec<_> = result
+        .grounding
+        .basis
+        .iter()
+        .filter(|(_, evidence)| evidence.contains("historical; not re-observed"))
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert!(!weak.is_empty(), "{:?}", result.grounding.basis);
+    for key in weak {
+        assert!(lenient[0].message.contains(key), "{:?}", lenient[0]);
+    }
     assert_eq!(result.exit_code(true), 1);
     assert!(
         analyze(partial_data(), true)
@@ -807,4 +817,49 @@ fn jsonl_early_failures_keep_effective_flags_and_recover() {
         assert_eq!(result.grounding.policy.require_observed, index == 2);
     }
     assert_eq!(results[3].outcome, Outcome::Ready);
+}
+
+#[test]
+fn lenient_grounding_is_one_warning_after_the_query_diagnostics() {
+    let result = app::check(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: "ComputerName=a | groupBy(UserName) | sort(_count)".into(),
+            context: Context::default(),
+        },
+        None,
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    let positions: Vec<_> = result
+        .diagnostics
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.code == "CQL_GROUNDING_LENIENT")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        positions,
+        [result.diagnostics.len() - 1],
+        "{:?}",
+        result.diagnostics
+    );
+    let warning = result.diagnostics.last().unwrap();
+    assert_eq!(warning.severity, Severity::Warning);
+    assert!(warning.message.contains("2 fields"), "{warning:?}");
+    for key in ["*:*:ComputerName", "*:*:UserName"] {
+        assert!(warning.message.contains(key), "{warning:?}");
+        assert_eq!(
+            result.grounding.basis[key],
+            "query-supplied; deployment unverified"
+        );
+    }
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_GROUPBY_LIMIT"),
+        "{:?}",
+        result.diagnostics
+    );
 }

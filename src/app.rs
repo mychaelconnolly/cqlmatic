@@ -551,6 +551,7 @@ fn finish(
     if result.outcome == Outcome::NeedsContext {
         result.diagnostics.push(Diagnostic::error("CQL_CONTEXT_REQUIRED","Resolve the missing, conflicting or stale grounding requirements; grounding.basis explains the evidence. Language acceptance remains separate."));
     }
+    let mut lenient = Vec::new();
     for (key, evidence) in &result.grounding.basis {
         if evidence
             .split(" | ")
@@ -593,10 +594,7 @@ fn finish(
                     && !basis.starts_with("captured search observation;")
             })
         {
-            result.diagnostics.push(Diagnostic::warning(
-                "CQL_GROUNDING_LENIENT",
-                format!("{key}: {evidence}; ready relies on lenient grounding because require_observed is false."),
-            ));
+            lenient.push(key.as_str());
         }
         if key.ends_with(":@record-kind")
             && (evidence.starts_with("multiple record kinds observed (")
@@ -613,6 +611,17 @@ fn finish(
                 Diagnostic::error("CQL_RECORD_KIND_AMBIGUOUS", message)
             });
         }
+    }
+    // One warning for all weakly grounded fields, after the diagnostics about the query itself.
+    if !lenient.is_empty() {
+        result.diagnostics.push(Diagnostic::warning(
+            "CQL_GROUNDING_LENIENT",
+            format!(
+                "Ready relies on lenient grounding because require_observed is false. {} without qualifying deployment evidence: {}. grounding.basis records the evidence for each.",
+                if lenient.len() == 1 { "1 field".to_string() } else { format!("{} fields", lenient.len()) },
+                lenient.join(", ")
+            ),
+        ));
     }
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
