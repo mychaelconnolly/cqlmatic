@@ -31,6 +31,7 @@ Keep state, packs, parser definitions, raw results, receipts and credentials pro
 | `CQL_MISSING_POLICY`, `CQL_ACCURACY_MODE`, `CQL_UNSUPPORTED_EXACT_AGGREGATE` | Choose missing inclusion/exclusion or exact/estimated mode explicitly. Exact grouped distinct is not silently replaced by an estimate. |
 | `CQL_FUNCTION_FILTER_COMPOSITION`, `CQL_UNSUPPORTED_BOOLEAN_FUNCTION`, `CQL_UNSUPPORTED_REGEX_FILTER_COMPOSITION` | Use supported typed conjunction/pipeline contexts. Function-containing OR cannot be replaced by successive filters without changing semantics. |
 | `CQL_BRANCH_FUNCTION` | Move aggregates, `join`, `selfJoin` and `selfJoinFilter` before or after the whole `case` or `match`. Branch steps may filter, assign and transform. |
+| `CQL_JOIN_PLACEMENT` | Move `join`, `selfJoin` or `selfJoinFilter` out of the function argument to the top level of the query, or of a `join` subquery. Aggregate before or after the join. |
 | `CQL_BARE_FUNCTION_NAME` | A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text. |
 | `CQL_BARE_COMMAND_WORD` | The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text. |
 | `CQL_OPERATOR_TEXT` | Bare `&&` is searched as text. Use `and` or a space between terms. |

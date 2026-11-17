@@ -36,6 +36,7 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         after_aggregate: false,
         ordered_input: false,
         aggregate_parents: vec![],
+        enclosed_queries: 0,
         stored_input: true,
         time_interval_seen: false,
     };
@@ -143,6 +144,7 @@ struct Checker<'a> {
     after_aggregate: bool,
     ordered_input: bool,
     aggregate_parents: Vec<&'static str>,
+    enclosed_queries: usize,
     stored_input: bool,
     time_interval_seen: bool,
 }
@@ -1436,6 +1438,19 @@ impl Checker<'_> {
                 );
             }
         }
+        if matches!(spec.name, "join" | "selfJoin" | "selfJoinFilter")
+            && (self.enclosed_queries > 0 || !self.aggregate_parents.is_empty())
+        {
+            self.emit(
+                "CQL_JOIN_PLACEMENT",
+                format!(
+                    "{}() must be at the top level of the query or of a join subquery; it cannot be used inside a function argument.",
+                    spec.name
+                ),
+                Some(c),
+                false,
+            );
+        }
         self.joins |= matches!(spec.name, "join" | "selfJoinFilter");
         self.join_seen |= spec.name == "join";
         self.correlation_seen |= spec.name == "correlate";
@@ -1952,6 +1967,8 @@ impl Checker<'_> {
             } else if spec.argument_scope(name) == catalog::ArgumentScope::Independent {
                 let outer = std::mem::take(&mut self.bindings);
                 let fields = std::mem::take(&mut self.fields);
+                let enclosed = std::mem::take(&mut self.enclosed_queries);
+                let parents = std::mem::take(&mut self.aggregate_parents);
                 if let Value::Query { pipeline, .. } = value {
                     let mut state = PipelineState::default();
                     self.pipeline_state(
@@ -1968,6 +1985,8 @@ impl Checker<'_> {
                 }
                 self.bindings = outer;
                 self.fields = fields;
+                self.enclosed_queries = enclosed;
+                self.aggregate_parents = parents;
             } else {
                 self.value(value, tables);
             }
@@ -2518,7 +2537,9 @@ impl Checker<'_> {
                 false,
             );
         }
+        self.enclosed_queries += 1;
         self.pipeline(pipeline, QueryContext::Continuing, &mut tables.clone());
+        self.enclosed_queries -= 1;
     }
     fn inline(&mut self, value: &Value, tables: &mut BTreeSet<String>) {
         // Element pseudo-fields do not belong to the enclosing event's projection.
@@ -2528,6 +2549,7 @@ impl Checker<'_> {
             after_aggregate: self.after_aggregate,
             ..PipelineState::default()
         };
+        self.enclosed_queries += 1;
         match value {
             Value::Query { pipeline, .. } => {
                 self.nonaggregate(pipeline);
@@ -2553,6 +2575,7 @@ impl Checker<'_> {
             }
             _ => {}
         }
+        self.enclosed_queries -= 1;
         self.fields = outer_fields;
     }
     fn nonaggregate(&mut self, pipeline: &Pipeline) {

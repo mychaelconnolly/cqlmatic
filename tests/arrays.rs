@@ -303,12 +303,15 @@ fn array_paths_and_scope_resets_preserve_only_current_uncertainty() {
     }
     let q =
         r#"objectArray:exists("items[]",var=x,condition={join(query={x.k:=1},field=x.k,key=x.k)})"#;
-    assert_eq!(
-        check(q, false).outcome,
-        Outcome::Ready,
-        "{:?}",
-        check(q, false).diagnostics
-    );
+    // The join subquery is its own scope, so the element binding raises nothing inside it;
+    // the join itself is misplaced in a function argument.
+    let errors: Vec<_> = check(q, false)
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.severity != Severity::Warning && d.severity != Severity::Info)
+        .map(|d| d.code)
+        .collect();
+    assert_eq!(errors, ["CQL_JOIN_PLACEMENT"]);
     let q = r#"objectArray:exists("items[]",var=x,condition={series(x.k,startmatch={x.k:=1})})"#;
     assert!(
         check(q, false)
