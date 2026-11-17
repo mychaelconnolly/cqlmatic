@@ -223,7 +223,6 @@ fn checked_self_join_requires_an_array_of_unlabeled_filter_queries() {
     for clauses in [
         r#"[{ kind=login }, { in(user, values=["alice"]) | test(true) }]"#,
         r#"[{ user=alice OR user=bob }, { not wildcard("admin*", field=user) }]"#,
-        r#"[{ selfJoinFilter(user, where=[{ kind=login }]) }]"#,
     ] {
         let query = format!("selfJoinFilter(field=[user], where={clauses})");
         assert_eq!(check(&query).outcome, Outcome::Ready, "{query}");
@@ -236,6 +235,7 @@ fn checked_self_join_requires_an_array_of_unlabeled_filter_queries() {
         "[{ kind=login }, true]",
         "{ kind=login }",
         "[A: { kind=login }]",
+        r#"[{ selfJoinFilter(user, where=[{ kind=login }]) }]"#,
     ] {
         let query = format!("selfJoinFilter(field=[user], where={clauses})");
         assert_eq!(check(&query).outcome, Outcome::Invalid, "{query}");

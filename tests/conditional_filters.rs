@@ -228,3 +228,60 @@ fn numeric_membership_generation_and_assessment_share_the_contract() {
         "{result:?}"
     );
 }
+
+#[test]
+fn join_functions_are_top_level_in_their_own_query() {
+    for query in [
+        "x=1 | groupBy(k, function={join({y=1}, field=k) | count()})",
+        "x=1 | groupBy(k, function={count() | join({y=1}, field=k)})",
+        "x=1 | groupBy(k, function=[count(), {join({y=1}, field=k) | count()}])",
+        "x=1 | groupBy(k, function={groupBy(j, function={join({y=1}, field=k) | count()})})",
+        "x=1 | groupBy(k, function={!join({y=1}, field=k) | count()})",
+        "x=1 | stats({join({y=1}, field=k) | count()})",
+        "x=1 | bucket(function={join({y=1}, field=k) | count()})",
+        "x=1 | groupBy(k, function=selfJoin(k, where=[{a=1},{b=2}]))",
+        "x=1 | stats([count(), selfJoin(k, where=[{a=1},{b=2}])])",
+        "x=1 | groupBy(k, function={selfJoinFilter(k, where=[{a=1},{b=2}]) | count()})",
+        "x=1 | selfJoinFilter(k, where=[{a=1 | join({z=1}, field=k)},{b=2}])",
+        "x=1 | selfJoin(k, where=[{a=1 | join({z=1}, field=k)},{b=2}])",
+        "x=1 | series(collect=a, startmatch={a=1 | join({y=1}, field=k)})",
+        r#"x=1 | array:eval("a[]", function={join({y=1}, field=k)})"#,
+    ] {
+        rejected(query, "CQL_JOIN_PLACEMENT");
+    }
+    // A join subquery is its own query: the rule applies inside it afresh.
+    let nested =
+        "x=1 | join({y=1 | groupBy(k, function={join({z=1}, field=k) | count()})}, field=k)";
+    rejected(nested, "CQL_JOIN_PLACEMENT");
+    // A table query is no place for any join function.
+    rejected(
+        r#"defineTable({selfJoin(k, where=[{a=1},{b=2}])}, name="t", include=k) | match(table=t, field=k)"#,
+        "CQL_TABLE_JOIN_CONFLICT",
+    );
+    rejected(
+        r#"defineTable({a=1}, name="t", include=k) | selfJoin(k, where=[{a=1},{b=2}]) | match(table=t, field=k)"#,
+        "CQL_TABLE_JOIN_CONFLICT",
+    );
+    assert_eq!(
+        check(nested)
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "CQL_JOIN_PLACEMENT")
+            .count(),
+        1
+    );
+    for query in [
+        "x=1 | join({y=1}, field=k)",
+        "x=1 | !join({y=1}, field=k)",
+        "x=1 | count() | join({y=1}, field=k)",
+        "x=1 | join({y=1 | join({z=1}, field=k)}, field=k)",
+        "x=1 | join({y=1 | selfJoinFilter(k, where=[{a=1},{b=2}])}, field=k)",
+        "x=1 | join({y=1 | selfJoin(k, where=[{a=1},{b=2}])}, field=k)",
+        "x=1 | join({y=1 | groupBy(k, function=count())}, field=k) | groupBy(k)",
+        "x=1 | selfJoin(k, where=[{a=1},{b=2}])",
+        "x=1 | selfJoinFilter(k, where=[{a=1},{b=2}])",
+        "x=1 | count() | selfJoin(k, where=[{a=1},{b=2}])",
+    ] {
+        accepted(query);
+    }
+}
