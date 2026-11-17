@@ -73,9 +73,12 @@ def png_findings(data):
     if not ended and not findings:
         findings.append("no end-of-image chunk")
     if not findings:
-        stream = zlib.decompressobj()
+        # Decode in bounded pieces: a small file can describe a very large image.
+        stream, pending = zlib.decompressobj(), pixels
         try:
-            stream.decompress(pixels)
+            while pending and not stream.eof:
+                stream.decompress(pending, 1 << 16)
+                pending = stream.unconsumed_tail
         except zlib.error:
             findings.append("image data does not decompress")
         else:
@@ -91,7 +94,9 @@ def split_name(name):
 
 def svg_findings(text):
     """Reasons an SVG is refused; empty when it holds drawing markup only."""
-    findings = {f"contains {match.group(0)!r}" for match in SVG_TEXT_MARKERS.finditer(text)}
+    # Character data sections are drawing text, whatever they spell.
+    markup = re.sub(r"<!\[CDATA\[.*?\]\]>", "", text, flags=re.DOTALL)
+    findings = {f"contains {match.group(0)!r}" for match in SVG_TEXT_MARKERS.finditer(markup)}
     if findings:
         # Comments, processing instructions, document types and entities are refused unparsed.
         return sorted(findings)
@@ -109,7 +114,7 @@ def svg_findings(text):
             namespace, local = split_name(attribute)
             if namespace and namespace not in SVG_NAMESPACES:
                 findings.add(f"attribute {local!r} is outside the SVG namespaces ({namespace})")
-            elif not namespace and local.startswith("data-"):
+            elif local.startswith("data-"):
                 findings.add(f"attribute {local!r} carries application data")
     return sorted(findings)
 

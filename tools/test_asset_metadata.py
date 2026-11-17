@@ -56,6 +56,10 @@ class AssetMetadataTests(unittest.TestCase):
                 self.assertTrue(assets.png_findings(data))
         split = signature + header + chunk(b"IDAT", pixels[:3]) + chunk(b"IDAT", pixels[3:]) + chunk(b"IEND")
         self.assertEqual(assets.png_findings(split), [])
+        # More image data than one decoding step holds.
+        large = signature + header + chunk(b"IDAT", zlib.compress(bytes(1 << 20))) + chunk(b"IEND")
+        self.assertEqual(assets.png_findings(large), [])
+        self.assertTrue(assets.png_findings(large.replace(chunk(b"IEND"), chunk(b"IDAT", b"note") + chunk(b"IEND"))))
 
     def test_damaged_or_extended_pngs_are_refused(self):
         self.assertTrue(assets.png_findings(png(tail=b"hidden")))
@@ -71,7 +75,8 @@ class AssetMetadataTests(unittest.TestCase):
         for addition in ("<metadata>x</metadata>", "<!-- made with a tool -->", '<rdf:RDF xmlns:rdf="urn:x"/>',
                          '<s:metadata xmlns:s="http://www.w3.org/2000/svg">provenance</s:metadata>',
                          '<e:layer xmlns:e="urn:editor"/>', '<g xmlns:e="urn:editor" e:label="layer"/>',
-                         '<g data-name="layer"/>', "<?editor version 1?>"):
+                         '<g data-name="layer"/>', "<?editor version 1?>",
+                         '<g xmlns:x="http://www.w3.org/1999/xlink" x:data-note="layer"/>'):
             with self.subTest(addition=addition):
                 changed = clean.replace("<path", addition + "<path")
                 self.assertTrue(assets.file_findings("icon.svg", changed.encode()))
@@ -80,6 +85,8 @@ class AssetMetadataTests(unittest.TestCase):
                 self.assertTrue(assets.file_findings("icon.svg", document.encode()))
         linked = clean.replace("<path", '<use xmlns:x="http://www.w3.org/1999/xlink" x:href="#a"/><path')
         self.assertEqual(assets.file_findings("icon.svg", linked.encode()), [])
+        quoted = clean.replace("<path", "<text><![CDATA[<?php echo 1; ?> <!-- x -->]]></text><path")
+        self.assertEqual(assets.file_findings("icon.svg", quoted.encode()), [])
 
     def test_text_passes_and_unknown_binary_types_are_refused(self):
         self.assertEqual(assets.file_findings("notes.md", "Exif and XMP are named here.\n".encode()), [])
