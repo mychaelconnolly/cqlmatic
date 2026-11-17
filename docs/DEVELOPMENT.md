@@ -85,6 +85,14 @@ For release tooling, run the standard-library checks:
 python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
+Tracked images and other binary files must carry no embedded metadata, such as provenance manifests, Exif or XMP blocks, text chunks and colour-profile descriptions. CI runs this check first, and the tooling tests include it:
+
+```sh
+python3 tools/asset_metadata.py
+```
+
+A tracked file that is not UTF-8 text must be a PNG made only of display chunks; SVG files must hold no metadata elements, editor namespaces or comments. Remove the embedded data before committing, or add a check for a new binary type in [the tool](../tools/asset_metadata.py).
+
 For website changes, use a supported, patched Node.js release and the locked private build package:
 
 ```sh
