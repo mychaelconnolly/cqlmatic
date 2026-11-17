@@ -1,33 +1,41 @@
-# CQLmatic v0.1.8
+# CQLmatic v0.1.9
 
-`check` corrects offline verdicts for many query forms it misclassified in 0.1.7, accepting more supported forms and rejecting more invalid ones. It also warns about queries that run but search for text where a function or operator was meant, recognizes the hosted search tool's error answers, and lets a discovery attempt end on them instead of blocking.
+CQLmatic can now learn which fields your assistant sees in searches it already runs. You can install the companion skill from the command line and see how many searches discovery may need before starting. Query checks catch misplaced joins and point out steps that may make a search do extra work. Routine checks of private inventory files are faster on Windows.
 
-## What changed
+## Capture and setup
 
-- **Queries that do not run are rejected.** Free text after the first aggregate (`groupBy(y) | head 10`), a bare function name as an argument (`stats(count)`), `field := f()` for a function without an `as` parameter, an aggregate or join inside a `case` or `match` branch, operators in mixed case (`a=1 Or b=2`), curly quotes, single quotes and backticks as delimiters, an unquoted `$`, row limits outside 1 to 200,000, group limits outside 1 to 1,000,000, and `top` limits above 24,576 are now errors. `parseTimestamp`, `math:mod` and `setTimeInterval` follow their real argument rules.
-- **Queries that do run are accepted.** Quoted numbers and booleans as arguments (`head("10")`, `distinct="true"`), a single value where a list is expected (`in(a, values=1)`), numbers in value lists, regex literal flags `g`, `m`, `i`, `d` and `F`, parameters with a default (`?{name="x"}`), backslash sequences such as `"C:\Windows"`, one leading or trailing empty pipe, and negated transforms are no longer rejected or reported as unknown.
-- **Warnings for queries that mean something else.** A function name without parentheses (`| count`), a command word from another query language (`where a=1`), `&&`, a comparison with the bare word `null`, `or` mixed with `and` without parentheses, a tab or newline escape inside a path (`"C:\temp"`), `tail()` after a step that removes `@timestamp`, and a negation that has no effect each get a diagnostic. The query stays accepted.
-- **Hosted search answers.** An answer whose `result` is an object with an error is reported as a timeout or a tool error instead of an unsupported shape, and the guides explain how to tell whether a hosted search finished. `assess` asks for a positive control before a zero result is read as "no matches".
-- **Discovery attempts can end.** In a resumable discovery run, a hosted cutoff, a start rejection, a failure after start, or a completed result that cannot be used now ends the attempt. The attempt stays charged, the run pauses, and an explicit resume sends the probe again as a new attempt. A lost response still blocks until it is settled.
+- Scrappy mode records field evidence from qualifying completed searches against a confirmed target. Use `cqlmatic env capture --client CLIENT --server SERVER` with a client hook. For clients that cannot supply the result through a hook, `cqlmatic env pass-through -- COMMAND` runs the server over standard I/O, forwards messages unchanged and records eligible results after forwarding them.
+- Captured observations appear separately in status and can support field grounding with `CQL_CAPTURED_OBSERVATION`. The reconciliation fingerprint excludes captured observations. Eligible searches can also queue a newly seen source for inventory. Each state has its own protected directory for saved copies and outcome counts. [Inventory guide](docs/INVENTORY.md#scrappy-mode-capture-the-agents-searches)
+- `cqlmatic skill install --client CLIENT` installs the companion skill and its linked guides in the client's user-level skill directory. Use `--dir DIR` to choose a location. Verified setup surfaces the command for the selected client. [Setup guide](docs/SETUP.md)
+- Windows now checks existing private files and directories through the Windows API. The same ownership, access and ancestor requirements apply. Creating a private directory still uses the PowerShell helper.
 
-## Compatibility
+## Query checks
 
-The profile is still `cqlmatic-ngsiem-core-v3`. Its knowledge revision changes. Packs written by 0.1.7 remain readable and keep their original binding; a 0.1.7 binary rejects packs using the new knowledge revision with `PACK_PROFILE` (the producer version alone does not determine admission). Request, status and pack format versions remain 1. Inventory state remains version 4, as in 0.1.7; the optional field-evidence version 3 and discovery checkpoint formats 2 and 3 are unchanged. A 0.1.7 binary rejects checkpoints produced by 0.1.8 with `MCP_STATE_TAMPERED`.
+- `CQL_JOIN_PLACEMENT` rejects `join`, `selfJoin` and `selfJoinFilter` inside another function's arguments. Place them at the top level or in a join subquery. `selfJoin` combined with `defineTable` also reports `CQL_TABLE_JOIN_CONFLICT`.
+- Lenient grounding emits one `CQL_GROUNDING_LENIENT` warning listing the affected fields. JSON still carries evidence per field in `grounding.basis`.
+- `check` and `generate` can report six informational notes. They leave the outcome and `--fail-on-warning` behavior unchanged.
 
-Checkpoints written by 0.1.0 to 0.1.7 remain inspectable. Continuing a run stays bound to the release that wrote it, and an attempt that was already blocked under an earlier release stays blocked: the new attempt endings apply to runs started with 0.1.8. Finish unfinished discovery with the release that started it before you upgrade.
+| Note | What it points out |
+| --- | --- |
+| `CQL_TAG_FILTER_ORDER` | Tag filters can narrow the input earlier. |
+| `CQL_FILTER_AFTER_TRANSFORM` | A filter that uses untouched fields can run before the earlier transform. |
+| `CQL_SORT_COST` | Sorting input that has not been narrowed can be costly. |
+| `CQL_SPLIT_COST` | Splitting input that has not been narrowed can be costly. |
+| `CQL_WILDCARD_IGNORE_CASE` | Case-insensitive wildcard matching can be costly. |
+| `CQL_REGEX_ALL_FIELDS` | An unfielded regex can search every field. |
 
-Some queries that 0.1.7 accepted are now rejected, including `head(0)` and `table([a], type=any)`. Some that it rejected or could not classify are now accepted, and accepted queries can carry new warnings. The [changelog](CHANGELOG.md) lists each change with an example.
+## Mapping and recovery
 
-Functions and forms that need a newer version or a feature a target may not have, such as `wildcard()` inside `if()` or the newer array functions, are still accepted with `CQL_TARGET_REQUIREMENT`: whether they run depends on the target.
+- Discovery reports searches used, ready and allowed, answer bytes where applicable, and expected search counts where known. Brief output retains these figures. The offline discovery plan also shows the expected range. Quick sources-only uses one search per source. Quick sources and fields plans for 13 to 30 per source with events, plus one per requested value field. Quiet sources can finish earlier. Full discovery gives a lower estimate only. The inventory guide includes a reference cost table. [Mapping cost](docs/INVENTORY.md#cost-recovery-and-freshness)
+- A recognized hosted poll failure uses the existing `lifetime-expired` settlement for refresh or capability checks. Use the reply's arrival time as `search_started_at`, wait the retained search lifetime, and bind the saved answer's digest and trace ID. Capability settlement also requires the saved answer as `result_file`. Refresh imports no rows and the capability result stays `unknown`. [Settlement guidance](docs/MCP-COMPANION.md)
+- Inventory can continue past a qualifying 0.1.6 or 0.1.7 discovery run once its original active-time allowance expires and its checkpoint proves the last attempt received a distinct final answer. Inspection keeps the original checkpoint. [Inventory recovery](docs/INVENTORY.md)
 
-## Before using it
+## Upgrading and compatibility
 
-Basic query writing needs no setup or discovery. Start with [setup](docs/SETUP.md), then inspect [inventory and status](docs/INVENTORY.md) when environment evidence is needed. Authorize the target, window and finite budgets before any search. Full discovery can take substantial time and assistant tokens; parser inventory requires a separate Falcon API client with NGSIEM Parsers: READ.
+Upgrade with `npx cqlmatic@0.1.9` on supported macOS and Linux systems. On Windows, verify the release ZIP checksum and extract it to a new directory. Keep the producing executable for any unfinished discovery run. [Installation](docs/SETUP.md)
 
-The npm package targets macOS Apple silicon and Linux x86_64 without install scripts or additional binary downloads. Standalone packaging supports Linux x86_64 and Windows x64. Verify release archives against `SHA256SUMS` before extraction. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; the unsigned Windows executable uses a static CRT. Source builds require Rust 1.99.1.
+This release can inspect 0.1.8 checkpoints in formats 2 and 3. Lifecycle actions require the exact producing release, and 0.1.8 rejects discovery checkpoints written by 0.1.9. The executable profile and knowledge revision are unchanged. Inventory state stays at version 4. A state with captured observations contains a new `captured_observations` field and is rejected by 0.1.8. The field is omitted when unused. Keep a protected copy of your inventory and its files before upgrading if you may need to go back.
 
-`ready` describes local construction and the selected grounding policy. Neither it nor saved-result assessment proves vendor compilation, execution completeness or analyst-answer correctness. Saved-query observations retain the caller's assertion about query, target, window and response. Confirm operational results through your authorized CrowdStrike client; see [coverage and limits](docs/COVERAGE.md).
+## For contributors
 
-## Feedback
-
-Include the version, platform and a minimal synthetic reproduction when reporting a problem. Keep credentials, tenant identifiers, packs and raw telemetry out of public issues. Use the [tester feedback form](https://github.com/mychaelconnolly/cqlmatic/issues/new/choose).
+CI now checks tracked assets for embedded metadata before building. Run `python3 tools/asset_metadata.py` locally before committing an asset. [Development guide](docs/DEVELOPMENT.md)

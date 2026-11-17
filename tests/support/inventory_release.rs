@@ -111,7 +111,7 @@ fn release_fixture(writer: &Path, dir: &Path, phase: &str) -> usize {
     assert_eq!(pack["profile_id"], "cqlmatic-ngsiem-core-v3");
     assert_eq!(
         pack["knowledge_revision"],
-        "29db942fa5364af3a454e8e6525d20b7d9337075958807280f3d998dc8504357"
+        "b71fce37fea7286d253252ca224899b70ad35ba0ed84e8a2b2d986a0ad46284a"
     );
     assert_eq!(
         inventory["active_pack"]["content_digest"],
@@ -141,7 +141,7 @@ fn release_status_and_pack(reader: &Path, dir: &Path) -> Value {
     assert_eq!(pack["profile_id"], "cqlmatic-ngsiem-core-v3");
     assert_eq!(
         pack["knowledge_revision"],
-        "29db942fa5364af3a454e8e6525d20b7d9337075958807280f3d998dc8504357"
+        "b71fce37fea7286d253252ca224899b70ad35ba0ed84e8a2b2d986a0ad46284a"
     );
     assert_eq!(
         inventory["active_pack"]["content_digest"],
