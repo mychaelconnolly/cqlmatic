@@ -345,7 +345,7 @@ pub fn resumable_info(path: &Path) -> Result<Value, Diagnostic> {
     )
 }
 
-pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
+pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> {
     let Some(session) = &state.session else {
         return if matches!(
             state.status.as_str(),
@@ -396,6 +396,7 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
     let mut pending = 0;
     let mut completed_probes = BTreeSet::new();
     let mut last_dispatch = environment::parse_time(&state.created_at)?;
+    let historical_018 = state.producer_version == "0.1.8" && state.producer_version != producer;
     for (index, attempt) in session.attempts.iter().enumerate() {
         let id = discovery::probe_id(&state.request.environment.view, &attempt.probe);
         if !matches!(
@@ -426,7 +427,7 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
         if ended(&attempt.outcome)
             && (session.transport != Transport::Mcp
                 || attempt.terminal.is_none()
-                || state.producer_version != env!("CARGO_PKG_VERSION"))
+                || (state.producer_version != producer && !historical_018))
         {
             return Err(tampered());
         }
@@ -494,13 +495,19 @@ pub(crate) fn validate(state: &State) -> Result<(), Diagnostic> {
             )
         {
             let raw = capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)?;
-            if terminal
-                && ended(&attempt.outcome)
-                && (attempt_ending(&raw, &attempt.probe) != Some(attempt.outcome.as_str())
+            if terminal && ended(&attempt.outcome) {
+                let valid_ending = if historical_018 && attempt.outcome == "completed-unusable" {
+                    // Historical list completion is independent of current measurement rules.
+                    normalize(&raw).is_ok()
+                } else {
+                    attempt_ending(&raw, &attempt.probe) == Some(attempt.outcome.as_str())
+                };
+                if !valid_ending
                     || (crate::mcp::hosted_answer_identifies_call(&raw)
-                        && reused_evidence(state, index, &evidence.raw_sha256)))
-            {
-                return Err(tampered());
+                        && reused_evidence(state, index, &evidence.raw_sha256))
+                {
+                    return Err(tampered());
+                }
             }
             if terminal && attempt.outcome == "completed" {
                 complete_result(&raw, &attempt.probe).map_err(|_| tampered())?;
