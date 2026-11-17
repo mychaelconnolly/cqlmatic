@@ -364,15 +364,47 @@ Register the command as a hook that runs after tool calls of the CrowdStrike MCP
 }
 ```
 
-Replace `SERVER` with the server's name exactly as the client spells it in tool names (`mcp__SERVER__...`); a client may change characters, for example hyphens to underscores. For Codex use `--client codex`, then review and trust the new hook with `/hooks` before it runs.
+Copilot CLI reads `*.json` files in `~/.copilot/hooks/`:
 
-| `--client` | Payload read from stdin |
-| --- | --- |
-| `claude-code` | Claude Code's `PostToolUse` or `PostToolUseFailure` payload. A result the client moved to a file is read only from that session's own saved tool results. |
-| `codex` | Codex's `PostToolUse` payload. |
-| `generic` | A JSON object with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response`, for another client or a wrapper script. |
+```json
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "cqlmatic env capture --client copilot-cli --server SERVER",
+        "powershell": "cqlmatic env capture --client copilot-cli --server SERVER"
+      }
+    ]
+  }
+}
+```
 
-`tool_response` may be the result's JSON text, a list holding one text block, or the MCP result object with `content`. The search is `falcon_search_ngsiem` called directly or through the hosted server's `execute_tool`. `--state FILE` selects a state other than the default. The command prints nothing and always exits 0, so it cannot interrupt the assistant. Register the hook only for the server that reaches the confirmed target: a search whose `repository` differs from the confirmed view is skipped, and CQLmatic cannot tell two tenants with the same view name apart.
+Cursor reads `~/.cursor/hooks.json`:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "afterMCPExecution": [
+      { "command": "cqlmatic env capture --client cursor --server SERVER" }
+    ]
+  }
+}
+```
+
+`SERVER` is the server's name exactly as that client spells it, and clients differ:
+
+| `--client` | Payload read from stdin | `SERVER` |
+| --- | --- | --- |
+| `claude-code` | `PostToolUse` or `PostToolUseFailure`. A result the client moved to a file is read only from that session's own saved tool results. | As in tool names, `mcp__SERVER__TOOL` |
+| `codex` | `PostToolUse`. Review and trust the new hook with `/hooks` before it runs. | As in tool names, `mcp__SERVER__TOOL`; Codex writes hyphens as underscores |
+| `copilot-cli` | `postToolUse` or `postToolUseFailure`. A result the client moved to a file is read only from the temporary directory. | As in tool names, `SERVER-TOOL` |
+| `cursor` | `afterMCPExecution`, as Cursor documents it. | The server's key in `mcp.json` |
+| `generic` | A JSON object with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response`, for another client or a wrapper script. | As given in `tool_name` |
+
+For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. The search is `falcon_search_ngsiem` called directly or through the hosted server's `execute_tool`. `--state FILE` selects a state other than the default. The command prints nothing and always exits 0, so it cannot interrupt the assistant. Register the hook only for the server that reaches the confirmed target: a search whose `repository` differs from the confirmed view is skipped, and CQLmatic cannot tell two tenants with the same view name apart.
 
 | Search | Effect | Count in `tally.json` |
 | --- | --- | --- |

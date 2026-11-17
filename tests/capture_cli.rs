@@ -325,3 +325,92 @@ fn capture_reads_codex_and_generic_payloads() {
     assert_eq!(fields, ["user", "bytes"], "{state}");
     assert_eq!(dir.tally(), json!({"recorded": 2, "search-failed": 2}));
 }
+
+#[test]
+fn capture_reads_copilot_cli_and_cursor_payloads() {
+    let dir = Temp::new();
+    dir.confirm();
+    let query = "#type=synthetic | head(5)";
+    let arguments = || {
+        json!({
+            "repository": "third-party", "query_string": query,
+            "start": hours_ago(2), "end": hours_ago(1)
+        })
+    };
+
+    // Copilot CLI joins server and tool with a hyphen and hands the result over as text.
+    let copilot = |result: Value| {
+        json!({
+            "toolName": format!("{SERVER}-falcon_search_ngsiem"),
+            "toolArgs": arguments(),
+            "toolResult": result,
+        })
+    };
+    let success = |text: String| json!({"resultType": "success", "textResultForLlm": text});
+    dir.capture_as(
+        "copilot-cli",
+        SERVER,
+        copilot(success(body(json!([{"user": "ann"}])))),
+    );
+    // A large result is named in a notice and read only from the temporary directory.
+    let saved = std::env::temp_dir().join(format!(
+        "{}-copilot-tool-output-synthetic.txt",
+        std::process::id()
+    ));
+    fs::write(&saved, body(json!([{"host": "synthetic-host"}]))).unwrap();
+    let notice = |path: &Path| {
+        success(format!(
+            "Output too large to read at once (92.9 KB). Saved to: {}\nConsider using tools like rg.\n\nPreview (first 500 chars):\n{{\"result\":[",
+            path.display()
+        ))
+    };
+    dir.capture_as("copilot-cli", SERVER, copilot(notice(&saved)));
+    fs::remove_file(&saved).unwrap();
+    let elsewhere = dir.0.join("1-copilot-tool-output-synthetic.txt");
+    fs::write(&elsewhere, body(json!([{"stray": "x"}]))).unwrap();
+    dir.capture_as("copilot-cli", SERVER, copilot(notice(&elsewhere)));
+    let mut failed = copilot(Value::Null);
+    failed.as_object_mut().unwrap().remove("toolResult");
+    failed["error"] = json!("Search failed");
+    dir.capture_as("copilot-cli", SERVER, failed);
+
+    // Cursor names the server separately and hands arguments and result over as JSON text.
+    let cursor = |server: &str, result: Value| {
+        json!({
+            "hook_event_name": "afterMCPExecution",
+            "tool_name": "execute_tool",
+            "mcp_server_name": server,
+            "tool_input": json!({"name": "falcon_search_ngsiem", "arguments": arguments()})
+                .to_string(),
+            "result_json": result.to_string(),
+        })
+    };
+    dir.capture_as(
+        "cursor",
+        SERVER,
+        cursor(
+            SERVER,
+            json!({"content": [{"type": "text", "text": body(json!([{"bytes": "10"}]))}]}),
+        ),
+    );
+    dir.capture_as(
+        "cursor",
+        SERVER,
+        cursor(SERVER, json!({"result": [{"zone": "synthetic-zone"}]})),
+    );
+    dir.capture_as(
+        "cursor",
+        SERVER,
+        cursor("another-server", json!({"result": [{"stray": "x"}]})),
+    );
+
+    let state = dir.saved();
+    let fields = state["query_observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|observation| observation["fields"][0]["field"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(fields, ["user", "host", "bytes", "zone"], "{state}");
+    assert_eq!(dir.tally(), json!({"recorded": 4, "search-failed": 2}));
+}

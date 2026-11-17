@@ -13,7 +13,6 @@ use cqlmatic::{
     setup::SEARCH_TOOL,
     storage,
 };
-use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -27,8 +26,6 @@ use std::{
 const DEFAULT_REPOSITORY: &str = "search-all";
 const MAX_PAYLOAD_BYTES: u64 = 2 * mcp::MAX_RESULT_BYTES as u64;
 const MAX_TALLY_BYTES: u64 = 65_536;
-/// Claude Code replaces an oversized tool result with a notice naming the file that holds it.
-const SAVED_NOTICE: &str = "Output has been saved to ";
 
 #[derive(Debug, Args)]
 pub struct CaptureArgs {
@@ -56,6 +53,8 @@ pub struct CaptureArgs {
 enum Client {
     ClaudeCode,
     Codex,
+    CopilotCli,
+    Cursor,
     /// Any client or wrapper that supplies `tool_name`, `tool_input` and `tool_response`.
     Generic,
 }
@@ -221,28 +220,92 @@ fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
     writer.commit_bytes(&bytes, MAX_TALLY_BYTES)
 }
 
-/// The post-tool hook fields Claude Code and Codex share.
-#[derive(Deserialize)]
-struct Hook {
-    hook_event_name: Option<String>,
-    tool_name: String,
-    tool_input: Value,
-    #[serde(default)]
-    tool_response: Value,
-    transcript_path: Option<String>,
+/// One MCP tool call in the form every client's payload is reduced to.
+struct Call {
+    /// The tool's name within its server.
+    tool: String,
+    arguments: Value,
+    /// The result as the client handed it over; absent when the call failed.
+    response: Option<Value>,
+    saved: Option<Saved>,
+}
+
+/// How a client reports a result it moved into a file instead of handing it over.
+struct Saved {
+    /// How the notice that replaces the result begins.
+    notice: &'static str,
+    /// The text that precedes the file's path.
+    before_path: &'static str,
+    /// The only directory such a file is read from.
+    directory: PathBuf,
+    /// Text the file's name must contain.
+    name: &'static str,
+}
+
+fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
+    let hook: Value = serde_json::from_slice(payload).ok()?;
+    let text = |name: &str| hook[name].as_str();
+    // Some clients hand over arguments or results as JSON text.
+    let parsed = |value: &Value| match value {
+        Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| value.clone()),
+        value => value.clone(),
+    };
+    Some(match client {
+        Client::ClaudeCode | Client::Codex | Client::Generic => Call {
+            tool: text("tool_name")?
+                .strip_prefix("mcp__")?
+                .strip_prefix(server)?
+                .strip_prefix("__")?
+                .into(),
+            arguments: hook["tool_input"].clone(),
+            // Claude Code reports a failed call as a different event without a result.
+            response: (text("hook_event_name") != Some("PostToolUseFailure"))
+                .then(|| hook["tool_response"].clone()),
+            saved: text("transcript_path")
+                .filter(|_| client == Client::ClaudeCode)
+                .map(|transcript| Saved {
+                    notice: "Error: result",
+                    before_path: "Output has been saved to ",
+                    directory: Path::new(transcript)
+                        .with_extension("")
+                        .join("tool-results"),
+                    name: "",
+                }),
+        },
+        Client::CopilotCli => Call {
+            tool: text("toolName")?
+                .strip_prefix(server)?
+                .strip_prefix('-')?
+                .into(),
+            arguments: parsed(&hook["toolArgs"]),
+            // A failed call carries `error` in place of a result.
+            response: hook["toolResult"]["textResultForLlm"]
+                .as_str()
+                .map(|text| text.into()),
+            saved: Some(Saved {
+                notice: "Output too large to read at once",
+                before_path: "Saved to: ",
+                directory: std::env::temp_dir(),
+                name: "-copilot-tool-output-",
+            }),
+        },
+        Client::Cursor => Call {
+            tool: text("tool_name")
+                .filter(|_| text("mcp_server_name") == Some(server))?
+                .into(),
+            arguments: parsed(&hook["tool_input"]),
+            response: Some(parsed(&hook["result_json"])),
+            saved: None,
+        },
+    })
 }
 
 fn search(payload: &[u8], server: &str, client: Client) -> Option<Search> {
-    let hook: Hook = serde_json::from_slice(payload).ok()?;
-    let tool = hook
-        .tool_name
-        .strip_prefix("mcp__")?
-        .strip_prefix(server)?
-        .strip_prefix("__")?;
-    let arguments = match tool {
-        SEARCH_TOOL => &hook.tool_input,
+    let call = call(payload, server, client)?;
+    let arguments = match call.tool.as_str() {
+        SEARCH_TOOL => &call.arguments,
         // The hosted server runs its tools through one gateway tool.
-        "execute_tool" if hook.tool_input["name"] == SEARCH_TOOL => &hook.tool_input["arguments"],
+        "execute_tool" if call.arguments["name"] == SEARCH_TOOL => &call.arguments["arguments"],
         _ => return None,
     };
     let text = |name: &str| arguments[name].as_str().map(str::to_owned);
@@ -251,38 +314,37 @@ fn search(payload: &[u8], server: &str, client: Client) -> Option<Search> {
         query: text("query_string")?,
         start: text("start")?,
         end: text("end"),
-        // Claude Code reports a failed call as a different event without a result.
-        body: (hook.hook_event_name.as_deref() != Some("PostToolUseFailure"))
-            .then(|| body(&hook, client))
-            .flatten(),
+        body: body(&call),
     })
 }
 
-fn body(hook: &Hook, client: Client) -> Option<Vec<u8>> {
+fn body(call: &Call) -> Option<Vec<u8>> {
     let text = |blocks: &Value| match blocks.as_array()?.as_slice() {
         [block] if block["type"] == "text" => {
             block["text"].as_str().map(|text| text.as_bytes().to_vec())
         }
         _ => None,
     };
-    match &hook.tool_response {
-        Value::String(notice)
-            if client == Client::ClaudeCode && notice.starts_with("Error: result") =>
-        {
-            let (_, rest) = notice.split_once(SAVED_NOTICE)?;
-            let saved = Path::new(rest.lines().next()?.trim_end_matches('.'));
-            // Only this session's own saved results are read.
-            let results = Path::new(hook.transcript_path.as_deref()?)
-                .with_extension("")
-                .join("tool-results");
-            (saved.parent() == Some(&results))
-                .then(|| saved_result(saved))
+    match call.response.as_ref()? {
+        Value::String(text) => match &call.saved {
+            Some(saved) if text.starts_with(saved.notice) => {
+                let (_, rest) = text.split_once(saved.before_path)?;
+                let path = Path::new(rest.lines().next()?.trim_end_matches('.'));
+                (path.parent() == Some(&saved.directory)
+                    && path.file_name()?.to_string_lossy().contains(saved.name))
+                .then(|| saved_result(path))
                 .flatten()
-        }
-        Value::String(body) => Some(body.clone().into_bytes()),
+            }
+            _ => Some(text.clone().into_bytes()),
+        },
         blocks @ Value::Array(_) => text(blocks),
         // The MCP result object. A tool-level error carries no search result.
-        result @ Value::Object(_) if result["isError"] != true => text(&result["content"]),
+        Value::Object(result) if result.contains_key("content") => (result.get("isError")
+            != Some(&Value::Bool(true)))
+        .then(|| text(&result["content"]))
+        .flatten(),
+        // A result body handed over already parsed.
+        parsed @ Value::Object(_) => serde_json::to_vec(parsed).ok(),
         _ => None,
     }
 }
