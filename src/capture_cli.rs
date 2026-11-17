@@ -92,10 +92,18 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
 }
 
 fn capture(args: &CaptureArgs, payload: &[u8]) -> Result<(), Diagnostic> {
-    let Some(search) = search(payload, &args.server, args.client) else {
+    match call(payload, &args.server, args.client) {
+        Some(call) => record(args.state.clone(), call),
+        None => Ok(()),
+    }
+}
+
+/// Records a finished tool call when it is a search of the confirmed inventory's target.
+pub(crate) fn record(state: Option<PathBuf>, call: Call) -> Result<(), Diagnostic> {
+    let Some(search) = search(call) else {
         return Ok(());
     };
-    let path = inventory_cli::state_path(args.state.clone())?;
+    let path = inventory_cli::state_path(state)?;
     let Some(state) = inventory_cli::load_existing(&path)? else {
         return Ok(());
     };
@@ -385,13 +393,26 @@ fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
 }
 
 /// One MCP tool call in the form every client's payload is reduced to.
-struct Call {
+pub(crate) struct Call {
     /// The tool's name within its server.
-    tool: String,
-    arguments: Value,
+    pub(crate) tool: String,
+    pub(crate) arguments: Value,
     /// The result as the client handed it over; absent when the call failed.
-    response: Option<Value>,
+    pub(crate) response: Option<Value>,
     saved: Option<Saved>,
+}
+
+impl Call {
+    /// A call seen on the server's own connection: `result` is the MCP result object, absent
+    /// when the server answered with an error.
+    pub(crate) fn on_connection(tool: String, arguments: Value, result: Option<Value>) -> Self {
+        Self {
+            tool,
+            arguments,
+            response: result,
+            saved: None,
+        }
+    }
 }
 
 /// How a client reports a result it moved into a file instead of handing it over.
@@ -522,8 +543,7 @@ fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
     })
 }
 
-fn search(payload: &[u8], server: &str, client: Client) -> Option<Search> {
-    let call = call(payload, server, client)?;
+fn search(call: Call) -> Option<Search> {
     let arguments = match call.tool.as_str() {
         SEARCH_TOOL => &call.arguments,
         // The hosted server runs its tools through one gateway tool.

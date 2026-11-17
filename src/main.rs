@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 mod capture_cli;
 mod inventory_cli;
+mod pass_through_cli;
 mod setup_cli;
 mod skill_cli;
 mod terminal;
@@ -238,6 +239,8 @@ enum EnvCommand {
     Inventory(inventory_cli::InventoryArgs),
     /// Record inventory evidence from a client's post-tool hook payload on stdin.
     Capture(capture_cli::CaptureArgs),
+    /// Run an MCP server command, pass its messages through, and record finished searches.
+    PassThrough(pass_through_cli::PassThroughArgs),
     /// Derive a local API-client account binding without authenticating or exposing keys.
     Identity {
         #[arg(long, value_parser = parse_cloud)]
@@ -1395,6 +1398,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
     match command {
         EnvCommand::Inventory(args) => inventory_cli::run(args),
         EnvCommand::Capture(args) => capture_cli::run(args),
+        EnvCommand::PassThrough(args) => pass_through_cli::run(args),
         EnvCommand::Identity {
             cloud,
             view,

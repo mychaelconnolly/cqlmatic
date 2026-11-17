@@ -363,7 +363,7 @@ cqlmatic env capture --client CLIENT --server SERVER
 | `qwen-code` | `PostToolUse` in `~/.qwen/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
 | `generic` | Any other client, plugin or wrapper script: a JSON object on stdin with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response` | As given in `tool_name` |
 
-For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for the Copilot clients. A client whose hook does not pass the tool's result cannot use this command.
+For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for the Copilot clients. A client whose hook does not pass the tool's result can use the pass-through below.
 
 `claude-code`, `codex`, `copilot-cli` and the OpenCode plugin below have been run against their clients. The other formats follow each client's published hook payload and have not been run against it; when one records nothing, `captures/tally.json` shows whether its searches arrived.
 
@@ -448,6 +448,14 @@ echo '{}'
 ```
 
 OpenCode has no command hook. Copy the [capture plugin](../examples/capture/opencode-plugin.js) into `~/.config/opencode/plugins/` and set its `SERVER`; it passes each finished search to `cqlmatic env capture --client generic`.
+
+Where no hook can pass a result, run the server through CQLmatic. Register this as the MCP server's command in place of the server's own:
+
+```sh
+cqlmatic env pass-through -- COMMAND [ARGUMENTS]
+```
+
+`COMMAND` starts the CrowdStrike MCP server over standard input and output; for a hosted server it is a stdio bridge that connects to it. CQLmatic starts the command, passes every message through unchanged in both directions, and records each finished search as a hook would, after the client has its answer. `--state FILE` goes before `--`. The pass-through needs no `--client` or `--server`, works with any client that starts MCP servers as commands, and exits with the server's status. On Windows, name the command file in full, such as `npx.cmd`. It has been run under two clients with a stdio server, and not with a hosted server behind a bridge.
 
 The search is `falcon_search_ngsiem` called directly or through the hosted server's `execute_tool`. The command prints nothing and always exits 0, so it cannot interrupt the agent. Register the hook only for the server that reaches the confirmed target: a search whose `repository` differs from the confirmed view is skipped, and CQLmatic cannot tell two tenants with the same view name apart.
 
