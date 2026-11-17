@@ -22,6 +22,9 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"
 sha2 = "0.11"
 ctrlc = { version = "3", features = ["termination"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+
 [dev-dependencies]
 proptest = "1"
 schemars = "1"

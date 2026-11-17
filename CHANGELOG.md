@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- On Windows, protection checks for existing private directories and files are made through direct system calls. 0.1.8 started PowerShell for each check, so inventory and discovery commands that verify many paths run faster. The owner, access-rule and ancestor conditions and the `SETUP_PROTECTION` diagnostics are unchanged. Creating a private directory still uses the fixed PowerShell helper.
+
 ## 0.1.8
 
 - Repeated discovery answers are refused as reused only when they carry a non-empty `trace_id` or a recognized cutoff job identifier. Identical identifier-free answers can end separate attempts after explicit resume.
