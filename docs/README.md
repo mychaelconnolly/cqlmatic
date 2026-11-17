@@ -17,7 +17,7 @@ This manual describes **CQLmatic 0.1.8**, JSON contracts **v1**, and executable 
 ## Start as an agent integrator
 
 1. Read [application flow](FLOW.md), [machine contracts](CONTRACTS.md), and [CLI modes/exits](../USAGE.md).
-2. Follow [the analyst workflow](ANALYST-WORKFLOW.md) and [MCP companion loop](MCP-COMPANION.md). The optional [agent snippet](../integrations/agent/AGENTS-snippet.md) and [agent skill](../integrations/agent/SKILL.md) point to the same workflow.
+2. Follow [the analyst workflow](ANALYST-WORKFLOW.md) and [MCP companion loop](MCP-COMPANION.md). The optional [agent snippet](../integrations/agent/AGENTS-snippet.md) and [agent skill](../integrations/agent/SKILL.md) point to the same workflow; [`cqlmatic skill install`](SETUP.md#install-the-agent-skill) writes the skill and its guides into a client's skill directory.
 3. Retrieve the relevant status/pack and catalog entries explicitly; setup/discovery does not create model memory or silently select the generation pack.
 4. Construct/review typed requests, execute only through an authorized client with the confirmed target/window, retain exact query/result bytes, and assess/report limits.
 

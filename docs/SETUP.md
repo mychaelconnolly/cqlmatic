@@ -145,6 +145,26 @@ Confirm the cloud/CID, source IDs, exact target/view, absolute UTC window, finit
 
 Settings can switch to Full later without discarding saved evidence. Quick evidence alone does not establish Full completion. See [inventory modes and completion](INVENTORY.md#full-and-quick-discovery).
 
+## Install the agent skill
+
+The agent skill tells your assistant how to work with CQLmatic: which commands to run, how to hand search results back, and what the saved evidence does and does not show. Install it once per client after setup:
+
+```sh
+cqlmatic skill install --client claude-code
+```
+
+| `--client` | Skill directory |
+| --- | --- |
+| `claude-code` | `$CLAUDE_CONFIG_DIR/skills` when that variable is set, otherwise `~/.claude/skills` |
+| `codex`, `vs-code` | `~/.agents/skills` |
+| `copilot-cli`, `copilot-app`, `copilot-vscode` | `$COPILOT_HOME/skills` when that variable is set, otherwise `~/.agents/skills` |
+
+For another host, pass its user-level skill directory with `cqlmatic skill install --dir DIR`. A verified setup names the command for the selected client in its next actions.
+
+The command writes `cqlmatic-companion/SKILL.md` and, under `cqlmatic-companion/references/`, every guide the skill links to. Links to other documentation point at this release in the public repository. After an upgrade, run the command again: it replaces those files with the current release's copies and leaves other files in the folder alone. It refuses to write over a link or anything that is not a regular file.
+
+Installing the skill makes no network call, changes no client configuration and grants no search authorization. Start a new agent session, or use the client's skill reload command, so the client reads it.
+
 ## Parser inventory is a separate connection
 
 CQLmatic's MCP search workflow does not retrieve the parser catalog. Create a Falcon API client with **NGSIEM Parsers: READ** for catalog and definition/template reads. Parser write permissions are unnecessary. This client supplements MCP scouting and field measurement.
