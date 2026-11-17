@@ -424,6 +424,17 @@
         "capability_blocked": {
           "type": "boolean"
         },
+        "captured_observation_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "captured_observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueryObservation"
+          }
+        },
         "context": {
           "type": [
             "string",
@@ -616,6 +627,7 @@
         "quick_depth",
         "unverified_lead_count",
         "query_observation_count",
+        "captured_observation_count",
         "refresh_settings",
         "automatic_refresh_available",
         "refresh_attempts",
@@ -627,6 +639,7 @@
         "settings_attention",
         "unverified_leads",
         "query_observations",
+        "captured_observations",
         "message",
         "target",
         "scouting",

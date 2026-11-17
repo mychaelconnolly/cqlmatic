@@ -1532,6 +1532,13 @@
             "$ref": "#/$defs/CapabilityRun"
           }
         },
+        "captured_observations": {
+          "description": "Searches a client hook passed to `env capture`. They support field grounding but are not\ninventory evidence: they are left out of the reconciliation fingerprint and replace\none another.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QueryObservation"
+          }
+        },
         "created_at": {
           "type": "string"
         },

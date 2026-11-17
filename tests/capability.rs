@@ -632,6 +632,7 @@ fn checked_with_capability(
             environment: &run.environment,
             active_pack: None,
             query_observations: &[],
+            captured_observations: &[],
             capabilities: Some(CapabilityEvidence {
                 runs: std::slice::from_ref(run),
                 environment: &run.environment,
@@ -830,6 +831,7 @@ fn check_and_generate_change_only_a_matching_prerequisite_to_a_dated_notice() {
             environment: &run.environment,
             active_pack: None,
             query_observations: &[],
+            captured_observations: &[],
             capabilities: Some(CapabilityEvidence {
                 runs: std::slice::from_ref(&run),
                 environment: &run.environment,

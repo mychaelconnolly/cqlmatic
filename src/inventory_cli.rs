@@ -1118,31 +1118,31 @@ fn import_query_observations(
         observation,
     };
     let mut remaining = MAX_STATE_BYTES;
-    let observation = if let Some(saved) = observation_replay(
-        &state.query_observations,
-        &directory,
-        key,
-        &audit,
-        &mut remaining,
-    )? {
-        saved.clone()
+    let ledger = if caller_assertion == QueryResultAssertion::ClientHookCapture {
+        &state.captured_observations
     } else {
-        state.record_query_observation(audit.observation.clone())?;
-        crate::setup_cli::protect_directory(&directory)?;
-        if audit_path.exists() {
-            if read_observation_audit(&audit_path, &mut remaining)? != audit {
-                return Err(fail(
-                    "Saved query observation audit differs from this exact import.",
-                ));
-            }
-        } else {
-            let bytes = serde_json::to_value(&audit)
-                .and_then(|audit| serde_json::to_vec_pretty(&audit))
-                .map_err(|_| fail("Cannot serialize query observation audit."))?;
-            storage::Writer::acquire(&audit_path)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
-        }
-        audit.observation
+        &state.query_observations
     };
+    let observation =
+        if let Some(saved) = observation_replay(ledger, &directory, key, &audit, &mut remaining)? {
+            saved.clone()
+        } else {
+            state.record_query_observation(audit.observation.clone())?;
+            crate::setup_cli::protect_directory(&directory)?;
+            if audit_path.exists() {
+                if read_observation_audit(&audit_path, &mut remaining)? != audit {
+                    return Err(fail(
+                        "Saved query observation audit differs from this exact import.",
+                    ));
+                }
+            } else {
+                let bytes = serde_json::to_value(&audit)
+                    .and_then(|audit| serde_json::to_vec_pretty(&audit))
+                    .map_err(|_| fail("Cannot serialize query observation audit."))?;
+                storage::Writer::acquire(&audit_path)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
+            }
+            audit.observation
+        };
     let mut action = json!({
         "query_observation_id":observation.id,"audit_path":observation.audit_path,
         "query_sha256":observation.query_sha256,"result_sha256":observation.result_sha256,

@@ -574,6 +574,7 @@ fn select_inventory(
     if state.target.is_none() {
         if !state.unverified_leads.is_empty()
             || !state.query_observations.is_empty()
+            || !state.captured_observations.is_empty()
             || state.scout_plan.is_some()
             || !state.scouting.is_empty()
             || !state.sources.is_empty()
@@ -721,14 +722,18 @@ fn save_inventory_hints(
                                         })
                                 })
                     })
-            }) && !current.query_observations.iter().any(|observation| {
-                observation.environment == target
-                    && observation.source_id == discovery::source_id(&hint.source)
-                    && observation
-                        .fields
-                        .iter()
-                        .any(|field| field.field == *name && field.positive_rows > 0)
-            })
+            }) && !current
+                .query_observations
+                .iter()
+                .chain(&current.captured_observations)
+                .any(|observation| {
+                    observation.environment == target
+                        && observation.source_id == discovery::source_id(&hint.source)
+                        && observation
+                            .fields
+                            .iter()
+                            .any(|field| field.field == *name && field.positive_rows > 0)
+                })
         });
     }
     let (boundary, _checkpoint_guard) = inventory_cli::inventory_capture_boundary(&current);
@@ -894,6 +899,7 @@ fn analyze_generate(
             .environment,
         active_pack: quick.active_pack.as_ref(),
         query_observations: &quick.state.query_observations,
+        captured_observations: &quick.state.captured_observations,
         capabilities: Some(cqlmatic::capability::CapabilityEvidence {
             runs: &quick.state.capability_runs,
             environment: &quick
@@ -948,6 +954,7 @@ fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>
             .environment,
         active_pack: quick.active_pack.as_ref(),
         query_observations: &quick.state.query_observations,
+        captured_observations: &quick.state.captured_observations,
         capabilities: Some(cqlmatic::capability::CapabilityEvidence {
             runs: &quick.state.capability_runs,
             environment: &quick

@@ -95,6 +95,7 @@ fn checked(
             environment: &environment(),
             active_pack: active,
             query_observations: observations,
+            captured_observations: &[],
             capabilities: None,
         }),
     )
@@ -145,6 +146,7 @@ fn exact_direct_field_qualifies_without_a_pack_and_supersedes_an_ordered_older_m
             environment: &environment(),
             active_pack: None,
             query_observations: &[observation],
+            captured_observations: &[],
             capabilities: None,
         }),
     );
@@ -191,6 +193,7 @@ fn observation_does_not_qualify_other_fields_sources_targets_or_shapes() {
             environment: &environment(),
             active_pack: None,
             query_observations: &[observation],
+            captured_observations: &[],
             capabilities: None,
         }),
     );
@@ -730,6 +733,7 @@ fn record_kind_guard_unions_active_and_explicit_evidence_in_both_directions() {
             environment: &environment(),
             active_pack: Some(&mixed),
             query_observations: &[observation],
+            captured_observations: &[],
             capabilities: None,
         }),
     );
@@ -807,4 +811,53 @@ fn predicted_leads_include_only_scoped_input_fields_and_are_bounded() {
     let error =
         app::unverified_leads(&format!("#repo=synthetic | select([{fields}])")).unwrap_err();
     assert_eq!(error.code, "CQL_LEAD_BUDGET");
+}
+
+#[test]
+fn a_captured_search_grounds_a_field_under_its_own_basis_and_warning() {
+    // A window longer than an import allows, as an agent's own search may have.
+    let capture = QueryObservation::from_result(
+        br#"#repo="synthetic" | head(5)"#,
+        br#"{"result":[{"user":"alice"}]}"#,
+        environment(),
+        source(),
+        "2026-01-01T00:00:00Z".into(),
+        "2026-02-02T00:00:00Z".into(),
+        "2026-02-03T00:00:00Z".into(),
+        QueryResultAssertion::ClientHookCapture,
+        std::env::temp_dir()
+            .join("synthetic-capture-audit.json")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .unwrap();
+    let result = app::check_with_evidence(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: "#repo=synthetic | user=* | count()".into(),
+            context: Context {
+                require_observed: true,
+                ..Context::default()
+            },
+        },
+        None,
+        Some(GroundingEvidence {
+            environment: &environment(),
+            active_pack: None,
+            query_observations: &[],
+            captured_observations: std::slice::from_ref(&capture),
+            capabilities: None,
+        }),
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
+    let basis = &result.grounding.basis["synthetic:*:user"];
+    assert!(basis.starts_with("captured search observation;"), "{basis}");
+    let codes = result
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"CQL_CAPTURED_OBSERVATION"), "{codes:?}");
+    assert!(!codes.contains(&"CQL_QUERY_OBSERVATION"), "{codes:?}");
 }

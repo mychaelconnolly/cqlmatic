@@ -33,20 +33,28 @@ impl Temp {
         serde_json::from_slice(&fs::read(self.state()).unwrap()).unwrap()
     }
     fn tally(&self) -> Value {
-        serde_json::from_slice(&fs::read(self.0.join("workflow/captures/tally.json")).unwrap())
-            .unwrap()
+        serde_json::from_slice(
+            &fs::read(self.0.join("workflow/state.json.captures/tally.json")).unwrap(),
+        )
+        .unwrap()
     }
     /// Confirms a selected-source target in view `third-party` with source `#type=synthetic`.
     fn confirm(&self) {
+        self.act_on(
+            &self.state(),
+            json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic capture target","expected_sources":[{"type":"synthetic"}]}),
+        );
+    }
+    fn act_on(&self, state: &Path, action: Value) {
         let request = self.0.join("request.json");
         fs::write(
             &request,
-            json!({"schema_version":1,"action":{"kind":"confirm-target","environment":{"cloud":"us1","tenant":"00000000000000000000000000000000","view":"third-party"},"scope":"selected-sources","context":"Synthetic capture target","expected_sources":[{"type":"synthetic"}]}}).to_string(),
+            json!({"schema_version":1,"action":action}).to_string(),
         )
         .unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
             .args(["env", "inventory", "--json", "--state"])
-            .arg(self.state())
+            .arg(state)
             .arg("--request")
             .arg(request)
             .output()
@@ -62,11 +70,14 @@ impl Temp {
         self.capture_as("claude-code", SERVER, payload);
     }
     fn capture_as(&self, client: &str, server: &str, payload: Value) {
+        self.capture_into(&self.state(), client, server, payload);
+    }
+    fn capture_into(&self, state: &Path, client: &str, server: &str, payload: Value) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
             .args(["env", "capture", "--client", client, "--server"])
             .arg(server)
             .arg("--state")
-            .arg(self.state())
+            .arg(state)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -90,6 +101,10 @@ impl Drop for Temp {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn environment() -> Value {
+    json!({"cloud":"us1","tenant":"00000000000000000000000000000000","view":"third-party"})
 }
 
 fn hours_ago(hours: i64) -> String {
@@ -159,7 +174,7 @@ fn capture_credits_a_plain_search_in_every_claude_code_result_form() {
     dir.capture(notice(&outside));
 
     let state = dir.saved();
-    let observations = state["query_observations"].as_array().unwrap();
+    let observations = state["captured_observations"].as_array().unwrap();
     let fields = |index: usize| {
         observations[index]["fields"]
             .as_array()
@@ -169,6 +184,8 @@ fn capture_credits_a_plain_search_in_every_claude_code_result_form() {
             .collect::<Vec<_>>()
     };
     assert_eq!(observations.len(), 3, "{state}");
+    // Captures are kept apart from imported observations.
+    assert_eq!(state["query_observations"], json!([]));
     assert_eq!(fields(0), ["bytes", "user"]);
     assert_eq!(fields(1), ["user"]);
     assert_eq!(fields(2), ["host"]);
@@ -179,7 +196,7 @@ fn capture_credits_a_plain_search_in_every_claude_code_result_form() {
     assert_eq!(dir.tally(), json!({"recorded": 3, "search-failed": 1}));
 
     // Each credited search keeps a private copy of its query and result.
-    let captures = dir.0.join("workflow/captures");
+    let captures = dir.0.join("workflow/state.json.captures");
     let kept = |extension: &str| {
         fs::read_dir(&captures)
             .unwrap()
@@ -258,7 +275,8 @@ fn capture_flags_an_unmapped_source_and_counts_what_it_skips() {
         })
     );
     assert_eq!(dir.saved()["query_observations"], json!([]));
-    let leftovers = fs::read_dir(dir.0.join("workflow/captures"))
+    assert!(dir.saved()["captured_observations"].is_null());
+    let leftovers = fs::read_dir(dir.0.join("workflow/state.json.captures"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .filter(|name| !name.contains("tally.json"))
@@ -325,7 +343,7 @@ fn capture_reads_codex_and_generic_payloads() {
     );
 
     let state = dir.saved();
-    let fields = state["query_observations"]
+    let fields = state["captured_observations"]
         .as_array()
         .unwrap()
         .iter()
@@ -414,7 +432,7 @@ fn capture_reads_copilot_cli_and_cursor_payloads() {
     );
 
     let state = dir.saved();
-    let fields = state["query_observations"]
+    let fields = state["captured_observations"]
         .as_array()
         .unwrap()
         .iter()
@@ -557,7 +575,7 @@ fn capture_reads_cline_gemini_kiro_and_qwen_payloads() {
     );
 
     let state = dir.saved();
-    let fields = state["query_observations"]
+    let fields = state["captured_observations"]
         .as_array()
         .unwrap()
         .iter()
@@ -565,4 +583,216 @@ fn capture_reads_cline_gemini_kiro_and_qwen_payloads() {
         .collect::<Vec<_>>();
     assert_eq!(fields, ["a", "b", "c", "d", "e", "f", "g"], "{state}");
     assert_eq!(dir.tally(), json!({"recorded": 7, "search-failed": 3}));
+}
+
+/// Makes a file look old enough for the tidy-up to consider it.
+fn age(path: &Path) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+}
+
+fn names(directory: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| !name.starts_with('.'))
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[test]
+fn capture_replaces_covered_captures_and_tidies_what_nothing_refers_to() {
+    let dir = Temp::new();
+    dir.confirm();
+    let window = |start: i64, end: Option<i64>, rows: Value| {
+        let mut payload = search("#type=synthetic | head(5)", json!(body(rows)));
+        let arguments = &mut payload["tool_input"]["arguments"];
+        arguments["start"] = json!(hours_ago(start));
+        match end {
+            Some(end) => arguments["end"] = json!(hours_ago(end)),
+            None => drop(arguments.as_object_mut().unwrap().remove("end")),
+        }
+        payload
+    };
+    let captures = dir.0.join("workflow/state.json.captures");
+    let audits = dir.0.join("workflow/query-observations");
+
+    // A thirty-day search is credited, then replaced by a later-starting one showing more.
+    dir.capture(window(24 * 30, Some(3), json!([{"a": "1", "b": "1"}])));
+    let mut replaced = names(&captures);
+    replaced.retain(|name| name != "tally.json");
+    assert_eq!(replaced.len(), 2);
+    let replaced_audit = names(&audits);
+    // An import may reuse a capture's saved query with a result of its own. Its audit record
+    // then names that query file, which has to outlive the capture.
+    let reused = replaced
+        .iter()
+        .find(|name| name.ends_with(".cql"))
+        .unwrap()
+        .clone();
+    let result = dir.0.join("workflow/imported-result.json");
+    fs::write(&result, body(json!([{"z": "1"}]))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    dir.act_on(
+        &dir.state(),
+        json!({
+            "kind": "import-query-observations", "query_file": captures.join(&reused),
+            "result_file": result, "environment": environment(), "source": {"type": "synthetic"},
+            "start": "2026-01-01T00:00:00Z", "end": "2026-01-02T00:00:00Z",
+            "retrieved_at": "2026-01-03T00:00:00Z",
+            "caller_assertion": "exact-query-result-target-window"
+        }),
+    );
+    dir.capture(window(2, Some(1), json!([{"a": "1", "b": "1", "c": "1"}])));
+    // An earlier-starting search that shows nothing new writes nothing.
+    dir.capture(window(5, Some(4), json!([{"a": "1"}])));
+    let fields = |state: &Value| {
+        state["captured_observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|observation| observation["fields"].as_array().unwrap().len())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fields(&dir.saved()), [3]);
+    assert_eq!(dir.tally(), json!({"recorded": 2, "already-covered": 1}));
+
+    // Nothing recent is removed: both captures' copies and audit records are still here.
+    assert_eq!(names(&captures).len(), 5, "{:?}", names(&captures));
+    assert_eq!(names(&audits).len(), 3);
+    for directory in [&captures, &audits] {
+        for name in names(directory) {
+            age(&directory.join(name));
+        }
+    }
+    let plant = |path: PathBuf, text: &str, old: bool| {
+        fs::write(&path, text).unwrap();
+        if old {
+            age(&path);
+        }
+    };
+    plant(
+        captures.join("20260101T000000Z-0123456789ab.json"),
+        "{}",
+        true,
+    );
+    plant(
+        captures.join("20260101T000000Z-0123456789ab.cql"),
+        "x",
+        true,
+    );
+    plant(
+        captures.join("20260103T000000Z-0123456789ab.cql"),
+        "x",
+        true,
+    );
+    plant(
+        captures.join("20260102T000000Z-0123456789ab.json"),
+        "{}",
+        false,
+    );
+    plant(captures.join("notes.json"), "{}", true);
+    plant(
+        audits.join("imported.json"),
+        r#"{"observation":{"caller_assertion":"exact-query-result-target-window"}}"#,
+        true,
+    );
+
+    dir.capture(window(1, None, json!([{"d": "1"}])));
+    assert_eq!(fields(&dir.saved()), [3, 1]);
+    let kept = names(&captures);
+    // The replaced capture's result is gone; its query stays because the import names it.
+    assert_eq!(
+        replaced
+            .iter()
+            .filter(|name| kept.contains(name))
+            .collect::<Vec<_>>(),
+        [&reused],
+        "{kept:?}"
+    );
+    assert_eq!(
+        kept.iter()
+            .filter(|name| name.contains("0123456789ab") || *name == "notes.json")
+            .collect::<Vec<_>>(),
+        ["20260102T000000Z-0123456789ab.json", "notes.json"]
+    );
+    // The held capture's aged copies stay, beside the new capture's and the tally.
+    assert_eq!(kept.len(), 1 + 2 + 2 + 2 + 1, "{kept:?}");
+    let kept = names(&audits);
+    assert!(!kept.contains(&replaced_audit[0]), "{kept:?}");
+    assert!(kept.contains(&"imported.json".to_owned()));
+    assert_eq!(kept.len(), 4, "{kept:?}");
+    assert!(!audits.join(format!(".{}.lock", replaced_audit[0])).exists());
+}
+
+#[test]
+fn capture_never_tidies_the_files_of_another_state_in_its_directory() {
+    let dir = Temp::new();
+    dir.confirm();
+    let second = dir.0.join("workflow/second.json");
+    dir.act_on(
+        &second,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Second synthetic target","expected_sources":[{"type":"synthetic"}]}),
+    );
+    let rows = |field: &str| {
+        search(
+            "#type=synthetic | head(5)",
+            json!(body(json!([{field: "1"}]))),
+        )
+    };
+    dir.capture_into(&second, "claude-code", SERVER, rows("a"));
+    let copies = dir.0.join("workflow/second.json.captures");
+    let audits = dir.0.join("workflow/query-observations");
+    let before = (names(&copies), names(&audits));
+    assert_eq!((before.0.len(), before.1.len()), (3, 1));
+    for (directory, files) in [(&copies, &before.0), (&audits, &before.1)] {
+        for name in files {
+            age(&directory.join(name));
+        }
+    }
+
+    // The first state shares the directory and the audit folder, and tidies after recording.
+    dir.capture(rows("b"));
+    assert_eq!(dir.tally(), json!({"recorded": 1}));
+    assert_eq!(names(&copies), before.0);
+    assert!(before.1.iter().all(|name| names(&audits).contains(name)));
+    let second: Value = serde_json::from_slice(&fs::read(second).unwrap()).unwrap();
+    assert_eq!(second["captured_observations"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_state_holding_captures_among_its_imports_still_loads() {
+    let dir = Temp::new();
+    dir.confirm();
+    let rows = |field: &str| {
+        search(
+            "#type=synthetic | head(5)",
+            json!(body(json!([{field: "1"}]))),
+        )
+    };
+    dir.capture(rows("a"));
+    // An earlier layout kept captures in the import list.
+    let mut state = dir.saved();
+    let captures = state["captured_observations"].take();
+    state
+        .as_object_mut()
+        .unwrap()
+        .remove("captured_observations");
+    state["query_observations"] = captures;
+    fs::write(dir.state(), state.to_string()).unwrap();
+
+    dir.capture(rows("b"));
+    assert_eq!(dir.tally(), json!({"recorded": 2}));
+    let state = dir.saved();
+    assert_eq!(state["query_observations"].as_array().unwrap().len(), 1);
+    assert_eq!(state["captured_observations"].as_array().unwrap().len(), 1);
 }
