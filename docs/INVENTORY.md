@@ -354,14 +354,20 @@ cqlmatic env capture --client CLIENT --server SERVER
 | `--client` | Hook event and where it is registered | `SERVER` |
 | --- | --- | --- |
 | `claude-code` | `PostToolUse` in `~/.claude/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
+| `cline` | A `PostToolUse` script in `~/.cline/hooks/` or `~/Documents/Cline/Hooks/` | As in tool names, `SERVER__TOOL` |
 | `codex` | `PostToolUse` in `~/.codex/hooks.json`; review and trust the new hook with `/hooks` before it runs | As in tool names, `mcp__SERVER__TOOL`, with hyphens written as underscores |
-| `copilot-cli` | `postToolUse` in a `*.json` file under `~/.copilot/hooks/` | As in tool names, `SERVER-TOOL` |
-| `cursor` | `afterMCPExecution` in `~/.cursor/hooks.json`, as Cursor documents it | The server's key in `mcp.json` |
-| `generic` | Any other client or wrapper script: a JSON object on stdin with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response` | As given in `tool_name` |
+| `copilot-cli`, `copilot-app`, `copilot-vscode` | `postToolUse` in a `*.json` file under `~/.copilot/hooks/` | As in tool names, `SERVER-TOOL` |
+| `cursor` | `afterMCPExecution` in `~/.cursor/hooks.json` | The server's key in `mcp.json` |
+| `gemini-cli` | `AfterTool` in `~/.gemini/settings.json` | The server's configured name |
+| `kiro` | `PostToolUse` in a `*.json` file under `~/.kiro/hooks/` | As in tool IDs, `mcp_SERVER_TOOL` (lowercase), or `@SERVER/TOOL` in Amazon Q Developer CLI |
+| `qwen-code` | `PostToolUse` in `~/.qwen/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
+| `generic` | Any other client, plugin or wrapper script: a JSON object on stdin with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response` | As given in `tool_name` |
 
-For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for `copilot-cli`.
+For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for the Copilot clients. A client whose hook does not pass the tool's result cannot use this command.
 
-Hook entries differ by client. `claude-code` and `codex`:
+`claude-code`, `codex`, `copilot-cli` and the OpenCode plugin below have been run against their clients. The other formats follow each client's published hook payload and have not been run against it; when one records nothing, `captures/tally.json` shows whether its searches arrived.
+
+Hook entries differ by client. `claude-code`, `codex` and `qwen-code`:
 
 ```json
 {
@@ -382,7 +388,9 @@ Hook entries differ by client. `claude-code` and `codex`:
 }
 ```
 
-`copilot-cli`:
+`gemini-cli` uses the same form with the event `AfterTool`, the matcher `mcp_SERVER_.*` and no `async` field.
+
+`copilot-cli`, `copilot-app` and `copilot-vscode`:
 
 ```json
 {
@@ -411,6 +419,35 @@ Hook entries differ by client. `claude-code` and `codex`:
   }
 }
 ```
+
+`kiro`:
+
+```json
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "cqlmatic-capture",
+      "trigger": "PostToolUse",
+      "matcher": "@SERVER",
+      "action": {
+        "type": "command",
+        "command": "cqlmatic env capture --client kiro --server SERVER"
+      }
+    }
+  ]
+}
+```
+
+`cline` runs an executable file named `PostToolUse` and reads a JSON object from its output:
+
+```sh
+#!/bin/sh
+cqlmatic env capture --client cline --server SERVER
+echo '{}'
+```
+
+OpenCode has no command hook. Copy the [capture plugin](../examples/capture/opencode-plugin.js) into `~/.config/opencode/plugins/` and set its `SERVER`; it passes each finished search to `cqlmatic env capture --client generic`.
 
 The search is `falcon_search_ngsiem` called directly or through the hosted server's `execute_tool`. The command prints nothing and always exits 0, so it cannot interrupt the agent. Register the hook only for the server that reaches the confirmed target: a search whose `repository` differs from the confirmed view is skipped, and CQLmatic cannot tell two tenants with the same view name apart.
 

@@ -283,7 +283,16 @@ fn capture_reads_codex_and_generic_payloads() {
         "synthetic_server",
         codex(json!({
             "content": [{"type": "text", "text": text}],
-            "structuredContent": {"result": [{"user": "ann"}]}
+            "structuredContent": serde_json::from_str::<Value>(&text).unwrap()
+        })),
+    );
+    // A structured copy that disagrees with the text is refused, as it is for an import.
+    dir.capture_as(
+        "codex",
+        "synthetic_server",
+        codex(json!({
+            "content": [{"type": "text", "text": text}],
+            "structuredContent": {"result": {"error": "Search failed"}}
         })),
     );
     dir.capture_as(
@@ -323,7 +332,7 @@ fn capture_reads_codex_and_generic_payloads() {
         .map(|observation| observation["fields"][0]["field"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(fields, ["user", "bytes"], "{state}");
-    assert_eq!(dir.tally(), json!({"recorded": 2, "search-failed": 2}));
+    assert_eq!(dir.tally(), json!({"recorded": 2, "search-failed": 3}));
 }
 
 #[test]
@@ -413,4 +422,147 @@ fn capture_reads_copilot_cli_and_cursor_payloads() {
         .collect::<Vec<_>>();
     assert_eq!(fields, ["user", "host", "bytes", "zone"], "{state}");
     assert_eq!(dir.tally(), json!({"recorded": 4, "search-failed": 2}));
+}
+
+#[test]
+fn capture_reads_cline_gemini_kiro_and_qwen_payloads() {
+    let dir = Temp::new();
+    dir.confirm();
+    let query = "#type=synthetic | head(5)";
+    let arguments = || {
+        json!({
+            "repository": "third-party", "query_string": query,
+            "start": hours_ago(2), "end": hours_ago(1)
+        })
+    };
+    let result =
+        |field: &str| json!({"content": [{"type": "text", "text": body(json!([{field: "x"}]))}]});
+
+    // Cline: the command-line client's record, then the editor extension's text-only form.
+    dir.capture_as(
+        "cline",
+        SERVER,
+        json!({"hookName": "tool_result", "tool_result": {
+            "name": format!("{SERVER}__falcon_search_ngsiem"),
+            "input": arguments(), "output": result("a"), "error": null
+        }}),
+    );
+    dir.capture_as(
+        "cline",
+        SERVER,
+        json!({"postToolUse": {
+            "toolName": format!("{SERVER}__falcon_search_ngsiem"),
+            "parameters": arguments(), "result": result("b").to_string(), "success": true
+        }}),
+    );
+    dir.capture_as(
+        "cline",
+        SERVER,
+        json!({"tool_result": {
+            "name": format!("{SERVER}__falcon_search_ngsiem"),
+            "input": arguments(), "output": null, "error": "Search failed"
+        }}),
+    );
+
+    // Gemini CLI names the server in `mcp_context` and wraps the text it gives the model.
+    let gemini = |server: &str, response: Value| {
+        json!({
+            "hook_event_name": "AfterTool",
+            "tool_name": "mcp_synthetic-server_falcon_search_ngsiem",
+            "tool_input": arguments(),
+            "tool_response": response,
+            "mcp_context": {"server_name": server, "tool_name": "falcon_search_ngsiem"},
+        })
+    };
+    let display = body(json!([{"c": "x"}]));
+    let wrapped = format!("<untrusted_context>\n{display}\n</untrusted_context>");
+    dir.capture_as(
+        "gemini-cli",
+        SERVER,
+        gemini(
+            SERVER,
+            json!({"llmContent": [{"text": wrapped}], "returnDisplay": display}),
+        ),
+    );
+    dir.capture_as(
+        "gemini-cli",
+        SERVER,
+        gemini(
+            SERVER,
+            json!({
+                "llmContent": "MCP tool reported tool error",
+                "returnDisplay": "Error: MCP tool reported an error.",
+                "error": {"message": "Search failed", "type": "mcp_tool_error"}
+            }),
+        ),
+    );
+    dir.capture_as(
+        "gemini-cli",
+        SERVER,
+        gemini(
+            "another-server",
+            json!({"returnDisplay": body(json!([{"stray": "x"}]))}),
+        ),
+    );
+
+    // Kiro reports `mcp_SERVER_TOOL`; its predecessor reported `@SERVER/TOOL`.
+    for (name, field) in [
+        (format!("mcp_{SERVER}_falcon_search_ngsiem"), "d"),
+        (format!("@{SERVER}/falcon_search_ngsiem"), "e"),
+    ] {
+        dir.capture_as(
+            "kiro",
+            SERVER,
+            json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": name,
+                "tool_input": arguments(),
+                "tool_response": {"success": true, "result": [result(field)]},
+            }),
+        );
+    }
+    dir.capture_as(
+        "kiro",
+        SERVER,
+        json!({
+            "tool_name": format!("mcp_{SERVER}_falcon_search_ngsiem"),
+            "tool_input": arguments(),
+            "tool_response": {"success": false, "error": ["Search failed"]},
+        }),
+    );
+
+    dir.capture_as(
+        "qwen-code",
+        SERVER,
+        json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": format!("mcp__{SERVER}__falcon_search_ngsiem"),
+            "tool_input": arguments(),
+            "tool_response": {
+                "llmContent": [{"text": body(json!([{"f": "x"}]))}],
+                "returnDisplay": body(json!([{"f": "x"}]))
+            },
+        }),
+    );
+
+    // The Copilot surfaces share one hook format.
+    dir.capture_as(
+        "copilot-vscode",
+        SERVER,
+        json!({
+            "toolName": format!("{SERVER}-falcon_search_ngsiem"),
+            "toolArgs": arguments(),
+            "toolResult": {"resultType": "success", "textResultForLlm": body(json!([{"g": "x"}]))},
+        }),
+    );
+
+    let state = dir.saved();
+    let fields = state["query_observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|observation| observation["fields"][0]["field"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(fields, ["a", "b", "c", "d", "e", "f", "g"], "{state}");
+    assert_eq!(dir.tally(), json!({"recorded": 7, "search-failed": 3}));
 }

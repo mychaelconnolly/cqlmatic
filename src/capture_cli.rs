@@ -52,11 +52,17 @@ pub struct CaptureArgs {
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
 enum Client {
     ClaudeCode,
+    Cline,
     Codex,
+    CopilotApp,
     CopilotCli,
+    CopilotVscode,
     Cursor,
+    GeminiCli,
     /// Any client or wrapper that supplies `tool_name`, `tool_input` and `tool_response`.
     Generic,
+    Kiro,
+    QwenCode,
 }
 
 /// One search call as a client hook reported it. `body` is absent when the call failed.
@@ -142,38 +148,62 @@ fn observe(
         };
     }
     let retrieved_at = discovery::timestamp();
-    let name = format!(
-        "{}-{}",
-        retrieved_at.replace([':', '-'], ""),
-        &cqlmatic::sha256_hex(&body)[..12]
-    );
+    let digest = cqlmatic::sha256_hex(&body);
+    let name = format!("{}-{}", retrieved_at.replace([':', '-'], ""), &digest[..12]);
     let query_file = directory.join(format!("{name}.cql"));
     let result_file = directory.join(format!("{name}.json"));
-    let recorded = private_file(&query_file, search.query.as_bytes())
-        .and_then(|()| private_file(&result_file, &body))
-        .and_then(|()| {
-            apply(
-                path,
-                InventoryAction::ImportQueryObservations {
-                    query_file: query_file.to_string_lossy().into_owned(),
-                    result_file: result_file.to_string_lossy().into_owned(),
-                    environment: environment.clone(),
-                    source,
-                    start: search.start,
-                    // A call without `end` searched up to the moment it ran.
-                    end: search.end.unwrap_or_else(|| retrieved_at.clone()),
-                    retrieved_at,
-                    caller_assertion: QueryResultAssertion::ClientHookCapture,
-                },
-            )
-        });
-    if recorded.is_ok() {
+    let query_created = private_file(&query_file, search.query.as_bytes()).is_ok();
+    let result_created = query_created && private_file(&result_file, &body).is_ok();
+    let failure = if result_created {
+        apply(
+            path,
+            InventoryAction::ImportQueryObservations {
+                query_file: query_file.to_string_lossy().into_owned(),
+                result_file: result_file.to_string_lossy().into_owned(),
+                environment: environment.clone(),
+                source,
+                start: search.start,
+                // A call without `end` searched up to the moment it ran.
+                end: search.end.unwrap_or_else(|| retrieved_at.clone()),
+                retrieved_at: retrieved_at.clone(),
+                caller_assertion: QueryResultAssertion::ClientHookCapture,
+            },
+        )
+        .err()
+        .map(|failure| failure.code)
+    } else {
+        Some("CAPTURE_WRITE".into())
+    };
+    let Some(failure) = failure else {
         return "recorded";
+    };
+    // An error can follow a replaced state, so ask the state whether the observation was saved.
+    let saved = inventory_cli::load_existing(path).map(|state| {
+        state.is_some_and(|state| {
+            state.query_observations.iter().any(|observation| {
+                observation.retrieved_at == retrieved_at && observation.result_sha256 == digest
+            })
+        })
+    });
+    match saved {
+        Ok(true) => "recorded",
+        // Unknown: keep the copies an observation may refer to.
+        Err(_) => "not-recorded",
+        Ok(false) => {
+            // This call created these files, so no saved observation refers to them.
+            if query_created {
+                let _ = fs::remove_file(&query_file);
+            }
+            if result_created {
+                let _ = fs::remove_file(&result_file);
+            }
+            if matches!(failure.as_str(), "PACK_BUSY" | "CAPTURE_WRITE") {
+                "not-recorded"
+            } else {
+                "not-creditable"
+            }
+        }
     }
-    // Copies are kept only for results the inventory holds an observation of.
-    let _ = fs::remove_file(&query_file);
-    let _ = fs::remove_file(&result_file);
-    "not-creditable"
 }
 
 /// Parallel tool calls run their hooks at once, so wait briefly for another writer to finish.
@@ -194,6 +224,7 @@ fn apply(path: &Path, action: InventoryAction) -> Result<Value, Diagnostic> {
     patiently(|| inventory_cli::apply_and_store(path, action.clone())).map(|(_, extra)| extra)
 }
 
+/// Creates a new owner-only file, leaving nothing behind when it cannot be written in full.
 fn private_file(path: &Path, bytes: &[u8]) -> Result<(), Diagnostic> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -202,10 +233,14 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), Diagnostic> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options
-        .open(path)
-        .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
-        .map_err(|_| Diagnostic::error("CAPTURE_WRITE", "Cannot save the captured search."))
+    let failed = || Diagnostic::error("CAPTURE_WRITE", "Cannot save the captured search.");
+    let mut file = options.open(path).map_err(|_| failed())?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| {
+            let _ = fs::remove_file(path);
+            failed()
+        })
 }
 
 fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
@@ -250,13 +285,16 @@ fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
         Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| value.clone()),
         value => value.clone(),
     };
+    // The tool's own name, when `name` places it on this server.
+    let on_server = |name: &str, before: &str, after: &str| {
+        name.strip_prefix(before)?
+            .strip_prefix(server)?
+            .strip_prefix(after)
+            .map(str::to_owned)
+    };
     Some(match client {
         Client::ClaudeCode | Client::Codex | Client::Generic => Call {
-            tool: text("tool_name")?
-                .strip_prefix("mcp__")?
-                .strip_prefix(server)?
-                .strip_prefix("__")?
-                .into(),
+            tool: on_server(text("tool_name")?, "mcp__", "__")?,
             arguments: hook["tool_input"].clone(),
             // Claude Code reports a failed call as a different event without a result.
             response: (text("hook_event_name") != Some("PostToolUseFailure"))
@@ -272,11 +310,34 @@ fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
                     name: "",
                 }),
         },
-        Client::CopilotCli => Call {
-            tool: text("toolName")?
-                .strip_prefix(server)?
-                .strip_prefix('-')?
-                .into(),
+        Client::Cline => {
+            // The command-line client sends `tool_result`; the editor extension `postToolUse`.
+            let (name, arguments, failed, output) = match &hook["tool_result"] {
+                Value::Null => {
+                    let legacy = &hook["postToolUse"];
+                    (
+                        &legacy["toolName"],
+                        &legacy["parameters"],
+                        legacy["success"] == false,
+                        &legacy["result"],
+                    )
+                }
+                record => (
+                    &record["name"],
+                    &record["input"],
+                    !record["error"].is_null(),
+                    &record["output"],
+                ),
+            };
+            Call {
+                tool: on_server(name.as_str()?, "", "__")?,
+                arguments: arguments.clone(),
+                response: (!failed).then(|| parsed(output)),
+                saved: None,
+            }
+        }
+        Client::CopilotApp | Client::CopilotCli | Client::CopilotVscode => Call {
+            tool: on_server(text("toolName")?, "", "-")?,
             arguments: parsed(&hook["toolArgs"]),
             // A failed call carries `error` in place of a result.
             response: hook["toolResult"]["textResultForLlm"]
@@ -295,6 +356,38 @@ fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
                 .into(),
             arguments: parsed(&hook["tool_input"]),
             response: Some(parsed(&hook["result_json"])),
+            saved: None,
+        },
+        Client::GeminiCli => {
+            let context = &hook["mcp_context"];
+            Call {
+                tool: context["tool_name"]
+                    .as_str()
+                    .filter(|_| context["server_name"] == server)?
+                    .into(),
+                arguments: hook["tool_input"].clone(),
+                // `returnDisplay` holds the result text without the wrapper added for the model.
+                response: hook["tool_response"]["error"]
+                    .is_null()
+                    .then(|| hook["tool_response"]["returnDisplay"].clone()),
+                saved: None,
+            }
+        }
+        Client::Kiro => {
+            let name = text("tool_name")?;
+            Call {
+                tool: on_server(name, "mcp_", "_").or_else(|| on_server(name, "@", "/"))?,
+                arguments: hook["tool_input"].clone(),
+                response: (hook["tool_response"]["success"] != false)
+                    .then(|| hook["tool_response"]["result"][0].clone()),
+                saved: None,
+            }
+        }
+        Client::QwenCode => Call {
+            tool: on_server(text("tool_name")?, "mcp__", "__")?,
+            arguments: hook["tool_input"].clone(),
+            response: (text("hook_event_name") != Some("PostToolUseFailure"))
+                .then(|| hook["tool_response"]["returnDisplay"].clone()),
             saved: None,
         },
     })
@@ -318,13 +411,9 @@ fn search(payload: &[u8], server: &str, client: Client) -> Option<Search> {
     })
 }
 
+/// The bytes `mcp::normalize` judges: the result text, or the whole MCP result object so that
+/// its error flag and structured copy are checked with it.
 fn body(call: &Call) -> Option<Vec<u8>> {
-    let text = |blocks: &Value| match blocks.as_array()?.as_slice() {
-        [block] if block["type"] == "text" => {
-            block["text"].as_str().map(|text| text.as_bytes().to_vec())
-        }
-        _ => None,
-    };
     match call.response.as_ref()? {
         Value::String(text) => match &call.saved {
             Some(saved) if text.starts_with(saved.notice) => {
@@ -337,14 +426,11 @@ fn body(call: &Call) -> Option<Vec<u8>> {
             }
             _ => Some(text.clone().into_bytes()),
         },
-        blocks @ Value::Array(_) => text(blocks),
-        // The MCP result object. A tool-level error carries no search result.
-        Value::Object(result) if result.contains_key("content") => (result.get("isError")
-            != Some(&Value::Bool(true)))
-        .then(|| text(&result["content"]))
-        .flatten(),
-        // A result body handed over already parsed.
-        parsed @ Value::Object(_) => serde_json::to_vec(parsed).ok(),
+        // A bare content list is the MCP result object without its wrapper.
+        blocks @ Value::Array(_) => {
+            serde_json::to_vec(&serde_json::json!({ "content": blocks })).ok()
+        }
+        result @ Value::Object(_) => serde_json::to_vec(result).ok(),
         _ => None,
     }
 }
