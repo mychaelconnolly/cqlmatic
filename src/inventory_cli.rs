@@ -205,7 +205,7 @@ pub fn default_state_path() -> Result<PathBuf, Diagnostic> {
     }
 }
 
-fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
+pub(crate) fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
     let path = explicit.map_or_else(default_state_path, Ok)?;
     let path =
         std::path::absolute(path).map_err(|_| fail("Cannot resolve inventory state path."))?;
@@ -213,7 +213,7 @@ fn state_path(explicit: Option<PathBuf>) -> Result<PathBuf, Diagnostic> {
         .ok_or_else(|| fail("Cannot resolve inventory state path."))?;
     Ok(path)
 }
-fn load_existing(path: &Path) -> Result<Option<InventoryState>, Diagnostic> {
+pub(crate) fn load_existing(path: &Path) -> Result<Option<InventoryState>, Diagnostic> {
     if !crate::setup_cli::private_input_exists(path)? {
         return Ok(None);
     }
@@ -603,7 +603,7 @@ fn state_fingerprint(state: &InventoryState) -> Result<String, Diagnostic> {
         .map_err(|_| fail("Cannot serialize inventory state."))
 }
 
-fn apply_and_store(
+pub(crate) fn apply_and_store(
     path: &Path,
     action: InventoryAction,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {

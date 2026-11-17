@@ -2186,7 +2186,8 @@
     "QueryResultAssertion": {
       "type": "string",
       "enum": [
-        "exact-query-result-target-window"
+        "exact-query-result-target-window",
+        "client-hook-capture"
       ]
     },
     "QuickDepth": {

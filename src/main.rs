@@ -1,4 +1,5 @@
 #![deny(unsafe_code)]
+mod capture_cli;
 mod inventory_cli;
 mod setup_cli;
 mod skill_cli;
@@ -235,6 +236,8 @@ struct CatalogArgs {
 enum EnvCommand {
     /// Build and reconcile the environment reference map with explicit evidence.
     Inventory(inventory_cli::InventoryArgs),
+    /// Record inventory evidence from a client's post-tool hook payload on stdin.
+    Capture(capture_cli::CaptureArgs),
     /// Derive a local API-client account binding without authenticating or exposing keys.
     Identity {
         #[arg(long, value_parser = parse_cloud)]
@@ -1384,6 +1387,7 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
 fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
     match command {
         EnvCommand::Inventory(args) => inventory_cli::run(args),
+        EnvCommand::Capture(args) => capture_cli::run(args),
         EnvCommand::Identity {
             cloud,
             view,

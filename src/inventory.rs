@@ -581,6 +581,8 @@ pub struct PendingInventoryWork {
 #[serde(rename_all = "kebab-case")]
 pub enum QueryResultAssertion {
     ExactQueryResultTargetWindow,
+    // Recorded by `env capture` from a client's post-tool hook payload.
+    ClientHookCapture,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

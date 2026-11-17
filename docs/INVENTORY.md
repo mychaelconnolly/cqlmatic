@@ -339,6 +339,54 @@ A selected confirmed inventory's validated caller-attested ledger can supply qua
 
 The field ledger and unverified-lead list are each bounded to 1000 entries. Leads are deduplicated by exact source and field; they remain suggestions, with no observed/declared status or completion effect. Query observations retain exact field namespaces and at most 4000 fields per record. Later bounded discovery remains necessary for unresolved evidence and broader coverage.
 
+### Scrappy mode: capture the agent's searches
+
+After a target is confirmed, for example by Quick discovery, a client hook can add to the same ledger from the searches the assistant already runs. The client passes each finished search to `cqlmatic env capture`, which reads the query and its complete result directly. Nothing is sent back through the model, and no search is executed.
+
+Register the command as a hook that runs after tool calls of the CrowdStrike MCP server. Claude Code (`~/.claude/settings.json`) and Codex (`~/.codex/hooks.json`) use the same form:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "mcp__SERVER__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cqlmatic env capture --client claude-code --server SERVER",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Replace `SERVER` with the server's name exactly as the client spells it in tool names (`mcp__SERVER__...`); a client may change characters, for example hyphens to underscores. For Codex use `--client codex`, then review and trust the new hook with `/hooks` before it runs.
+
+| `--client` | Payload read from stdin |
+| --- | --- |
+| `claude-code` | Claude Code's `PostToolUse` or `PostToolUseFailure` payload. A result the client moved to a file is read only from that session's own saved tool results. |
+| `codex` | Codex's `PostToolUse` payload. |
+| `generic` | A JSON object with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response`, for another client or a wrapper script. |
+
+`tool_response` may be the result's JSON text, a list holding one text block, or the MCP result object with `content`. The search is `falcon_search_ngsiem` called directly or through the hosted server's `execute_tool`. `--state FILE` selects a state other than the default. The command prints nothing and always exits 0, so it cannot interrupt the assistant. Register the hook only for the server that reaches the confirmed target: a search whose `repository` differs from the confirmed view is skipped, and CQLmatic cannot tell two tenants with the same view name apart.
+
+| Search | Effect | Count in `tally.json` |
+| --- | --- | --- |
+| Names one confirmed expected source and meets every saved-query rule above | Query observation with `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `captures/` beside the state | `recorded` |
+| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window over seven days or without UTC `Z` times, 10,000 rows or more, or a full ledger | None | `not-creditable` |
+| Returned rows and names one source that is not a confirmed expected source | Pending inventory work for that source and the query's input fields, as `record-inventory-hints` | `new-source-lead`, `nothing-new` when already queued, or `not-recorded` when the state refused the change |
+| Has a query CQLmatic cannot parse | None | `query-not-read` |
+| Names no source, or more than one | None | `no-single-source` |
+| Completed without rows | None | `no-rows` |
+| Failed, was cut off, or its result could not be read | None | `search-failed` |
+| Used another repository | None | `other-view` |
+
+A search without `end` is recorded with the capture time as its end. Captured observations follow the same rules and limits as imported ones and are equally unverified: the payload is taken as the client supplied it. They do not update the active pack, complete discovery or confirm a pending source. `captures/tally.json` holds the counts by outcome.
+
 See [setup](SETUP.md), [MCP relay details](MCP-COMPANION.md), [application flow](FLOW.md), and [troubleshooting](TROUBLESHOOTING.md).
 
 Recognized final answers from the hosted search tool end a format-3 MCP attempt as `timed-out`, `not-started` or `failed-after-start`; a completed list that cannot supply the required measurement ends it as `completed-unusable`. Exact terminal bytes and their hash are retained separately from accepted evidence. The run pauses, the attempt stays charged, and an explicit resume is required before another dispatch. Resume emits the same unaccepted probe. A cutoff does not prove the remote job stopped: at most one leftover job per cut-off attempt may overlap later searches. A missing answer or client wait without a tool answer keeps the attempt unresolved and blocks further dispatch. An unrecognized error shape or wording, malformed or incomplete response leaves it in `cleanup-pending`. Resolve that same attempt with an acceptable original successful result or exact bound cancellation report before resuming. Earlier-release checkpoints retain their blocking behavior and refuse lifecycle changes; native attempts and format-2 runs retain their existing rules. See [hosted search outcomes](MCP-COMPANION.md).
