@@ -248,12 +248,11 @@ fn native_resume_preserves_origin_and_accepted_captures_without_remote_replay() 
     assert_ne!(backend.starts[0], backend.starts[1]);
     let uninterrupted = Run::new(Transport::Native, 4);
     let mut other = Fake::for_run(&uninterrupted);
-    assert_eq!(
-        mcp::run_native(&uninterrupted.state, &mut other)
-            .unwrap()
-            .status,
-        "complete"
-    );
+    let output = mcp::run_native(&uninterrupted.state, &mut other).unwrap();
+    assert_eq!(output.status, "complete");
+    // A native run fetches its own answers, so none are handed back.
+    assert!(output.cost.searches.used > 0);
+    assert_eq!(output.cost.answer_bytes, None);
     let a: Value = serde_json::from_slice(&fs::read(&interrupted.pack).unwrap()).unwrap();
     let b: Value = serde_json::from_slice(&fs::read(&uninterrupted.pack).unwrap()).unwrap();
     assert_eq!(a["data"], b["data"]);
@@ -782,7 +781,10 @@ fn cancelled_mcp_attempt_requires_its_exact_saved_terminal_proof() {
 
     run.save(&reserved);
     let proof = cancellation_proof(&run, &id);
-    mcp::settle_cancelled(&run.state, &id, &proof).unwrap();
+    let output = mcp::settle_cancelled(&run.state, &id, &proof).unwrap();
+    // The attempt stays charged, and its cleanup report is not an answer.
+    assert_eq!(output.cost.searches.used, 1);
+    assert_eq!(output.cost.answer_bytes, Some(0));
     let settled = run.saved();
     fs::remove_file(&proof).unwrap();
     assert!(!mcp::has_in_flight(

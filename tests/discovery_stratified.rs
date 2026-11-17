@@ -152,6 +152,13 @@ fn execute(request: &DiscoverRequest, scenario: &Scenario) -> (Pack, Vec<Probe>)
     assert!(!report.active_pack_updated);
     assert_eq!(backend.emitted.len(), backend.stops);
     assert_eq!(backend.emitted.len(), probes.len());
+    // Every completed scenario stays within the range stated before its first search.
+    let (low, high) = discovery::expected_searches(request).unwrap();
+    assert!(
+        low as usize <= probes.len() && probes.len() <= high.unwrap() as usize,
+        "{low}..{high:?} does not hold {} searches",
+        probes.len()
+    );
     (candidate.unwrap(), probes)
 }
 fn field<'a>(pack: &'a Pack, path: &str) -> &'a Value {
@@ -767,6 +774,17 @@ fn api_and_mcp_emit_identical_stratified_probes_and_population_rates() {
     let mut output = mcp::init(r.clone(), &state, &pack_path, &receipt).unwrap();
     let mut relayed = BTreeSet::new();
     let mut rounds = 0;
+    let (low, high) = discovery::expected_searches(&r).unwrap();
+    assert_eq!(output.cost.searches.used, 0);
+    assert_eq!(output.cost.searches.ready, output.probes.len());
+    assert_eq!(output.cost.searches.expected_low, Some(low));
+    assert_eq!(
+        output.cost.searches.expected_high,
+        Some(high.unwrap().min(r.max_queries))
+    );
+    assert_eq!(output.cost.searches.limit, r.max_queries);
+    assert_eq!(output.cost.answer_bytes, Some(0));
+    let mut answer_bytes = 0;
     while output.status == "needs-probes" {
         rounds += 1;
         assert!(rounds <= 6);
@@ -784,13 +802,19 @@ fn api_and_mcp_emit_identical_stratified_probes_and_population_rates() {
                     p.end.clone(),
                 ));
                 let path = dir.0.join(format!("answer-{rounds}-{index}.json"));
-                fs::write(&path, json!({"result":scenario.rows(&r,&p)}).to_string()).unwrap();
+                let answer = json!({"result":scenario.rows(&r,&p)}).to_string();
+                answer_bytes += answer.len();
+                fs::write(&path, answer).unwrap();
                 (wire["probe_id"].as_str().unwrap().to_string(), path)
             })
             .collect::<Vec<_>>();
         output = mcp::step(&state, &answers).unwrap();
+        assert_eq!(output.cost.searches.used, relayed.len());
+        assert_eq!(output.cost.searches.ready, output.probes.len());
+        assert_eq!(output.cost.answer_bytes, Some(answer_bytes));
     }
     assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
+    assert!((low as usize..=high.unwrap() as usize).contains(&relayed.len()));
     let relayed_pack = storage::read_pack(&pack_path).unwrap();
     let (_, answers) = scenario.graph(&r);
     let mut backend = Backend::new(answers);
@@ -864,4 +888,59 @@ fn malformed_facets_budgets_and_timeouts_leave_the_active_pack_untouched() {
     assert_eq!(report.status, "error");
     assert!(!report.active_pack_updated);
     assert_eq!(backend.emitted.len(), backend.stops);
+}
+
+#[test]
+fn expected_searches_follow_the_request_shape() {
+    let capped = request();
+    // Three base searches, nine tag checks and one population chunk at least.
+    let (low, high) = discovery::expected_searches(&capped).unwrap();
+    assert_eq!(low, 13);
+    assert!(high.unwrap() > low);
+    let plan = discovery::initial_plan(&capped).unwrap();
+    assert_eq!(
+        plan["searches"],
+        json!({"expected_low":low,"expected_high":high.unwrap().min(capped.max_queries),"limit":capped.max_queries})
+    );
+    let mut two = capped.clone();
+    two.sources
+        .push(serde_json::from_value(json!({"repo":"second"})).unwrap());
+    let (two_low, two_high) = discovery::expected_searches(&two).unwrap();
+    assert_eq!((two_low, two_high.unwrap()), (2 * low, 2 * high.unwrap()));
+    let mut valued = capped.clone();
+    valued.value_fields = vec!["user".into()];
+    assert_eq!(discovery::expected_searches(&valued).unwrap().0, low + 1);
+    // An uncapped field run measures every field it finds, so it has no upper figure.
+    let mut uncapped = capped.clone();
+    uncapped.max_population_fields_per_source = None;
+    assert_eq!(
+        discovery::expected_searches(&uncapped).unwrap(),
+        (low, None)
+    );
+    // A census names its own sources.
+    let mut census = uncapped.clone();
+    census.census = true;
+    census.sources.clear();
+    assert_eq!(discovery::expected_searches(&census), None);
+    assert!(
+        discovery::initial_plan(&census)
+            .unwrap()
+            .get("searches")
+            .is_none()
+    );
+    let sources_only: DiscoverRequest = serde_json::from_value(json!({
+        "schema_version":1,
+        "environment":{"cloud":"us1","tenant":"00000000000000000000000000000000","view":"search-all"},
+        "start":"2026-01-01T00:00:00Z",
+        "end":"2026-01-01T01:00:00Z",
+        "sources":[{"repo":"a"},{"repo":"b"}],
+        "depth":"sources-only",
+        "max_queries":5,
+        "max_seconds":120
+    }))
+    .unwrap();
+    assert_eq!(
+        discovery::expected_searches(&sources_only).unwrap(),
+        (2, Some(2))
+    );
 }

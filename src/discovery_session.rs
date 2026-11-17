@@ -105,6 +105,26 @@ impl Session {
     pub(crate) fn attempts_len(&self) -> usize {
         self.attempts.len()
     }
+    /// Bytes of every answer handed back for this run, accepted or not. A cancelled
+    /// attempt's terminal evidence is its cleanup report, not an answer.
+    pub(crate) fn answer_bytes(&self) -> usize {
+        self.attempts
+            .iter()
+            .flat_map(|attempt| {
+                attempt
+                    .terminal
+                    .iter()
+                    .filter(move |_| attempt.outcome != "cancelled")
+                    .chain(
+                        attempt
+                            .rejected_results
+                            .iter()
+                            .map(|rejected| &rejected.evidence),
+                    )
+            })
+            .map(|evidence| evidence.raw_hex.len() / 2)
+            .sum()
+    }
     fn active_nanos(&self, now: &str) -> Result<u64, Diagnostic> {
         let now = environment::parse_time(now)?;
         let mut total = 0_u64;
