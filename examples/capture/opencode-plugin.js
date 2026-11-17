@@ -9,6 +9,25 @@ const COMMAND = "cqlmatic"
 // OpenCode replaces other characters when it builds a tool's name from its server.
 const normalized = (name) => name.replace(/[^a-zA-Z0-9_-]/g, "_")
 
+const same = (left, right) =>
+  left === right ||
+  (left !== null &&
+    right !== null &&
+    typeof left === "object" &&
+    typeof right === "object" &&
+    Array.isArray(left) === Array.isArray(right) &&
+    Object.keys(left).length === Object.keys(right).length &&
+    Object.keys(left).every((key) => same(left[key], right[key])))
+
+// Whether the single text block parses to the structured copy.
+const agrees = (content, structured) => {
+  try {
+    return content.length === 1 && same(JSON.parse(content[0].text), structured)
+  } catch {
+    return false
+  }
+}
+
 export default {
   id: "cqlmatic.capture",
   async setup(ctx) {
@@ -19,13 +38,17 @@ export default {
         const tool = (await ctx.tool.list()).find((entry) => entry.id === event.tool)
         if (tool?.options?.namespace !== normalized(SERVER)) return
         const content = event.result.content
-        const text =
-          typeof content === "string"
-            ? content
-            : (content ?? [])
-                .filter((part) => part.type === "text")
-                .map((part) => part.text)
-                .join("\n")
+        const response = {
+          content: (typeof content === "string" ? [{ type: "text", text: content }] : (content ?? []))
+            .filter((part) => part.type === "text")
+            .map((part) => ({ type: "text", text: part.text })),
+        }
+        // A structured copy that disagrees with the text goes along, so the result is refused.
+        // An agreeing copy is left out: the text keeps digits that numbers here may have lost.
+        const structured = event.result.output
+        if (structured && typeof structured === "object" && !agrees(response.content, structured)) {
+          response.structuredContent = structured
+        }
         const child = spawn(COMMAND, ["env", "capture", "--client", "generic", "--server", SERVER], {
           stdio: ["pipe", "ignore", "ignore"],
         })
@@ -35,7 +58,7 @@ export default {
           JSON.stringify({
             tool_name: `mcp__${SERVER}__${tool.name}`,
             tool_input: event.input ?? {},
-            tool_response: text,
+            tool_response: response,
           }),
         )
       } catch {}
