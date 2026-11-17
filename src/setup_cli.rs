@@ -22,6 +22,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+#[cfg(windows)]
+mod windows_acl;
+
 const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 const PROBE_TIMEOUT: u32 = 10;
@@ -399,19 +402,19 @@ struct WindowsAclFailure {
 }
 #[cfg(any(windows, test))]
 fn windows_acl_failure(output: &[u8]) -> Diagnostic {
-    let failure = serde_json::from_slice::<WindowsAclFailure>(output)
-        .ok()
-        .filter(|failure| {
-            !failure.path.is_empty()
-                && failure.path.len() <= 16 * 1024
-                && [&failure.sid, &failure.right, &failure.reason]
-                    .into_iter()
-                    .all(|value| {
-                        !value.is_empty()
-                            && value.len() <= 256
-                            && !value.chars().any(char::is_control)
-                    })
-        });
+    windows_acl_diagnostic(serde_json::from_slice(output).ok())
+}
+#[cfg(any(windows, test))]
+fn windows_acl_diagnostic(failure: Option<WindowsAclFailure>) -> Diagnostic {
+    let failure = failure.filter(|failure| {
+        !failure.path.is_empty()
+            && failure.path.len() <= 16 * 1024
+            && [&failure.sid, &failure.right, &failure.reason]
+                .into_iter()
+                .all(|value| {
+                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+                })
+    });
     match failure {
         Some(failure) => err(
             "SETUP_PROTECTION",
@@ -448,6 +451,26 @@ fn configure_windows_acl(command: &mut Command, path: &Path, mode: &str, parent:
 }
 #[cfg(windows)]
 fn check_windows_acl_with_parent(
+    path: &Path,
+    mode: &str,
+    parent: Option<&Path>,
+) -> Result<(), Diagnostic> {
+    // Creating a private directory stays with the fixed helper; verification of existing
+    // paths applies the same conditions through direct system calls.
+    if mode == "create-directory" {
+        return run_windows_acl_helper(path, mode, parent);
+    }
+    windows_acl::check(path, mode, parent).map_err(|failure| {
+        windows_acl_diagnostic(Some(WindowsAclFailure {
+            path: failure.path,
+            sid: failure.sid,
+            right: failure.right,
+            reason: failure.reason.into(),
+        }))
+    })
+}
+#[cfg(windows)]
+fn run_windows_acl_helper(
     path: &Path,
     mode: &str,
     parent: Option<&Path>,
@@ -4773,6 +4796,74 @@ mod tests {
                 assert!(actual.unwrap());
             }
         }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_direct_acl_checks_match_the_fixed_helper() {
+        let temp = Temp::new();
+        let directory = temp.0.join("private space ' ; $()");
+        protect_directory(&directory).unwrap();
+        let file = directory.join("state.json");
+        fs::write(&file, b"synthetic").unwrap();
+        let nested = directory.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let missing = directory.join("missing.json");
+        let compare = |label: &str| {
+            for (path, mode, parent) in [
+                (&directory, "directory", None),
+                (&file, "file", None),
+                (&file, "directory-file", Some(directory.as_path())),
+                (&file, "input-directory", Some(directory.as_path())),
+                (&nested, "directory", None),
+                (&nested, "file", None),
+                (&file, "directory", None),
+                (&missing, "file", None),
+                (&missing, "directory", None),
+            ] {
+                assert_eq!(
+                    serde_json::to_value(check_windows_acl_with_parent(path, mode, parent))
+                        .unwrap(),
+                    serde_json::to_value(run_windows_acl_helper(path, mode, parent)).unwrap(),
+                    "{label}: {mode} {path:?}"
+                );
+            }
+        };
+        compare("private");
+        check_windows_acl_with_parent(&file, "directory-file", Some(&directory)).unwrap();
+        allow_windows_users_read(&file);
+        compare("readable file");
+        assert!(
+            check_windows_acl_with_parent(&file, "file", None)
+                .unwrap_err()
+                .message
+                .contains("principal S-1-5-32-545; right Read, Synchronize; check allow")
+        );
+        allow_windows_users_read(&directory);
+        compare("readable directory");
+    }
+    #[cfg(windows)]
+    #[test]
+    fn setup_windows_direct_acl_check_refuses_a_replaceable_ancestor() {
+        let temp = Temp::new();
+        let outer = temp.0.join("outer");
+        let inner = outer.join("inner");
+        protect_directory(&inner).unwrap();
+        verify_directory(&inner).unwrap();
+        let acl = Command::new("icacls")
+            .arg(&outer)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .output()
+            .unwrap();
+        assert!(acl.status.success());
+        let direct = verify_directory(&inner).unwrap_err();
+        assert_eq!(direct.code, "SETUP_PROTECTION");
+        assert!(direct.message.contains(
+            "principal S-1-1-0; right DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership; check allow"
+        ));
+        let helper = run_windows_acl_helper(&inner, "directory", None).unwrap_err();
+        assert!(helper.message.contains(
+            "principal S-1-1-0; right DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership; check allow"
+        ));
     }
     #[cfg(windows)]
     #[test]
