@@ -275,6 +275,12 @@ mod tests {
             }})))
             .unwrap();
         assert_eq!(finished.tool, "falcon_search_ngsiem");
+        assert!(finished.may_be_search());
+        // Only the gateway's search calls are queued for recording.
+        let gateway =
+            |inner: &str| Call::on_connection("execute_tool".into(), json!({"name": inner}), None);
+        assert!(gateway("falcon_search_ngsiem").may_be_search());
+        assert!(!gateway("another_tool").may_be_search());
         assert_eq!(finished.arguments, json!({"query_string": "x"}));
         assert_eq!(
             finished.response,
