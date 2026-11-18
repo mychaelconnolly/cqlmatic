@@ -262,6 +262,23 @@ fn join_functions_are_top_level_in_their_own_query() {
         r#"defineTable({a=1}, name="t", include=k) | selfJoin(k, where=[{a=1},{b=2}]) | match(table=t, field=k)"#,
         "CQL_TABLE_JOIN_CONFLICT",
     );
+    // correlate excludes every join function, wherever either one appears.
+    let correlation = "correlate(a: { #repo=x } include: [k], b: { #repo=z | k <=> a.k } include: [k], within=1h)";
+    for query in [
+        format!("{correlation} | join({{y=1}}, field=k)"),
+        format!("{correlation} | selfJoin(k, where=[{{a=1}},{{b=2}}])"),
+        format!("{correlation} | selfJoinFilter(k, where=[{{a=1}},{{b=2}}])"),
+        format!("selfJoinFilter(k, where=[{{a=1}},{{b=2}}]) | {correlation}"),
+        "correlate(a: { #repo=x | selfJoinFilter(k, where=[{a=1},{b=2}]) } include: [k], b: { #repo=z | k <=> a.k } include: [k], within=1h)".into(),
+    ] {
+        rejected(&query, "CQL_CORRELATION_JOIN_CONFLICT");
+    }
+    assert!(
+        check(correlation)
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "CQL_CORRELATION_JOIN_CONFLICT")
+    );
     assert_eq!(
         check(nested)
             .diagnostics

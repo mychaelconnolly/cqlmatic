@@ -27,7 +27,6 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         nesting: 0,
         definitions: 0,
         joins: false,
-        join_seen: false,
         correlation_seen: false,
         table_columns: BTreeMap::new(),
         correlation_columns: BTreeMap::new(),
@@ -49,10 +48,10 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
             false,
         );
     }
-    if checker.join_seen && checker.correlation_seen {
+    if checker.joins && checker.correlation_seen {
         checker.emit(
             "CQL_CORRELATION_JOIN_CONFLICT",
-            "correlate cannot be combined with join.",
+            "correlate cannot be combined with join, selfJoin or selfJoinFilter.",
             None,
             false,
         );
@@ -292,7 +291,6 @@ struct Checker<'a> {
     nesting: usize,
     definitions: usize,
     joins: bool,
-    join_seen: bool,
     correlation_seen: bool,
     table_columns: BTreeMap<String, Option<BTreeSet<String>>>,
     correlation_columns: BTreeMap<usize, Option<BTreeSet<String>>>,
@@ -1627,7 +1625,6 @@ impl Checker<'_> {
             );
         }
         self.joins |= matches!(spec.name, "join" | "selfJoin" | "selfJoinFilter");
-        self.join_seen |= spec.name == "join";
         self.correlation_seen |= spec.name == "correlate";
         if matches!(spec.name, "match" | "matchAsArray" | "readFile")
             && c.args.iter().any(|a| a.name.as_deref() == Some("table"))
