@@ -11,8 +11,6 @@ use std::{
 };
 
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
-/// Age after which a leftover candidate file is taken to be from an interrupted installation.
-const ABANDONED_CANDIDATE: std::time::Duration = std::time::Duration::from_secs(60);
 const POST_TOOL_USE: &str = "PostToolUse";
 const COPILOT_EVENT: &str = "postToolUse";
 
@@ -587,31 +585,12 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
         .file_name()
         .and_then(|n| n.to_str())
         .expect("A known settings filename");
-    // Each installation writes a candidate of its own, so none can remove another's.
-    let prefix = format!(".{name}.cqlmatic.");
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let temporary = parent.join(format!("{prefix}{}.{unique}.tmp", std::process::id()));
-    // Candidates left by interrupted installations are cleared once they are old.
-    for entry in fs::read_dir(parent).into_iter().flatten().flatten() {
-        let abandoned =
-            entry.file_name().to_str().is_some_and(|candidate| {
-                candidate.starts_with(&prefix) && candidate.ends_with(".tmp")
-            }) && entry.metadata().is_ok_and(|meta| {
-                meta.is_file()
-                    && meta
-                        .modified()
-                        .ok()
-                        .and_then(|at| at.elapsed().ok())
-                        .is_some_and(|age| age >= ABANDONED_CANDIDATE)
-            });
-        if abandoned {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
+    // The candidate file is also the lock between installations: whoever holds its lock may
+    // write it and move it into place. The lock ends with the process, so a candidate left by
+    // an interrupted installation is simply taken over.
+    let temporary = parent.join(format!(".{name}.cqlmatic.tmp"));
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -620,7 +599,22 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
     let mut file = options
         .open(&temporary)
         .map_err(|e| io_error(path, "Cannot create settings candidate", e))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => {
+            return Err(file_error(
+                "LOCAL_IO",
+                path,
+                "Another installation is writing these settings. Retry",
+            ));
+        }
+        Err(fs::TryLockError::Error(e)) => {
+            return Err(io_error(path, "Cannot lock settings candidate", e));
+        }
+    }
     let staged = (|| {
+        file.set_len(0)
+            .map_err(|e| io_error(path, "Cannot clear settings candidate", e))?;
         if let Settings::File { metadata, .. } = settings {
             #[cfg(unix)]
             {
@@ -645,7 +639,6 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
         .and_then(|()| file.sync_all())
         .map_err(|e| io_error(path, "Cannot write settings candidate", e))
     })();
-    drop(file);
     let result = staged.and_then(|()| {
         let changed = || {
             file_error(
@@ -689,6 +682,8 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
         fs::remove_file(&temporary)
             .map_err(|e| io_error(path, "Cannot remove settings candidate", e))?;
     }
+    // The lock is held until the candidate is in place or removed.
+    drop(file);
     result
 }
 
