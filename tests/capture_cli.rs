@@ -3,8 +3,11 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    process::{Command, Output, Stdio},
+    sync::{
+        Barrier,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 const SERVER: &str = "synthetic-server";
@@ -28,6 +31,9 @@ impl Temp {
     }
     fn state(&self) -> PathBuf {
         self.0.join("workflow/state.json")
+    }
+    fn install_lock(&self) -> PathBuf {
+        self.0.join("data/cqlmatic/inventory/hook-install.lock")
     }
     fn saved(&self) -> Value {
         serde_json::from_slice(&fs::read(self.state()).unwrap()).unwrap()
@@ -164,15 +170,24 @@ const WRITTEN_CLIENTS: [(&str, &str, &str, &str); 5] = [
 ];
 
 fn isolated<'a>(command: &'a mut Command, home: &Path) -> &'a mut Command {
+    #[cfg(windows)]
+    command.env("LOCALAPPDATA", home.join("data"));
+    #[cfg(not(windows))]
+    command.env_remove("LOCALAPPDATA");
     command
         .env("HOME", home)
         .env("USERPROFILE", home)
+        .env("XDG_DATA_HOME", home.join("data"))
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         .env_remove("COPILOT_HOME")
 }
 
 fn install(home: &Path, client: &str) -> Command {
+    install_for(home, client, SERVER)
+}
+
+fn install_for(home: &Path, client: &str, server: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
     isolated(&mut command, home).args([
         "env",
@@ -180,19 +195,37 @@ fn install(home: &Path, client: &str) -> Command {
         "--client",
         client,
         "--server",
-        SERVER,
+        server,
         "--install",
     ]);
     command
 }
 
 fn report(command: &mut Command) -> Value {
-    let output = command.output().unwrap();
+    install_report(&command.output().unwrap())
+}
+
+fn install_report(output: &Output) -> Value {
     assert!(
         output.status.success() && output.stderr.is_empty(),
         "{output:?}"
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn install_error(output: &Output) -> Value {
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    serde_json::from_slice(&output.stderr).unwrap()
+}
+
+fn assert_manual(report: &Value, reason: &str) {
+    assert_eq!(report["installed"], false, "{report}");
+    assert_eq!(report["changed"], false, "{report}");
+    assert!(report["entry"]["hooks"].is_object(), "{report}");
+    assert!(
+        report["next_actions"][0].as_str().unwrap().contains(reason),
+        "{report}"
+    );
 }
 
 #[test]
@@ -214,6 +247,7 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         assert_eq!(preview["changed"], true);
         assert_eq!(preview["installed"], false);
         assert_eq!(preview["dry_run"], true);
+        assert!(!home.install_lock().exists());
         assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
         let mut command = install(&home.0, client);
         command
@@ -272,7 +306,7 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
 }
 
 #[test]
-fn capture_install_preserves_existing_settings_and_deduplicates_by_command() {
+fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks() {
     for (client, _, default, file) in WRITTEN_CLIENTS {
         let home = Temp::new();
         let file = home.0.join(default).join(file);
@@ -321,16 +355,37 @@ fn capture_install_preserves_existing_settings_and_deduplicates_by_command() {
 
         let hook = &mut expected["hooks"][event][1];
         hook["extra-setting"] = json!(true);
-        if copilot {
-            hook["powershell"] = json!("another command");
-        } else {
-            hook["matcher"] = json!("alternate matcher");
-        }
-        let wanted = serde_json::to_vec(&expected).unwrap();
-        fs::write(&file, &wanted).unwrap();
+        let exact = serde_json::to_vec(&expected).unwrap();
+        fs::write(&file, &exact).unwrap();
         let repeat = report(&mut command);
+        assert_eq!(repeat["installed"], true, "{client}");
         assert_eq!(repeat["changed"], false, "{client}");
-        assert_eq!(fs::read(&file).unwrap(), wanted, "{client}");
+        assert_eq!(fs::read(&file).unwrap(), exact, "{client}");
+
+        let hook = &expected["hooks"][event][1];
+        let mut customized = vec![hook.clone()];
+        if copilot {
+            customized[0]["powershell"] = json!("another command");
+            let mut other_shell = hook.clone();
+            other_shell["bash"] = json!("another command");
+            customized.push(other_shell);
+        } else {
+            customized[0]["matcher"] = json!("alternate matcher");
+        }
+        for custom in customized {
+            expected["hooks"][event][1] = custom;
+            let wanted = serde_json::to_vec(&expected).unwrap();
+            fs::write(&file, &wanted).unwrap();
+            for dry_run in [false, true] {
+                let mut command = install(&home.0, client);
+                if dry_run {
+                    command.arg("--dry-run");
+                }
+                let repeat = report(&mut command);
+                assert_manual(&repeat, "different hook entry");
+                assert_eq!(fs::read(&file).unwrap(), wanted, "{client}");
+            }
+        }
     }
 }
 
@@ -369,10 +424,16 @@ fn capture_install_refuses_unsafe_or_invalid_settings() {
     let command = || install(&home.0, "codex");
     let assert_refused = |code| {
         let output = command().output().unwrap();
-        assert_eq!(output.status.code(), Some(2), "{output:?}");
-        assert!(output.stdout.is_empty());
-        let d: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let d = install_error(&output);
         assert_eq!(d["code"], code);
+        if code == "LOCAL_FILE_TYPE" {
+            assert_manual(
+                &serde_json::from_slice(&output.stdout).unwrap(),
+                "regular file",
+            );
+        } else {
+            assert!(output.stdout.is_empty());
+        }
         assert!(
             d["message"]
                 .as_str()
@@ -397,6 +458,18 @@ fn capture_install_refuses_unsafe_or_invalid_settings() {
         assert_refused("CLI_INPUT");
         assert_eq!(fs::read(&file).unwrap(), bytes);
     }
+    let too_large_number = br#"{"number": 1e400}"#;
+    fs::write(&file, too_large_number).unwrap();
+    let invalid = install_error(&command().output().unwrap());
+    assert_eq!(invalid["code"], "CLI_INPUT");
+    assert!(
+        invalid["message"]
+            .as_str()
+            .unwrap()
+            .contains("number out of range"),
+        "{invalid}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), too_large_number);
     let oversized = vec![b' '; 8 * 1024 * 1024 + 1];
     fs::write(&file, &oversized).unwrap();
     assert_refused("LOCAL_SIZE");
@@ -414,8 +487,10 @@ fn capture_install_reports_a_symbolic_link_for_manual_installation() {
     let root = home.0.join(".claude");
     let file = root.join("settings.json");
     let target = home.0.join("settings.json");
+    let preview = report(install(&home.0, "claude-code").arg("--dry-run"));
+    let original = serde_json::to_vec(&preview["entry"]).unwrap();
     fs::create_dir(&root).unwrap();
-    fs::write(&target, b"this file is never read or edited").unwrap();
+    fs::write(&target, &original).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &file).unwrap();
     #[cfg(windows)]
@@ -423,22 +498,22 @@ fn capture_install_reports_a_symbolic_link_for_manual_installation() {
         Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
         result => result.unwrap(),
     }
-    let output = report(&mut install(&home.0, "claude-code"));
-    assert_eq!(output["installed"], false);
-    assert_eq!(output["changed"], false);
-    assert_eq!(output["path"], json!(file));
-    assert!(
-        output["next_actions"][0]
-            .as_str()
-            .unwrap()
-            .contains("linked")
-    );
-    assert_eq!(fs::read_link(&file).unwrap(), target);
-    assert_eq!(
-        fs::read(&target).unwrap(),
-        b"this file is never read or edited"
-    );
-    assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    for dry_run in [true, false] {
+        let mut command = install(&home.0, "claude-code");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let output = report(&mut command);
+        assert_manual(&output, "symbolic link");
+        assert_eq!(output["path"], json!(file));
+        assert_eq!(output["entry"], preview["entry"]);
+        assert_eq!(fs::read_link(&file).unwrap(), target);
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        if dry_run {
+            assert!(!home.install_lock().exists());
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -482,13 +557,89 @@ fn capture_install_creates_settings_in_a_group_writable_directory() {
     let output = report(&mut install(&home.0, "codex"));
     assert_eq!(output["installed"], true);
     assert_eq!(output["changed"], true);
-    let settings: Value =
-        serde_json::from_slice(&fs::read(root.join("hooks.json")).unwrap()).unwrap();
+    let file = root.join("hooks.json");
+    let settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert_eq!(settings, output["entry"]);
+    assert_eq!(
+        fs::metadata(file).unwrap().permissions().mode() & 0o7777,
+        0o600
+    );
     assert_eq!(
         fs::metadata(&root).unwrap().permissions().mode() & 0o777,
         0o770
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_refuses_world_writable_settings_before_merge() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    let entry = report(install(&home.0, "codex").arg("--dry-run"))["entry"].clone();
+    let installed = serde_json::to_vec(&entry).unwrap();
+    fs::create_dir(&root).unwrap();
+    for (shared, shared_mode, private_mode, reason) in [
+        (&file, 0o606, 0o600, "file is writable by everyone"),
+        (&root, 0o707, 0o700, "directory is writable by everyone"),
+    ] {
+        for bytes in [installed.as_slice(), b"{"] {
+            fs::write(&file, bytes).unwrap();
+            fs::set_permissions(shared, fs::Permissions::from_mode(shared_mode)).unwrap();
+            check_settings_refusal(&home, &file, bytes, &entry, reason);
+        }
+        fs::set_permissions(shared, fs::Permissions::from_mode(private_mode)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_refuses_foreign_owners_before_merge() {
+    use std::os::unix::fs::{MetadataExt, chown};
+
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    let entry = report(install(&home.0, "codex").arg("--dry-run"))["entry"].clone();
+    let bytes = serde_json::to_vec(&entry).unwrap();
+    fs::create_dir(&root).unwrap();
+    fs::write(&file, &bytes).unwrap();
+    let user = fs::metadata(&home.0).unwrap().uid();
+    for (path, reason) in [
+        (&file, "file is owned by another user"),
+        (&root, "directory is owned by another user"),
+    ] {
+        match chown(path, Some(user + 1), None) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("Foreign owner fixture requires permission to change its owner.");
+                return;
+            }
+            Err(e) => panic!("Cannot change fixture owner. {e}"),
+        }
+        check_settings_refusal(&home, &file, &bytes, &entry, reason);
+        chown(path, Some(user), None).unwrap();
+    }
+}
+
+fn check_settings_refusal(home: &Temp, path: &Path, bytes: &[u8], entry: &Value, reason: &str) {
+    for dry_run in [true, false] {
+        let had_lock = home.install_lock().exists();
+        let mut command = install(&home.0, "codex");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let report = report(&mut command);
+        assert_manual(&report, reason);
+        assert_eq!(&report["entry"], entry);
+        assert_eq!(fs::read(path).unwrap(), bytes);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        if dry_run {
+            assert_eq!(home.install_lock().exists(), had_lock);
+        }
+    }
 }
 
 #[test]
@@ -571,6 +722,17 @@ fn capture_install_requires_valid_program_text() {
 }
 
 #[test]
+fn capture_install_rejects_an_empty_server_before_reading_settings() {
+    let home = Temp::new();
+    let output = install_for(&home.0, "codex", "").output().unwrap();
+    let refused = install_error(&output);
+    assert_eq!(refused["code"], "CLI_INPUT");
+    assert_eq!(refused["message"], "--server must be non-empty.");
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+#[test]
 fn capture_without_install_is_silent_with_invalid_input() {
     let home = Temp::new();
     let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
@@ -604,12 +766,12 @@ fn capture_install_preserves_existing_settings_permission_bits() {
     let path = home.0.join(".codex/hooks.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{}").unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o764)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o7764)).unwrap();
 
     assert_eq!(report(&mut install(&home.0, "codex"))["changed"], true);
     assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o764
+        fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+        0o7764
     );
 }
 
@@ -619,6 +781,66 @@ fn powershell() -> Command {
     let mut shell = Command::new(root.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
     shell.args(["-NoProfile", "-NonInteractive", "-Command"]);
     shell
+}
+
+#[cfg(windows)]
+#[test]
+fn capture_install_windows_refuses_everyone_write_and_creates_a_private_file() {
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    let installed = report(&mut install(&home.0, "codex"));
+    assert_eq!(installed["installed"], true);
+    let bytes = fs::read(&file).unwrap();
+    let private = powershell()
+        .env("CQLMATIC_TEST_SETTINGS", &file)
+        .arg(r#"
+$ErrorActionPreference='Stop'
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$a=Get-Acl -LiteralPath $env:CQLMATIC_TEST_SETTINGS
+if(!$a.AreAccessRulesProtected -or $a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){exit 1}
+foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+  if($r.IdentityReference.Value -notin $sid,'S-1-5-18'){exit 1}
+}
+"#)
+        .output()
+        .unwrap();
+    assert!(private.status.success(), "{private:?}");
+    for (path, reason) in [
+        (&file, "file is writable by everyone"),
+        (&root, "directory is writable by everyone"),
+    ] {
+        let shared = powershell()
+            .env("CQLMATIC_TEST_SETTINGS", path)
+            .arg(
+                r#"
+$ErrorActionPreference='Stop'
+$p=$env:CQLMATIC_TEST_SETTINGS
+$a=Get-Acl -LiteralPath $p
+$everyone=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,'Write','Allow'))
+Set-Acl -LiteralPath $p -AclObject $a
+"#,
+            )
+            .output()
+            .unwrap();
+        assert!(shared.status.success(), "{shared:?}");
+        check_settings_refusal(&home, &file, &bytes, &installed["entry"], reason);
+        let restored = powershell()
+            .env("CQLMATIC_TEST_SETTINGS", path)
+            .arg(
+                r#"
+$ErrorActionPreference='Stop'
+$p=$env:CQLMATIC_TEST_SETTINGS
+$a=Get-Acl -LiteralPath $p
+$a.PurgeAccessRules([Security.Principal.SecurityIdentifier]::new('S-1-1-0'))
+Set-Acl -LiteralPath $p -AclObject $a
+"#,
+            )
+            .output()
+            .unwrap();
+        assert!(restored.status.success(), "{restored:?}");
+    }
 }
 
 #[test]
@@ -1466,30 +1688,138 @@ fn capture_install_registers_an_absolute_state_path() {
 }
 
 #[test]
-fn capture_install_takes_over_an_abandoned_candidate_and_yields_to_a_live_one() {
+fn capture_install_refuses_a_held_lock_and_succeeds_after_release() {
     let home = Temp::new();
+    // A different client establishes the shared lock in CQLmatic's own data directory.
+    assert_eq!(
+        report(&mut install(&home.0, "claude-code"))["installed"],
+        true
+    );
+    let lock_path = home.install_lock();
+    let held = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
     let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
     fs::create_dir(&root).unwrap();
-    let candidate = root.join(".hooks.json.cqlmatic.tmp");
-    // A candidate another installation holds locked is left alone.
-    fs::write(&candidate, "left over").unwrap();
-    let held = fs::File::options().write(true).open(&candidate).unwrap();
+    let original = b"{\"existing\":true}\n";
+    fs::write(&file, original).unwrap();
+
     held.lock().unwrap();
-    let mut command = install(&home.0, "codex");
-    let refused = command.args(["--program", "launcher"]).output().unwrap();
-    assert!(!refused.status.success(), "{refused:?}");
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("Another installation"));
-    assert!(!root.join("hooks.json").exists());
-    drop(held);
-    assert_eq!(fs::read(&candidate).unwrap(), b"left over");
-    // With nobody holding it, it is from an interrupted installation and is taken over.
-    let mut command = install(&home.0, "codex");
-    let output = report(command.args(["--program", "launcher"]));
-    assert_eq!(output["installed"], true);
-    assert_eq!(output["changed"], true);
-    let installed: Value =
-        serde_json::from_slice(&fs::read(root.join("hooks.json")).unwrap()).unwrap();
-    assert_eq!(installed, output["entry"]);
-    assert!(!candidate.exists());
+    let busy = install(&home.0, "codex").output().unwrap();
+    assert_eq!(
+        install_error(&busy)["message"],
+        "Another hook installation is running. Retry."
+    );
+    assert!(busy.stdout.is_empty());
+    let preview = report(install(&home.0, "codex").arg("--dry-run"));
+    assert_eq!(preview["installed"], false);
+    assert_eq!(preview["changed"], true);
+    assert_eq!(fs::read(&file).unwrap(), original);
     assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+
+    drop(held);
+    let updated = report(&mut install(&home.0, "codex"));
+    assert_eq!(updated["installed"], true);
+    assert_eq!(updated["changed"], true);
+    let installed: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(installed["existing"], true);
+    assert_eq!(installed["hooks"], updated["entry"]["hooks"]);
+    assert_eq!(fs::metadata(&lock_path).unwrap().len(), 0);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+}
+
+#[test]
+fn concurrent_capture_install_processes_keep_every_reported_hook() {
+    let home = Temp::new();
+    assert_eq!(
+        report(&mut install(&home.0, "claude-code"))["installed"],
+        true
+    );
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    fs::create_dir(&root).unwrap();
+    let existing =
+        r#"{"matcher":"keep","hooks":[{"type":"command","command":"keep quoted spelling"}]}"#;
+    let original = format!(
+        "{{\r\n  \"padding\" : \"{}\",\r\n  \"hooks\": {{\"OtherEvent\": [], \"PostToolUse\": [{existing}]}},\r\n  \"keep\" : 1e+01\r\n}}\r\n",
+        "x".repeat(512 * 1024)
+    );
+    fs::write(&file, &original).unwrap();
+
+    let start = Barrier::new(3);
+    let run = |server| {
+        let mut command = install_for(&home.0, "codex", server);
+        start.wait();
+        command.output().unwrap()
+    };
+    let results = std::thread::scope(|scope| {
+        let a = scope.spawn(|| run("first"));
+        let b = scope.spawn(|| run("second"));
+        start.wait();
+        [("first", a.join().unwrap()), ("second", b.join().unwrap())]
+    });
+
+    let saved = fs::read_to_string(&file).unwrap();
+    let after: Value = serde_json::from_str(&saved).unwrap();
+    let hooks = after["hooks"]["PostToolUse"].as_array().unwrap();
+    let mut installed = 0;
+    let mut refused = Vec::new();
+    for (server, result) in &results {
+        if result.status.success() {
+            let report = install_report(result);
+            assert_eq!(report["installed"], true, "{report}");
+            assert_eq!(report["changed"], true, "{report}");
+            let entry = &report["entry"]["hooks"]["PostToolUse"][0];
+            assert_eq!(entry["matcher"], format!("mcp__{server}__.*"));
+            assert_eq!(hooks.iter().filter(|hook| *hook == entry).count(), 1);
+            installed += 1;
+        } else {
+            let error = install_error(result);
+            assert!(
+                matches!(
+                    error["message"].as_str().unwrap(),
+                    "Another hook installation is running. Retry."
+                        | "Settings changed during installation. Retry."
+                ),
+                "{error}"
+            );
+            assert!(result.stdout.is_empty());
+            refused.push(server);
+        }
+    }
+    assert!(installed > 0);
+    assert_eq!(hooks.len(), 1 + installed);
+    let mut without_installed = after;
+    without_installed["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(1);
+    assert_eq!(
+        without_installed,
+        serde_json::from_str::<Value>(&original).unwrap()
+    );
+    let insertion = original.find(existing).unwrap() + existing.len();
+    assert!(saved.starts_with(&original[..insertion]));
+    assert!(saved.ends_with(&original[insertion..]));
+    for server in refused {
+        assert_eq!(
+            report(&mut install_for(&home.0, "codex", server))["installed"],
+            true
+        );
+    }
+    let saved: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    let hooks = saved["hooks"]["PostToolUse"].as_array().unwrap();
+    assert_eq!(hooks.len(), 3);
+    for server in ["first", "second"] {
+        assert_eq!(
+            hooks
+                .iter()
+                .filter(|hook| hook["matcher"] == format!("mcp__{server}__.*"))
+                .count(),
+            1
+        );
+    }
 }

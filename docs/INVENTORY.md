@@ -374,6 +374,12 @@ Use `--install` to write the hook for clients marked **Writes** below. The JSON 
 cqlmatic env capture --client CLIENT --server SERVER --install
 ```
 
+`--dry-run` checks the settings and previews the merge without creating files or directories. The installer checks for links at the settings filename. It writes JSON only to a fresh temporary file, without reusing or truncating any existing file, and publishes complete JSON at the settings path in one step. Installations using the same CQLmatic data directory share a per-user lock. A second install is refused while the lock is held and can retry. Killing the installer leaves the settings intact and releases the lock. A later install can clear leftover temporary files.
+
+The installer reports the entry and the reason for manual installation if the settings path is a link or a non-regular file, or if the settings file or directory belongs to another user or is writable by everyone. It accepts a symlinked parent directory on Unix. A group-writable directory is allowed because anyone who can already write there can change the client's hooks directly. On Windows the installer checks the owner SID and Everyone write grants. Replacement preserves Unix permission bits and group ownership. Extended Unix ACLs are outside that check. Windows installs use a private access list for the new file.
+
+The lock coordinates CQLmatic installations. A save by another program between the final reread and replacement can be lost. On Unix, a link swapped in during the read-only open can be followed before the identity check. If the capture command is already under a different matcher or paired with a different shell command, the report asks you to review the entry by hand.
+
 | `--client` | Hook event and where it is registered | `SERVER` | `--install` |
 | --- | --- | --- | --- |
 | `claude-code` | `PostToolUse` in `~/.claude/settings.json` | As in tool names, `mcp__SERVER__TOOL` | **Writes**, honors `CLAUDE_CONFIG_DIR` |

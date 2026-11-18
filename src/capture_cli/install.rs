@@ -1,13 +1,19 @@
 //! Writes the user-level hook for clients with a supported settings file.
 use super::{CaptureArgs, Client};
+use crate::{inventory_cli, setup_cli};
 use clap::ValueEnum;
 use cqlmatic::{contracts::Diagnostic, mcp};
 use serde_json::{Value, json, value::RawValue};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::{
     collections::BTreeMap,
     env, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
@@ -15,11 +21,16 @@ const POST_TOOL_USE: &str = "PostToolUse";
 const COPILOT_EVENT: &str = "postToolUse";
 
 pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
+    if args.server.is_empty() {
+        return Err(crate::input_error("--server must be non-empty."));
+    }
     let client = args.client;
     let name = client
         .to_possible_value()
         .expect("A capture client has a name");
     let mut next_actions = Vec::new();
+    let mut refusal = None;
+    let _lock;
     let (path, event, command, entry, installed, changed) = if let Some(path) = config_path(client)?
     {
         let copilot = is_copilot(client);
@@ -51,28 +62,34 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 "Cannot report a non-Unicode settings path",
             )
         })?;
-        let settings = read_settings(&path)?;
-        let (installed, changed) = if matches!(settings, Settings::Link) {
-            let kind = if cfg!(windows) {
-                "a symbolic link or reparse point"
-            } else {
-                "a symbolic link"
-            };
-            next_actions.push(format!(
-                "{destination} is {kind}. Merge the reported entry into the linked settings file."
-            ));
-            (false, false)
-        } else {
-            let bytes = match &settings {
-                Settings::Missing => {
-                    let mut bytes = serde_json::to_vec_pretty(&entry).expect("JSON serializes");
-                    bytes.push(b'\n');
-                    Some(bytes)
-                }
-                Settings::File { bytes, .. } => merge(&path, bytes, event, &hook)?,
-                Settings::Link => unreachable!(),
-            };
-            if let Some(bytes) = bytes {
+        if !args.dry_run {
+            _lock = lock_installation()?;
+        }
+        let user = current_user()?;
+        let settings = read_settings(&path, &user)?;
+        let edit = match &settings {
+            Settings::Missing => {
+                let mut bytes = serde_json::to_vec_pretty(&entry).expect("JSON serializes");
+                bytes.push(b'\n');
+                Edit::Write(bytes)
+            }
+            Settings::File(snapshot) => merge(&path, &snapshot.bytes, event, &hook)?,
+            Settings::Manual(reason) => Edit::Manual(reason),
+            Settings::NonRegular => {
+                let reason = "Settings must be a regular file";
+                refusal = Some(file_error("LOCAL_FILE_TYPE", &path, reason));
+                Edit::Manual(reason)
+            }
+        };
+        let (installed, changed) = match edit {
+            Edit::Manual(reason) => {
+                next_actions.push(format!(
+                    "{reason} ({destination}). Review and merge the reported entry by hand."
+                ));
+                (false, false)
+            }
+            Edit::Installed => (true, false),
+            Edit::Write(bytes) => {
                 if bytes.len() as u64 > MAX_SETTINGS_BYTES {
                     return Err(file_error(
                         "LOCAL_SIZE",
@@ -80,12 +97,30 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                         "Updated settings exceed the byte limit",
                     ));
                 }
-                if !args.dry_run {
-                    replace(&path, &settings, &bytes)?;
+                #[cfg(windows)]
+                if matches!(&settings, Settings::File(snapshot) if snapshot.stamp.mode != 0) {
+                    return Err(file_error(
+                        "LOCAL_IO",
+                        &path,
+                        "Cannot replace read-only settings",
+                    ));
                 }
-                (!args.dry_run, true)
-            } else {
-                (true, false)
+                if !args.dry_run {
+                    match replace(&path, settings, &user, &bytes)? {
+                        Replacement::Manual(reason) => {
+                            next_actions.push(format!(
+                                "{reason} ({destination}). Merge the reported entry by hand."
+                            ));
+                            (false, false)
+                        }
+                        Replacement::Installed(warning) => {
+                            next_actions.extend(warning);
+                            (true, true)
+                        }
+                    }
+                } else {
+                    (false, true)
+                }
             }
         };
         if client == Client::Codex {
@@ -124,7 +159,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         })
         .to_string(),
     )?;
-    Ok(0)
+    refusal.map_or(Ok(0), Err)
 }
 
 fn is_copilot(client: Client) -> bool {
@@ -345,66 +380,269 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
 
 enum Settings {
     Missing,
-    Link,
-    File {
-        bytes: Vec<u8>,
-        metadata: fs::Metadata,
-    },
+    Manual(&'static str),
+    NonRegular,
+    File(Snapshot),
 }
 
-fn read_settings(path: &Path) -> Result<Settings, Diagnostic> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(meta) if is_link(&meta) => return Ok(Settings::Link),
-        Ok(meta) if meta.is_file() => meta,
-        Ok(_) => {
+struct Snapshot {
+    bytes: Vec<u8>,
+    stamp: Stamp,
+    // Keep the inode alive until the final comparison so its identity cannot be reused.
+    _file: fs::File,
+}
+
+#[derive(PartialEq, Eq)]
+struct Stamp {
+    identity: (u64, u64),
+    mode: u32,
+    length: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    group: u32,
+}
+
+impl Snapshot {
+    fn matches(&self, other: &Self) -> bool {
+        self.stamp == other.stamp && self.bytes == other.bytes
+    }
+}
+
+fn read_options() -> fs::OpenOptions {
+    let mut options = fs::File::options();
+    options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    options
+}
+
+fn lock_installation() -> Result<fs::File, Diagnostic> {
+    let state = inventory_cli::state_path(None)?;
+    let directory = settings_directory(&state);
+    setup_cli::protect_directory(directory)?;
+    let path = directory.join("hook-install.lock");
+    #[cfg(windows)]
+    setup_cli::create_windows_private_file(&path)?;
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if is_link(&meta) || !meta.is_file() => {
             return Err(file_error(
                 "LOCAL_FILE_TYPE",
-                path,
-                "Settings must be a regular file",
+                &path,
+                "Hook installation lock must be a regular file",
             ));
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Settings::Missing),
-        Err(e) => return Err(io_error(path, "Cannot inspect settings", e)),
-    };
-    if metadata.len() > MAX_SETTINGS_BYTES {
+        Ok(_) => setup_cli::verify_private_file(&path)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_error(&path, "Cannot inspect hook installation lock", e)),
+    }
+    let mut options = read_options();
+    options.write(true);
+    #[cfg(unix)]
+    options.create(true).truncate(false).mode(0o600);
+    let lock = options
+        .open(&path)
+        .map_err(|e| io_error(&path, "Cannot open hook installation lock", e))?;
+    let metadata = lock
+        .metadata()
+        .map_err(|e| io_error(&path, "Cannot inspect open hook installation lock", e))?;
+    if is_link(&metadata) || !metadata.is_file() || metadata.len() != 0 {
         return Err(file_error(
-            "LOCAL_SIZE",
-            path,
-            "Settings exceed the byte limit",
+            "LOCAL_FILE_TYPE",
+            &path,
+            "Hook installation lock must be an empty regular file",
         ));
     }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(fs::TryLockError::WouldBlock) => Err(Diagnostic::error(
+            "LOCAL_IO",
+            "Another hook installation is running. Retry.",
+        )),
+        Err(fs::TryLockError::Error(e)) => {
+            Err(io_error(&path, "Cannot lock hook installation lock", e))
+        }
     }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
-    }
+}
+
+#[cfg(unix)]
+type User = u32;
+#[cfg(windows)]
+type User = String;
+
+fn current_user() -> Result<User, Diagnostic> {
+    #[cfg(unix)]
+    let user = setup_cli::current_unix_uid();
     #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let user = setup_cli::windows_acl::current_user()
+        .ok_or_else(|| Diagnostic::error("LOCAL_IO", "Cannot identify the current Windows user."));
+    user
+}
+
+fn settings_directory(path: &Path) -> &Path {
+    path.parent()
+        .expect("An absolute settings path has a parent")
+}
+
+fn permission_issue(
+    path: &Path,
+    metadata: &fs::Metadata,
+    user: &User,
+) -> Result<Option<&'static str>, Diagnostic> {
+    #[cfg(unix)]
+    let (owned, shared) = {
+        let _ = path;
+        (metadata.uid() == *user, mode(metadata) & 0o002 != 0)
+    };
+    #[cfg(windows)]
+    let (owned, shared) = {
+        let directory;
+        let inspected = if metadata.is_dir() {
+            directory = fs::canonicalize(path)
+                .map_err(|e| io_error(path, "Cannot resolve settings directory", e))?;
+            &directory
+        } else {
+            path
+        };
+        setup_cli::windows_acl::hook_permissions(inspected, metadata.is_dir(), user).ok_or_else(
+            || {
+                file_error(
+                    "LOCAL_IO",
+                    path,
+                    "Cannot inspect settings ownership and access rules",
+                )
+            },
+        )?
+    };
+    Ok(match (metadata.is_dir(), owned, shared) {
+        (true, false, _) => Some("Settings directory is owned by another user"),
+        (false, false, _) => Some("Settings file is owned by another user"),
+        (true, true, true) => Some("Settings directory is writable by everyone"),
+        (false, true, true) => Some("Settings file is writable by everyone"),
+        (_, true, false) => None,
+    })
+}
+
+fn directory_issue(path: &Path, user: &User) -> Result<Option<&'static str>, Diagnostic> {
+    // If the directory is missing, check where it would be created. Directory aliases are allowed.
+    for directory in settings_directory(path).ancestors() {
+        match fs::metadata(directory) {
+            Ok(meta) if meta.is_dir() => return permission_issue(directory, &meta, user),
+            Ok(_) => {
+                return Err(file_error(
+                    "LOCAL_FILE_TYPE",
+                    directory,
+                    "Settings parent must be a directory",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_error(directory, "Cannot inspect settings directory", e)),
+        }
     }
-    let file = options
+    Err(file_error(
+        "LOCAL_IO",
+        path,
+        "Cannot locate settings directory",
+    ))
+}
+
+fn mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    return metadata.permissions().mode() & 0o7777;
+    #[cfg(windows)]
+    return u32::from(metadata.permissions().readonly());
+}
+
+#[cfg(unix)]
+fn unix_identity(metadata: &fs::Metadata) -> (u64, u64) {
+    (metadata.dev(), metadata.ino())
+}
+
+const LINK_REASON: &str = if cfg!(windows) {
+    "Settings path is a symbolic link or reparse point"
+} else {
+    "Settings path is a symbolic link"
+};
+
+fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
+    let inspected = match fs::symlink_metadata(path) {
+        Ok(meta) if is_link(&meta) => return Ok(Settings::Manual(LINK_REASON)),
+        Ok(meta) if meta.is_file() => Some(meta),
+        Ok(_) => return Ok(Settings::NonRegular),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(io_error(path, "Cannot inspect settings", e)),
+    };
+    if let Some(meta) = &inspected
+        && let Some(reason) = permission_issue(path, meta, user)?
+    {
+        return Ok(Settings::Manual(reason));
+    }
+    if let Some(reason) = directory_issue(path, user)? {
+        return Ok(Settings::Manual(reason));
+    }
+    let Some(inspected) = inspected else {
+        return Ok(Settings::Missing);
+    };
+
+    let file = read_options()
         .open(path)
         .map_err(|e| io_error(path, "Cannot open settings", e))?;
     let metadata = file
         .metadata()
         .map_err(|e| io_error(path, "Cannot inspect open settings", e))?;
     if is_link(&metadata) {
-        return Ok(Settings::Link);
+        return Ok(Settings::Manual(LINK_REASON));
     }
     if !metadata.is_file() {
+        return Err(settings_changed());
+    }
+    #[cfg(unix)]
+    {
+        let current = fs::symlink_metadata(path)
+            .map_err(|e| io_error(path, "Cannot re-inspect settings", e))?;
+        if is_link(&current) {
+            return Ok(Settings::Manual(LINK_REASON));
+        }
+        if !current.is_file() || unix_identity(&current) != unix_identity(&metadata) {
+            return Err(settings_changed());
+        }
+        if let Some(reason) = permission_issue(path, &current, user)? {
+            return Ok(Settings::Manual(reason));
+        }
+    }
+    if let Some(reason) = permission_issue(path, &metadata, user)? {
+        return Ok(Settings::Manual(reason));
+    }
+    let modified = |meta: &fs::Metadata| {
+        meta.modified()
+            .map_err(|e| io_error(path, "Cannot read settings modification time", e))
+    };
+    let stamp = Stamp {
+        #[cfg(unix)]
+        identity: unix_identity(&metadata),
+        #[cfg(windows)]
+        identity: setup_cli::windows_file_identity(&file)
+            .map_err(|e| io_error(path, "Cannot identify open settings", e))?,
+        mode: mode(&metadata),
+        length: metadata.len(),
+        modified: modified(&metadata)?,
+        #[cfg(unix)]
+        group: metadata.gid(),
+    };
+    if inspected.len() != stamp.length
+        || mode(&inspected) != stamp.mode
+        || modified(&inspected)? != stamp.modified
+    {
+        return Err(settings_changed());
+    }
+    #[cfg(unix)]
+    if unix_identity(&inspected) != stamp.identity || inspected.gid() != stamp.group {
+        return Err(settings_changed());
+    }
+    if stamp.length > MAX_SETTINGS_BYTES {
         return Err(file_error(
-            "LOCAL_FILE_TYPE",
+            "LOCAL_SIZE",
             path,
-            "Settings changed to a non-file",
+            "Settings exceed the byte limit",
         ));
     }
     let mut bytes = Vec::new();
@@ -419,7 +657,14 @@ fn read_settings(path: &Path) -> Result<Settings, Diagnostic> {
             "Settings exceed the byte limit",
         ));
     }
-    Ok(Settings::File { bytes, metadata })
+    if bytes.len() as u64 != stamp.length {
+        return Err(settings_changed());
+    }
+    Ok(Settings::File(Snapshot {
+        bytes,
+        stamp,
+        _file: file,
+    }))
 }
 
 fn is_link(metadata: &fs::Metadata) -> bool {
@@ -435,12 +680,13 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn merge(
-    path: &Path,
-    bytes: &[u8],
-    event: &str,
-    hook: &Value,
-) -> Result<Option<Vec<u8>>, Diagnostic> {
+enum Edit {
+    Write(Vec<u8>),
+    Installed,
+    Manual(&'static str),
+}
+
+fn merge(path: &Path, bytes: &[u8], event: &str, hook: &Value) -> Result<Edit, Diagnostic> {
     let invalid = || {
         file_error(
             "CLI_INPUT",
@@ -450,7 +696,17 @@ fn merge(
     };
     // Require a single JSON value. The shared parser additionally checks for duplicate keys.
     let raw: &RawValue = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-    let value = mcp::parse_saved_result(bytes).map_err(|_| invalid())?;
+    let value = mcp::parse_saved_result(bytes).map_err(|_| {
+        // Distinguish duplicate keys from values outside the parser's representation limits.
+        match serde_json::from_slice::<Value>(bytes) {
+            Ok(_) => invalid(),
+            Err(e) => file_error(
+                "CLI_INPUT",
+                path,
+                &format!("Cannot read settings JSON. {e}"),
+            ),
+        }
+    })?;
     let root = value
         .as_object()
         .ok_or_else(|| file_error("CLI_INPUT", path, "Settings must contain a JSON object"))?;
@@ -484,10 +740,19 @@ fn merge(
                     &format!("Expected hooks.{event} to be a JSON array"),
                 )
             })?;
-            if !entries
-                .iter()
-                .any(|existing| registers(existing, hook, event))
-            {
+            let mut installed = false;
+            for existing in entries {
+                match matching_command(existing, hook, event) {
+                    Some(true) => installed = true,
+                    Some(false) => {
+                        return Ok(Edit::Manual(
+                            "The capture command is part of a different hook entry",
+                        ));
+                    }
+                    None => {}
+                }
+            }
+            if !installed {
                 let hook_fields: BTreeMap<String, &RawValue> =
                     serde_json::from_str(raw_hooks.get()).map_err(|_| invalid())?;
                 inner = Some((
@@ -519,26 +784,33 @@ fn merge(
         additions.push(insertion(bytes, container, nonempty, &text));
     }
     if additions.is_empty() {
-        return Ok(None);
+        return Ok(Edit::Installed);
     }
     let mut output = bytes.to_vec();
     // Outer containers end later, so their insertions leave inner byte offsets valid.
     for (offset, addition) in additions {
         output.splice(offset..offset, addition.bytes());
     }
-    Ok(Some(output))
+    Ok(Edit::Write(output))
 }
 
-fn registers(existing: &Value, hook: &Value, event: &str) -> bool {
+// When our command is present, report whether the entry registers it as requested.
+fn matching_command(existing: &Value, hook: &Value, event: &str) -> Option<bool> {
     if event == COPILOT_EVENT {
-        return existing["type"] == "command"
-            && (existing["bash"] == hook["bash"] || existing["powershell"] == hook["powershell"]);
+        let bash = existing["bash"] == hook["bash"];
+        let powershell = existing["powershell"] == hook["powershell"];
+        return (bash || powershell).then_some(existing["type"] == "command" && bash && powershell);
     }
-    existing["hooks"].as_array().is_some_and(|commands| {
-        commands.iter().any(|command| {
-            command["type"] == "command" && command["command"] == hook["hooks"][0]["command"]
-        })
-    })
+    let commands = existing["hooks"].as_array()?;
+    let mut matching = commands
+        .iter()
+        .filter(|command| command["command"] == hook["hooks"][0]["command"])
+        .peekable();
+    matching.peek()?;
+    Some(
+        existing["matcher"] == hook["matcher"]
+            && matching.any(|command| command["type"] == "command"),
+    )
 }
 
 fn members(object: &Value) -> String {
@@ -572,135 +844,207 @@ fn insertion(bytes: &[u8], raw: &RawValue, nonempty: bool, text: &str) -> (usize
     )
 }
 
-fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnostic> {
-    let parent = path
-        .parent()
-        .expect("An absolute settings path has a parent");
-    fs::create_dir_all(parent)
-        .map_err(|e| io_error(path, "Cannot create settings directory", e))?;
+enum Replacement {
+    Manual(&'static str),
+    Installed(Option<String>),
+}
+
+fn replace(
+    path: &Path,
+    settings: Settings,
+    user: &User,
+    bytes: &[u8],
+) -> Result<Replacement, Diagnostic> {
+    let snapshot = match settings {
+        Settings::Missing => None,
+        Settings::File(snapshot) => Some(snapshot),
+        _ => unreachable!("Only writable settings reach replacement"),
+    };
+    let parent = settings_directory(path);
+    if snapshot.is_none() {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder
+            .create(parent)
+            .map_err(|e| io_error(path, "Cannot create settings directory", e))?;
+        if let Some(reason) = directory_issue(path, user)? {
+            return Ok(Replacement::Manual(reason));
+        }
+    }
 
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .expect("A known settings filename");
-    // The candidate file is also the lock between installations: whoever holds its lock may
-    // write it and move it into place. The lock ends with the process, so a candidate left by
-    // an interrupted installation is simply taken over.
-    let temporary = parent.join(format!(".{name}.cqlmatic.tmp"));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temporary)
-        .map_err(|e| io_error(path, "Cannot create settings candidate", e))?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => {
-            return Err(file_error(
-                "LOCAL_IO",
-                path,
-                "Another installation is writing these settings. Retry",
-            ));
-        }
-        Err(fs::TryLockError::Error(e)) => {
-            return Err(io_error(path, "Cannot lock settings candidate", e));
-        }
-    }
-    let staged = (|| {
-        file.set_len(0)
-            .map_err(|e| io_error(path, "Cannot clear settings candidate", e))?;
-        if let Settings::File { metadata, .. } = settings {
-            #[cfg(unix)]
-            {
-                let candidate = file
-                    .metadata()
-                    .map_err(|e| io_error(path, "Cannot inspect settings candidate", e))?;
-                check_owner(path, metadata, &candidate)?;
-            }
-            #[cfg(windows)]
-            if metadata.permissions().readonly() {
-                return Err(file_error(
-                    "LOCAL_IO",
-                    path,
-                    "Cannot replace read-only settings",
-                ));
-            }
-            file.write_all(bytes)
-                .and_then(|()| file.set_permissions(metadata.permissions()))
-        } else {
-            file.write_all(bytes)
-        }
-        .and_then(|()| file.sync_all())
-        .map_err(|e| io_error(path, "Cannot write settings candidate", e))
-    })();
-    let result = staged.and_then(|()| {
-        let changed = || {
-            file_error(
-                "LOCAL_IO",
-                path,
-                "Settings changed during installation. Inspect the file and retry",
-            )
-        };
-        // This reread catches a change made since the settings were first read. A save by
-        // another program in the instant between it and the rename is not detected.
-        match (settings, read_settings(path)?) {
-            (Settings::Missing, Settings::Missing) => {
-                // Creation must fail if another process created the destination in the meantime.
-                fs::hard_link(&temporary, path).and_then(|()| fs::remove_file(&temporary))
-            }
-            (
-                Settings::File {
-                    bytes, metadata, ..
-                },
-                Settings::File {
-                    bytes: current,
-                    metadata: current_meta,
-                    ..
-                },
-            ) => {
-                #[cfg(unix)]
-                check_owner(path, &current_meta, metadata)?;
-                if *bytes != current
-                    || metadata.permissions() != current_meta.permissions()
-                    || metadata.modified().ok() != current_meta.modified().ok()
-                {
-                    return Err(changed());
+    let prefix = format!(".{name}.cqlmatic.");
+    let (temporary, file) = create_candidate(parent, &prefix)?;
+    let commit = (|| {
+        write_candidate(path, file, snapshot.as_ref().map(|s| &s.stamp), bytes)?;
+        if let Some(original) = snapshot {
+            // The client can still save after this check and before the rename.
+            let current = read_settings(path, user).map_err(|error| {
+                if error.code == "LOCAL_SIZE" {
+                    settings_changed()
+                } else {
+                    error
                 }
-                fs::rename(&temporary, path)
+            })?;
+            if !matches!(current, Settings::File(ref current) if original.matches(current)) {
+                return Err(settings_changed());
             }
-            _ => return Err(changed()),
+            drop(current);
+            drop(original);
+            fs::rename(&temporary, path)
+                .map_err(|e| io_error(path, "Cannot replace settings", e))?;
+            Ok(None)
+        } else {
+            fs::hard_link(&temporary, path).map_err(|e| {
+                if e.kind() == io::ErrorKind::AlreadyExists || fs::symlink_metadata(path).is_ok() {
+                    file_error(
+                        "LOCAL_IO",
+                        path,
+                        "Settings appeared during installation. Retry",
+                    )
+                } else {
+                    io_error(path, "Cannot publish new settings", e)
+                }
+            })?;
+            Ok(fs::remove_file(&temporary).err().map(|e| {
+                format!("Warning. The hook was installed, but the temporary file could not be removed ({}). {e}", temporary.display())
+            }))
         }
-        .map_err(|e| io_error(path, "Cannot activate settings candidate", e))
-    });
-    if result.is_err() {
-        fs::remove_file(&temporary)
-            .map_err(|e| io_error(path, "Cannot remove settings candidate", e))?;
-    }
-    // The lock is held until the candidate is in place or removed.
-    drop(file);
-    result
+    })();
+    let warning = commit.map_err(|error| cleanup_failed_install(&temporary, error))?;
+    cleanup_leftovers(parent, &prefix, &temporary);
+    Ok(Replacement::Installed(warning))
 }
 
-#[cfg(unix)]
-fn check_owner(
-    path: &Path,
-    settings: &fs::Metadata,
-    candidate: &fs::Metadata,
-) -> Result<(), Diagnostic> {
-    use std::os::unix::fs::MetadataExt;
+fn create_candidate(parent: &Path, prefix: &str) -> Result<(PathBuf, fs::File), Diagnostic> {
+    #[cfg(unix)]
+    let mut options = fs::File::options();
+    #[cfg(unix)]
+    options.write(true).create_new(true).mode(0o600);
+    for counter in 0..u64::MAX {
+        let path = parent.join(format!("{prefix}{}.{counter}.tmp", std::process::id()));
+        #[cfg(unix)]
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(io_error(&path, "Cannot create temporary settings", e)),
+        }
+        #[cfg(windows)]
+        {
+            if !setup_cli::create_windows_private_file(&path)? {
+                continue;
+            }
+            let file = read_options().write(true).open(&path).map_err(|e| {
+                cleanup_failed_install(&path, io_error(&path, "Cannot open temporary settings", e))
+            })?;
+            return Ok((path, file));
+        }
+    }
+    Err(file_error(
+        "LOCAL_IO",
+        parent,
+        "Cannot find a fresh temporary settings name",
+    ))
+}
 
-    if settings.uid() != candidate.uid() {
+fn write_candidate(
+    path: &Path,
+    file: fs::File,
+    previous: Option<&Stamp>,
+    bytes: &[u8],
+) -> Result<(), Diagnostic> {
+    let inspect = || {
+        file.metadata()
+            .map_err(|e| io_error(path, "Cannot inspect temporary settings", e))
+    };
+    #[cfg(windows)]
+    {
+        let metadata = inspect()?;
+        if !metadata.is_file() || is_link(&metadata) || metadata.len() != 0 {
+            return Err(settings_changed());
+        }
+    }
+    (&file)
+        .write_all(bytes)
+        .map_err(|e| io_error(path, "Cannot write temporary settings", e))?;
+    #[cfg(unix)]
+    if let Some(previous) = previous
+        && inspect()?.gid() != previous.group
+    {
+        std::os::unix::fs::fchown(&file, None, Some(previous.group))
+            .map_err(|e| io_error(path, "Cannot preserve settings group", e))?;
+    }
+    #[cfg(unix)]
+    let expected = previous.map_or(0o600, |s| s.mode);
+    #[cfg(windows)]
+    let expected = previous.map_or(0, |s| s.mode);
+    #[cfg(unix)]
+    let permissions = fs::Permissions::from_mode(expected);
+    #[cfg(windows)]
+    let permissions = {
+        let mut permissions = inspect()?.permissions();
+        permissions.set_readonly(expected != 0);
+        permissions
+    };
+    file.set_permissions(permissions)
+        .map_err(|e| io_error(path, "Cannot set temporary settings permissions", e))?;
+    let actual = inspect()?;
+    if mode(&actual) != expected {
         return Err(file_error(
             "LOCAL_IO",
             path,
-            "Settings file has a different owner. Add the hook entry by hand",
+            "Cannot verify temporary settings permissions",
         ));
     }
-    Ok(())
+    #[cfg(unix)]
+    if previous.is_some_and(|s| s.group != actual.gid()) {
+        return Err(file_error(
+            "LOCAL_IO",
+            path,
+            "Cannot verify temporary settings group",
+        ));
+    }
+    file.sync_all()
+        .map_err(|e| io_error(path, "Cannot sync temporary settings", e))
+}
+
+fn cleanup_failed_install(temporary: &Path, mut error: Diagnostic) -> Diagnostic {
+    if let Err(cleanup) = fs::remove_file(temporary) {
+        error.message.push_str(&format!(
+            " Cannot remove the temporary file ({}). {cleanup}",
+            temporary.display()
+        ));
+    }
+    error
+}
+
+fn cleanup_leftovers(parent: &Path, prefix: &str, temporary: &Path) {
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix(prefix))
+                .is_some_and(|rest| rest.ends_with(".tmp"))
+            {
+                let path = entry.path();
+                if path != temporary
+                    && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !is_link(&m))
+                {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    }
+}
+
+fn settings_changed() -> Diagnostic {
+    Diagnostic::error("LOCAL_IO", "Settings changed during installation. Retry.")
 }
 
 fn file_error(code: &str, path: &Path, message: &str) -> Diagnostic {
@@ -709,4 +1053,106 @@ fn file_error(code: &str, path: &Path, message: &str) -> Diagnostic {
 
 fn io_error(path: &Path, message: &str, error: io::Error) -> Diagnostic {
     file_error("LOCAL_IO", path, &format!("{message}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new(name: &str) -> Self {
+            let path =
+                env::temp_dir().join(format!("cqlmatic-install-{}-{name}", std::process::id()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_occupied_candidates_and_cleans_regular_leftovers() {
+        let temp = Temp::new("candidates");
+        let path = temp.0.join("hooks.json");
+        let prefix = format!(".hooks.json.cqlmatic.{}", std::process::id());
+        let symlink = temp.0.join(format!("{prefix}.0.tmp"));
+        let regular = temp.0.join(format!("{prefix}.1.tmp"));
+        let leftover = temp.0.join(".hooks.json.cqlmatic.123.4.tmp");
+        let sentinel = temp.0.join("sentinel");
+        let unrelated = temp.0.join(".hooks.json.cqlmatic.tmp");
+        fs::write(&sentinel, b"sentinel").unwrap();
+        fs::write(&leftover, b"leftover").unwrap();
+        fs::write(&unrelated, b"unrelated").unwrap();
+        std::os::unix::fs::symlink(&sentinel, &symlink).unwrap();
+        fs::hard_link(&sentinel, &regular).unwrap();
+
+        let result = replace(&path, Settings::Missing, &current_user().unwrap(), b"{}").unwrap();
+        assert!(matches!(result, Replacement::Installed(None)));
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        assert_eq!(fs::read_link(&symlink).unwrap(), sentinel);
+        assert_eq!(fs::read(sentinel).unwrap(), b"sentinel");
+        assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
+        assert!(!regular.exists());
+        assert!(!leftover.exists());
+        assert!(!temp.0.join(format!("{prefix}.2.tmp")).exists());
+    }
+
+    #[test]
+    fn detects_a_different_file_with_identical_bytes_and_metadata() {
+        let temp = Temp::new("identity");
+        let path = temp.0.join("hooks.json");
+        fs::write(&path, b"{}").unwrap();
+        let user = current_user().unwrap();
+        let Settings::File(original) = read_settings(&path, &user).unwrap() else {
+            panic!("Expected regular settings");
+        };
+        let away = temp.0.join("old");
+        fs::rename(&path, &away).unwrap();
+        fs::write(&path, b"{}").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(original.stamp.modified)
+            .unwrap();
+        let Settings::File(current) = read_settings(&path, &user).unwrap() else {
+            panic!("Expected regular replacement");
+        };
+        assert_eq!(original.stamp.modified, current.stamp.modified);
+        assert_eq!(original.stamp.mode, current.stamp.mode);
+        assert_eq!(original.bytes, current.bytes);
+        drop(current);
+        let result = replace(&path, Settings::File(original), &user, br#"{"hook":true}"#);
+        assert_eq!(
+            result.err().unwrap().message,
+            "Settings changed during installation. Retry."
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"{}");
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn creation_keeps_settings_that_appeared_after_the_read() {
+        let temp = Temp::new("appeared");
+        let path = temp.0.join("hooks.json");
+        let user = current_user().unwrap();
+        let settings = read_settings(&path, &user).unwrap();
+        assert!(matches!(settings, Settings::Missing));
+        fs::write(&path, br#"{"keep":true}"#).unwrap();
+        let result = replace(&path, settings, &user, br#"{"hook":true}"#);
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .message
+                .contains("Settings appeared during installation")
+        );
+        assert_eq!(fs::read(&path).unwrap(), br#"{"keep":true}"#);
+        assert_eq!(fs::read_dir(&temp.0).unwrap().count(), 1);
+    }
 }
