@@ -40,8 +40,11 @@ impl Temp {
     }
     /// Confirms a selected-source target in view `third-party` with source `#type=synthetic`.
     fn confirm(&self) {
+        self.confirm_at(&self.state());
+    }
+    fn confirm_at(&self, state: &Path) {
         self.act_on(
-            &self.state(),
+            state,
             json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic capture target","expected_sources":[{"type":"synthetic"}]}),
         );
     }
@@ -130,6 +133,566 @@ fn search(query: &str, response: Value) -> Value {
 
 fn body(rows: Value) -> String {
     json!({"result": rows, "trace_id": "00000000-0000-0000-0000-000000000000"}).to_string()
+}
+
+const WRITTEN_CLIENTS: [(&str, &str, &str, &str); 5] = [
+    (
+        "claude-code",
+        "CLAUDE_CONFIG_DIR",
+        ".claude",
+        "settings.json",
+    ),
+    ("codex", "CODEX_HOME", ".codex", "hooks.json"),
+    (
+        "copilot-cli",
+        "COPILOT_HOME",
+        ".copilot",
+        "hooks/cqlmatic-capture.json",
+    ),
+    (
+        "copilot-app",
+        "COPILOT_HOME",
+        ".copilot",
+        "hooks/cqlmatic-capture.json",
+    ),
+    (
+        "copilot-vscode",
+        "COPILOT_HOME",
+        ".copilot",
+        "hooks/cqlmatic-capture.json",
+    ),
+];
+
+fn isolated<'a>(command: &'a mut Command, home: &Path) -> &'a mut Command {
+    command
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("COPILOT_HOME")
+}
+
+fn install(home: &Path, client: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
+    isolated(&mut command, home).args([
+        "env",
+        "capture",
+        "--client",
+        client,
+        "--server",
+        SERVER,
+        "--install",
+    ]);
+    command
+}
+
+fn report(command: &mut Command) -> Value {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
+    for (client, variable, default, file) in WRITTEN_CLIENTS {
+        let home = Temp::new();
+        let root = home.0.join("relocated client");
+        let file = root.join(file);
+        let state = home.0.join("inventory's state.json");
+        let mut command = install(&home.0, client);
+        command
+            .env(variable, root)
+            .args(["--program", "launcher --label capture", "--state"])
+            .arg(&state);
+        let preview = report(command.arg("--dry-run"));
+        assert_eq!(preview["path"], json!(file), "{client}");
+        assert_eq!(preview["changed"], true);
+        assert_eq!(preview["installed"], false);
+        assert_eq!(preview["dry_run"], true);
+        assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
+        let mut command = install(&home.0, client);
+        command
+            .env(variable, home.0.join("relocated client"))
+            .args(["--program", "launcher --label capture", "--state"])
+            .arg(&state);
+        let fresh = report(&mut command);
+        assert_eq!(fresh["changed"], true);
+        assert_eq!(fresh["installed"], true);
+        assert_eq!(fresh["dry_run"], false);
+        for field in ["path", "event", "command", "entry", "next_actions"] {
+            assert_eq!(fresh[field], preview[field], "{client}, {field}");
+        }
+        let check_command = |value: &Value| {
+            let value = value.as_str().unwrap();
+            assert!(value.starts_with(&format!("launcher --label capture env capture --client {client} --server '{SERVER}' --state ")));
+            assert!(value.contains("inventory"), "{value}");
+            assert!(value.contains("state.json"), "{value}");
+        };
+        let expected = if client.starts_with("copilot-") {
+            assert_eq!(fresh["event"], "postToolUse");
+            check_command(&fresh["command"]["bash"]);
+            check_command(&fresh["command"]["powershell"]);
+            json!({"version": 1, "hooks": {"postToolUse": [{
+                "type": "command", "bash": fresh["command"]["bash"],
+                "powershell": fresh["command"]["powershell"],
+            }]}})
+        } else {
+            assert_eq!(fresh["event"], "PostToolUse");
+            check_command(&fresh["command"]);
+            json!({"hooks": {"PostToolUse": [{
+                "matcher": "mcp__synthetic-server__.*",
+                "hooks": [{"type": "command", "command": fresh["command"], "async": true}],
+            }]}})
+        };
+        if client == "codex" {
+            assert!(
+                fresh["next_actions"][0]
+                    .as_str()
+                    .unwrap()
+                    .contains("/hooks")
+            );
+        }
+        let original = fs::read(&file).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&original).unwrap(),
+            expected
+        );
+        let repeat = report(&mut command);
+        assert_eq!(repeat["installed"], true);
+        assert_eq!(repeat["changed"], false);
+        assert_eq!(fs::read(&file).unwrap(), original);
+        assert!(!home.0.join(default).exists());
+        assert_eq!(fs::read_dir(file.parent().unwrap()).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn capture_install_preserves_existing_settings_and_deduplicates_by_command() {
+    for (client, _, default, file) in WRITTEN_CLIENTS {
+        let home = Temp::new();
+        let file = home.0.join(default).join(file);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let copilot = client.starts_with("copilot-");
+        let event = if copilot {
+            "postToolUse"
+        } else {
+            "PostToolUse"
+        };
+        let version = if copilot { r#", "version": 1"# } else { "" };
+        let old_hook = if copilot {
+            r#"{"type":"command","bash":"another command"}"#
+        } else {
+            r#"{"matcher":"another","hooks":[{"type":"command","command":"another command"}]}"#
+        };
+        let original = format!(
+            "{{\r\n  \"z-before\": {{\"z\": 1e+01, \"a\": \"\\u0061\"}},\r\n  \"hooks\": {{\"unrelated\": [], \"{event}\": [{old_hook}]}},\r\n  \"a-after\": true{version}\r\n}}\r\n"
+        );
+        fs::write(&file, &original).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let mut command = install(&home.0, client);
+        let fresh = report(&mut command);
+        let after = fs::read_to_string(&file).unwrap();
+        let inserted_at = original.find(old_hook).unwrap() + old_hook.len();
+        assert!(after.starts_with(&original[..inserted_at]), "{after}");
+        assert!(after.ends_with(&original[inserted_at..]), "{after}");
+        let mut expected: Value = serde_json::from_str(&original).unwrap();
+        expected["hooks"][event]
+            .as_array_mut()
+            .unwrap()
+            .push(fresh["entry"]["hooks"][event][0].clone());
+        assert_eq!(serde_json::from_str::<Value>(&after).unwrap(), expected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o640
+            );
+        }
+
+        let hook = &mut expected["hooks"][event][1];
+        hook["extra-setting"] = json!(true);
+        if copilot {
+            hook["powershell"] = json!("another command");
+        } else {
+            hook["matcher"] = json!("alternate matcher");
+        }
+        let wanted = serde_json::to_vec(&expected).unwrap();
+        fs::write(&file, &wanted).unwrap();
+        let repeat = report(&mut command);
+        assert_eq!(repeat["changed"], false, "{client}");
+        assert_eq!(fs::read(&file).unwrap(), wanted, "{client}");
+    }
+}
+
+#[test]
+fn capture_install_adds_missing_containers() {
+    let home = Temp::new();
+    let file = home.0.join(".copilot/hooks/cqlmatic-capture.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    for original in [
+        r#"{"unrelated":true}"#,
+        r#"{"hooks":{}}"#,
+        r#"{"hooks":{"postToolUse":[]}}"#,
+    ] {
+        fs::write(&file, original).unwrap();
+        let fresh = report(&mut install(&home.0, "copilot-cli"));
+        assert_eq!(fresh["changed"], true);
+        let mut expected: Value = serde_json::from_str(original).unwrap();
+        expected["version"] = json!(1);
+        expected["hooks"] = fresh["entry"]["hooks"].clone();
+        let after = fs::read(&file).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&after).unwrap(), expected);
+        assert_eq!(
+            report(&mut install(&home.0, "copilot-cli"))["changed"],
+            false
+        );
+        assert_eq!(fs::read(&file).unwrap(), after);
+    }
+}
+
+#[test]
+fn capture_install_refuses_unsafe_or_invalid_settings() {
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    fs::create_dir(&root).unwrap();
+    let command = || install(&home.0, "codex");
+    let assert_refused = |code| {
+        let output = command().output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+        let d: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(d["code"], code);
+        assert!(
+            d["message"]
+                .as_str()
+                .unwrap()
+                .contains(file.to_str().unwrap()),
+            "{d}"
+        );
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    };
+    for bytes in [
+        &b"{"[..],
+        b"{} {}",
+        b"[]",
+        b"null",
+        br#"{"duplicate":1,"duplicate":2}"#,
+        br#"{"hooks":null}"#,
+        br#"{"hooks":[]}"#,
+        br#"{"hooks":{"PostToolUse":{}}}"#,
+        br#"{"hooks":{"PostToolUse":null}}"#,
+    ] {
+        fs::write(&file, bytes).unwrap();
+        assert_refused("CLI_INPUT");
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+    }
+    let oversized = vec![b' '; 8 * 1024 * 1024 + 1];
+    fs::write(&file, &oversized).unwrap();
+    assert_refused("LOCAL_SIZE");
+    assert_eq!(fs::read(&file).unwrap(), oversized);
+    fs::remove_file(&file).unwrap();
+    fs::create_dir(&file).unwrap();
+    assert_refused("LOCAL_FILE_TYPE");
+    assert!(file.is_dir());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn capture_install_reports_a_symbolic_link_for_manual_installation() {
+    let home = Temp::new();
+    let root = home.0.join(".claude");
+    let file = root.join("settings.json");
+    let target = home.0.join("settings.json");
+    fs::create_dir(&root).unwrap();
+    fs::write(&target, b"this file is never read or edited").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &file).unwrap();
+    #[cfg(windows)]
+    match std::os::windows::fs::symlink_file(&target, &file) {
+        Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
+        result => result.unwrap(),
+    }
+    let output = report(&mut install(&home.0, "claude-code"));
+    assert_eq!(output["installed"], false);
+    assert_eq!(output["changed"], false);
+    assert_eq!(output["path"], json!(file));
+    assert!(
+        output["next_actions"][0]
+            .as_str()
+            .unwrap()
+            .contains("linked")
+    );
+    assert_eq!(fs::read_link(&file).unwrap(), target);
+    assert_eq!(
+        fs::read(&target).unwrap(),
+        b"this file is never read or edited"
+    );
+    assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn capture_install_merges_settings_through_a_symlinked_directory() {
+    let home = Temp::new();
+    let root = home.0.join("settings");
+    let linked = home.0.join(".claude");
+    let file = root.join("settings.json");
+    fs::create_dir(&root).unwrap();
+    fs::write(&file, r#"{"existing":true}"#).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&root, &linked).unwrap();
+    #[cfg(windows)]
+    match std::os::windows::fs::symlink_dir(&root, &linked) {
+        Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
+        result => result.unwrap(),
+    }
+
+    let output = report(&mut install(&home.0, "claude-code"));
+    assert_eq!(output["installed"], true);
+    assert_eq!(output["changed"], true);
+    assert_eq!(output["path"], json!(linked.join("settings.json")));
+    let settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(settings["existing"], true);
+    assert_eq!(settings["hooks"], output["entry"]["hooks"]);
+    assert_eq!(fs::read_link(linked).unwrap(), root);
+    assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_creates_settings_in_a_group_writable_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o770)).unwrap();
+
+    let output = report(&mut install(&home.0, "codex"));
+    assert_eq!(output["installed"], true);
+    assert_eq!(output["changed"], true);
+    let settings: Value =
+        serde_json::from_slice(&fs::read(root.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(settings, output["entry"]);
+    assert_eq!(
+        fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o770
+    );
+}
+
+#[test]
+fn capture_install_prints_documented_manual_entries() {
+    let home = Temp::new();
+    for (client, path, event) in [
+        (
+            "cline",
+            Some("~/.cline/hooks/PostToolUse"),
+            Some("PostToolUse"),
+        ),
+        (
+            "cursor",
+            Some("~/.cursor/hooks.json"),
+            Some("afterMCPExecution"),
+        ),
+        (
+            "gemini-cli",
+            Some("~/.gemini/settings.json"),
+            Some("AfterTool"),
+        ),
+        (
+            "kiro",
+            Some("~/.kiro/hooks/cqlmatic-capture.json"),
+            Some("PostToolUse"),
+        ),
+        (
+            "qwen-code",
+            Some("~/.qwen/settings.json"),
+            Some("PostToolUse"),
+        ),
+        ("generic", None, None),
+    ] {
+        let output = report(install(&home.0, client).args(["--program", "launcher"]));
+        assert_eq!(output["installed"], false);
+        assert_eq!(output["changed"], false);
+        assert_eq!(output["path"], json!(path));
+        assert_eq!(output["event"], json!(event));
+        let command = format!("launcher env capture --client {client} --server '{SERVER}'");
+        assert_eq!(output["command"], command);
+        let expected = match client {
+            "cline" => json!(format!("#!/bin/sh\n{command}\necho '{{}}'\n")),
+            "cursor" => {
+                json!({"version": 1, "hooks": {"afterMCPExecution": [{"command": command}]}})
+            }
+            "gemini-cli" => json!({"hooks": {"AfterTool": [{
+                "matcher": "mcp_synthetic-server_.*", "hooks": [{"type":"command", "command": command}],
+            }]}}),
+            "kiro" => json!({"version": "v1", "hooks": [{
+                "name": "cqlmatic-capture", "trigger": "PostToolUse", "matcher": "@synthetic-server",
+                "action": {"type": "command", "command": command},
+            }]}),
+            "qwen-code" => json!({"hooks": {"PostToolUse": [{
+                "matcher": "mcp__synthetic-server__.*", "hooks": [{"type":"command", "command": command, "async":true}],
+            }]}}),
+            _ => Value::Null,
+        };
+        assert_eq!(output["entry"], expected, "{client}");
+        assert!(!output["next_actions"].as_array().unwrap().is_empty());
+    }
+    assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+#[test]
+fn capture_install_requires_valid_program_text() {
+    let home = Temp::new();
+    for program in ["", "  ", "launcher\nextra", "launcher\u{7f}"] {
+        let output = install(&home.0, "codex")
+            .args(["--program", program])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stderr).unwrap()["code"],
+            "CLI_INPUT"
+        );
+    }
+    assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+#[test]
+fn capture_without_install_is_silent_with_invalid_input() {
+    let home = Temp::new();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
+    let mut child = isolated(&mut command, &home.0)
+        .args([
+            "env", "capture", "--client", "codex", "--server", SERVER, "--state",
+        ])
+        .arg(home.state())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"invalid JSON")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success() && output.stdout.is_empty() && output.stderr.is_empty());
+    assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_preserves_existing_settings_permission_bits() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = Temp::new();
+    let path = home.0.join(".codex/hooks.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, "{}").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o764)).unwrap();
+
+    assert_eq!(report(&mut install(&home.0, "codex"))["changed"], true);
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o764
+    );
+}
+
+#[cfg(windows)]
+fn powershell() -> Command {
+    let root = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    let mut shell = Command::new(root.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+    shell.args(["-NoProfile", "-NonInteractive", "-Command"]);
+    shell
+}
+
+#[test]
+fn installed_hook_runs_the_native_command_and_captures_evidence() {
+    let dir = Temp::new();
+    let directory = dir.0.join("work folder's $data; settings");
+    let state = directory.join("state.json");
+    dir.confirm_at(&state);
+    let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
+    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
+        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
+    }
+    let server = "synthetic $server's (name)";
+    let mut installer = Command::new(&executable);
+    isolated(&mut installer, &dir.0)
+        .args([
+            "env",
+            "capture",
+            "--client",
+            "copilot-cli",
+            "--server",
+            server,
+            "--install",
+            "--state",
+        ])
+        .arg(&state);
+    let installed = report(&mut installer);
+    let file = dir.0.join(".copilot/hooks/cqlmatic-capture.json");
+    let settings: Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+    let hook = &settings["hooks"]["postToolUse"][0];
+    let shell = if cfg!(windows) { "powershell" } else { "bash" };
+    let command = hook[shell].as_str().unwrap();
+    assert_eq!(installed["command"][shell], command);
+    let response = body(json!([{"synthetic_field": "seen"}]));
+    let sample = search("#type=synthetic | head(5)", json!(response));
+    let payload = json!({
+        "toolName": format!("{server}-falcon_search_ngsiem"),
+        "toolArgs": sample["tool_input"]["arguments"],
+        "toolResult": {"resultType": "success", "textResultForLlm": response},
+    });
+    #[cfg(unix)]
+    let mut shell = {
+        let mut shell = Command::new("/bin/bash");
+        shell.args(["-c", command]);
+        shell
+    };
+    #[cfg(windows)]
+    let mut shell = {
+        let mut shell = powershell();
+        shell
+            .arg("& ([ScriptBlock]::Create($env:CQLMATIC_TEST_HOOK))")
+            .env("CQLMATIC_TEST_HOOK", command);
+        shell
+    };
+    let mut child = isolated(&mut shell, &dir.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+    let state: Value = serde_json::from_slice(&fs::read(state).unwrap()).unwrap();
+    assert_eq!(
+        state["captured_observations"][0]["fields"][0]["field"],
+        "synthetic_field"
+    );
 }
 
 #[test]
