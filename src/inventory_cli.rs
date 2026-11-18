@@ -26,6 +26,24 @@ pub struct InventoryArgs {
     pub request: Option<PathBuf>,
     #[arg(
         long,
+        requires = "json",
+        conflicts_with = "request",
+        help = "Settle an optional discovery answer and return the next probe"
+    )]
+    pub next_probe: bool,
+    #[arg(
+        long,
+        requires = "next_probe",
+        value_name = "N",
+        help = "Discovery run index, defaulting to the latest"
+    )]
+    pub run_index: Option<usize>,
+    #[arg(long, requires_all = ["next_probe", "result_file"], value_name = "ID", help = "Issued probe ID for the saved result")]
+    pub probe_id: Option<String>,
+    #[arg(long, requires_all = ["next_probe", "probe_id"], value_name = "FILE", help = "Whole saved result for the issued probe")]
+    pub result_file: Option<String>,
+    #[arg(
+        long,
         value_name = "FILE",
         help = "Workflow state; defaults to local cqlmatic/inventory/state.json"
     )]
@@ -560,7 +578,7 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
 
 pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     let path = state_path(args.state)?;
-    if args.request.is_none() {
+    if args.request.is_none() && !args.next_probe {
         let state = load(&path)?;
         let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
         if args.json || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -579,7 +597,23 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         }
         return interactive(&path, state, report);
     }
-    let request: InventoryRequest = read_json(args.request.as_deref().expect("request checked"))?;
+    let request = if args.next_probe {
+        InventoryRequest {
+            schema_version: 1,
+            action: InventoryAction::NextProbe {
+                run_index: args.run_index,
+                answer: args
+                    .probe_id
+                    .zip(args.result_file)
+                    .map(|(probe_id, result_file)| DiscoveryAnswer {
+                        probe_id,
+                        result_file,
+                    }),
+            },
+        }
+    } else {
+        read_json(args.request.as_deref().expect("request checked"))?
+    };
     if request.schema_version != 1 {
         return Err(fail("Unsupported inventory request version."));
     }
@@ -616,24 +650,66 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     Ok(0)
 }
 
+struct NextProbeRun {
+    index: usize,
+    phase: String,
+    relay: mcp::State,
+    checkpoint: storage::Writer,
+}
+
+fn inspect_next_probe_run(
+    path: &Path,
+    run_index: Option<usize>,
+    owner: &storage::Writer,
+) -> Result<NextProbeRun, Diagnostic> {
+    let state = load(path)?;
+    let index = discovery_run_index(&state, run_index)?;
+    let run = &state.discovery_runs[index];
+    let checkpoint = storage::Writer::acquire(Path::new(&run.state_path))
+        .map_err(|d| discovery_run_diagnostic(index, d))?;
+    let relay = inspect_selected_run(&state, index)?;
+    mcp::inspect_inventory_owner(&relay, owner).map_err(|d| discovery_run_diagnostic(index, d))?;
+    let phase = match run.status.as_str() {
+        "complete" | "superseded" => run.status.clone(),
+        _ => relay.status.clone(),
+    };
+    Ok(NextProbeRun {
+        index,
+        phase,
+        relay,
+        checkpoint,
+    })
+}
+
 fn next_probe(
     path: &Path,
     run_index: Option<usize>,
     answer: Option<DiscoveryAnswer>,
 ) -> Result<Value, Diagnostic> {
     let writer = inventory_writer(path)?;
+    let mut run = inspect_next_probe_run(path, run_index, &writer)?;
+    let index = run.index;
+    let apply = |action| apply_locked(path, action, MAX_STATE_BYTES, &writer);
+    let step = |answers| {
+        apply(InventoryAction::DiscoveryStep {
+            run_index: Some(index),
+            answers,
+        })
+    };
     let supplied_answer = answer.is_some();
-    let diagnostics = if let Some(answer) = answer {
-        let (_, settled) = apply_locked(
-            path,
-            InventoryAction::DiscoveryStep {
-                run_index,
-                answers: vec![answer],
-            },
-            MAX_STATE_BYTES,
-            &writer,
-        )?;
-        [settled.get("diagnostics"), settled.pointer("/relay/diagnostics")]
+    let (settled, mut diagnostics) = if let Some(answer) = answer {
+        let probe_id = answer.probe_id.clone();
+        let already_answered = run.relay.answers.contains_key(&probe_id);
+        drop(run);
+        let (_, output) = step(vec![answer])?;
+        run = inspect_next_probe_run(path, Some(index), &writer)?;
+        let accepted = !already_answered
+            && run
+                .relay
+                .answers
+                .get(&probe_id)
+                .is_some_and(|answer| answer.outcome == "complete");
+        let diagnostics = [output.get("diagnostics"), output.pointer("/relay/diagnostics")]
             .into_iter()
             .flatten()
             .filter_map(Value::as_array)
@@ -642,89 +718,176 @@ fn next_probe(
                 json!({"code":d["code"],"severity":d["severity"],
                     "message":"Inspect the protected discovery checkpoint or inventory failures for details about this answer."})
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (accepted, diagnostics)
     } else {
-        Vec::new()
+        (false, Vec::new())
     };
 
-    let (run_index, phase, outstanding, probe, mut cost) = {
-        let state = load(path)?;
-        let index = discovery_run_index(&state, run_index)?;
-        let run = &state.discovery_runs[index];
-        let checkpoint = storage::Writer::acquire(Path::new(&run.state_path))
-            .map_err(|d| discovery_run_diagnostic(index, d))?;
-        let relay = inspect_selected_run(&state, index)?;
-        mcp::inspect_inventory_owner(&relay, &writer)
-            .map_err(|d| discovery_run_diagnostic(index, d))?;
-        let phase = match run.status.as_str() {
-            "complete" | "superseded" => &run.status,
-            _ => &relay.status,
-        };
-        let outstanding = mcp::has_in_flight(&relay);
-        let probe = if phase == "needs-probes"
-            && diagnostics.is_empty()
-            && !(supplied_answer && outstanding)
-        {
-            mcp::inventory_probe(&relay).map_err(|d| discovery_run_diagnostic(index, d))?
-        } else {
-            None
-        };
-        if outstanding && probe.is_some() {
-            checkpoint
-                .confirm_parent_durable()
-                .map_err(|d| discovery_run_diagnostic(index, d))?;
-        }
-        (
-            index,
-            phase.clone(),
-            outstanding,
-            probe,
-            json!(mcp::cost(&relay, 0)),
-        )
-    };
-
-    let dispatched = probe.is_some() && !outstanding;
-    if let Some(probe) = &probe
-        && dispatched
+    let mut outstanding = mcp::outstanding_probe_id(&run.relay);
+    let mut probe = if run.phase == "needs-probes"
+        && diagnostics.is_empty()
+        && !(supplied_answer && outstanding.is_some())
     {
-        let probe_id = probe["probe_id"].as_str().expect("Wire probe has an ID");
-        // Settlement is already committed. A failed reservation leaves the answer saved.
-        let (_, mut reservation) = apply_locked(
-            path,
-            InventoryAction::DispatchDiscovery {
-                run_index: Some(run_index),
-                probe_id: probe_id.into(),
-            },
-            MAX_STATE_BYTES,
-            &writer,
-        )?;
-        cost = reservation["relay"]["cost"].take();
+        mcp::inventory_probe(&run.relay).map_err(|d| discovery_run_diagnostic(index, d))?
+    } else {
+        None
+    };
+    if outstanding.is_some() && probe.is_some() {
+        run.checkpoint
+            .confirm_parent_durable()
+            .map_err(|d| discovery_run_diagnostic(index, d))?;
+    }
+    let mut cost = json!(mcp::cost(&run.relay, 0));
+    let mut phase = run.phase.clone();
+    drop(run);
+
+    let mut dispatched = false;
+    let mut reservation_failed = false;
+    if let Some(candidate) = &probe
+        && outstanding.is_none()
+    {
+        let probe_id = candidate["probe_id"]
+            .as_str()
+            .expect("Wire probe has an ID")
+            .to_owned();
+        match apply(InventoryAction::DispatchDiscovery {
+            run_index: Some(index),
+            probe_id: probe_id.clone(),
+        }) {
+            Ok((_, mut reservation)) => {
+                cost = reservation["relay"]["cost"].take();
+                outstanding = Some(probe_id);
+                dispatched = true;
+            }
+            Err(error) => {
+                // The answer has its own commit. Poll to finalize expiry, then verify the
+                // checkpoint even if polling could not write the inventory.
+                let poll = step(vec![]);
+                let saved = inspect_next_probe_run(path, Some(index), &writer)
+                    .map_err(|read_error| poll.err().unwrap_or(read_error))?;
+                phase = saved.phase;
+                outstanding = mcp::outstanding_probe_id(&saved.relay);
+                cost = json!(mcp::cost(&saved.relay, 0));
+                probe = None;
+                reservation_failed = true;
+                diagnostics.push(reservation_diagnostic(error, outstanding.is_some()));
+            }
+        }
     }
     let phase = if probe.is_some() { "probe" } else { &phase };
-    let next_action = match phase {
-        "probe" => {
-            "Run the tool once with these exact arguments, save the whole result unedited, and submit next-probe with answer."
-        }
-        "complete" => "Submit reconcile with reviewed_at.",
-        "paused" => "Submit resume-discovery to continue this run.",
-        "cancel-requested" | "cleanup-pending" => {
-            "Settle the exact outstanding attempt before continuing."
-        }
-        _ => "Inspect this run with discovery-step and answers: [].",
-    };
-    if probe.is_some() {
-        cost["searches"]["ready"] = json!(1);
-    }
-    let mut action = json!({"kind":"next-probe","run_index":run_index,"state":phase,
-        "dispatched":dispatched,"cost":cost,"next_action":next_action});
+    let next_action = next_probe_guidance(
+        index,
+        phase,
+        dispatched,
+        supplied_answer && !settled,
+        reservation_failed,
+        outstanding.is_some(),
+    );
+    let mut action = json!({"kind":"next-probe","run_index":index,"state":phase,
+        "dispatched":dispatched,"settled":settled,"cost":cost,"next_action":next_action});
     if let Some(mut probe) = probe {
+        action["cost"]["searches"]["ready"] = json!(1);
         action["probe"] = json!({"probe_id":probe["probe_id"].take(),
             "tool":probe["mcp"]["tool"].take(),"arguments":probe["mcp"]["arguments"].take()});
+    }
+    if let Some(id) = outstanding {
+        action["outstanding_probe_id"] = json!(id);
     }
     if !diagnostics.is_empty() {
         action["diagnostics"] = json!(diagnostics);
     }
     Ok(action)
+}
+
+fn next_probe_guidance(
+    index: usize,
+    phase: &str,
+    dispatched: bool,
+    refused: bool,
+    reservation_failed: bool,
+    outstanding: bool,
+) -> String {
+    match phase {
+        "probe" if dispatched => format!(
+            "Run the tool once with these exact arguments, save the whole result unedited, and submit next-probe with run_index={index} and answer."
+        ),
+        "probe" => format!(
+            "This probe is already reserved. If its search ran, submit the saved result as answer with run_index={index}. Run the search only if it never started."
+        ),
+        "complete" => "The run is complete. Submit reconcile with reviewed_at unless status already shows reconciliation done.".into(),
+        "needs-probes" if reservation_failed && outstanding => format!(
+            "The reservation reported an error; see diagnostics. Submit next-probe with run_index={index} and no answer to read the outstanding probe."
+        ),
+        "needs-probes" if reservation_failed => format!(
+            "The next probe was not reserved; see diagnostics. Submit next-probe with run_index={index} and no answer after resolving it."
+        ),
+        "needs-probes" if refused => {
+            let next = if outstanding { "read the outstanding probe" } else { "request the next probe" };
+            format!("The answer was not accepted. Submit next-probe with run_index={index} and no answer to {next}.")
+        }
+        "paused" => format!("Submit resume-discovery with run_index={index} to continue this run."),
+        "cancel-requested" | "cleanup-pending" => format!(
+            "Settle the outstanding attempt for run_index={index} before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. Then submit resume-discovery with run_index={index}."
+        ),
+        "failed" => "This run failed and hands out no more probes. Submit prepare-discovery to start a new run.".into(),
+        "superseded" => "This run was superseded by newer inventory evidence. Submit prepare-discovery to measure again.".into(),
+        _ => format!("Inspect run_index={index} with discovery-step, answers: [] and --json alone."),
+    }
+}
+
+fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
+    // Preserve only audited messages. Pack decoders can quote values or field names, and
+    // storage and protection errors can carry operating-system details and paths.
+    let fixed = match error.code.as_str() {
+        "INVENTORY_INPUT" => !error
+            .message
+            .contains("Discovery checkpoint was written by CQLmatic "),
+        "SETUP_PROTECTION" => !error.message.contains("Unsafe Windows ACL at "),
+        "CAPABILITY_INPUT"
+        | "CQL_FIELD"
+        | "CQL_INPUT_LIMIT"
+        | "CQL_STRING_ESCAPE"
+        | "CQL_SYNTAX"
+        | "CQL_TEXT_LIMIT"
+        | "CQL_UNSUPPORTED_SYNTAX"
+        | "DISCOVERY_BUSY"
+        | "DISCOVERY_EVIDENCE"
+        | "DISCOVERY_INVENTORY_OWNER"
+        | "DISCOVERY_TRANSPORT"
+        | "ENV_TENANT"
+        | "ENV_VIEW"
+        | "INVENTORY_EVIDENCE"
+        | "LOCAL_DIRECTORY_PERMISSIONS"
+        | "LOCAL_FILE_TYPE"
+        | "LOCAL_PATH"
+        | "LOCAL_SERIALIZATION"
+        | "LOCAL_SIZE"
+        | "MCP_ACTIVATION_CONFLICT"
+        | "MCP_DEADLINE"
+        | "MCP_SHAPE"
+        | "MCP_STATE_RESTART"
+        | "MCP_STATE_TAMPERED"
+        | "MCP_TOO_LARGE"
+        | "MCP_UNKNOWN_PROBE"
+        | "PACK_BUSY"
+        | "PACK_DIGEST"
+        | "PACK_ENVIRONMENT_MISMATCH"
+        | "PACK_PROFILE"
+        | "PACK_SERIALIZATION"
+        | "PACK_TIME"
+        | "PACK_VERSION"
+        | "SETUP_STORAGE" => true,
+        _ => false,
+    };
+    let message = if fixed {
+        &error.message
+    } else if outstanding {
+        "The reservation reported an error. Check the outstanding probe before continuing."
+    } else {
+        "The next probe was not reserved."
+    };
+    json!({"code":error.code,"severity":error.severity,"message":message})
 }
 
 const DISCOVERY_ALLOWANCE_EXPIRED: &str = "DISCOVERY_ALLOWANCE_EXPIRED";

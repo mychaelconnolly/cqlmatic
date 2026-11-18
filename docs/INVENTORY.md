@@ -124,9 +124,9 @@ Status reads only local state and its referenced packs; it does not authenticate
 
 ### Relay one probe at a time
 
-After `prepare-discovery`, send `{"schema_version":1,"action":{"kind":"next-probe"}}` to `cqlmatic env inventory --request - --json` with the same state selection. When `action.state` is `probe`, run `action.probe.tool` once with its exact `arguments` and save the whole unedited result. Submit `next-probe` again with the returned `run_index` and `answer` containing the issued `probe_id` and saved `result_file`. Repeat until `complete`, then submit `reconcile`. Other run states return no probe.
+After `prepare-discovery`, use the same state selection with `cqlmatic env inventory --state STATE --json --next-probe`. When `action.state` is `probe`, run `action.probe.tool` once with its exact `arguments` and save the whole unedited result. Append `--run-index N --probe-id ID --result-file FILE` to submit the answer for that probe. `settled: true` confirms the result was accepted. Continue while the response includes a probe, and submit `reconcile` after `complete`. Use `next_action` for other states.
 
-A probe with `dispatched: false` is the existing reservation. Read it again without an answer if its descriptor was lost. If the host already made the call, recover its result or settle that exact attempt before making another call. A refused answer returns fixed diagnostic text and leaves the details in protected storage.
+A probe with `dispatched: false` is the existing reservation. Reading it again without the answer flags never charges it again. If the host already made the call, recover its result or settle that exact attempt. After an exit 2 while submitting an answer, read back the same run without the answer flags and compare `outstanding_probe_id` with the submitted ID. A match identifies the attempt that still needs settlement. For any other returned ID or phase, continue from the reported state and keep the original result. See the [recovery contract](CONTRACTS.md#single-probe-output).
 
 ## Optional function capability checks
 

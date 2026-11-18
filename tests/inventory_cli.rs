@@ -39,12 +39,15 @@ fn inventory_command_at(dir: &Path, state: &Path, action: Value) -> Command {
         serde_json::to_vec(&json!({"schema_version":1,"action":action})).unwrap(),
     )
     .unwrap();
+    let mut command = inventory_json_command(state);
+    command.arg("--request").arg(request);
+    command
+}
+fn inventory_json_command(state: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
     command
         .args(["env", "inventory", "--json", "--state"])
-        .arg(state)
-        .arg("--request")
-        .arg(request);
+        .arg(state);
     command
 }
 fn call(dir: &Path, action: Value) -> Value {
@@ -999,14 +1002,33 @@ fn prepare_two_source_run(dir: &Path) -> Value {
     prepare_source_run(dir)
 }
 
+fn synthetic_inventory_pack(dir: &Path) -> PathBuf {
+    let pack = cqlmatic::environment::Pack::new(
+        serde_json::from_value(environment()).unwrap(),
+        "2026-01-01T00:00:00Z".into(),
+        Default::default(),
+    )
+    .unwrap();
+    let path = dir.join("synthetic-pack.json");
+    cqlmatic::storage::Writer::acquire(&path)
+        .unwrap()
+        .commit(&pack)
+        .unwrap();
+    path
+}
+
 #[test]
 fn next_probe_completes_a_quick_run_in_one_call_per_search_plus_one() {
     let dir = Temp::new();
     let prepared = prepare_two_source_run(&dir.0);
     let expected = prepared["action"]["relay"]["probes"].as_array().unwrap();
     assert_eq!(expected.len(), 2);
-    let mut progress = call(&dir.0, json!({"kind":"next-probe"}));
-    let mut calls = 1;
+    let mut calls = 0;
+    let mut next_probe = |action| {
+        calls += 1;
+        call(&dir.0, action)
+    };
+    let mut progress = next_probe(json!({"kind":"next-probe"}));
     let mut searches = 0;
     while progress["action"]["state"] == "probe" {
         assert_eq!(progress.as_object().unwrap().len(), 2);
@@ -1024,11 +1046,9 @@ fn next_probe_completes_a_quick_run_in_one_call_per_search_plus_one() {
         assert_eq!(action["cost"]["searches"]["used"], searches);
         assert_eq!(action["cost"]["searches"]["ready"], 1);
         let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
-        progress = call(
-            &dir.0,
+        progress = next_probe(
             json!({"kind":"next-probe","run_index":action["run_index"],"answer":{"probe_id":action["probe"]["probe_id"],"result_file":result}}),
         );
-        calls += 1;
     }
     assert_eq!(searches, expected.len());
     assert_eq!(calls, searches + 1);
@@ -1062,6 +1082,18 @@ fn next_probe_rereads_an_outstanding_attempt_without_writing_or_charging() {
     assert_eq!(reread["action"]["probe"], first["action"]["probe"]);
     assert_eq!(first["action"]["dispatched"], true);
     assert_eq!(reread["action"]["dispatched"], false);
+    assert_eq!(
+        first["action"]["next_action"],
+        "Run the tool once with these exact arguments, save the whole result unedited, and submit next-probe with run_index=0 and answer."
+    );
+    assert_eq!(
+        reread["action"]["next_action"],
+        "This probe is already reserved. If its search ran, submit the saved result as answer with run_index=0. Run the search only if it never started."
+    );
+    assert_eq!(
+        reread["action"]["outstanding_probe_id"],
+        first["action"]["probe"]["probe_id"]
+    );
     assert_eq!(first["action"]["cost"]["searches"]["used"], 1);
     assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
     assert_eq!(fs::read(&state).unwrap(), inventory_bytes);
@@ -1089,6 +1121,16 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
         assert_eq!(action["dispatched"], false);
         assert!(action.get("probe").is_none());
         assert_eq!(action["diagnostics"][0]["code"], code);
+        assert_eq!(action["settled"], false);
+        assert_eq!(action["outstanding_probe_id"], probe_id);
+        assert_eq!(
+            action["next_action"],
+            "The answer was not accepted. Submit next-probe with run_index=0 and no answer to read the outstanding probe."
+        );
+        assert_eq!(
+            action["diagnostics"][0]["message"],
+            "Inspect the protected discovery checkpoint or inventory failures for details about this answer."
+        );
         assert_eq!(action["cost"]["searches"]["used"], 1);
     }
     let reread = call(&dir.0, json!({"kind":"next-probe"}));
@@ -1096,6 +1138,340 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
     assert_eq!(reread["action"]["probe"], first["action"]["probe"]);
     assert_eq!(reread["action"]["dispatched"], false);
     assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
+}
+
+#[test]
+fn next_probe_checks_ownership_before_writing_the_answer() {
+    let owner = Temp::new();
+    let copy = Temp::new();
+    confirm_quick_source(&owner.0, "synthetic");
+    let prepared = prepare_source_run(&owner.0);
+    let relay = prepared["status"]["discovery_runs"][0]["state_path"]
+        .as_str()
+        .unwrap();
+    let first = call(&owner.0, json!({"kind":"next-probe"}));
+    let result = fixture(&owner.0, "volume.json", json!({"result":[{"events":10}]}));
+    let answer = json!({"kind":"next-probe","answer":{"probe_id":first["action"]["probe"]["probe_id"],"result_file":result}});
+    let state = owner.0.join("workflow/state.json");
+    let copied_state = copy.0.join("state.json");
+    fs::copy(&state, &copied_state).unwrap();
+    let inventory_before = fs::read(&state).unwrap();
+    let relay_before = fs::read(relay).unwrap();
+
+    let rejected = inventory_command_at(&copy.0, &copied_state, answer.clone())
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2), "{rejected:?}");
+    assert!(rejected.stdout.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&rejected.stderr).unwrap()["code"],
+        "DISCOVERY_INVENTORY_OWNER"
+    );
+    assert!(
+        fs::read(&state).unwrap() == inventory_before,
+        "owner inventory changed"
+    );
+    assert!(
+        fs::read(&copied_state).unwrap() == inventory_before,
+        "copied inventory changed"
+    );
+    assert!(
+        fs::read(relay).unwrap() == relay_before,
+        "owner checkpoint changed"
+    );
+
+    let completed = call(&owner.0, answer);
+    assert_eq!(completed["action"]["state"], "complete");
+    assert_eq!(completed["action"]["settled"], true);
+}
+
+#[test]
+fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
+    let dir = Temp::new();
+    prepare_two_source_run(&dir.0);
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let pack = synthetic_inventory_pack(&dir.0);
+    call(&dir.0, json!({"kind":"import-pack","pack_file":pack}));
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let accepted = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":first["action"]["probe"]["probe_id"],"result_file":result}}),
+    );
+    let action = &accepted["action"];
+    assert_eq!(action["settled"], true);
+    assert_eq!(action["state"], "needs-probes");
+    assert_eq!(action["dispatched"], false);
+    assert!(action.get("probe").is_none() && action.get("outstanding_probe_id").is_none());
+    assert_eq!(
+        action["diagnostics"][0],
+        json!({"code":"INVENTORY_INPUT","severity":"error","message":"Discovery run_index 0: Discovery started from an earlier inventory; its accepted captures are retained. Prepare discovery again from the current inventory with explicit finite budgets."})
+    );
+    assert_eq!(
+        action["next_action"],
+        "The next probe was not reserved; see diagnostics. Submit next-probe with run_index=0 and no answer after resolving it."
+    );
+    let repeat = json!({"kind":"next-probe","run_index":0});
+    let compact = call(&dir.0, repeat.clone());
+    assert_eq!(compact["action"]["settled"], false);
+    assert_eq!(compact["action"]["state"], "needs-probes");
+    assert_eq!(compact["action"]["diagnostics"], action["diagnostics"]);
+    assert_eq!(brief_call(&dir.0, repeat), compact);
+}
+
+#[test]
+fn next_probe_marks_an_expired_first_reservation_failed() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let mut request = source_run_request(4);
+    request["max_seconds"] = json!(1);
+    call(&dir.0, request.clone());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let expired = call(&dir.0, json!({"kind":"next-probe"}));
+    let action = &expired["action"];
+    assert_eq!(action["state"], "failed");
+    assert_eq!(action["settled"], false);
+    assert_eq!(action["dispatched"], false);
+    assert!(action.get("probe").is_none() && action.get("outstanding_probe_id").is_none());
+    assert_eq!(action["diagnostics"][0]["code"], "MCP_DEADLINE");
+    assert_eq!(
+        action["diagnostics"][0]["message"],
+        "Discovery run_index 0: Discovery active-time budget expired; pause and resume do not renew it."
+    );
+    assert_eq!(action["cost"]["searches"]["used"], 0);
+    assert_eq!(call(&dir.0, request)["action"]["run_index"], 1);
+}
+
+#[test]
+fn next_probe_guides_paused_and_cancel_requested_runs() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let paused = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(
+        paused["action"]["next_action"],
+        "Submit resume-discovery with run_index=0 to continue this run."
+    );
+    call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+    let reserved = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let canceled = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(canceled["action"]["state"], "cancel-requested");
+    assert_eq!(
+        canceled["action"]["outstanding_probe_id"],
+        reserved["action"]["probe"]["probe_id"]
+    );
+    assert!(canceled["action"].get("probe").is_none());
+    assert_eq!(
+        canceled["action"]["next_action"],
+        "Settle the outstanding attempt for run_index=0 before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. Then submit resume-discovery with run_index=0."
+    );
+}
+
+#[test]
+fn next_probe_recovery_reports_the_outstanding_id_before_and_after_exit_two() {
+    for (cleanup_pending, timed_out) in [(false, false), (true, false), (false, true)] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let import = synthetic_inventory_pack(&dir.0);
+        let imported = call(&dir.0, json!({"kind":"import-pack","pack_file":import}));
+        let active = Path::new(imported["status"]["active_pack"]["path"].as_str().unwrap());
+        let prepared = prepare_two_source_run(&dir.0);
+        let relay = prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap();
+        let first = call(&dir.0, json!({"kind":"next-probe"}));
+        let probe_id = &first["action"]["probe"]["probe_id"];
+        if cleanup_pending {
+            let invalid = fixture(
+                &dir.0,
+                "unresolved.json",
+                json!({"result":{"error":"Synthetic unresolved tool result"}}),
+            );
+            let refused = call(
+                &dir.0,
+                json!({"kind":"next-probe","answer":{"probe_id":probe_id,"result_file":invalid}}),
+            );
+            assert_eq!(refused["action"]["state"], "cleanup-pending");
+            assert_eq!(refused["action"]["outstanding_probe_id"], *probe_id);
+        }
+
+        assert_rejected(
+            &dir.0,
+            json!({"kind":"next-probe","answer":{"probe_id":probe_id,"result_file":dir.0.join("wrong-name.json")}}),
+            "Cannot resolve evidence path.",
+        );
+        let reread = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+        assert_eq!(
+            reread["action"]["state"],
+            if cleanup_pending {
+                "cleanup-pending"
+            } else {
+                "probe"
+            }
+        );
+        assert_eq!(reread["action"]["outstanding_probe_id"], *probe_id);
+        assert_eq!(reread["action"]["dispatched"], false);
+
+        fs::rename(active, active.with_file_name("offline-pack.json")).unwrap();
+        let payload = if timed_out {
+            json!({"result":{"error":"NGSIEM search timed out after 20 seconds",
+                "operation":"GetSearchStatusV1","details":{"job_id":"synthetic-job","timeout_seconds":20}}})
+        } else {
+            json!({"result":[{"events":10}]})
+        };
+        let result = fixture(&dir.0, "answer.json", payload);
+        assert_rejected(
+            &dir.0,
+            json!({"kind":"next-probe","answer":{"probe_id":probe_id,"result_file":result}}),
+            "Retained inventory snapshot does not exist.",
+        );
+        let recovered = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+        assert_eq!(
+            recovered["action"]["state"],
+            if cleanup_pending || timed_out {
+                "paused"
+            } else {
+                "needs-probes"
+            }
+        );
+        assert!(recovered["action"].get("outstanding_probe_id").is_none());
+        let stored: Value = serde_json::from_slice(&fs::read(relay).unwrap()).unwrap();
+        let accepted = stored["answers"].get(probe_id.as_str().unwrap());
+        if timed_out {
+            // The attempt ended and retained evidence, but the result was never accepted.
+            assert!(accepted.is_none());
+            let attempt = &stored["session"]["attempts"][0];
+            assert_eq!(attempt["outcome"], "timed-out");
+            assert!(attempt["terminal"]["raw_sha256"].is_string());
+        } else {
+            assert_eq!(accepted.unwrap()["outcome"], "complete");
+        }
+    }
+}
+
+#[test]
+fn next_probe_reservation_redacts_pack_json_text() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let import = synthetic_inventory_pack(&dir.0);
+    let imported = call(&dir.0, json!({"kind":"import-pack","pack_file":import}));
+    let active = imported["status"]["active_pack"]["path"].as_str().unwrap();
+    prepare_source_run(&dir.0);
+    let mut pack: Value = serde_json::from_slice(&fs::read(active).unwrap()).unwrap();
+    let marker = "synthetic-private-pack-field";
+    pack["format_version"] = json!(marker);
+    fs::write(active, serde_json::to_vec(&pack).unwrap()).unwrap();
+    let action = json!({"kind":"next-probe"});
+    let full = call(&dir.0, action.clone());
+    assert_eq!(brief_call(&dir.0, action), full);
+    assert!(!full.to_string().contains(marker));
+    assert_eq!(
+        full["action"]["diagnostics"][0],
+        json!({"code":"PACK_JSON","severity":"error","message":"The next probe was not reserved."})
+    );
+}
+
+#[test]
+fn next_probe_flags_match_json_for_dispatch_and_settlement() {
+    let json_dir = Temp::new();
+    let flag_dir = Temp::new();
+    for dir in [&json_dir.0, &flag_dir.0] {
+        prepare_two_source_run(dir);
+    }
+    let state = flag_dir.0.join("workflow/state.json");
+    let first = inventory_command(&json_dir.0, json!({"kind":"next-probe"}))
+        .output()
+        .unwrap();
+    let reserved = inventory_json_command(&state)
+        .arg("--next-probe")
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success() && reserved.status.success(),
+        "{first:?} {reserved:?}"
+    );
+    assert_eq!(first.stdout, reserved.stdout);
+    let reply: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let probe_id = reply["action"]["probe"]["probe_id"].as_str().unwrap();
+    let result = fixture(
+        &json_dir.0,
+        "volume.json",
+        json!({"result":[{"events":10}]}),
+    );
+    let full = inventory_command(
+        &json_dir.0, json!({"kind":"next-probe","run_index":0,"answer":{"probe_id":probe_id,"result_file":result}}),
+    ).output().unwrap();
+    let brief = inventory_json_command(&state)
+        .args([
+            "--brief",
+            "--next-probe",
+            "--run-index",
+            "0",
+            "--probe-id",
+            probe_id,
+            "--result-file",
+            &result,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        full.status.success() && brief.status.success(),
+        "{full:?} {brief:?}"
+    );
+    assert_eq!(full.stdout, brief.stdout);
+    let next: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    assert_eq!(next["action"]["settled"], true);
+    assert_eq!(
+        next["action"]["outstanding_probe_id"],
+        next["action"]["probe"]["probe_id"]
+    );
+}
+
+#[test]
+fn next_probe_flags_reject_invalid_combinations_in_the_parser() {
+    let dir = Temp::new();
+    let state = dir.0.join("state.json");
+    for (flags, expected) in [
+        (&["--next-probe"][..], "--json"),
+        (&["--json", "--next-probe", "--request", "-"], "--request"),
+        (&["--json", "--run-index", "0"], "--next-probe"),
+        (
+            &[
+                "--json",
+                "--probe-id",
+                "p-example",
+                "--result-file",
+                "result.json",
+            ],
+            "--next-probe",
+        ),
+        (
+            &["--json", "--next-probe", "--probe-id", "p-example"],
+            "--result-file",
+        ),
+        (
+            &["--json", "--next-probe", "--result-file", "result.json"],
+            "--probe-id",
+        ),
+    ] {
+        let refusal = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["env", "inventory", "--state"])
+            .arg(&state)
+            .args(flags)
+            .output()
+            .unwrap();
+        assert_eq!(refusal.status.code(), Some(2), "{refusal:?}");
+        assert!(refusal.stdout.is_empty());
+        let stderr = String::from_utf8(refusal.stderr).unwrap();
+        assert!(
+            stderr.starts_with("error:") && stderr.contains(expected),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("unexpected argument"), "{stderr}");
+    }
+    assert!(!state.exists());
 }
 
 #[test]

@@ -494,8 +494,9 @@ mod session;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
     has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
-    inventory_probe, is_resumable, pause, recover_native_cleanup, resumable_info,
-    resumable_request, resume, resume_inventory, run_native, settle_cancelled, step_resumable,
+    inventory_probe, is_resumable, outstanding_probe_id, pause, recover_native_cleanup,
+    resumable_info, resumable_request, resume, resume_inventory, run_native, settle_cancelled,
+    step_resumable,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

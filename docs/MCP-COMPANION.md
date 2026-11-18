@@ -44,7 +44,7 @@ Notify the user of newly pending source/field/type work with a concise aggregate
 
 Keep query writing available against committed evidence while a user-requested refresh is outstanding. A skill instruction, detached CLI or tool availability does not prove ownership of the authorized connection, complete result capture or settlement/import. Never relabel a reservation as a running search.
 
-Bound both directions of the routine handoff: use `--json --brief` on inventory action responses, including acknowledgement and refresh bookkeeping. Every brief response is at most 4,096 bytes; full/summary responses can grow with inventory size. Capture required full execution descriptors and original MCP results privately and consume them locally. Return only fixed flags/counts and bounded references to the conversation. Do not expand all omitted records or send raw queries, results, scripts or tenant text as instructions. Unchanged successful refreshes need no announcement; surface new work or actionable failure/blocker information at a safe foreground point. Acknowledge only after that message. A lost delivery or acknowledgement can repeat a reminder.
+Use `--json --brief` for routine inventory actions, including acknowledgement and refresh bookkeeping. Brief projections are at most 4,096 bytes. `next-probe` returns its exact single-probe response in either mode, which can exceed that limit. Full and summary responses can grow with inventory size. Use the `next-probe` descriptor for its one search. Keep other full execution descriptors and all original MCP results in protected local storage. Return only fixed flags, counts and bounded references to the conversation. Do not expand all omitted records or send raw queries, results, scripts or tenant text as instructions. Unchanged successful refreshes need no announcement; surface new work or actionable failure/blocker information at a safe foreground point. Acknowledge only after that message. A lost delivery or acknowledgement can repeat a reminder.
 
 ## 1. Choose the inventory depth
 
@@ -54,7 +54,7 @@ Quick scouting requires an explicit chosen view or `search-all`, an authorized U
 
 Keep the prepared scout's environment aligned with the confirmed target and any retained scout. Re-prepare after a mode change if the pending scout's repository or budget no longer fits. Use the actual UTC capture time for `import-scout`, at or after the scout window ends.
 
-Start with brief status, then request focused pack records or bounded local extraction from protected full captures only for the sources and fields needed by the task. Compact inventory actions omit probe bodies; use `discovery-step` with `answers: []` without `--summary` when exact pending arguments are needed. A relevant query can still be constructed without waiting for a complete map.
+Start with brief status, then request focused pack records or bounded local extraction from protected full captures only for the sources and fields needed by the task. Use `next-probe` for the exact arguments of the outstanding or next ready probe. A full `discovery-step` poll with `answers: []` also lists ready arguments. A relevant query can still be constructed without waiting for a complete map.
 
 ### Relay a bounded discovery run
 

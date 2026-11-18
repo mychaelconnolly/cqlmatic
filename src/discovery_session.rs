@@ -183,12 +183,21 @@ pub fn is_resumable(state: &State) -> bool {
 }
 
 pub fn has_in_flight(state: &State) -> bool {
-    state.session.as_ref().is_some_and(|session| {
+    outstanding_attempt(state).is_some()
+}
+
+fn outstanding_attempt(state: &State) -> Option<&Attempt> {
+    state.session.as_ref().and_then(|session| {
         session
             .attempts
             .iter()
-            .any(|attempt| attempt_uncertain(session.transport, attempt))
+            .rfind(|attempt| attempt_uncertain(session.transport, attempt))
     })
+}
+
+pub fn outstanding_probe_id(state: &State) -> Option<String> {
+    outstanding_attempt(state)
+        .map(|attempt| discovery::probe_id(&state.request.environment.view, &attempt.probe))
 }
 
 fn ended(outcome: &str) -> bool {
@@ -805,14 +814,14 @@ pub fn inventory_probe(state: &State) -> Result<Option<Value>, Diagnostic> {
     if state.status != "needs-probes" {
         return Ok(None);
     }
-    if has_in_flight(state) {
-        return Ok(state
+    if let Some(attempt) = outstanding_attempt(state) {
+        let mcp = state
             .session
             .as_ref()
-            .filter(|session| session.transport == Transport::Mcp)
-            .and_then(|session| session.attempts.last())
-            .filter(|attempt| attempt.outcome == "dispatched")
-            .map(|attempt| wire_probe(state, &attempt.probe)));
+            .is_some_and(|session| session.transport == Transport::Mcp);
+        return Ok(
+            (mcp && attempt.outcome == "dispatched").then(|| wire_probe(state, &attempt.probe))
+        );
     }
     Ok(pending(state)?
         .first()
