@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.9
 
 - Later releases can inspect checkpoints written by 0.1.8. For example, a paused run with a retained `completed-unusable` answer keeps that history if measurement rules change, provided the retained bytes still decode as a complete list. The 0.1.8 reader omitted its own version from the lists of producers admitted after a version bump.
 - Inventory can continue past a retained 0.1.6 or 0.1.7 MCP discovery run after its original active-time allowance expires and the checkpoint proves it retained one distinct final answer from the hosted search tool. For example, `prepare-scout` can record a qualifying run as `failed` while preserving its checkpoint for inspection. 0.1.8 continued to block on those runs.
@@ -144,7 +144,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v018).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v019).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.
