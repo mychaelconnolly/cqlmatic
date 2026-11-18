@@ -1,8 +1,10 @@
 //! Records inventory evidence from a client's post-tool hook payload.
 //!
-//! A hook's output and exit status can reach the model, so this command prints nothing and
+//! A hook's output and exit status can reach the model, so the recorder prints nothing and
 //! always exits 0. Each search it sees is counted by outcome in `tally.json`, in the
 //! `<state file>.captures` folder beside the state.
+mod install;
+
 use crate::{inventory_cli, setup_cli};
 use clap::{Args, ValueEnum};
 use cqlmatic::{
@@ -52,6 +54,21 @@ pub struct CaptureArgs {
         help = "Workflow state; defaults to local cqlmatic/inventory/state.json"
     )]
     state: Option<PathBuf>,
+    #[arg(long, help = "Install or print the hook for the selected client")]
+    install: bool,
+    #[arg(
+        long,
+        requires = "install",
+        help = "Report the hook without writing files"
+    )]
+    dry_run: bool,
+    #[arg(
+        long,
+        requires = "install",
+        value_name = "TEXT",
+        help = "Use this command prefix verbatim instead of the running executable"
+    )]
+    program: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -80,6 +97,9 @@ struct Search {
 }
 
 pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
+    if args.install {
+        return install::run(&args);
+    }
     let mut payload = Vec::new();
     if std::io::stdin()
         .take(MAX_PAYLOAD_BYTES + 1)

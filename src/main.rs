@@ -237,7 +237,7 @@ struct CatalogArgs {
 enum EnvCommand {
     /// Build and reconcile the environment reference map with explicit evidence.
     Inventory(inventory_cli::InventoryArgs),
-    /// Record inventory evidence from a client's post-tool hook payload on stdin.
+    /// Record inventory evidence from stdin or install the client hook.
     Capture(capture_cli::CaptureArgs),
     /// Run an MCP server command, pass its messages through, and record finished searches.
     PassThrough(pass_through_cli::PassThroughArgs),
