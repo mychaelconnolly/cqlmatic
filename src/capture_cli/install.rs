@@ -499,25 +499,25 @@ fn lock_installation(settings: &Path, real: &Path) -> Result<Option<Vec<fs::File
         }
     }
     let mut locks = vec![lock];
-    // Installers that reach one file through different links have different lock files, so they
-    // also meet on the real file itself.
+    // A settings file can be reached by more than one path: through different links, or
+    // through a link and directly. Those installers have different lock files, so every
+    // installer of an existing file also meets the others on the file itself.
     #[cfg(unix)]
-    if real != settings {
-        let file =
-            fs::File::open(real).map_err(|e| io_error(real, "Cannot open linked settings", e))?;
+    if fs::symlink_metadata(real).is_ok_and(|meta| meta.is_file()) {
+        let file = fs::File::open(real).map_err(|e| io_error(real, "Cannot open settings", e))?;
         match file.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => return Ok(None),
             Err(fs::TryLockError::Error(e)) => {
-                return Err(io_error(real, "Cannot lock linked settings", e));
+                return Err(io_error(real, "Cannot lock settings", e));
             }
         }
         // An installation that finished while this one waited swapped in a new file.
         let current =
-            fs::metadata(real).map_err(|e| io_error(real, "Cannot inspect linked settings", e))?;
+            fs::metadata(real).map_err(|e| io_error(real, "Cannot inspect settings", e))?;
         let locked = file
             .metadata()
-            .map_err(|e| io_error(real, "Cannot inspect linked settings", e))?;
+            .map_err(|e| io_error(real, "Cannot inspect settings", e))?;
         if unix_identity(&current) != unix_identity(&locked) {
             return Err(settings_changed());
         }
