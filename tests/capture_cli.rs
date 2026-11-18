@@ -622,17 +622,15 @@ fn capture_install_edits_a_linked_settings_file_where_it_really_is() {
     assert_eq!(output["installed"], true);
     assert_eq!(output["changed"], true);
     assert_eq!(output["path"], json!(file));
-    // Both links are untouched, and nothing is left beside the first one.
+    // Both links are untouched. The lock stays in the client's folder, so the folder that
+    // holds the real file gains nothing.
     assert_eq!(fs::read_link(&file).unwrap(), link);
     assert_eq!(
         fs::read_link(store.join("alias.json")).unwrap(),
         Path::new("claude.json")
     );
-    assert_eq!(entries(&root), ["settings.json"]);
-    assert_eq!(
-        entries(&store),
-        [".claude.json.cqlmatic.lock", "alias.json", "claude.json"]
-    );
+    assert_eq!(entries(&root), with_lock(&file));
+    assert_eq!(entries(&store), ["alias.json", "claude.json"]);
     let settings: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
     assert_eq!(settings["existing"], true);
     assert_eq!(settings["hooks"], output["entry"]["hooks"]);
@@ -640,6 +638,67 @@ fn capture_install_edits_a_linked_settings_file_where_it_really_is() {
     let repeat = report(&mut install(&home.0, "claude-code"));
     assert_eq!(repeat["installed"], true);
     assert_eq!(repeat["changed"], false);
+
+    // A refusal about the real file names it, and the link that led to it.
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(&target, "{}").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+    let refused = report(&mut install(&home.0, "claude-code"));
+    assert_manual(&refused, "read-only");
+    let reason = refused["next_actions"][0].as_str().unwrap();
+    let real = fs::canonicalize(&target).unwrap();
+    assert!(reason.contains(real.to_str().unwrap()), "{reason}");
+    assert!(reason.contains("linked from"), "{reason}");
+    assert!(reason.contains(file.to_str().unwrap()), "{reason}");
+    assert_eq!(fs::read(&target).unwrap(), b"{}");
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_reports_hard_linked_settings_for_manual_installation() {
+    // Swapping in a new file would leave the second name pointing at the old one.
+    let home = Temp::new();
+    let file = home.0.join(".codex/hooks.json");
+    let twin = home.0.join("hooks-copy.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "{}").unwrap();
+    fs::hard_link(&file, &twin).unwrap();
+    for dry_run in [true, false] {
+        let mut command = install(&home.0, "codex");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        assert_manual(&report(&mut command), "more than one hard link");
+        assert_eq!(fs::read(&file).unwrap(), b"{}");
+        assert_eq!(fs::read(&twin).unwrap(), b"{}");
+        assert_eq!(entries(file.parent().unwrap()), ["hooks.json"]);
+    }
+}
+
+#[test]
+fn capture_install_still_reports_the_entry_when_it_cannot_write() {
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&file, "{}").unwrap();
+    // Something other than a file sits where the lock belongs.
+    fs::create_dir(root.join(".hooks.json.cqlmatic.lock")).unwrap();
+    let preview = report(install(&home.0, "codex").arg("--dry-run"));
+    let output = install(&home.0, "codex").output().unwrap();
+    let error = install_error(&output);
+    assert_eq!(error["code"], "LOCAL_FILE_TYPE");
+    let failed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(failed["installed"], false);
+    assert_eq!(failed["changed"], false);
+    assert_eq!(failed["entry"], preview["entry"]);
+    assert!(
+        failed["next_actions"][0]
+            .as_str()
+            .unwrap()
+            .contains("merge the reported entry by hand")
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"{}");
 }
 
 #[cfg(any(unix, windows))]
