@@ -182,14 +182,15 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Diagnostic> {
         storage::read_bytes(path, MAX_STATE_BYTES)?
     };
     serde_json::from_slice(&raw).map_err(|error| {
-        // A missing field's name comes from the schema. Nothing from the request is repeated.
+        // A missing field's name comes from the schema. Nothing from the file is repeated.
+        // The file may be a request or a saved state, so the message names neither.
         let error = error.to_string();
         match error
             .strip_prefix("missing field `")
             .and_then(|rest| rest.split_once('`'))
         {
             Some((field, _)) => fail(&format!(
-                "Inventory request is missing the required field {field}; inspect the inventory schema."
+                "Inventory input is missing the required field {field}; inspect the inventory schema."
             )),
             None => fail("Invalid inventory JSON or unknown fields; inspect the inventory schema."),
         }

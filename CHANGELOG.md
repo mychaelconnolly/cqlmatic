@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `cqlmatic env capture --client CLIENT --server SERVER --install` registers the scrappy-mode hook, replacing the client's settings file in one step with its existing content kept. It prints the entry for manual installation when the client or settings file requires it. Use `--dry-run` for a read-only preview or `--program TEXT` to specify a launcher.
-- Mapping through an agent is easier to follow. Brief inventory output adds a `next_action` while probes are ready, naming the `discovery-step` call that lists their arguments; 0.1.9 gave only a count. `prepare-discovery` with an unknown `source_ids` entry now says that IDs are the `source_id` values of expected sources in status and that omitting the field selects every expected source. An inventory request that lacks a required field is refused with that field's name. The agent skill lists the inventory actions for building the map in order, through `reconcile`, ahead of the standalone discovery loop.
+- Mapping through an agent is easier to follow. Brief inventory output adds a `next_action` while probes are ready, naming the `discovery-step` call that lists their arguments; 0.1.9 gave only a count. `prepare-discovery` with an unknown `source_ids` entry now says that IDs are the `source_id` values of expected sources in `status --json --summary` and that omitting the field selects every expected source. Inventory input that lacks a required field is refused with that field's name, and `prepare-discovery` with no expected source says so instead of suggesting to omit `source_ids`. The agent skill lists the inventory actions for building the map in order, through `reconcile`, ahead of the standalone discovery loop, with what Full mode needs beyond Quick.
 
 ## 0.1.9
 

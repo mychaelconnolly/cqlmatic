@@ -3560,13 +3560,17 @@ impl InventoryState {
                 contracts.push(json!({"source":source.selectors,"contract":ParserContract { source:"Explicit reviewed inventory parser binding".into(), parser:parser.id.clone(), retrieved_at:parser.snapshot.retrieved_at.clone(), source_hash:Some(parser.snapshot.sha256.clone()), declared_fields:declaration.fields.clone(), fields_to_tag:declaration.fields_to_tag.clone(), array_fields:declaration.array_fields.clone(), details:None }}));
             }
         }
-        if sources.is_empty()
-            || ids
-                .iter()
-                .any(|id| !self.sources.iter().any(|s| s.expected && &s.id == id))
+        if ids
+            .iter()
+            .any(|id| !self.sources.iter().any(|s| s.expected && &s.id == id))
         {
             return Err(fail(
-                "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
+                "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status --json --summary (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
+            ));
+        }
+        if sources.is_empty() {
+            return Err(fail(
+                "Discovery requires at least one expected source in the confirmed target; follow next_actions in status first.",
             ));
         }
         let mut request: DiscoverRequest = serde_json::from_value(json!({"schema_version":1,"environment":target.environment,"start":start,"end":end,"sources":sources,"value_fields":values,"kind_fields":kinds,"population_fields":population_fields,"contracts":contracts,"max_queries":max_queries,"max_seconds":max_seconds})).map_err(|_| fail("Cannot build typed discovery request."))?;
