@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `cqlmatic env capture --client CLIENT --server SERVER --install` registers the scrappy-mode hook with a per-user lock and atomic settings updates. It prints the entry for manual installation when the client or settings file requires it. Use `--dry-run` for a read-only preview or `--program TEXT` to specify a launcher.
+- `cqlmatic env capture --client CLIENT --server SERVER --install` registers the scrappy-mode hook, replacing the client's settings file in one step with its existing content kept. It prints the entry for manual installation when the client or settings file requires it. Use `--dry-run` for a read-only preview or `--program TEXT` to specify a launcher.
 
 ## 0.1.9
 

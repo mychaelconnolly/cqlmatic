@@ -68,12 +68,9 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 "Cannot report a non-Unicode settings path",
             )
         })?;
-        if !args.dry_run {
-            _lock = lock_installation()?;
-        }
         let user = current_user()?;
-        let settings = read_settings(&path, &user)?;
-        let edit = match &settings {
+        let plan = |settings: &Settings| {
+            match settings {
             Settings::Missing => {
                 let mut bytes = serde_json::to_vec_pretty(&entry).expect("JSON serializes");
                 bytes.push(b'\n');
@@ -82,17 +79,36 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             // Clients fail to read a settings file that starts with a byte order mark.
             Settings::File(snapshot) if snapshot.bytes.starts_with(b"\xEF\xBB\xBF") => {
                 Edit::Manual(
-                    "Settings start with a byte order mark. Save the file as UTF-8 without it, then retry",
+                    "Settings start with a byte order mark. Save the file as UTF-8 without it, then retry".into(),
                 )
             }
-            Settings::File(snapshot) => merge(&path, &snapshot.bytes, event, &hook)?,
-            Settings::Manual(reason) => Edit::Manual(reason),
-            Settings::NonRegular => {
-                let reason = "Settings must be a regular file";
-                refusal = Some(file_error("LOCAL_FILE_TYPE", &path, reason));
-                Edit::Manual(reason)
-            }
+            Settings::File(snapshot) => match merge(&snapshot.bytes, event, &hook) {
+                // A file its owner made read-only is theirs to change.
+                Ok(Edit::Write(_)) if snapshot.read_only() => {
+                    Edit::Manual("Settings are read-only".into())
+                }
+                Ok(edit) => edit,
+                Err(reason) => Edit::Manual(reason),
+            },
+            Settings::Manual(reason) => Edit::Manual((*reason).into()),
+            Settings::NonRegular => Edit::Manual("Settings must be a regular file".into()),
+        }
         };
+        let mut settings = read_settings(&path, &user)?;
+        let mut edit = plan(&settings);
+        if !args.dry_run && matches!(edit, Edit::Write(_)) {
+            _lock = lock_installation(&path)?;
+            // Another installation may have written while this one waited for the lock.
+            settings = read_settings(&path, &user)?;
+            edit = plan(&settings);
+        }
+        if matches!(settings, Settings::NonRegular) {
+            refusal = Some(file_error(
+                "LOCAL_FILE_TYPE",
+                &path,
+                "Settings must be a regular file",
+            ));
+        }
         let (installed, changed) = match edit {
             Edit::Manual(reason) => {
                 next_actions.push(format!(
@@ -109,27 +125,9 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                         "Updated settings exceed the byte limit",
                     ));
                 }
-                #[cfg(windows)]
-                if matches!(&settings, Settings::File(snapshot) if snapshot.stamp.mode != 0) {
-                    return Err(file_error(
-                        "LOCAL_IO",
-                        &path,
-                        "Cannot replace read-only settings",
-                    ));
-                }
                 if !args.dry_run {
-                    match replace(&path, settings, &user, &bytes)? {
-                        Replacement::Manual(reason) => {
-                            next_actions.push(format!(
-                                "{reason} ({destination}). Merge the reported entry by hand."
-                            ));
-                            (false, false)
-                        }
-                        Replacement::Installed(warning) => {
-                            next_actions.extend(warning);
-                            (true, true)
-                        }
-                    }
+                    next_actions.extend(replace(&path, settings, &user, &bytes)?);
+                    (true, true)
                 } else {
                     (false, true)
                 }
@@ -385,6 +383,14 @@ impl Snapshot {
     fn matches(&self, other: &Self) -> bool {
         self.stamp == other.stamp && self.bytes == other.bytes
     }
+
+    fn read_only(&self) -> bool {
+        if cfg!(unix) {
+            self.stamp.mode & 0o200 == 0
+        } else {
+            self.stamp.mode != 0
+        }
+    }
 }
 
 fn read_options() -> fs::OpenOptions {
@@ -395,11 +401,22 @@ fn read_options() -> fs::OpenOptions {
     options
 }
 
-fn lock_installation() -> Result<fs::File, Diagnostic> {
-    let state = inventory_cli::state_path(None)?;
-    let directory = settings_directory(&state);
-    setup_cli::protect_directory(directory)?;
-    let path = directory.join("hook-install.lock");
+/// One installation at a time edits a settings file. The lock file stays beside it, so every
+/// installer of that file meets the same lock.
+fn lock_installation(settings: &Path) -> Result<fs::File, Diagnostic> {
+    let parent = settings_directory(settings);
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
+        .create(parent)
+        .map_err(|e| io_error(parent, "Cannot create settings directory", e))?;
+    let name = settings
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("A known settings filename");
+    let path = parent.join(format!(".{name}.cqlmatic.lock"));
     if fs::symlink_metadata(&path).is_ok_and(|meta| is_link(&meta) || !meta.is_file()) {
         return Err(file_error(
             "LOCAL_FILE_TYPE",
@@ -621,42 +638,29 @@ fn is_link(metadata: &fs::Metadata) -> bool {
 enum Edit {
     Write(Vec<u8>),
     Installed,
-    Manual(&'static str),
+    Manual(String),
 }
 
-fn merge(path: &Path, bytes: &[u8], event: &str, hook: &Value) -> Result<Edit, Diagnostic> {
-    let invalid = || {
-        file_error(
-            "CLI_INPUT",
-            path,
-            "Settings must contain strict JSON with unique keys",
-        )
-    };
+/// The edit that registers the hook, or the reason the settings need a manual edit.
+fn merge(bytes: &[u8], event: &str, hook: &Value) -> Result<Edit, String> {
+    let invalid = || String::from("Settings must contain strict JSON with unique keys");
     // Require a single JSON value. The shared parser additionally checks for duplicate keys.
     let raw: &RawValue = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     let value = mcp::parse_saved_result(bytes).map_err(|_| {
         // Distinguish duplicate keys from values outside the parser's representation limits.
         match serde_json::from_slice::<Value>(bytes) {
             Ok(_) => invalid(),
-            Err(e) => file_error(
-                "CLI_INPUT",
-                path,
-                &format!("Cannot read settings JSON. {e}"),
-            ),
+            Err(e) => format!("Cannot read settings JSON: {e}"),
         }
     })?;
     let root = value
         .as_object()
-        .ok_or_else(|| file_error("CLI_INPUT", path, "Settings must contain a JSON object"))?;
+        .ok_or("Settings must contain a JSON object")?;
     let mut root_additions = json!({});
     if event == COPILOT_EVENT {
         match root.get("version") {
             Some(version) if version != 1 => {
-                return Err(file_error(
-                    "CLI_INPUT",
-                    path,
-                    "Expected hook configuration version 1",
-                ));
+                return Err("Expected hook configuration version 1".into());
             }
             None => root_additions["version"] = json!(1),
             _ => {}
@@ -666,26 +670,20 @@ fn merge(path: &Path, bytes: &[u8], event: &str, hook: &Value) -> Result<Edit, D
     if let Some(hooks) = root.get("hooks") {
         let hooks = hooks
             .as_object()
-            .ok_or_else(|| file_error("CLI_INPUT", path, "Expected hooks to be a JSON object"))?;
+            .ok_or("Expected hooks to be a JSON object")?;
         let root_fields: BTreeMap<String, &RawValue> =
             serde_json::from_str(raw.get()).map_err(|_| invalid())?;
         let raw_hooks = root_fields["hooks"];
         if let Some(entries) = hooks.get(event) {
-            let entries = entries.as_array().ok_or_else(|| {
-                file_error(
-                    "CLI_INPUT",
-                    path,
-                    &format!("Expected hooks.{event} to be a JSON array"),
-                )
-            })?;
+            let entries = entries
+                .as_array()
+                .ok_or_else(|| format!("Expected hooks.{event} to be a JSON array"))?;
             let mut installed = false;
             for existing in entries {
                 match matching_command(existing, hook, event) {
                     Some(true) => installed = true,
                     Some(false) => {
-                        return Ok(Edit::Manual(
-                            "The capture command is part of a different hook entry",
-                        ));
+                        return Err("The capture command is part of a different hook entry".into());
                     }
                     None => {}
                 }
@@ -784,35 +782,19 @@ fn insertion(bytes: &[u8], raw: &RawValue, nonempty: bool, text: &str) -> (usize
     )
 }
 
-enum Replacement {
-    Manual(&'static str),
-    Installed(Option<String>),
-}
-
+/// Publishes the new settings. A returned warning does not undo the installation.
 fn replace(
     path: &Path,
     settings: Settings,
     user: &User,
     bytes: &[u8],
-) -> Result<Replacement, Diagnostic> {
+) -> Result<Option<String>, Diagnostic> {
     let snapshot = match settings {
         Settings::Missing => None,
         Settings::File(snapshot) => Some(snapshot),
         _ => unreachable!("Only writable settings reach replacement"),
     };
     let parent = settings_directory(path);
-    if snapshot.is_none() {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        builder.mode(0o700);
-        builder
-            .create(parent)
-            .map_err(|e| io_error(path, "Cannot create settings directory", e))?;
-        if let Some(reason) = directory_issue(path, user)? {
-            return Ok(Replacement::Manual(reason));
-        }
-    }
 
     let name = path
         .file_name()
@@ -856,8 +838,7 @@ fn replace(
             }))
         }
     })();
-    let warning = commit.map_err(|error| cleanup_failed_install(&temporary, error))?;
-    Ok(Replacement::Installed(warning))
+    commit.map_err(|error| cleanup_failed_install(&temporary, error))
 }
 
 fn create_candidate(parent: &Path, prefix: &str) -> Result<(PathBuf, fs::File), Diagnostic> {
@@ -895,14 +876,20 @@ fn write_candidate(
         .write_all(bytes)
         .map_err(|e| io_error(path, "Cannot write temporary settings", e))?;
     #[cfg(unix)]
-    if let Some(previous) = previous
-        && inspect()?.gid() != previous.group
-    {
-        std::os::unix::fs::fchown(&file, None, Some(previous.group))
-            .map_err(|e| io_error(path, "Cannot preserve settings group", e))?;
-    }
-    #[cfg(unix)]
-    let expected = previous.map_or(0o600, |s| s.mode);
+    let expected = match previous {
+        None => 0o600,
+        Some(previous) => {
+            let kept = inspect()?.gid() == previous.group
+                || std::os::unix::fs::fchown(&file, None, Some(previous.group)).is_ok();
+            if kept {
+                previous.mode
+            } else {
+                // The user is not in the old group, so the file takes the folder's group,
+                // which gets no more access than everyone already had.
+                previous.mode & !0o070 | (previous.mode & 0o007) << 3
+            }
+        }
+    };
     #[cfg(windows)]
     let expected = previous.map_or(0, |s| s.mode);
     #[cfg(unix)]
@@ -921,14 +908,6 @@ fn write_candidate(
             "LOCAL_IO",
             path,
             "Cannot verify temporary settings permissions",
-        ));
-    }
-    #[cfg(unix)]
-    if previous.is_some_and(|s| s.group != actual.gid()) {
-        return Err(file_error(
-            "LOCAL_IO",
-            path,
-            "Cannot verify temporary settings group",
         ));
     }
     file.sync_all()
@@ -994,7 +973,7 @@ mod tests {
         fs::hard_link(&sentinel, &regular).unwrap();
 
         let result = replace(&path, Settings::Missing, &current_user().unwrap(), b"{}").unwrap();
-        assert!(matches!(result, Replacement::Installed(None)));
+        assert_eq!(result, None);
         assert_eq!(fs::read(&path).unwrap(), b"{}");
         assert_eq!(fs::read_link(&symlink).unwrap(), sentinel);
         assert_eq!(fs::read(sentinel).unwrap(), b"sentinel");
@@ -1002,6 +981,46 @@ mod tests {
         assert_eq!(fs::read(regular).unwrap(), b"sentinel");
         assert_eq!(fs::read(leftover).unwrap(), b"leftover");
         assert!(!temp.0.join(format!("{prefix}.2.tmp")).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reports_settings_owned_by_another_user() {
+        let temp = Temp::new("owner");
+        let path = temp.0.join("hooks.json");
+        fs::write(&path, b"{}").unwrap();
+        let User(own) = current_user().unwrap();
+        let Settings::Manual(reason) = read_settings(&path, &User(own + 1)).unwrap() else {
+            panic!("Expected a manual report");
+        };
+        assert_eq!(reason, "Settings file is owned by another user");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_the_user_is_not_in_gives_way_to_the_group_of_the_folder() {
+        let temp = Temp::new("group");
+        let path = temp.0.join("hooks.json");
+        for (mode, limited) in [(0o640, 0o600), (0o664, 0o644), (0o604, 0o644)] {
+            let (temporary, file) = create_candidate(&temp.0, ".hooks.json.cqlmatic.").unwrap();
+            let previous = Stamp {
+                identity: (0, 0),
+                mode,
+                length: 0,
+                modified: SystemTime::now(),
+                group: u32::MAX - 2,
+            };
+            write_candidate(&path, file, Some(&previous), b"{}").unwrap();
+            let written = fs::metadata(&temporary).unwrap();
+            // Only a privileged user can hand the file to a group it is not in.
+            let expected = if written.gid() == previous.group {
+                mode
+            } else {
+                limited
+            };
+            assert_eq!(written.permissions().mode() & 0o777, expected);
+            fs::remove_file(temporary).unwrap();
+        }
     }
 
     #[test]

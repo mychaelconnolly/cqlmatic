@@ -32,9 +32,6 @@ impl Temp {
     fn state(&self) -> PathBuf {
         self.0.join("workflow/state.json")
     }
-    fn install_lock(&self) -> PathBuf {
-        self.0.join("data/cqlmatic/inventory/hook-install.lock")
-    }
     fn saved(&self) -> Value {
         serde_json::from_slice(&fs::read(self.state()).unwrap()).unwrap()
     }
@@ -247,7 +244,6 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         assert_eq!(preview["changed"], true);
         assert_eq!(preview["installed"], false);
         assert_eq!(preview["dry_run"], true);
-        assert!(!home.install_lock().exists());
         assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
         let mut command = install(&home.0, client);
         command
@@ -312,8 +308,24 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         assert_eq!(repeat["changed"], false);
         assert_eq!(fs::read(&file).unwrap(), original);
         assert!(!home.0.join(default).exists());
-        assert_eq!(fs::read_dir(file.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(entries(file.parent().unwrap()), with_lock(&file));
     }
+}
+
+/// Every name in a folder, hidden ones included.
+fn entries(directory: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// What a settings folder holds after an installation: the lock file and the settings.
+fn with_lock(settings: &Path) -> Vec<String> {
+    let name = settings.file_name().unwrap().to_str().unwrap();
+    vec![format!(".{name}.cqlmatic.lock"), name.to_owned()]
 }
 
 #[test]
@@ -463,6 +475,31 @@ fn capture_install_refuses_unsafe_or_invalid_settings() {
     let file = root.join("hooks.json");
     fs::create_dir(&root).unwrap();
     let command = || install(&home.0, "codex");
+    // Settings the installer cannot merge into stay as they are, and the entry is reported.
+    for (bytes, reason) in [
+        (&b"{"[..], "strict JSON"),
+        (b"{} {}", "strict JSON"),
+        (b"// note\n{}", "strict JSON"),
+        (b"[]", "a JSON object"),
+        (b"null", "a JSON object"),
+        (br#"{"duplicate":1,"duplicate":2}"#, "unique keys"),
+        (br#"{"hooks":null}"#, "hooks to be a JSON object"),
+        (br#"{"hooks":[]}"#, "hooks to be a JSON object"),
+        (br#"{"hooks":{"PostToolUse":{}}}"#, "to be a JSON array"),
+        (br#"{"hooks":{"PostToolUse":null}}"#, "to be a JSON array"),
+        (br#"{"number": 1e400}"#, "number out of range"),
+    ] {
+        fs::write(&file, bytes).unwrap();
+        for dry_run in [true, false] {
+            let mut command = command();
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            assert_manual(&report(&mut command), reason);
+            assert_eq!(fs::read(&file).unwrap(), bytes);
+            assert_eq!(entries(&root), ["hooks.json"]);
+        }
+    }
     let assert_refused = |code| {
         let output = command().output().unwrap();
         let d = install_error(&output);
@@ -482,35 +519,8 @@ fn capture_install_refuses_unsafe_or_invalid_settings() {
                 .contains(file.to_str().unwrap()),
             "{d}"
         );
-        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(entries(&root), ["hooks.json"]);
     };
-    for bytes in [
-        &b"{"[..],
-        b"{} {}",
-        b"[]",
-        b"null",
-        br#"{"duplicate":1,"duplicate":2}"#,
-        br#"{"hooks":null}"#,
-        br#"{"hooks":[]}"#,
-        br#"{"hooks":{"PostToolUse":{}}}"#,
-        br#"{"hooks":{"PostToolUse":null}}"#,
-    ] {
-        fs::write(&file, bytes).unwrap();
-        assert_refused("CLI_INPUT");
-        assert_eq!(fs::read(&file).unwrap(), bytes);
-    }
-    let too_large_number = br#"{"number": 1e400}"#;
-    fs::write(&file, too_large_number).unwrap();
-    let invalid = install_error(&command().output().unwrap());
-    assert_eq!(invalid["code"], "CLI_INPUT");
-    assert!(
-        invalid["message"]
-            .as_str()
-            .unwrap()
-            .contains("number out of range"),
-        "{invalid}"
-    );
-    assert_eq!(fs::read(&file).unwrap(), too_large_number);
     let oversized = vec![b' '; 8 * 1024 * 1024 + 1];
     fs::write(&file, &oversized).unwrap();
     assert_refused("LOCAL_SIZE");
@@ -519,6 +529,30 @@ fn capture_install_refuses_unsafe_or_invalid_settings() {
     fs::create_dir(&file).unwrap();
     assert_refused("LOCAL_FILE_TYPE");
     assert!(file.is_dir());
+}
+
+#[test]
+fn capture_install_reports_read_only_settings_for_manual_installation() {
+    let home = Temp::new();
+    let file = home.0.join(".codex/hooks.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "{}").unwrap();
+    let mut permissions = fs::metadata(&file).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&file, permissions.clone()).unwrap();
+    for dry_run in [true, false] {
+        let mut command = install(&home.0, "codex");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        assert_manual(&report(&mut command), "read-only");
+        assert_eq!(fs::read(&file).unwrap(), b"{}");
+        assert_eq!(entries(file.parent().unwrap()), ["hooks.json"]);
+    }
+    // Let the temporary folder be removed on every platform.
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&file, permissions).unwrap();
 }
 
 #[cfg(any(unix, windows))]
@@ -551,9 +585,6 @@ fn capture_install_reports_a_symbolic_link_for_manual_installation() {
         assert_eq!(fs::read_link(&file).unwrap(), target);
         assert_eq!(fs::read(&target).unwrap(), original);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
-        if dry_run {
-            assert!(!home.install_lock().exists());
-        }
     }
 }
 
@@ -582,7 +613,7 @@ fn capture_install_merges_settings_through_a_symlinked_directory() {
     assert_eq!(settings["existing"], true);
     assert_eq!(settings["hooks"], output["entry"]["hooks"]);
     assert_eq!(fs::read_link(linked).unwrap(), root);
-    assert_eq!(fs::read_dir(root).unwrap().count(), 1);
+    assert_eq!(entries(&root), with_lock(&file));
 }
 
 #[cfg(unix)]
@@ -668,7 +699,6 @@ fn capture_install_refuses_foreign_owners_before_merge() {
 #[cfg(unix)]
 fn check_settings_refusal(home: &Temp, path: &Path, bytes: &[u8], entry: &Value, reason: &str) {
     for dry_run in [true, false] {
-        let had_lock = home.install_lock().exists();
         let mut command = install(&home.0, "codex");
         if dry_run {
             command.arg("--dry-run");
@@ -678,9 +708,6 @@ fn check_settings_refusal(home: &Temp, path: &Path, bytes: &[u8], entry: &Value,
         assert_eq!(&report["entry"], entry);
         assert_eq!(fs::read(path).unwrap(), bytes);
         assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
-        if dry_run {
-            assert_eq!(home.install_lock().exists(), had_lock);
-        }
     }
 }
 
@@ -1690,22 +1717,14 @@ fn capture_install_registers_an_absolute_state_path() {
 #[test]
 fn capture_install_refuses_a_held_lock_and_succeeds_after_release() {
     let home = Temp::new();
-    // A different client establishes the shared lock in CQLmatic's own data directory.
-    assert_eq!(
-        report(&mut install(&home.0, "claude-code"))["installed"],
-        true
-    );
-    let lock_path = home.install_lock();
-    let held = fs::File::options()
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .unwrap();
     let root = home.0.join(".codex");
     let file = root.join("hooks.json");
     fs::create_dir(&root).unwrap();
     let original = b"{\"existing\":true}\n";
     fs::write(&file, original).unwrap();
+    // The lock stays beside the settings it guards.
+    let lock_path = root.join(".hooks.json.cqlmatic.lock");
+    let held = fs::File::create(&lock_path).unwrap();
 
     held.lock().unwrap();
     let busy = install(&home.0, "codex").output().unwrap();
@@ -1718,7 +1737,7 @@ fn capture_install_refuses_a_held_lock_and_succeeds_after_release() {
     assert_eq!(preview["installed"], false);
     assert_eq!(preview["changed"], true);
     assert_eq!(fs::read(&file).unwrap(), original);
-    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    assert_eq!(entries(&root), with_lock(&file));
 
     drop(held);
     let updated = report(&mut install(&home.0, "codex"));
@@ -1728,7 +1747,7 @@ fn capture_install_refuses_a_held_lock_and_succeeds_after_release() {
     assert_eq!(installed["existing"], true);
     assert_eq!(installed["hooks"], updated["entry"]["hooks"]);
     assert_eq!(fs::metadata(&lock_path).unwrap().len(), 0);
-    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+    assert_eq!(entries(&root), with_lock(&file));
 }
 
 #[test]
