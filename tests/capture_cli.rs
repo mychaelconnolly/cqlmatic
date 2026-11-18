@@ -557,21 +557,25 @@ fn capture_install_reports_read_only_settings_for_manual_installation() {
 
 #[cfg(any(unix, windows))]
 #[test]
-fn capture_install_reports_a_symbolic_link_for_manual_installation() {
+fn capture_install_reports_a_link_it_cannot_follow_for_manual_installation() {
+    // On Windows that is any linked settings file; elsewhere, a link whose target is missing.
     let home = Temp::new();
     let root = home.0.join(".claude");
     let file = root.join("settings.json");
     let target = home.0.join("settings.json");
     let preview = report(install(&home.0, "claude-code").arg("--dry-run"));
-    let original = serde_json::to_vec(&preview["entry"]).unwrap();
     fs::create_dir(&root).unwrap();
-    fs::write(&target, &original).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &file).unwrap();
     #[cfg(windows)]
-    match std::os::windows::fs::symlink_file(&target, &file) {
-        Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
-        result => result.unwrap(),
+    let original = serde_json::to_vec(&preview["entry"]).unwrap();
+    #[cfg(windows)]
+    {
+        fs::write(&target, &original).unwrap();
+        match std::os::windows::fs::symlink_file(&target, &file) {
+            Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
+            result => result.unwrap(),
+        }
     }
     for dry_run in [true, false] {
         let mut command = install(&home.0, "claude-code");
@@ -583,9 +587,59 @@ fn capture_install_reports_a_symbolic_link_for_manual_installation() {
         assert_eq!(output["path"], json!(file));
         assert_eq!(output["entry"], preview["entry"]);
         assert_eq!(fs::read_link(&file).unwrap(), target);
+        #[cfg(unix)]
+        assert!(!target.exists());
+        #[cfg(windows)]
         assert_eq!(fs::read(&target).unwrap(), original);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_edits_a_linked_settings_file_where_it_really_is() {
+    let home = Temp::new();
+    let root = home.0.join(".claude");
+    let file = root.join("settings.json");
+    let store = home.0.join("dotfiles");
+    let target = store.join("claude.json");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&store).unwrap();
+    let original = "{\"existing\":true}\n";
+    fs::write(&target, original).unwrap();
+    // A relative link through a second link, as a dotfile manager may leave.
+    std::os::unix::fs::symlink("claude.json", store.join("alias.json")).unwrap();
+    let link = Path::new("../dotfiles/alias.json");
+    std::os::unix::fs::symlink(link, &file).unwrap();
+
+    let preview = report(install(&home.0, "claude-code").arg("--dry-run"));
+    assert_eq!(preview["installed"], false);
+    assert_eq!(preview["changed"], true);
+    assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    assert_eq!(entries(&store), ["alias.json", "claude.json"]);
+
+    let output = report(&mut install(&home.0, "claude-code"));
+    assert_eq!(output["installed"], true);
+    assert_eq!(output["changed"], true);
+    assert_eq!(output["path"], json!(file));
+    // Both links are untouched, and nothing is left beside the first one.
+    assert_eq!(fs::read_link(&file).unwrap(), link);
+    assert_eq!(
+        fs::read_link(store.join("alias.json")).unwrap(),
+        Path::new("claude.json")
+    );
+    assert_eq!(entries(&root), ["settings.json"]);
+    assert_eq!(
+        entries(&store),
+        [".claude.json.cqlmatic.lock", "alias.json", "claude.json"]
+    );
+    let settings: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    assert_eq!(settings["existing"], true);
+    assert_eq!(settings["hooks"], output["entry"]["hooks"]);
+
+    let repeat = report(&mut install(&home.0, "claude-code"));
+    assert_eq!(repeat["installed"], true);
+    assert_eq!(repeat["changed"], false);
 }
 
 #[cfg(any(unix, windows))]

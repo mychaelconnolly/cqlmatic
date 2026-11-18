@@ -61,13 +61,23 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             entry["version"] = json!(1);
         }
 
-        let destination = path.to_str().ok_or_else(|| {
-            file_error(
-                "LOCAL_PATH",
-                &path,
-                "Cannot report a non-Unicode settings path",
-            )
-        })?;
+        let destination = path
+            .to_str()
+            .ok_or_else(|| {
+                file_error(
+                    "LOCAL_PATH",
+                    &path,
+                    "Cannot report a non-Unicode settings path",
+                )
+            })?
+            .to_owned();
+        // A settings file kept elsewhere and linked into place, as dotfile managers do, is
+        // edited where it really is. The link itself is left alone.
+        #[cfg(unix)]
+        let path = match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => fs::canonicalize(&path).unwrap_or(path),
+            _ => path,
+        };
         let user = current_user()?;
         let plan = |settings: &Settings| {
             match settings {
@@ -137,7 +147,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             next_actions.push("Review and trust the hook with /hooks before it runs.".into());
         }
         (
-            Some(destination.to_owned()),
+            Some(destination),
             Some(event),
             command,
             entry,
