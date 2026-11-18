@@ -38,7 +38,7 @@ For non-selected retained format-3 runs, all nine guarded discovery, refresh, sc
 | `needs-probes`, `activation-blocked`, `activating` | Block as unfinished. |
 | `cancel-requested`, `cleanup-pending` | Block until termination and cleanup are resolved, subject to the next row. |
 | Exhausted 0.1.6 or 0.1.7 MCP run with a verified final answer | Allow unrelated guarded work under the checks below. |
-| `paused` | Allow when safely paused; an identical request with the same predecessor must reuse its original allowance. |
+| `paused` | Allow when safely paused; an identical request with the same predecessor must reuse its original allowance, unless that run has used its whole time limit and can no longer resume. |
 | `activated` | Allow after verifying the frozen artifacts. |
 | `failed` | Allow only when no attempt remains uncertain. |
 

@@ -2991,6 +2991,32 @@ fn identical_paused_discovery_resumes_its_allowance_instead_of_replacing_it() {
 }
 
 #[test]
+fn identical_request_replaces_a_paused_run_that_used_its_whole_time_limit() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let mut request = source_run_request(4);
+    request["max_seconds"] = json!(1);
+    call(&dir.0, request.clone());
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    // The paused run cannot continue, so nothing is kept by refusing the same request.
+    assert_rejected(
+        &dir.0,
+        json!({"kind":"resume-discovery","run_index":0}),
+        "active-time budget expired",
+    );
+    let replacement = call(&dir.0, request);
+    assert_eq!(replacement["action"]["run_index"], 1);
+    assert_eq!(
+        replacement["status"]["discovery_runs"][0]["status"],
+        "paused"
+    );
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(first["action"]["run_index"], 1);
+    assert_eq!(first["action"]["dispatched"], true);
+}
+
+#[test]
 fn selected_older_discovery_preserves_captures_allowance_and_later_run() {
     let dir = Temp::new();
     confirm_quick_source(&dir.0, "one");
