@@ -437,17 +437,15 @@ fn lock_installation() -> Result<fs::File, Diagnostic> {
     }
 }
 
-#[cfg(unix)]
-type User = u32;
-// Windows settings keep the access rules of their folder; ownership is not inspected there.
-#[cfg(windows)]
-type User = ();
+/// The account running the installer. Windows settings keep the access rules of their
+/// folder, so ownership is inspected only on Unix.
+struct User(#[cfg(unix)] u32);
 
 fn current_user() -> Result<User, Diagnostic> {
     #[cfg(unix)]
-    return setup_cli::current_unix_uid();
+    return setup_cli::current_unix_uid().map(User);
     #[cfg(windows)]
-    Ok(())
+    Ok(User())
 }
 
 fn settings_directory(path: &Path) -> &Path {
@@ -457,10 +455,10 @@ fn settings_directory(path: &Path) -> &Path {
 
 fn permission_issue(metadata: &fs::Metadata, user: &User) -> Option<&'static str> {
     #[cfg(unix)]
-    let (owned, shared) = (metadata.uid() == *user, mode(metadata) & 0o002 != 0);
+    let (owned, shared) = (metadata.uid() == user.0, mode(metadata) & 0o002 != 0);
     #[cfg(windows)]
     let (owned, shared) = {
-        let () = user;
+        let User() = user;
         (true, false)
     };
     match (metadata.is_dir(), owned, shared) {

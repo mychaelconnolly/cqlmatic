@@ -656,6 +656,7 @@ fn capture_install_refuses_foreign_owners_before_merge() {
     }
 }
 
+#[cfg(unix)]
 fn check_settings_refusal(home: &Temp, path: &Path, bytes: &[u8], entry: &Value, reason: &str) {
     for dry_run in [true, false] {
         let had_lock = home.install_lock().exists();
