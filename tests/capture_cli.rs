@@ -71,6 +71,33 @@ impl Temp {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    /// Asks for the run's probe without supplying an answer.
+    fn next_probe(&self) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["env", "inventory", "--json", "--next-probe", "--state"])
+            .arg(self.state())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["action"].take()
+    }
+    /// Prepares a Quick run over two sources and reserves its first probe.
+    fn probing(&self) -> Value {
+        for action in [
+            json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+            json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic capture target","expected_sources":[{"type":"synthetic-a"},{"type":"synthetic-b"}]}),
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_queries":4,"max_seconds":120}),
+        ] {
+            self.act_on(&self.state(), action);
+        }
+        let first = self.next_probe();
+        assert_eq!(first["dispatched"], true, "{first}");
+        first
+    }
     /// Runs the hook command on one payload; it must stay silent and succeed whatever happens.
     fn capture(&self, payload: Value) {
         self.capture_as("claude-code", SERVER, payload);
@@ -130,6 +157,16 @@ fn search(query: &str, response: Value) -> Value {
             "repository": "third-party", "query_string": query,
             "start": hours_ago(2), "end": hours_ago(1)
         }},
+        "tool_response": response,
+    })
+}
+
+/// The search a probe asks for, as Claude Code reports it after calling the tool directly.
+fn probe_search(probe: &Value, response: Value) -> Value {
+    json!({
+        "hook_event_name": "PostToolUse",
+        "tool_name": format!("mcp__{SERVER}__{}", probe["tool"].as_str().unwrap()),
+        "tool_input": probe["arguments"],
         "tool_response": response,
     })
 }
@@ -1869,6 +1906,46 @@ fn pass_through_relays_every_message_unchanged_and_records_a_finished_search() {
     assert!(String::from_utf8_lossy(&missing.stderr).contains("PASS_THROUGH"));
 }
 
+#[cfg(unix)]
+#[test]
+fn pass_through_answers_the_outstanding_probe_of_a_run() {
+    let home = Temp::new();
+    let first = home.probing();
+    let input = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": first["probe"]["tool"], "arguments": first["probe"]["arguments"]
+        }}),
+        json!({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": body(json!([{"events": 10}]))}],
+            "isError": false
+        }}),
+    ]
+    .map(|message| format!("{message}\n"))
+    .concat();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["env", "pass-through", "--state"])
+        .arg(home.state())
+        .args(["--", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    let second = home.next_probe();
+    assert_eq!(second["dispatched"], true, "{second}");
+    assert_ne!(second["probe"]["probe_id"], first["probe"]["probe_id"]);
+    assert_eq!(home.tally(), json!({"probe-answered": 1}));
+}
+
 #[test]
 fn capture_install_registers_an_absolute_state_path() {
     // The hook runs from whatever directory the client was started in.
@@ -2033,4 +2110,208 @@ fn concurrent_capture_install_processes_keep_every_reported_hook() {
             1
         );
     }
+}
+
+#[test]
+fn capture_answers_the_outstanding_probe_of_a_run() {
+    let home = Temp::new();
+    let first = home.probing();
+    let counted = json!(body(json!([{"events": 10}])));
+    home.capture(probe_search(&first["probe"], counted.clone()));
+
+    let second = home.next_probe();
+    assert_eq!(second["state"], "probe", "{second}");
+    assert_eq!(second["dispatched"], true);
+    assert_ne!(second["probe"]["probe_id"], first["probe"]["probe_id"]);
+    assert_eq!(second["cost"]["searches"]["used"], 2);
+    assert!(
+        first["next_action"]
+            .as_str()
+            .unwrap()
+            .ends_with("submit next-probe with run_index=0 and answer."),
+        "{first}"
+    );
+    assert!(
+        second["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("submit next-probe with run_index=0 and no answer"),
+        "{second}"
+    );
+    assert_eq!(home.tally(), json!({"probe-answered": 1}));
+    assert_eq!(
+        names(&home.0.join("workflow/state.json.captures")),
+        ["tally.json"]
+    );
+
+    // The hosted server's gateway carries the same arguments one level down.
+    let mut through_gateway = probe_search(&second["probe"], counted);
+    through_gateway["tool_name"] = json!(format!("mcp__{SERVER}__execute_tool"));
+    through_gateway["tool_input"] =
+        json!({"name": second["probe"]["tool"], "arguments": second["probe"]["arguments"]});
+    home.capture(through_gateway);
+    let done = home.next_probe();
+    assert_eq!(done["state"], "complete", "{done}");
+    assert_eq!(done["cost"]["searches"]["used"], 2);
+    assert_eq!(home.tally(), json!({"probe-answered": 2}));
+    assert!(home.saved().get("captured_observations").is_none());
+}
+
+#[test]
+fn capture_answers_a_probe_only_with_its_own_completed_search() {
+    let home = Temp::new();
+    let first = home.probing();
+    let counted = json!(body(json!([{"events": 10}])));
+    let still_outstanding = |after: &str| {
+        let reread = home.next_probe();
+        assert_eq!(reread["state"], "probe", "{after}: {reread}");
+        assert_eq!(reread["dispatched"], false, "{after}");
+        assert_eq!(reread["probe"], first["probe"], "{after}");
+        assert_eq!(reread["cost"]["searches"]["used"], 1, "{after}");
+    };
+
+    let mut other_query = probe_search(&first["probe"], counted.clone());
+    other_query["tool_input"]["query_string"] = json!("#type = \"synthetic-a\" | count()");
+    home.capture(other_query);
+    still_outstanding("a different query");
+
+    let mut extra_argument = probe_search(&first["probe"], counted.clone());
+    extra_argument["tool_input"]["limit"] = json!(10);
+    home.capture(extra_argument);
+    still_outstanding("an added argument");
+
+    let mut beside_the_gateway = probe_search(&first["probe"], counted.clone());
+    beside_the_gateway["tool_name"] = json!(format!("mcp__{SERVER}__execute_tool"));
+    beside_the_gateway["tool_input"] = json!({
+        "name": first["probe"]["tool"], "arguments": first["probe"]["arguments"], "timeout": 5
+    });
+    home.capture(beside_the_gateway);
+    still_outstanding("a gateway call with something beside the arguments");
+
+    let mut failed = probe_search(&first["probe"], Value::Null);
+    failed["hook_event_name"] = json!("PostToolUseFailure");
+    home.capture(failed);
+    still_outstanding("a failed call");
+
+    home.capture(probe_search(
+        &first["probe"],
+        json!("NGSIEM search timed out after 20 seconds"),
+    ));
+    still_outstanding("a search that timed out");
+    assert!(home.tally().get("probe-answered").is_none());
+
+    // A copied state does not own the run, so its hook leaves the run alone.
+    let copy = home.0.join("copy/state.json");
+    fs::create_dir(home.0.join("copy")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(home.0.join("copy"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::copy(home.state(), &copy).unwrap();
+    home.capture_into(
+        &copy,
+        "claude-code",
+        SERVER,
+        probe_search(&first["probe"], counted.clone()),
+    );
+    still_outstanding("a copied state");
+
+    home.capture(probe_search(&first["probe"], counted));
+    assert_eq!(home.next_probe()["dispatched"], true);
+    assert_eq!(home.tally()["probe-answered"], 1);
+}
+
+#[test]
+fn capture_counts_a_probe_result_that_is_refused() {
+    let home = Temp::new();
+    let first = home.probing();
+    home.capture(probe_search(
+        &first["probe"],
+        json!(body(json!([{"user": "ann"}]))),
+    ));
+    // The run treats the result as it would one the agent submitted.
+    let after = home.next_probe();
+    assert_eq!(after["state"], "paused", "{after}");
+    assert_eq!(after["cost"]["searches"]["used"], 1);
+    assert_eq!(home.tally(), json!({"probe-not-answered": 1}));
+    assert_eq!(
+        names(&home.0.join("workflow/state.json.captures")),
+        ["tally.json"]
+    );
+}
+
+#[test]
+fn capture_answers_a_probe_despite_a_leftover_copy() {
+    let home = Temp::new();
+    let first = home.probing();
+    let counted = body(json!([{"events": 10}]));
+    home.capture(probe_search(
+        &first["probe"],
+        json!({"content": [{"type": "text", "text": counted}], "isError": false}),
+    ));
+    let second = home.next_probe();
+    assert_eq!(second["dispatched"], true, "{second}");
+    assert_ne!(second["probe"]["probe_id"], first["probe"]["probe_id"]);
+
+    // A hook stopped after saving its copy must not block the same result later.
+    let captures = home.0.join("workflow/state.json.captures");
+    for entry in fs::read_dir(&captures).unwrap() {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        assert!(!name.starts_with("probe-"), "{name}");
+    }
+    let leftover = captures.join(format!(
+        "probe-{}.json",
+        &cqlmatic::sha256_hex(counted.as_bytes())[..12]
+    ));
+    fs::write(&leftover, &counted).unwrap();
+    home.capture(probe_search(&second["probe"], json!(counted)));
+    assert_eq!(home.next_probe()["state"], "complete");
+    assert_eq!(home.tally(), json!({"probe-answered": 2}));
+}
+
+#[test]
+fn capture_answers_the_probe_of_a_resumed_earlier_run() {
+    let home = Temp::new();
+    let first = home.probing();
+    let state = home.state();
+    home.act_on(&state, json!({"kind":"pause-discovery","run_index":0}));
+    // The pause asked for the outstanding search to finish; hand its result in.
+    let counted = body(json!([{"events": 10}]));
+    let saved = home.0.join("first.json");
+    fs::write(&saved, &counted).unwrap();
+    home.act_on(
+        &state,
+        json!({"kind":"discovery-step","run_index":0,"answers":[{"probe_id":first["probe"]["probe_id"],"result_file":saved}]}),
+    );
+    home.act_on(
+        &state,
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","max_queries":5,"max_seconds":120}),
+    );
+    home.act_on(&state, json!({"kind":"pause-discovery","run_index":1}));
+    home.act_on(&state, json!({"kind":"resume-discovery","run_index":0}));
+    let reserve = |extra: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args([
+                "env",
+                "inventory",
+                "--json",
+                "--next-probe",
+                "--run-index",
+                "0",
+            ])
+            .args(extra)
+            .arg("--state")
+            .arg(&state)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["action"].take()
+    };
+    let second = reserve(&[]);
+    assert_eq!(second["state"], "probe", "{second}");
+    home.capture(probe_search(&second["probe"], json!(counted)));
+    let after = reserve(&[]);
+    assert_eq!(after["state"], "complete", "{after}");
+    assert_eq!(home.tally()["probe-answered"], 1);
 }
