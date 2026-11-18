@@ -51,7 +51,7 @@ cqlmatic env inventory --json
 cqlmatic status --json
 ```
 
-For agent communication, use `cqlmatic status --json --brief` and `env inventory --request FILE --json --brief`. Brief mode bounds the entire response to 4,096 bytes and excludes operational payloads. It conflicts with `--summary`; full and summary output can grow with inventory size. Obtain only focused detail when needed. See [bounded handoff](docs/INVENTORY.md#bounded-agent-handoff) for aggregate notices, explicit snapshot acknowledgement, and protected local handling of exact execution descriptors.
+For agent communication, use `cqlmatic status --json --brief` and `env inventory --request FILE --json --brief`. Brief projections are at most 4,096 bytes and omit operational payloads. The `next-probe` action returns one exact execution descriptor when a probe is available, even with `--brief` and for arguments above that limit. Brief mode conflicts with `--summary`. See [bounded handoff](docs/INVENTORY.md#bounded-agent-handoff) for aggregate notices, acknowledgement and protected handling of execution descriptors.
 
 These no-request invocations do not start native setup or a search. A setup request with action `status` passes through the state writer; it is different from no-request `setup --json`. Setup exits `1` until saved tool-discovery evidence qualifies. Inventory/status exit `0` when their command succeeds even if `full_map_complete` is false or an action records incomplete/failed work. Inspect the returned fields.
 

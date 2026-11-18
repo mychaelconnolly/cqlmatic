@@ -42,7 +42,7 @@ pub struct InventoryArgs {
     #[arg(
         long,
         requires = "json",
-        help = "Emit a notification/status view of at most 4096 bytes; no executable arguments"
+        help = "Emit at most 4096 bytes with no executable arguments, except for next-probe"
     )]
     pub brief: bool,
 }
@@ -583,6 +583,10 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     if request.schema_version != 1 {
         return Err(fail("Unsupported inventory request version."));
     }
+    if let InventoryAction::NextProbe { run_index, answer } = request.action {
+        output(&json!({"schema_version":1,"action":next_probe(&path, run_index, answer)?}))?;
+        return Ok(0);
+    }
     let session_id = match &request.action {
         InventoryAction::PrepareRefresh { session_id, .. }
         | InventoryAction::DispatchRefresh { session_id, .. } => Some(session_id.clone()),
@@ -612,6 +616,117 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     Ok(0)
 }
 
+fn next_probe(
+    path: &Path,
+    run_index: Option<usize>,
+    answer: Option<DiscoveryAnswer>,
+) -> Result<Value, Diagnostic> {
+    let writer = inventory_writer(path)?;
+    let supplied_answer = answer.is_some();
+    let diagnostics = if let Some(answer) = answer {
+        let (_, settled) = apply_locked(
+            path,
+            InventoryAction::DiscoveryStep {
+                run_index,
+                answers: vec![answer],
+            },
+            MAX_STATE_BYTES,
+            &writer,
+        )?;
+        [settled.get("diagnostics"), settled.pointer("/relay/diagnostics")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_array)
+            .flatten()
+            .map(|d| {
+                json!({"code":d["code"],"severity":d["severity"],
+                    "message":"Inspect the protected discovery checkpoint or inventory failures for details about this answer."})
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let (run_index, phase, outstanding, probe, mut cost) = {
+        let state = load(path)?;
+        let index = discovery_run_index(&state, run_index)?;
+        let run = &state.discovery_runs[index];
+        let checkpoint = storage::Writer::acquire(Path::new(&run.state_path))
+            .map_err(|d| discovery_run_diagnostic(index, d))?;
+        let relay = inspect_selected_run(&state, index)?;
+        mcp::inspect_inventory_owner(&relay, &writer)
+            .map_err(|d| discovery_run_diagnostic(index, d))?;
+        let phase = match run.status.as_str() {
+            "complete" | "superseded" => &run.status,
+            _ => &relay.status,
+        };
+        let outstanding = mcp::has_in_flight(&relay);
+        let probe = if phase == "needs-probes"
+            && diagnostics.is_empty()
+            && !(supplied_answer && outstanding)
+        {
+            mcp::inventory_probe(&relay).map_err(|d| discovery_run_diagnostic(index, d))?
+        } else {
+            None
+        };
+        if outstanding && probe.is_some() {
+            checkpoint
+                .confirm_parent_durable()
+                .map_err(|d| discovery_run_diagnostic(index, d))?;
+        }
+        (
+            index,
+            phase.clone(),
+            outstanding,
+            probe,
+            json!(mcp::cost(&relay, 0)),
+        )
+    };
+
+    let dispatched = probe.is_some() && !outstanding;
+    if let Some(probe) = &probe
+        && dispatched
+    {
+        let probe_id = probe["probe_id"].as_str().expect("Wire probe has an ID");
+        // Settlement is already committed. A failed reservation leaves the answer saved.
+        let (_, mut reservation) = apply_locked(
+            path,
+            InventoryAction::DispatchDiscovery {
+                run_index: Some(run_index),
+                probe_id: probe_id.into(),
+            },
+            MAX_STATE_BYTES,
+            &writer,
+        )?;
+        cost = reservation["relay"]["cost"].take();
+    }
+    let phase = if probe.is_some() { "probe" } else { &phase };
+    let next_action = match phase {
+        "probe" => {
+            "Run the tool once with these exact arguments, save the whole result unedited, and submit next-probe with answer."
+        }
+        "complete" => "Submit reconcile with reviewed_at.",
+        "paused" => "Submit resume-discovery to continue this run.",
+        "cancel-requested" | "cleanup-pending" => {
+            "Settle the exact outstanding attempt before continuing."
+        }
+        _ => "Inspect this run with discovery-step and answers: [].",
+    };
+    if probe.is_some() {
+        cost["searches"]["ready"] = json!(1);
+    }
+    let mut action = json!({"kind":"next-probe","run_index":run_index,"state":phase,
+        "dispatched":dispatched,"cost":cost,"next_action":next_action});
+    if let Some(mut probe) = probe {
+        action["probe"] = json!({"probe_id":probe["probe_id"].take(),
+            "tool":probe["mcp"]["tool"].take(),"arguments":probe["mcp"]["arguments"].take()});
+    }
+    if !diagnostics.is_empty() {
+        action["diagnostics"] = json!(diagnostics);
+    }
+    Ok(action)
+}
+
 const DISCOVERY_ALLOWANCE_EXPIRED: &str = "DISCOVERY_ALLOWANCE_EXPIRED";
 
 fn state_fingerprint(state: &InventoryState) -> Result<String, Diagnostic> {
@@ -632,9 +747,23 @@ fn apply_and_store_with_work_budget(
     action: InventoryAction,
     work_budget: u64,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
+    let writer = inventory_writer(path)?;
+    apply_locked(path, action, work_budget, &writer)
+}
+
+fn inventory_writer(path: &Path) -> Result<storage::Writer, Diagnostic> {
     protect_state(path)?;
     let writer = storage::Writer::acquire(path)?;
     protect_state(path)?;
+    Ok(writer)
+}
+
+fn apply_locked(
+    path: &Path,
+    action: InventoryAction,
+    work_budget: u64,
+    writer: &storage::Writer,
+) -> Result<(InventoryStatus, Value), Diagnostic> {
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
     let now = discovery::timestamp();
@@ -689,12 +818,7 @@ fn apply_and_store_with_work_budget(
             } else {
                 None
             };
-            let relay = mcp::inspect_state(Path::new(&state.discovery_runs[index].state_path))
-                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
-            verify_run_reference(&state, &state.discovery_runs[index], &relay)
-                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
-            mcp::require_current_producer(&relay)
-                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+            inspect_selected_run(&state, index)?;
         }
         let mut ended_runs = Vec::new();
         if !relay_guards.is_empty() {
@@ -713,7 +837,7 @@ fn apply_and_store_with_work_budget(
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
                 verify_run_reference(&state, run, &relay)
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
-                if preflight_foreign_run(&state, &action, index, &relay, &writer, &now)
+                if preflight_foreign_run(&state, &action, index, &relay, writer, &now)
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
                 {
                     ended_runs.push(index);
@@ -728,7 +852,7 @@ fn apply_and_store_with_work_budget(
                 ));
             }
             for (index, relay) in relay_guards.iter().enumerate() {
-                mcp::bind_inventory_owner(relay, &writer)
+                mcp::bind_inventory_owner(relay, writer)
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
             }
         }
@@ -774,7 +898,7 @@ fn apply_and_store_with_work_budget(
             action,
             &now,
             boundary,
-            &writer,
+            writer,
             &relay_guards,
         )?;
         if let Some(index) = selected_run {
@@ -1284,6 +1408,17 @@ fn verify_run_reference(
     Ok(())
 }
 
+fn inspect_selected_run(state: &InventoryState, index: usize) -> Result<mcp::State, Diagnostic> {
+    (|| {
+        let run = &state.discovery_runs[index];
+        let relay = mcp::inspect_state(Path::new(&run.state_path))?;
+        verify_run_reference(state, run, &relay)?;
+        mcp::require_current_producer(&relay)?;
+        Ok(relay)
+    })()
+    .map_err(|d| discovery_run_diagnostic(index, d))
+}
+
 pub(crate) fn inventory_capture_boundary(
     state: &InventoryState,
 ) -> (Option<InventoryCaptureBoundary>, Option<storage::Writer>) {
@@ -1630,6 +1765,9 @@ fn apply(
     relay_guards: &[storage::Writer],
 ) -> Result<Value, Diagnostic> {
     match action {
+        InventoryAction::NextProbe { .. } => {
+            Err(fail("Pass next-probe as a CLI inventory request."))
+        }
         InventoryAction::PrepareCapabilities {
             execution_context_id,
             session_id,

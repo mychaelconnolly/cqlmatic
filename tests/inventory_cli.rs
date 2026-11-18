@@ -987,6 +987,247 @@ fn prepare_source_run(dir: &Path) -> Value {
     call(dir, source_run_request(4))
 }
 
+fn prepare_two_source_run(dir: &Path) -> Value {
+    call(
+        dir,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    call(
+        dir,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":"synthetic-a"},{"type":"synthetic-b"}]}),
+    );
+    prepare_source_run(dir)
+}
+
+#[test]
+fn next_probe_completes_a_quick_run_in_one_call_per_search_plus_one() {
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let expected = prepared["action"]["relay"]["probes"].as_array().unwrap();
+    assert_eq!(expected.len(), 2);
+    let mut progress = call(&dir.0, json!({"kind":"next-probe"}));
+    let mut calls = 1;
+    let mut searches = 0;
+    while progress["action"]["state"] == "probe" {
+        assert_eq!(progress.as_object().unwrap().len(), 2);
+        assert_eq!(progress["schema_version"], 1);
+        let action = &progress["action"];
+        let full_probe = &expected[searches];
+        assert_eq!(action["kind"], "next-probe");
+        assert_eq!(action["run_index"], 0);
+        assert_eq!(action["dispatched"], true);
+        assert_eq!(
+            action["probe"],
+            json!({"probe_id":full_probe["probe_id"],"tool":full_probe["mcp"]["tool"],"arguments":full_probe["mcp"]["arguments"]})
+        );
+        searches += 1;
+        assert_eq!(action["cost"]["searches"]["used"], searches);
+        assert_eq!(action["cost"]["searches"]["ready"], 1);
+        let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+        progress = call(
+            &dir.0,
+            json!({"kind":"next-probe","run_index":action["run_index"],"answer":{"probe_id":action["probe"]["probe_id"],"result_file":result}}),
+        );
+        calls += 1;
+    }
+    assert_eq!(searches, expected.len());
+    assert_eq!(calls, searches + 1);
+    assert_eq!(progress.as_object().unwrap().len(), 2);
+    assert_eq!(progress["action"]["state"], "complete", "{progress}");
+    assert_eq!(progress["action"]["dispatched"], false);
+    assert!(progress["action"].get("probe").is_none());
+    let reconciled = call(
+        &dir.0,
+        json!({"kind":"reconcile","reviewed_at":"2026-01-02T00:00:00Z"}),
+    );
+    assert_eq!(reconciled["status"]["quick_scope_complete"], true);
+}
+
+#[test]
+fn next_probe_rereads_an_outstanding_attempt_without_writing_or_charging() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let state = dir.0.join("workflow/state.json");
+    let relay = prepared["status"]["discovery_runs"][0]["state_path"]
+        .as_str()
+        .unwrap();
+    let action = json!({"kind":"next-probe"});
+    let first = call(&dir.0, action.clone());
+    let inventory_bytes = fs::read(&state).unwrap();
+    let relay_bytes = fs::read(relay).unwrap();
+    let reread = call(&dir.0, action);
+    assert_eq!(first["action"]["state"], "probe");
+    assert_eq!(reread["action"]["state"], "probe");
+    assert_eq!(reread["action"]["probe"], first["action"]["probe"]);
+    assert_eq!(first["action"]["dispatched"], true);
+    assert_eq!(reread["action"]["dispatched"], false);
+    assert_eq!(first["action"]["cost"]["searches"]["used"], 1);
+    assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
+    assert_eq!(fs::read(&state).unwrap(), inventory_bytes);
+    assert_eq!(fs::read(relay).unwrap(), relay_bytes);
+}
+
+#[test]
+fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let probe_id = first["action"]["probe"]["probe_id"].as_str().unwrap();
+    for (id, path, code) in [
+        ("p-wrong", result.as_str(), "MCP_UNKNOWN_PROBE"),
+        (probe_id, dir.0.to_str().unwrap(), "LOCAL_FILE_TYPE"),
+    ] {
+        let response = call(
+            &dir.0,
+            json!({"kind":"next-probe","answer":{"probe_id":id,"result_file":path}}),
+        );
+        let action = &response["action"];
+        assert_eq!(action["state"], "needs-probes", "{response}");
+        assert_eq!(action["dispatched"], false);
+        assert!(action.get("probe").is_none());
+        assert_eq!(action["diagnostics"][0]["code"], code);
+        assert_eq!(action["cost"]["searches"]["used"], 1);
+    }
+    let reread = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(reread["action"]["state"], "probe");
+    assert_eq!(reread["action"]["probe"], first["action"]["probe"]);
+    assert_eq!(reread["action"]["dispatched"], false);
+    assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
+}
+
+#[test]
+fn next_probe_interoperates_with_dispatch_and_discovery_step() {
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let probes = &prepared["action"]["relay"]["probes"];
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","probe_id":probes[0]["probe_id"]}),
+    );
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let next = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probes[0]["probe_id"],"result_file":result}}),
+    );
+    assert_eq!(next["action"]["state"], "probe", "{next}");
+    assert_eq!(next["action"]["dispatched"], true);
+    let id = &next["action"]["probe"]["probe_id"];
+    assert_eq!(id, &probes[1]["probe_id"]);
+    let completed = call(
+        &dir.0,
+        json!({"kind":"discovery-step","answers":[{"probe_id":id,"result_file":result}]}),
+    );
+    assert_eq!(completed["action"]["relay"]["status"], "complete");
+    assert_eq!(completed["action"]["relay"]["answered"], 2);
+    let reread = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(reread["action"]["state"], "complete");
+    assert_eq!(reread["action"]["dispatched"], false);
+    assert!(reread["action"].get("probe").is_none());
+}
+
+#[test]
+fn next_probe_brief_matches_full_even_for_long_arguments() {
+    let full_dir = Temp::new();
+    let brief_dir = Temp::new();
+    let source = "synthetic".repeat(600);
+    for dir in [&full_dir.0, &brief_dir.0] {
+        confirm_quick_source(dir, &source);
+        prepare_source_run(dir);
+    }
+    let action = json!({"kind":"next-probe"});
+    let full = inventory_command(&full_dir.0, action.clone())
+        .output()
+        .unwrap();
+    let brief = inventory_command(&brief_dir.0, action)
+        .arg("--brief")
+        .output()
+        .unwrap();
+    assert!(full.status.success(), "{full:?}");
+    assert!(brief.status.success(), "{brief:?}");
+    assert!(brief.stderr.is_empty(), "{brief:?}");
+    assert_eq!(brief.stdout, full.stdout);
+    let reply: Value = serde_json::from_slice(&brief.stdout).unwrap();
+    let query = reply["action"]["probe"]["arguments"]["query_string"]
+        .as_str()
+        .unwrap();
+    assert!(query.len() > 4096 && query.contains(&source));
+
+    for invalid_answer in [Value::Null, json!([]), json!({"probe_id":"p-invalid"})] {
+        let refused = inventory_command(
+            &brief_dir.0,
+            json!({"kind":"next-probe","answer":invalid_answer}),
+        )
+        .arg("--brief")
+        .output()
+        .unwrap();
+        assert_eq!(refused.status.code(), Some(2));
+        assert!(refused.stdout.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&refused.stderr).unwrap(),
+            json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error","message":"Inventory brief command failed. Inspect protected full-mode output locally."})
+        );
+    }
+}
+
+#[test]
+fn next_probe_hides_request_text_and_keeps_raw_refusal_in_the_checkpoint() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let probe = &first["action"]["probe"]["probe_id"];
+    let marker = "synthetic-private-field";
+    let refused = inventory_command(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe,"result_file":"answer.json",(marker):true}}),
+    )
+    .output()
+    .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(refused.stdout.is_empty());
+    let stderr = String::from_utf8(refused.stderr).unwrap();
+    assert!(stderr.contains("INVENTORY_INPUT"), "{stderr}");
+    assert!(!stderr.contains(marker), "{stderr}");
+
+    let marker = "synthetic-private-result-error";
+    let result = fixture(
+        &dir.0,
+        "result-with-private-name.json",
+        json!({"result":{"error":marker}}),
+    );
+    let response = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe,"result_file":result}}),
+    );
+    let raw_reply = response.to_string();
+    assert!(!raw_reply.contains(marker));
+    assert!(!raw_reply.contains("result-with-private-name"));
+    assert_eq!(response["action"]["state"], "cleanup-pending");
+    assert_eq!(response["action"]["dispatched"], false);
+    assert!(response["action"].get("probe").is_none());
+    let diagnostic = &response["action"]["diagnostics"][0];
+    assert_eq!(diagnostic.as_object().unwrap().len(), 3);
+    assert_eq!(diagnostic["code"], "MCP_TOOL_ERROR");
+    assert_eq!(diagnostic["severity"], "error");
+    assert!(diagnostic["message"].is_string());
+    let relay = prepared["status"]["discovery_runs"][0]["state_path"]
+        .as_str()
+        .unwrap();
+    let stored: Value = serde_json::from_slice(&fs::read(relay).unwrap()).unwrap();
+    let attempt = &stored["session"]["attempts"][0];
+    assert_eq!(attempt["outcome"], "cleanup-pending");
+    assert_eq!(
+        attempt["rejected_results"][0]["diagnostic"]["message"],
+        format!("MCP search tool error: {marker}")
+    );
+    let reread = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(reread["action"]["state"], "cleanup-pending");
+    assert!(reread["action"].get("probe").is_none());
+}
+
 #[test]
 fn large_valid_discovery_artifacts_save_completion_and_resolve_source_work() {
     let dir = Temp::new();

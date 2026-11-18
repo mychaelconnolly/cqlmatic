@@ -181,6 +181,17 @@ pub enum InventoryAction {
         run_index: Option<usize>,
         probe_id: String,
     },
+    NextProbe {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_index: Option<usize>,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_discovery_answer",
+            skip_serializing_if = "Option::is_none"
+        )]
+        #[cfg_attr(test, schemars(with = "DiscoveryAnswer"))]
+        answer: Option<DiscoveryAnswer>,
+    },
     PauseDiscovery {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_index: Option<usize>,
@@ -682,6 +693,12 @@ pub struct ParserDetailInput {
 pub struct DiscoveryAnswer {
     pub probe_id: String,
     pub result_file: String,
+}
+
+fn deserialize_discovery_answer<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<DiscoveryAnswer>, D::Error> {
+    DiscoveryAnswer::deserialize(deserializer).map(Some)
 }
 
 /// A review records its exact parser snapshot and line. It cannot assert observed presence.

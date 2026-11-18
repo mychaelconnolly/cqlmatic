@@ -493,9 +493,9 @@ const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 mod session;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
-    has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner, is_resumable,
-    pause, recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
-    run_native, settle_cancelled, step_resumable,
+    has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
+    inventory_probe, is_resumable, pause, recover_native_cleanup, resumable_info,
+    resumable_request, resume, resume_inventory, run_native, settle_cancelled, step_resumable,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1148,15 +1148,10 @@ fn pending(state: &State) -> Result<Vec<Probe>, Diagnostic> {
             .collect(),
     )
 }
-fn wire_probes(state: &State, probes: Vec<Probe>) -> Vec<Value> {
-    probes
-        .into_iter()
-        .map(|p| {
-            json!({"probe_id":discovery::probe_id(&state.request.environment.view,&p),"kind":p.kind,"source":p.source,"fields":p.fields,"field":p.field,"mcp":{"tool":"falcon_search_ngsiem","arguments":{"query_string":p.query,"start":p.start,"end":p.end,"repository":state.request.environment.view}}})
-        })
-        .collect()
+fn wire_probe(state: &State, p: &Probe) -> Value {
+    json!({"probe_id":discovery::probe_id(&state.request.environment.view,p),"kind":p.kind,"source":p.source,"fields":p.fields,"field":p.field,"mcp":{"tool":"falcon_search_ngsiem","arguments":{"query_string":p.query,"start":p.start,"end":p.end,"repository":state.request.environment.view}}})
 }
-fn cost(state: &State, ready: usize) -> Cost {
+pub fn cost(state: &State, ready: usize) -> Cost {
     let limit = state.request.max_queries;
     let expected = discovery::expected_searches(&state.request);
     Cost {
@@ -1210,7 +1205,10 @@ fn progress(
         answered: state.answers.len() + state.session.as_ref().map_or(0, |s| s.captures.len()),
         max_queries: state.request.max_queries,
         cost: cost(state, probes.len()),
-        probes: wire_probes(state, probes),
+        probes: probes
+            .iter()
+            .map(|probe| wire_probe(state, probe))
+            .collect(),
         active_pack_updated,
         diagnostics,
         completion: (status == "complete").then(|| {

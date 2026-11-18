@@ -800,6 +800,25 @@ fn current_output(state: &State) -> Result<StepOutput, Diagnostic> {
     Ok(progress(state, status, probes, false, diagnostics))
 }
 
+/// Read the exact outstanding MCP probe or the first ready probe without reserving it.
+pub fn inventory_probe(state: &State) -> Result<Option<Value>, Diagnostic> {
+    if state.status != "needs-probes" {
+        return Ok(None);
+    }
+    if has_in_flight(state) {
+        return Ok(state
+            .session
+            .as_ref()
+            .filter(|session| session.transport == Transport::Mcp)
+            .and_then(|session| session.attempts.last())
+            .filter(|attempt| attempt.outcome == "dispatched")
+            .map(|attempt| wire_probe(state, &attempt.probe)));
+    }
+    Ok(pending(state)?
+        .first()
+        .map(|probe| wire_probe(state, probe)))
+}
+
 pub fn dispatch(path: &Path, probe_id: &str) -> Result<StepOutput, Diagnostic> {
     let writer = storage::Writer::acquire(path)?;
     let mut state = read_state(path)?;
