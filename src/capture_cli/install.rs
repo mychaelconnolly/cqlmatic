@@ -277,12 +277,10 @@ fn claude_uses_bash() -> bool {
     {
         return true;
     }
-    if [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files (x86)\Git\bin\bash.exe",
-    ]
-    .iter()
-    .any(|path| Path::new(path).is_file())
+    if ["ProgramFiles", "ProgramFiles(x86)"]
+        .iter()
+        .filter_map(env::var_os)
+        .any(|programs| Path::new(&programs).join("Git/bin/bash.exe").is_file())
     {
         return true;
     }
