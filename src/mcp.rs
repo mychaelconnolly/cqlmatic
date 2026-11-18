@@ -496,7 +496,7 @@ pub use session::{
     has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
     inventory_probe, is_resumable, outstanding_probe_id, pause, recover_native_cleanup,
     resumable_info, resumable_request, resume, resume_inventory, run_native, settle_cancelled,
-    step_resumable,
+    step_resumable, time_limit_passed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

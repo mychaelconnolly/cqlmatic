@@ -1980,8 +1980,10 @@ fn check_retained_searches(
         }
         check_retained_run(&relay, mcp::earlier_release_ended(&relay, now))
             .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+        // A paused run that has used its whole time limit has no budget left to keep.
         if relay.status == "paused"
             && mcp::is_resumable(&relay)
+            && !mcp::time_limit_passed(&relay, now)
             && selected_run.is_none()
             && fingerprint.as_ref() == Some(&relay.request_sha256)
         {

@@ -178,6 +178,15 @@ impl Session {
     }
 }
 
+/// Whether a resumable run has used its whole time limit, so it can never continue.
+pub fn time_limit_passed(state: &State, now: &str) -> bool {
+    state.session.as_ref().is_some_and(|session| {
+        session
+            .remaining(state, now)
+            .is_err_and(|d| d.code == "MCP_DEADLINE")
+    })
+}
+
 pub fn is_resumable(state: &State) -> bool {
     state.session.is_some()
 }
