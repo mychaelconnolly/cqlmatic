@@ -546,7 +546,11 @@ fn select_inventory(
         std::path::absolute(path)
             .map_err(|_| input_error("Cannot resolve inventory state path."))?
     } else {
-        inventory_cli::default_state_path()?
+        // With no place to look for a default inventory, there is none.
+        match inventory_cli::default_state_path() {
+            Ok(path) => path,
+            Err(_) => return Ok((None, false)),
+        }
     };
     if !setup_cli::private_input_exists(&path)? {
         return if selected_path.is_some() {

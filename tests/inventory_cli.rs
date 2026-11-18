@@ -225,6 +225,100 @@ fn refresh_reminder_acknowledgement_is_exact_bounded_and_preserves_due_until_lat
     assert_eq!(fs::read(&state).unwrap(), before);
 }
 
+#[cfg(unix)]
+#[test]
+fn an_empty_or_relative_data_folder_variable_is_treated_as_unset() {
+    let dir = Temp::new();
+    let work = dir.0.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let request = dir.0.join("request.json");
+    fs::write(&request, r#"{"schema_version":1,"action":{"kind":"init"}}"#).unwrap();
+    for (value, home) in [("", "home-a"), ("relative/data", "home-b")] {
+        let home = dir.0.join(home);
+        fs::create_dir_all(&home).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["env", "inventory", "--json", "--request"])
+            .arg(&request)
+            .current_dir(&work)
+            .env_remove("LOCALAPPDATA")
+            .env("XDG_DATA_HOME", value)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let state = Path::new(report["state"].as_str().unwrap());
+        assert!(state.starts_with(&home), "{state:?}");
+        assert!(
+            state.ends_with("cqlmatic/inventory/state.json"),
+            "{state:?}"
+        );
+        // Nothing is created where the command was started.
+        assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+
+        // Setup applies the same rule to its own folder.
+        let setup = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["setup", "--json"])
+            .current_dir(&work)
+            .env_remove("LOCALAPPDATA")
+            .env("XDG_STATE_HOME", value)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        // A new setup reports its status; it does not fail to find its folder.
+        assert!(setup.stderr.is_empty(), "{setup:?}");
+        let report: Value = serde_json::from_slice(&setup.stdout).unwrap();
+        assert_eq!(report["state"]["phase"], "new", "{setup:?}");
+        assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+    }
+
+    // An unusable first choice gives way to the next one.
+    let home = dir.0.join("home-c");
+    fs::create_dir_all(&home).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["env", "inventory", "--json", "--request"])
+        .arg(&request)
+        .current_dir(&work)
+        .env("LOCALAPPDATA", "")
+        .env_remove("XDG_DATA_HOME")
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(Path::new(report["state"].as_str().unwrap()).starts_with(&home));
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+}
+
+#[test]
+fn a_query_is_checked_when_no_default_inventory_location_exists() {
+    use std::io::Write;
+    let dir = Temp::new();
+    let work = dir.0.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let mut check = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["check", "-", "--json"])
+        .current_dir(&work)
+        .env("LOCALAPPDATA", "")
+        .env("XDG_DATA_HOME", "")
+        .env("HOME", "relative-home")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    check
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"#repo=example | count()")
+        .unwrap();
+    let output = check.wait_with_output().unwrap();
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "ready", "{output:?}");
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+}
+
 #[test]
 fn prepare_discovery_says_what_a_source_id_is_and_when_no_source_is_expected() {
     let window = json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","max_queries":4,"max_seconds":60});

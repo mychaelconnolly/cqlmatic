@@ -198,21 +198,25 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Diagnostic> {
 }
 
 pub fn default_state_path() -> Result<PathBuf, Diagnostic> {
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return Ok(PathBuf::from(local).join("cqlmatic/inventory/state.json"));
+    // An empty or relative value names no folder. Treat it as unset, so the inventory never
+    // lands in whatever directory the command was started from.
+    let folder = |name| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    if let Some(local) = folder("LOCALAPPDATA").or_else(|| folder("XDG_DATA_HOME")) {
+        return Ok(local.join("cqlmatic/inventory/state.json"));
     }
-    if let Some(local) = std::env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(local).join("cqlmatic/inventory/state.json"));
-    }
-    let home = std::env::var_os("HOME")
+    let home = folder("HOME")
         .ok_or_else(|| fail("Cannot locate local data directory; supply --state FILE."))?;
     #[cfg(target_os = "macos")]
     {
-        Ok(PathBuf::from(home).join("Library/Application Support/cqlmatic/inventory/state.json"))
+        Ok(home.join("Library/Application Support/cqlmatic/inventory/state.json"))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(PathBuf::from(home).join(".local/share/cqlmatic/inventory/state.json"))
+        Ok(home.join(".local/share/cqlmatic/inventory/state.json"))
     }
 }
 
