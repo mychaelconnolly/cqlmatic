@@ -593,6 +593,23 @@ fn capture_install_reports_a_link_it_cannot_follow_for_manual_installation() {
         assert_eq!(fs::read(&target).unwrap(), original);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
     }
+
+    // A link that leads back to itself cannot be followed either.
+    #[cfg(unix)]
+    {
+        let root = home.0.join(".codex");
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink("other.json", root.join("hooks.json")).unwrap();
+        std::os::unix::fs::symlink("hooks.json", root.join("other.json")).unwrap();
+        for dry_run in [true, false] {
+            let mut command = install(&home.0, "codex");
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            assert_manual(&report(&mut command), "cannot be followed");
+            assert_eq!(entries(&root), ["hooks.json", "other.json"]);
+        }
+    }
 }
 
 #[cfg(unix)]
