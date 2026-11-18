@@ -99,3 +99,10 @@ Explicit session authorization remains valid; do not ask again for an approved a
 Review the complete change with its callers, public contracts and regressions. Resolve blocking findings, rerun affected checks, and request re-review when behavior changes. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [docs/RELEASING.md](docs/RELEASING.md) for development and release checks.
 
 During review, flag query construction bypassing typed lowering, undocumented changes to missing/matching/accuracy/source semantics, promoted grounding claims, and network/storage changes weakening identity binding, budgets, protected-file validation, atomic replacement or cleanup. Require a concrete counterexample and the smallest safe fix.
+
+Weigh each finding by what it changes for a person using CQLmatic to write, check or ground CQL, or for the safety of their own files and data. Report it with a scenario that can happen in the documented use: who does what, on which ordinary setup, and what is lost or wrong afterwards.
+
+- The storage rules above protect CQLmatic's own state, evidence and credentials. They do not make every file the tool touches protected storage.
+- Code that edits a file belonging to another program must not corrupt it or lose its contents, and must work on ordinary setups. It is not required to defend that file's owner against other local users who can already change it.
+- Do not raise an attacker or failure model that the feature's documented guarantee excludes. If the guarantee itself looks wrong, say so once.
+- Prefer a feature that works on ordinary setups and states its limits over one that refuses them.
