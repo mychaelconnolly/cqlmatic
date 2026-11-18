@@ -672,6 +672,51 @@ fn capture_install_edits_a_linked_settings_file_where_it_really_is() {
 
 #[cfg(unix)]
 #[test]
+fn capture_installs_through_different_links_to_one_file_take_turns() {
+    // Two profiles keep one settings file. Their lock files differ, so they meet on the file.
+    let home = Temp::new();
+    let store = home.0.join("dotfiles");
+    let target = store.join("claude.json");
+    fs::create_dir(&store).unwrap();
+    fs::write(&target, "{}").unwrap();
+    let profiles = [home.0.join("profile-a"), home.0.join("profile-b")];
+    for profile in &profiles {
+        fs::create_dir(profile).unwrap();
+        std::os::unix::fs::symlink(&target, profile.join("settings.json")).unwrap();
+    }
+    let install_in = |profile: &Path, server: &str| {
+        let mut command = install_for(&home.0, "claude-code", server);
+        command.env("CLAUDE_CONFIG_DIR", profile);
+        command
+    };
+
+    // Another installation is in the middle of editing the real file.
+    let held = fs::File::open(&target).unwrap();
+    held.lock().unwrap();
+    let busy = install_in(&profiles[0], "one").output().unwrap();
+    assert_eq!(
+        install_error(&busy)["message"],
+        "Another hook installation is running. Retry."
+    );
+    assert!(busy.stdout.is_empty());
+    assert_eq!(fs::read(&target).unwrap(), b"{}");
+    drop(held);
+
+    for (profile, server) in profiles.iter().zip(["one", "two"]) {
+        let output = report(&mut install_in(profile, server));
+        assert_eq!(output["installed"], true, "{server}");
+        assert_eq!(output["changed"], true, "{server}");
+    }
+    let settings: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    assert_eq!(
+        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(entries(&store), ["claude.json"]);
+}
+
+#[cfg(unix)]
+#[test]
 fn capture_install_reports_hard_linked_settings_for_manual_installation() {
     // Swapping in a new file would leave the second name pointing at the old one.
     let home = Temp::new();

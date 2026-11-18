@@ -126,7 +126,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         let mut failure = None;
         if !args.dry_run && matches!(edit, Edit::Write(_)) {
             // The lock stays beside the configured path, in the client's own folder.
-            match lock_installation(&configured) {
+            match lock_installation(&configured, &path) {
                 Ok(Some(lock)) => {
                     _lock = lock;
                     // Another installation may have written while this one waited for the lock.
@@ -458,9 +458,10 @@ fn read_options() -> fs::OpenOptions {
     options
 }
 
-/// One installation at a time edits a settings file. The lock file stays beside it, so every
-/// installer of that file meets the same lock.
-fn lock_installation(settings: &Path) -> Result<Option<fs::File>, Diagnostic> {
+/// One installation at a time edits a settings file. The lock file stays beside the configured
+/// path, so every installer of that path meets the same lock. `None` means another installation
+/// is running.
+fn lock_installation(settings: &Path, real: &Path) -> Result<Option<Vec<fs::File>>, Diagnostic> {
     let parent = settings_directory(settings);
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -490,13 +491,41 @@ fn lock_installation(settings: &Path) -> Result<Option<fs::File>, Diagnostic> {
         .open(&path)
         .map_err(|e| io_error(&path, "Cannot open hook installation lock", e))?;
     match lock.try_lock() {
-        Ok(()) => Ok(Some(lock)),
+        Ok(()) => {}
         // Another installation holds it.
-        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::WouldBlock) => return Ok(None),
         Err(fs::TryLockError::Error(e)) => {
-            Err(io_error(&path, "Cannot lock hook installation lock", e))
+            return Err(io_error(&path, "Cannot lock hook installation lock", e));
         }
     }
+    let mut locks = vec![lock];
+    // Installers that reach one file through different links have different lock files, so they
+    // also meet on the real file itself.
+    #[cfg(unix)]
+    if real != settings {
+        let file =
+            fs::File::open(real).map_err(|e| io_error(real, "Cannot open linked settings", e))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(e)) => {
+                return Err(io_error(real, "Cannot lock linked settings", e));
+            }
+        }
+        // An installation that finished while this one waited swapped in a new file.
+        let current =
+            fs::metadata(real).map_err(|e| io_error(real, "Cannot inspect linked settings", e))?;
+        let locked = file
+            .metadata()
+            .map_err(|e| io_error(real, "Cannot inspect linked settings", e))?;
+        if unix_identity(&current) != unix_identity(&locked) {
+            return Err(settings_changed());
+        }
+        locks.push(file);
+    }
+    #[cfg(not(unix))]
+    let _ = real;
+    Ok(Some(locks))
 }
 
 /// The account running the installer. Windows settings keep the access rules of their
