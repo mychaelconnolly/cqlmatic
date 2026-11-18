@@ -809,6 +809,53 @@ fn next_probe(
     Ok(action)
 }
 
+/// Settles the latest run's outstanding probe with a finished search whose `arguments` are
+/// exactly the ones the probe was issued with. `save` stores the result and names its file; it
+/// runs only on a match. Returns whether the answer was accepted, or `None` when the search
+/// answers no outstanding probe. Nothing is reserved.
+pub(crate) fn answer_outstanding_probe(
+    path: &Path,
+    arguments: &Value,
+    save: &mut dyn FnMut() -> Result<String, Diagnostic>,
+) -> Result<Option<bool>, Diagnostic> {
+    let writer = inventory_writer(path)?;
+    let run = inspect_next_probe_run(path, None, &writer)?;
+    let Some(probe_id) = mcp::outstanding_probe_id(&run.relay) else {
+        return Ok(None);
+    };
+    // No probe is offered once the run's time limit has passed or outside `needs-probes`.
+    let Ok(Some(probe)) = mcp::inventory_probe(&run.relay) else {
+        return Ok(None);
+    };
+    if probe["mcp"]["tool"] != cqlmatic::setup::SEARCH_TOOL
+        || probe["mcp"]["arguments"] != *arguments
+    {
+        return Ok(None);
+    }
+    let index = run.index;
+    drop(run);
+    let answer = DiscoveryAnswer {
+        probe_id: probe_id.clone(),
+        result_file: save()?,
+    };
+    apply_locked(
+        path,
+        InventoryAction::DiscoveryStep {
+            run_index: Some(index),
+            answers: vec![answer],
+        },
+        MAX_STATE_BYTES,
+        &writer,
+    )?;
+    let run = inspect_next_probe_run(path, Some(index), &writer)?;
+    Ok(Some(
+        run.relay
+            .answers
+            .get(&probe_id)
+            .is_some_and(|answer| answer.outcome == "complete"),
+    ))
+}
+
 fn next_probe_guidance(
     index: usize,
     phase: &str,
