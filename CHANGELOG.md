@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `cqlmatic env capture --client CLIENT --server SERVER --install` registers the scrappy-mode hook, replacing the client's settings file in one step with its existing content kept. It prints the entry for manual installation when the client or settings file requires it. Use `--dry-run` for a read-only preview or `--program TEXT` to specify a launcher.
+- `check` rejects `correlate` combined with `selfJoin` or `selfJoinFilter`, anywhere in the query, as `CQL_CORRELATION_JOIN_CONFLICT`. 0.1.9 applied the rule to `join` only and reported such queries as ready.
 
 ## 0.1.9
 
