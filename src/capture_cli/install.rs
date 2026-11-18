@@ -61,13 +61,40 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             entry["version"] = json!(1);
         }
 
-        let destination = path.to_str().ok_or_else(|| {
-            file_error(
-                "LOCAL_PATH",
-                &path,
-                "Cannot report a non-Unicode settings path",
-            )
-        })?;
+        let destination = path
+            .to_str()
+            .ok_or_else(|| {
+                file_error(
+                    "LOCAL_PATH",
+                    &path,
+                    "Cannot report a non-Unicode settings path",
+                )
+            })?
+            .to_owned();
+        // A settings file kept elsewhere and linked into place, as dotfile managers do, is
+        // edited where it really is. The link itself is left alone.
+        let configured = path;
+        #[cfg(unix)]
+        let path = match fs::symlink_metadata(&configured) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                fs::canonicalize(&configured).unwrap_or_else(|_| configured.clone())
+            }
+            _ => configured.clone(),
+        };
+        #[cfg(not(unix))]
+        let path = configured.clone();
+        // A reason names the real file, and the link that led to it.
+        let location = match path.to_str() {
+            Some(real) if path != configured => format!("{real}, linked from {destination}"),
+            Some(_) => destination.clone(),
+            None => {
+                return Err(file_error(
+                    "LOCAL_PATH",
+                    &path,
+                    "Cannot use a non-Unicode settings path",
+                ));
+            }
+        };
         let user = current_user()?;
         let plan = |settings: &Settings| {
             match settings {
@@ -96,11 +123,24 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         };
         let mut settings = read_settings(&path, &user)?;
         let mut edit = plan(&settings);
+        let mut failure = None;
         if !args.dry_run && matches!(edit, Edit::Write(_)) {
-            _lock = lock_installation(&path)?;
-            // Another installation may have written while this one waited for the lock.
-            settings = read_settings(&path, &user)?;
-            edit = plan(&settings);
+            // The lock stays beside the configured path, in the client's own folder.
+            match lock_installation(&configured, &path) {
+                Ok(Some(lock)) => {
+                    _lock = lock;
+                    // Another installation may have written while this one waited for the lock.
+                    settings = read_settings(&path, &user)?;
+                    edit = plan(&settings);
+                }
+                Ok(None) => {
+                    return Err(Diagnostic::error(
+                        "LOCAL_IO",
+                        "Another hook installation is running. Retry.",
+                    ));
+                }
+                Err(error) => failure = Some(error),
+            }
         }
         if matches!(settings, Settings::NonRegular) {
             refusal = Some(file_error(
@@ -112,7 +152,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         let (installed, changed) = match edit {
             Edit::Manual(reason) => {
                 next_actions.push(format!(
-                    "{reason} ({destination}). Review and merge the reported entry by hand."
+                    "{reason} ({location}). Review and merge the reported entry by hand."
                 ));
                 (false, false)
             }
@@ -125,11 +165,28 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                         "Updated settings exceed the byte limit",
                     ));
                 }
-                if !args.dry_run {
-                    next_actions.extend(replace(&path, settings, &user, &bytes)?);
-                    (true, true)
-                } else {
+                if args.dry_run {
                     (false, true)
+                } else {
+                    let outcome = match failure.take() {
+                        Some(error) => Err(error),
+                        None => replace(&path, settings, &user, &bytes),
+                    };
+                    match outcome {
+                        Ok(warning) => {
+                            next_actions.extend(warning);
+                            (true, true)
+                        }
+                        // The entry is still reported, so it can be added by hand.
+                        Err(error) => {
+                            next_actions.push(format!(
+                                "{} If this persists, merge the reported entry by hand.",
+                                error.message
+                            ));
+                            refusal = Some(error);
+                            (false, false)
+                        }
+                    }
                 }
             }
         };
@@ -137,7 +194,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             next_actions.push("Review and trust the hook with /hooks before it runs.".into());
         }
         (
-            Some(destination.to_owned()),
+            Some(destination),
             Some(event),
             command,
             entry,
@@ -401,9 +458,10 @@ fn read_options() -> fs::OpenOptions {
     options
 }
 
-/// One installation at a time edits a settings file. The lock file stays beside it, so every
-/// installer of that file meets the same lock.
-fn lock_installation(settings: &Path) -> Result<fs::File, Diagnostic> {
+/// One installation at a time edits a settings file. The lock file stays beside the configured
+/// path, so every installer of that path meets the same lock. `None` means another installation
+/// is running.
+fn lock_installation(settings: &Path, real: &Path) -> Result<Option<Vec<fs::File>>, Diagnostic> {
     let parent = settings_directory(settings);
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -433,15 +491,49 @@ fn lock_installation(settings: &Path) -> Result<fs::File, Diagnostic> {
         .open(&path)
         .map_err(|e| io_error(&path, "Cannot open hook installation lock", e))?;
     match lock.try_lock() {
-        Ok(()) => Ok(lock),
-        Err(fs::TryLockError::WouldBlock) => Err(Diagnostic::error(
-            "LOCAL_IO",
-            "Another hook installation is running. Retry.",
-        )),
+        Ok(()) => {}
+        // Another installation holds it.
+        Err(fs::TryLockError::WouldBlock) => return Ok(None),
         Err(fs::TryLockError::Error(e)) => {
-            Err(io_error(&path, "Cannot lock hook installation lock", e))
+            return Err(io_error(&path, "Cannot lock hook installation lock", e));
         }
     }
+    // A settings file can be reached by more than one path: through different links, or
+    // through a link and directly. Those installers have different lock files, so every
+    // installer of an existing file also meets the others on the file itself.
+    #[cfg(unix)]
+    let locks = {
+        let mut locks = vec![lock];
+        if fs::symlink_metadata(real).is_ok_and(|meta| meta.is_file()) {
+            let file =
+                fs::File::open(real).map_err(|e| io_error(real, "Cannot open settings", e))?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(e)) => {
+                    return Err(io_error(real, "Cannot lock settings", e));
+                }
+            }
+            // An installation that finished while this one waited swapped in a new file.
+            let current =
+                fs::metadata(real).map_err(|e| io_error(real, "Cannot inspect settings", e))?;
+            let locked = file
+                .metadata()
+                .map_err(|e| io_error(real, "Cannot inspect settings", e))?;
+            if unix_identity(&current) != unix_identity(&locked) {
+                return Err(settings_changed());
+            }
+            locks.push(file);
+        }
+        locks
+    };
+    // Elsewhere the lock file is the only lock.
+    #[cfg(not(unix))]
+    let locks = {
+        let _ = real;
+        vec![lock]
+    };
+    Ok(Some(locks))
 }
 
 /// The account running the installer. Windows settings keep the access rules of their
@@ -515,7 +607,7 @@ fn unix_identity(metadata: &fs::Metadata) -> (u64, u64) {
 const LINK_REASON: &str = if cfg!(windows) {
     "Settings path is a symbolic link or reparse point"
 } else {
-    "Settings path is a symbolic link"
+    "Settings path is a symbolic link whose target is missing or cannot be followed"
 };
 
 fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
@@ -549,6 +641,13 @@ fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
     }
     if !metadata.is_file() {
         return Err(settings_changed());
+    }
+    // Swapping in a new file would leave the other names pointing at the old one.
+    #[cfg(unix)]
+    if metadata.nlink() > 1 {
+        return Ok(Settings::Manual(
+            "Settings file has more than one hard link, and replacing it would separate them",
+        ));
     }
     #[cfg(unix)]
     {

@@ -557,21 +557,25 @@ fn capture_install_reports_read_only_settings_for_manual_installation() {
 
 #[cfg(any(unix, windows))]
 #[test]
-fn capture_install_reports_a_symbolic_link_for_manual_installation() {
+fn capture_install_reports_a_link_it_cannot_follow_for_manual_installation() {
+    // On Windows that is any linked settings file; elsewhere, a link whose target is missing.
     let home = Temp::new();
     let root = home.0.join(".claude");
     let file = root.join("settings.json");
     let target = home.0.join("settings.json");
     let preview = report(install(&home.0, "claude-code").arg("--dry-run"));
-    let original = serde_json::to_vec(&preview["entry"]).unwrap();
     fs::create_dir(&root).unwrap();
-    fs::write(&target, &original).unwrap();
     #[cfg(unix)]
     std::os::unix::fs::symlink(&target, &file).unwrap();
     #[cfg(windows)]
-    match std::os::windows::fs::symlink_file(&target, &file) {
-        Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
-        result => result.unwrap(),
+    let original = serde_json::to_vec(&preview["entry"]).unwrap();
+    #[cfg(windows)]
+    {
+        fs::write(&target, &original).unwrap();
+        match std::os::windows::fs::symlink_file(&target, &file) {
+            Err(error) if error.raw_os_error() == Some(1314) => return, // Symlink privilege unavailable.
+            result => result.unwrap(),
+        }
     }
     for dry_run in [true, false] {
         let mut command = install(&home.0, "claude-code");
@@ -583,9 +587,197 @@ fn capture_install_reports_a_symbolic_link_for_manual_installation() {
         assert_eq!(output["path"], json!(file));
         assert_eq!(output["entry"], preview["entry"]);
         assert_eq!(fs::read_link(&file).unwrap(), target);
+        #[cfg(unix)]
+        assert!(!target.exists());
+        #[cfg(windows)]
         assert_eq!(fs::read(&target).unwrap(), original);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
     }
+
+    // A link that leads back to itself cannot be followed either.
+    #[cfg(unix)]
+    {
+        let root = home.0.join(".codex");
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink("other.json", root.join("hooks.json")).unwrap();
+        std::os::unix::fs::symlink("hooks.json", root.join("other.json")).unwrap();
+        for dry_run in [true, false] {
+            let mut command = install(&home.0, "codex");
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            assert_manual(&report(&mut command), "cannot be followed");
+            assert_eq!(entries(&root), ["hooks.json", "other.json"]);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_edits_a_linked_settings_file_where_it_really_is() {
+    let home = Temp::new();
+    let root = home.0.join(".claude");
+    let file = root.join("settings.json");
+    let store = home.0.join("dotfiles");
+    let target = store.join("claude.json");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&store).unwrap();
+    let original = "{\"existing\":true}\n";
+    fs::write(&target, original).unwrap();
+    // A relative link through a second link, as a dotfile manager may leave.
+    std::os::unix::fs::symlink("claude.json", store.join("alias.json")).unwrap();
+    let link = Path::new("../dotfiles/alias.json");
+    std::os::unix::fs::symlink(link, &file).unwrap();
+
+    let preview = report(install(&home.0, "claude-code").arg("--dry-run"));
+    assert_eq!(preview["installed"], false);
+    assert_eq!(preview["changed"], true);
+    assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    assert_eq!(entries(&store), ["alias.json", "claude.json"]);
+
+    let output = report(&mut install(&home.0, "claude-code"));
+    assert_eq!(output["installed"], true);
+    assert_eq!(output["changed"], true);
+    assert_eq!(output["path"], json!(file));
+    // Both links are untouched. The lock stays in the client's folder, so the folder that
+    // holds the real file gains nothing.
+    assert_eq!(fs::read_link(&file).unwrap(), link);
+    assert_eq!(
+        fs::read_link(store.join("alias.json")).unwrap(),
+        Path::new("claude.json")
+    );
+    assert_eq!(entries(&root), with_lock(&file));
+    assert_eq!(entries(&store), ["alias.json", "claude.json"]);
+    let settings: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    assert_eq!(settings["existing"], true);
+    assert_eq!(settings["hooks"], output["entry"]["hooks"]);
+
+    let repeat = report(&mut install(&home.0, "claude-code"));
+    assert_eq!(repeat["installed"], true);
+    assert_eq!(repeat["changed"], false);
+
+    // A refusal about the real file names it, and the link that led to it.
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(&target, "{}").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+    let refused = report(&mut install(&home.0, "claude-code"));
+    assert_manual(&refused, "read-only");
+    let reason = refused["next_actions"][0].as_str().unwrap();
+    let real = fs::canonicalize(&target).unwrap();
+    assert!(reason.contains(real.to_str().unwrap()), "{reason}");
+    assert!(reason.contains("linked from"), "{reason}");
+    assert!(reason.contains(file.to_str().unwrap()), "{reason}");
+    assert_eq!(fs::read(&target).unwrap(), b"{}");
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_installs_through_different_links_to_one_file_take_turns() {
+    // Two profiles keep one settings file. Their lock files differ, so they meet on the file.
+    let home = Temp::new();
+    let store = home.0.join("dotfiles");
+    let target = store.join("claude.json");
+    fs::create_dir(&store).unwrap();
+    fs::write(&target, "{}").unwrap();
+    let profiles = [home.0.join("profile-a"), home.0.join("profile-b")];
+    for profile in &profiles {
+        fs::create_dir(profile).unwrap();
+        std::os::unix::fs::symlink(&target, profile.join("settings.json")).unwrap();
+    }
+    let install_in = |profile: &Path, server: &str| {
+        let mut command = install_for(&home.0, "claude-code", server);
+        command.env("CLAUDE_CONFIG_DIR", profile);
+        command
+    };
+
+    // Another installation is in the middle of editing the real file.
+    let held = fs::File::open(&target).unwrap();
+    held.lock().unwrap();
+    let busy = install_in(&profiles[0], "one").output().unwrap();
+    assert_eq!(
+        install_error(&busy)["message"],
+        "Another hook installation is running. Retry."
+    );
+    assert!(busy.stdout.is_empty());
+    assert_eq!(fs::read(&target).unwrap(), b"{}");
+    drop(held);
+
+    for (profile, server) in profiles.iter().zip(["one", "two"]) {
+        let output = report(&mut install_in(profile, server));
+        assert_eq!(output["installed"], true, "{server}");
+        assert_eq!(output["changed"], true, "{server}");
+    }
+    let settings: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+    assert_eq!(
+        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(entries(&store), ["claude.json"]);
+
+    // A profile that holds its settings file directly meets other installers on it too.
+    let direct = home.0.join("profile-c");
+    fs::create_dir(&direct).unwrap();
+    let own = direct.join("settings.json");
+    fs::write(&own, "{}").unwrap();
+    let held = fs::File::open(&own).unwrap();
+    held.lock().unwrap();
+    let busy = install_in(&direct, "three").output().unwrap();
+    assert_eq!(
+        install_error(&busy)["message"],
+        "Another hook installation is running. Retry."
+    );
+    assert_eq!(fs::read(&own).unwrap(), b"{}");
+    drop(held);
+    let output = report(&mut install_in(&direct, "three"));
+    assert_eq!(output["installed"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn capture_install_reports_hard_linked_settings_for_manual_installation() {
+    // Swapping in a new file would leave the second name pointing at the old one.
+    let home = Temp::new();
+    let file = home.0.join(".codex/hooks.json");
+    let twin = home.0.join("hooks-copy.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "{}").unwrap();
+    fs::hard_link(&file, &twin).unwrap();
+    for dry_run in [true, false] {
+        let mut command = install(&home.0, "codex");
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        assert_manual(&report(&mut command), "more than one hard link");
+        assert_eq!(fs::read(&file).unwrap(), b"{}");
+        assert_eq!(fs::read(&twin).unwrap(), b"{}");
+        assert_eq!(entries(file.parent().unwrap()), ["hooks.json"]);
+    }
+}
+
+#[test]
+fn capture_install_still_reports_the_entry_when_it_cannot_write() {
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    let file = root.join("hooks.json");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&file, "{}").unwrap();
+    // Something other than a file sits where the lock belongs.
+    fs::create_dir(root.join(".hooks.json.cqlmatic.lock")).unwrap();
+    let preview = report(install(&home.0, "codex").arg("--dry-run"));
+    let output = install(&home.0, "codex").output().unwrap();
+    let error = install_error(&output);
+    assert_eq!(error["code"], "LOCAL_FILE_TYPE");
+    let failed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(failed["installed"], false);
+    assert_eq!(failed["changed"], false);
+    assert_eq!(failed["entry"], preview["entry"]);
+    assert!(
+        failed["next_actions"][0]
+            .as_str()
+            .unwrap()
+            .contains("merge the reported entry by hand")
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"{}");
 }
 
 #[cfg(any(unix, windows))]
