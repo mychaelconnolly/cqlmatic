@@ -23,7 +23,7 @@ use std::{
 };
 
 #[cfg(windows)]
-pub(crate) mod windows_acl;
+mod windows_acl;
 
 const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -959,7 +959,7 @@ fn executable_error() -> Diagnostic {
 }
 #[cfg(windows)]
 #[allow(unsafe_code)]
-pub(crate) fn windows_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
+pub(crate) fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagnostic> {
     use std::{ffi::c_void, os::windows::io::AsRawHandle};
     #[repr(C)]
     struct FileInformation {
@@ -980,7 +980,7 @@ pub(crate) fn windows_file_identity(file: &fs::File) -> io::Result<(u64, u64)> {
     }
     let mut info = std::mem::MaybeUninit::<FileInformation>::uninit();
     if unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) } == 0 {
-        return Err(io::Error::last_os_error());
+        return Err(executable_error());
     }
     // The successful Windows call initialized the complete fixed-layout structure.
     let info = unsafe { info.assume_init() };
@@ -1012,7 +1012,7 @@ fn executable_fingerprint(file: &fs::File) -> Result<ExecutableFingerprint, Diag
         #[cfg(unix)]
         identity: (meta.dev(), meta.ino()),
         #[cfg(windows)]
-        identity: windows_file_identity(file).map_err(|_| executable_error())?,
+        identity: windows_file_identity(file)?,
         len: meta.len(),
         modified: meta.modified().map_err(|_| executable_error())?,
         #[cfg(unix)]
@@ -1476,67 +1476,17 @@ fn write_new_copilot_config(
     result
 }
 #[cfg(windows)]
-const WINDOWS_PRIVATE_FILE_ACL: &str = r#"
-$ErrorActionPreference='Stop'
-$p=$env:CQLMATIC_SETUP_FILE
-$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
-$a=New-Object System.Security.AccessControl.FileSecurity
-$a.SetOwner($sid)
-$a.SetAccessRuleProtection($true,$false)
-$allow=[Security.AccessControl.AccessControlType]::Allow
-$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$allow))
-$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$allow))
-"#;
-
-#[cfg(windows)]
-pub(crate) fn create_windows_private_file(path: &Path) -> Result<bool, Diagnostic> {
-    let failed = || {
-        err(
-            "LOCAL_IO",
-            format!("Cannot create a private file ({}).", path.display()),
-        )
-    };
-    match fs::symlink_metadata(path) {
-        Ok(_) => return Ok(false),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => return Err(failed()),
-    }
-    const CREATE_NEW: &str = r#"
-try {
-  [IO.FileStream]::new($p,[IO.FileMode]::CreateNew,
-    [Security.AccessControl.FileSystemRights]::FullControl,[IO.FileShare]'ReadWrite,Delete',
-    4096,[IO.FileOptions]::None,$a).Dispose()
-  'created'
-} catch {
-  $e=$_.Exception
-  while($null -ne $e.InnerException){$e=$e.InnerException}
-  if(($e.HResult -band 65535) -in 80,183){'exists'} else {throw}
-}
-"#;
-    let mut command = powershell()?;
-    command
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
-        .arg(format!("{WINDOWS_PRIVATE_FILE_ACL}{CREATE_NEW}"))
-        .env("CQLMATIC_SETUP_FILE", path);
-    let output = run_bounded_command(command, false, 20, 1024).map_err(|_| failed())?;
-    match (
-        output.success,
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ) {
-        (true, "created") => Ok(true),
-        (true, "exists") => Ok(false),
-        _ => Err(failed()),
-    }
-}
-
-#[cfg(windows)]
 fn protect_copilot_candidate(path: &Path) -> Result<(), Diagnostic> {
+    const CREATE: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_FILE; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $allow=[Security.AccessControl.AccessControlType]::Allow; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$allow)); $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$allow)); [IO.File]::SetAccessControl($p,$a)"#;
     let mut command = powershell()?;
     command
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
-        .arg(format!(
-            "{WINDOWS_PRIVATE_FILE_ACL}[IO.File]::SetAccessControl($p,$a)"
-        ))
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            CREATE,
+        ])
         .env("CQLMATIC_SETUP_FILE", path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

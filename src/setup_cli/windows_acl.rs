@@ -15,7 +15,7 @@ use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::Path, ptr};
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
-        GENERIC_ALL, GENERIC_WRITE, GetLastError, HANDLE, LocalFree,
+        GetLastError, HANDLE, LocalFree,
     },
     Security::{
         ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_SIZE_INFORMATION, AclSizeInformation,
@@ -24,8 +24,7 @@ use windows_sys::Win32::{
         OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
     },
     Storage::FileSystem::{
-        FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetFileAttributesW,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW,
         INVALID_FILE_ATTRIBUTES,
     },
     System::Threading::{GetCurrentProcess, OpenProcessToken},
@@ -147,7 +146,7 @@ fn check_ancestors(path: &Path, trusted: &[&str]) -> Result<(), Failure> {
         if !trusted.contains(&owner.as_str()) {
             return Err(fail(directory, &owner, "Owner", "owner"));
         }
-        let rules = rules(security.dacl, true, false).ok_or_else(|| inspect(directory))?;
+        let rules = rules(security.dacl, true).ok_or_else(|| inspect(directory))?;
         if rules.is_empty() {
             return Err(fail(directory, "unknown", "AccessRules", "empty-acl"));
         }
@@ -183,7 +182,7 @@ fn check_private(path: &Path, file: bool, user: &str) -> Result<(), Failure> {
         return Err(fail(path, &owner, "Owner", "owner"));
     }
     let mut own = false;
-    for rule in rules(security.dacl, !file, false).ok_or_else(|| inspect(path))? {
+    for rule in rules(security.dacl, !file).ok_or_else(|| inspect(path))? {
         if !rule.allow {
             continue;
         }
@@ -196,25 +195,6 @@ fn check_private(path: &Path, file: bool, user: &str) -> Result<(), Failure> {
         return Err(fail(path, user, "AccessRules", "missing-self"));
     }
     Ok(())
-}
-
-/// Whether this settings path belongs to the user and whether Everyone can write it.
-pub(crate) fn hook_permissions(path: &Path, directory: bool, user: &str) -> Option<(bool, bool)> {
-    let security = security(path)?;
-    if sid_string(security.owner)? != user {
-        return Some((false, false));
-    }
-    let change = DANGER
-        | FILE_WRITE_DATA
-        | FILE_APPEND_DATA
-        | FILE_WRITE_EA
-        | FILE_WRITE_ATTRIBUTES
-        | GENERIC_WRITE
-        | GENERIC_ALL;
-    let shared = rules(security.dacl, directory, true)?.iter().any(|rule| {
-        rule.allow && !rule.inherit_only && rule.sid == EVERYONE && rule.mask & change != 0
-    });
-    Some((true, shared))
 }
 
 fn fail(path: &Path, sid: &str, right: &str, reason: &'static str) -> Failure {
@@ -307,7 +287,7 @@ fn security(path: &Path) -> Option<Security> {
 
 /// The access rules of a list, without entries that can never grant access: an empty mask,
 /// an inherit-only entry on a file, or an inherit-only entry that nothing inherits.
-fn rules(dacl: *const ACL, container: bool, strict: bool) -> Option<Vec<Rule>> {
+fn rules(dacl: *const ACL, container: bool) -> Option<Vec<Rule>> {
     if dacl.is_null() {
         // An object without an access list grants everyone full access.
         return Some(vec![Rule {
@@ -341,9 +321,6 @@ fn rules(dacl: *const ACL, container: bool, strict: bool) -> Option<Vec<Rule>> {
         // SAFETY: GetAce returned an entry inside the list; every entry starts with a header.
         let header = unsafe { ace.cast::<ACE_HEADER>().read_unaligned() };
         if header.AceType != ACCESS_ALLOWED && header.AceType != ACCESS_DENIED {
-            if strict {
-                return None;
-            }
             continue;
         }
         if usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
@@ -397,7 +374,7 @@ fn sid_string(sid: PSID) -> Option<String> {
 }
 
 /// The identifier of the user this process runs as.
-pub(crate) fn current_user() -> Option<String> {
+fn current_user() -> Option<String> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: the pseudo-handle for this process is always valid; `token` is a live local.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {

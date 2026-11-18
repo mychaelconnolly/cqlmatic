@@ -19,6 +19,7 @@ use std::{
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
 const POST_TOOL_USE: &str = "PostToolUse";
 const COPILOT_EVENT: &str = "postToolUse";
+const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
 
 pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
     if args.server.is_empty() {
@@ -35,8 +36,13 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
     {
         let copilot = is_copilot(client);
         let (event, command, hook) = if copilot {
-            let bash = command(args, name.get_name(), Shell::Bash)?;
-            let powershell = command(args, name.get_name(), Shell::PowerShell)?;
+            // The Copilot clients read the same file and send the same payload, so they share
+            // one entry. A second entry would run the capture twice for every search.
+            let shared = Client::CopilotCli
+                .to_possible_value()
+                .expect("A capture client has a name");
+            let bash = command(args, shared.get_name(), Shell::Bash)?;
+            let powershell = command(args, shared.get_name(), Shell::PowerShell)?;
             (
                 COPILOT_EVENT,
                 json!({"bash": bash, "powershell": powershell}),
@@ -44,11 +50,12 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             )
         } else {
             let command = command(args, name.get_name(), Shell::for_client(client))?;
-            (
-                POST_TOOL_USE,
-                json!(command),
-                matcher_hook(&matcher("mcp__", &args.server, "__.*"), &command, true),
-            )
+            let mut hook = matcher_hook(&matcher("mcp__", &args.server, "__.*"), &command, true);
+            // Claude Code on Windows would otherwise pick Git Bash whenever it is installed.
+            if cfg!(windows) && client == Client::ClaudeCode {
+                hook["hooks"][0]["shell"] = json!("powershell");
+            }
+            (POST_TOOL_USE, json!(command), hook)
         };
         let mut entry = json!({"hooks": {event: [&hook]}});
         if copilot {
@@ -73,7 +80,15 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 bytes.push(b'\n');
                 Edit::Write(bytes)
             }
-            Settings::File(snapshot) => merge(&path, &snapshot.bytes, event, &hook)?,
+            Settings::File(snapshot) => {
+                // Some Windows editors start the file with a byte order mark. Keep it.
+                let marked = snapshot.bytes.starts_with(BYTE_ORDER_MARK);
+                let (mark, text) = snapshot.bytes.split_at(if marked { 3 } else { 0 });
+                match merge(&path, text, event, &hook)? {
+                    Edit::Write(bytes) => Edit::Write([mark, &bytes].concat()),
+                    edit => edit,
+                }
+            }
             Settings::Manual(reason) => Edit::Manual(reason),
             Settings::NonRegular => {
                 let reason = "Settings must be a regular file";
@@ -261,14 +276,11 @@ enum Shell {
 
 impl Shell {
     fn for_client(client: Client) -> Self {
-        if client == Client::Cline {
-            return Self::Bash;
+        if cfg!(windows) && client != Client::Cline {
+            Self::PowerShell
+        } else {
+            Self::Bash
         }
-        #[cfg(windows)]
-        if client != Client::ClaudeCode || !claude_uses_bash() {
-            return Self::PowerShell;
-        }
-        Self::Bash
     }
 
     fn quote(self, text: &str) -> String {
@@ -297,34 +309,6 @@ impl Shell {
     }
 }
 
-#[cfg(windows)]
-fn claude_uses_bash() -> bool {
-    if let Some(path) = env::var_os("CLAUDE_CODE_GIT_BASH_PATH").map(PathBuf::from)
-        && path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                ["bash.exe", "sh.exe", "bash", "sh"]
-                    .iter()
-                    .any(|shell| name.eq_ignore_ascii_case(shell))
-            })
-        && path.is_file()
-    {
-        return true;
-    }
-    if ["ProgramFiles", "ProgramFiles(x86)"]
-        .iter()
-        .filter_map(env::var_os)
-        .any(|programs| Path::new(&programs).join("Git/bin/bash.exe").is_file())
-    {
-        return true;
-    }
-    let path = env::var_os("PATH").unwrap_or_default();
-    env::split_paths(&path)
-        .find(|dir| dir.join("git.exe").is_file())
-        .is_some_and(|dir| dir.join("../bin/bash.exe").is_file())
-}
-
 fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Diagnostic> {
     let program = if let Some(program) = &args.program {
         if program.trim().is_empty() || program.chars().any(char::is_control) {
@@ -346,16 +330,16 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
                 "The running executable path is not Unicode. Supply --program.",
             )
         })?;
-        match shell {
-            Shell::Bash if cfg!(windows) => {
-                let path = text.replace('\\', "/");
-                let path = if let Some(unc) = path.strip_prefix("//?/UNC/") {
-                    format!("//{unc}")
-                } else {
-                    path.strip_prefix("//?/").unwrap_or(&path).to_owned()
-                };
-                shell.quote(&path)
+        // Neither shell runs a path that keeps the Windows verbatim prefix.
+        #[cfg(windows)]
+        let text = &match text.get(..8) {
+            Some(prefix) if prefix.eq_ignore_ascii_case(r"\\?\UNC\") => {
+                format!(r"\\{}", &text[8..])
             }
+            _ => text.strip_prefix(r"\\?\").unwrap_or(text).to_owned(),
+        };
+        match shell {
+            Shell::Bash if cfg!(windows) => shell.quote(&text.replace('\\', "/")),
             Shell::Bash => shell.quote(text),
             Shell::PowerShell => format!("& {}", shell.quote(text)),
         }
@@ -366,6 +350,11 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
         // The hook runs from whatever directory the client was started in.
         let state = std::path::absolute(state)
             .map_err(|_| Diagnostic::error("LOCAL_PATH", "Cannot resolve the --state path."))?;
+        if state.is_dir() {
+            return Err(crate::input_error(
+                "--state must name the inventory state file, not a directory.",
+            ));
+        }
         let state = state.to_str().ok_or_else(|| {
             Diagnostic::error(
                 "LOCAL_PATH",
@@ -421,37 +410,21 @@ fn lock_installation() -> Result<fs::File, Diagnostic> {
     let directory = settings_directory(&state);
     setup_cli::protect_directory(directory)?;
     let path = directory.join("hook-install.lock");
-    #[cfg(windows)]
-    setup_cli::create_windows_private_file(&path)?;
-    match fs::symlink_metadata(&path) {
-        Ok(meta) if is_link(&meta) || !meta.is_file() => {
-            return Err(file_error(
-                "LOCAL_FILE_TYPE",
-                &path,
-                "Hook installation lock must be a regular file",
-            ));
-        }
-        Ok(_) => setup_cli::verify_private_file(&path)?,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_error(&path, "Cannot inspect hook installation lock", e)),
-    }
-    let mut options = read_options();
-    options.write(true);
-    #[cfg(unix)]
-    options.create(true).truncate(false).mode(0o600);
-    let lock = options
-        .open(&path)
-        .map_err(|e| io_error(&path, "Cannot open hook installation lock", e))?;
-    let metadata = lock
-        .metadata()
-        .map_err(|e| io_error(&path, "Cannot inspect open hook installation lock", e))?;
-    if is_link(&metadata) || !metadata.is_file() || metadata.len() != 0 {
+    if fs::symlink_metadata(&path).is_ok_and(|meta| is_link(&meta) || !meta.is_file()) {
         return Err(file_error(
             "LOCAL_FILE_TYPE",
             &path,
-            "Hook installation lock must be an empty regular file",
+            "Hook installation lock must be a regular file",
         ));
     }
+    // The file is only ever locked. Nothing reads or writes its content.
+    let mut options = read_options();
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let lock = options
+        .open(&path)
+        .map_err(|e| io_error(&path, "Cannot open hook installation lock", e))?;
     match lock.try_lock() {
         Ok(()) => Ok(lock),
         Err(fs::TryLockError::WouldBlock) => Err(Diagnostic::error(
@@ -466,16 +439,15 @@ fn lock_installation() -> Result<fs::File, Diagnostic> {
 
 #[cfg(unix)]
 type User = u32;
+// Windows settings keep the access rules of their folder; ownership is not inspected there.
 #[cfg(windows)]
-type User = String;
+type User = ();
 
 fn current_user() -> Result<User, Diagnostic> {
     #[cfg(unix)]
-    let user = setup_cli::current_unix_uid();
+    return setup_cli::current_unix_uid();
     #[cfg(windows)]
-    let user = setup_cli::windows_acl::current_user()
-        .ok_or_else(|| Diagnostic::error("LOCAL_IO", "Cannot identify the current Windows user."));
-    user
+    Ok(())
 }
 
 fn settings_directory(path: &Path) -> &Path {
@@ -483,50 +455,28 @@ fn settings_directory(path: &Path) -> &Path {
         .expect("An absolute settings path has a parent")
 }
 
-fn permission_issue(
-    path: &Path,
-    metadata: &fs::Metadata,
-    user: &User,
-) -> Result<Option<&'static str>, Diagnostic> {
+fn permission_issue(metadata: &fs::Metadata, user: &User) -> Option<&'static str> {
     #[cfg(unix)]
-    let (owned, shared) = {
-        let _ = path;
-        (metadata.uid() == *user, mode(metadata) & 0o002 != 0)
-    };
+    let (owned, shared) = (metadata.uid() == *user, mode(metadata) & 0o002 != 0);
     #[cfg(windows)]
     let (owned, shared) = {
-        let directory;
-        let inspected = if metadata.is_dir() {
-            directory = fs::canonicalize(path)
-                .map_err(|e| io_error(path, "Cannot resolve settings directory", e))?;
-            &directory
-        } else {
-            path
-        };
-        setup_cli::windows_acl::hook_permissions(inspected, metadata.is_dir(), user).ok_or_else(
-            || {
-                file_error(
-                    "LOCAL_IO",
-                    path,
-                    "Cannot inspect settings ownership and access rules",
-                )
-            },
-        )?
+        let () = user;
+        (true, false)
     };
-    Ok(match (metadata.is_dir(), owned, shared) {
+    match (metadata.is_dir(), owned, shared) {
         (true, false, _) => Some("Settings directory is owned by another user"),
         (false, false, _) => Some("Settings file is owned by another user"),
         (true, true, true) => Some("Settings directory is writable by everyone"),
         (false, true, true) => Some("Settings file is writable by everyone"),
         (_, true, false) => None,
-    })
+    }
 }
 
 fn directory_issue(path: &Path, user: &User) -> Result<Option<&'static str>, Diagnostic> {
     // If the directory is missing, check where it would be created. Directory aliases are allowed.
     for directory in settings_directory(path).ancestors() {
         match fs::metadata(directory) {
-            Ok(meta) if meta.is_dir() => return permission_issue(directory, &meta, user),
+            Ok(meta) if meta.is_dir() => return Ok(permission_issue(&meta, user)),
             Ok(_) => {
                 return Err(file_error(
                     "LOCAL_FILE_TYPE",
@@ -572,7 +522,7 @@ fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
         Err(e) => return Err(io_error(path, "Cannot inspect settings", e)),
     };
     if let Some(meta) = &inspected
-        && let Some(reason) = permission_issue(path, meta, user)?
+        && let Some(reason) = permission_issue(meta, user)
     {
         return Ok(Settings::Manual(reason));
     }
@@ -605,11 +555,11 @@ fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
         if !current.is_file() || unix_identity(&current) != unix_identity(&metadata) {
             return Err(settings_changed());
         }
-        if let Some(reason) = permission_issue(path, &current, user)? {
+        if let Some(reason) = permission_issue(&current, user) {
             return Ok(Settings::Manual(reason));
         }
     }
-    if let Some(reason) = permission_issue(path, &metadata, user)? {
+    if let Some(reason) = permission_issue(&metadata, user) {
         return Ok(Settings::Manual(reason));
     }
     let modified = |meta: &fs::Metadata| {
@@ -621,7 +571,7 @@ fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
         identity: unix_identity(&metadata),
         #[cfg(windows)]
         identity: setup_cli::windows_file_identity(&file)
-            .map_err(|e| io_error(path, "Cannot identify open settings", e))?,
+            .map_err(|_| file_error("LOCAL_IO", path, "Cannot identify open settings"))?,
         mode: mode(&metadata),
         length: metadata.len(),
         modified: modified(&metadata)?,
@@ -809,7 +759,9 @@ fn matching_command(existing: &Value, hook: &Value, event: &str) -> Option<bool>
     matching.peek()?;
     Some(
         existing["matcher"] == hook["matcher"]
-            && matching.any(|command| command["type"] == "command"),
+            && matching.any(|command| {
+                command["type"] == "command" && command["shell"] == hook["hooks"][0]["shell"]
+            }),
     )
 }
 
@@ -922,27 +874,17 @@ fn replace(
 }
 
 fn create_candidate(parent: &Path, prefix: &str) -> Result<(PathBuf, fs::File), Diagnostic> {
-    #[cfg(unix)]
+    // A new name is never an existing file or link. On Windows it takes the folder's access rules.
     let mut options = fs::File::options();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    options.write(true).create_new(true).mode(0o600);
+    options.mode(0o600);
     for counter in 0..u64::MAX {
         let path = parent.join(format!("{prefix}{}.{counter}.tmp", std::process::id()));
-        #[cfg(unix)]
         match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(io_error(&path, "Cannot create temporary settings", e)),
-        }
-        #[cfg(windows)]
-        {
-            if !setup_cli::create_windows_private_file(&path)? {
-                continue;
-            }
-            let file = read_options().write(true).open(&path).map_err(|e| {
-                cleanup_failed_install(&path, io_error(&path, "Cannot open temporary settings", e))
-            })?;
-            return Ok((path, file));
         }
     }
     Err(file_error(
@@ -962,13 +904,6 @@ fn write_candidate(
         file.metadata()
             .map_err(|e| io_error(path, "Cannot inspect temporary settings", e))
     };
-    #[cfg(windows)]
-    {
-        let metadata = inspect()?;
-        if !metadata.is_file() || is_link(&metadata) || metadata.len() != 0 {
-            return Err(settings_changed());
-        }
-    }
     (&file)
         .write_all(bytes)
         .map_err(|e| io_error(path, "Cannot write temporary settings", e))?;

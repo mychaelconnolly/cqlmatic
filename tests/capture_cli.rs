@@ -261,9 +261,15 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         for field in ["path", "event", "command", "entry", "next_actions"] {
             assert_eq!(fresh[field], preview[field], "{client}, {field}");
         }
+        // The Copilot clients share one entry.
+        let registered = if client.starts_with("copilot-") {
+            "copilot-cli"
+        } else {
+            client
+        };
         let check_command = |value: &Value| {
             let value = value.as_str().unwrap();
-            assert!(value.starts_with(&format!("launcher --label capture env capture --client {client} --server '{SERVER}' --state ")));
+            assert!(value.starts_with(&format!("launcher --label capture env capture --client {registered} --server '{SERVER}' --state ")));
             assert!(value.contains("inventory"), "{value}");
             assert!(value.contains("state.json"), "{value}");
         };
@@ -278,9 +284,14 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         } else {
             assert_eq!(fresh["event"], "PostToolUse");
             check_command(&fresh["command"]);
+            let mut handler =
+                json!({"type": "command", "command": fresh["command"], "async": true});
+            if cfg!(windows) && client == "claude-code" {
+                handler["shell"] = json!("powershell");
+            }
             json!({"hooks": {"PostToolUse": [{
                 "matcher": "mcp__synthetic-server__.*",
-                "hooks": [{"type": "command", "command": fresh["command"], "async": true}],
+                "hooks": [handler],
             }]}})
         };
         if client == "codex" {
@@ -387,6 +398,27 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
             }
         }
     }
+}
+
+#[test]
+fn capture_install_keeps_a_byte_order_mark_and_shares_one_copilot_entry() {
+    let home = Temp::new();
+    let file = home.0.join(".copilot/hooks/cqlmatic-capture.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "\u{feff}{\"version\": 1}").unwrap();
+    let first = report(&mut install(&home.0, "copilot-cli"));
+    assert_eq!(first["changed"], true);
+    let written = fs::read_to_string(&file).unwrap();
+    let settings: Value = serde_json::from_str(written.strip_prefix('\u{feff}').unwrap()).unwrap();
+    assert_eq!(settings, first["entry"]);
+    // Every Copilot client reads this file, so another client adds nothing.
+    for client in ["copilot-app", "copilot-vscode"] {
+        let repeat = report(&mut install(&home.0, client));
+        assert_eq!(repeat["installed"], true, "{client}");
+        assert_eq!(repeat["changed"], false, "{client}");
+        assert_eq!(repeat["entry"], first["entry"], "{client}");
+    }
+    assert_eq!(fs::read_to_string(&file).unwrap(), written);
 }
 
 #[test]
@@ -781,66 +813,6 @@ fn powershell() -> Command {
     let mut shell = Command::new(root.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
     shell.args(["-NoProfile", "-NonInteractive", "-Command"]);
     shell
-}
-
-#[cfg(windows)]
-#[test]
-fn capture_install_windows_refuses_everyone_write_and_creates_a_private_file() {
-    let home = Temp::new();
-    let root = home.0.join(".codex");
-    let file = root.join("hooks.json");
-    let installed = report(&mut install(&home.0, "codex"));
-    assert_eq!(installed["installed"], true);
-    let bytes = fs::read(&file).unwrap();
-    let private = powershell()
-        .env("CQLMATIC_TEST_SETTINGS", &file)
-        .arg(r#"
-$ErrorActionPreference='Stop'
-$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$a=Get-Acl -LiteralPath $env:CQLMATIC_TEST_SETTINGS
-if(!$a.AreAccessRulesProtected -or $a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid){exit 1}
-foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
-  if($r.IdentityReference.Value -notin $sid,'S-1-5-18'){exit 1}
-}
-"#)
-        .output()
-        .unwrap();
-    assert!(private.status.success(), "{private:?}");
-    for (path, reason) in [
-        (&file, "file is writable by everyone"),
-        (&root, "directory is writable by everyone"),
-    ] {
-        let shared = powershell()
-            .env("CQLMATIC_TEST_SETTINGS", path)
-            .arg(
-                r#"
-$ErrorActionPreference='Stop'
-$p=$env:CQLMATIC_TEST_SETTINGS
-$a=Get-Acl -LiteralPath $p
-$everyone=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
-$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,'Write','Allow'))
-Set-Acl -LiteralPath $p -AclObject $a
-"#,
-            )
-            .output()
-            .unwrap();
-        assert!(shared.status.success(), "{shared:?}");
-        check_settings_refusal(&home, &file, &bytes, &installed["entry"], reason);
-        let restored = powershell()
-            .env("CQLMATIC_TEST_SETTINGS", path)
-            .arg(
-                r#"
-$ErrorActionPreference='Stop'
-$p=$env:CQLMATIC_TEST_SETTINGS
-$a=Get-Acl -LiteralPath $p
-$a.PurgeAccessRules([Security.Principal.SecurityIdentifier]::new('S-1-1-0'))
-Set-Acl -LiteralPath $p -AclObject $a
-"#,
-            )
-            .output()
-            .unwrap();
-        assert!(restored.status.success(), "{restored:?}");
-    }
 }
 
 #[test]
@@ -1684,6 +1656,17 @@ fn capture_install_registers_an_absolute_state_path() {
     assert!(
         state.ends_with("project/relative/state.json"),
         "{registered}"
+    );
+
+    let mut command = install(&home.0, "codex");
+    command.current_dir(&home.0).args(["--state", "project"]);
+    let refused = install_error(&command.output().unwrap());
+    assert_eq!(refused["code"], "CLI_INPUT");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a directory")
     );
 }
 
