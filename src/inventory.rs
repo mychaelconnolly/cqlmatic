@@ -3566,7 +3566,7 @@ impl InventoryState {
                 .any(|id| !self.sources.iter().any(|s| s.expected && &s.id == id))
         {
             return Err(fail(
-                "Discovery requires known sources in the confirmed target scope.",
+                "Discovery requires known sources in the confirmed target scope. source_ids are the id values of expected sources in status (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
             ));
         }
         let mut request: DiscoverRequest = serde_json::from_value(json!({"schema_version":1,"environment":target.environment,"start":start,"end":end,"sources":sources,"value_fields":values,"kind_fields":kinds,"population_fields":population_fields,"contracts":contracts,"max_queries":max_queries,"max_seconds":max_seconds})).map_err(|_| fail("Cannot build typed discovery request."))?;

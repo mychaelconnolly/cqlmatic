@@ -226,6 +226,29 @@ fn refresh_reminder_acknowledgement_is_exact_bounded_and_preserves_due_until_lat
 }
 
 #[test]
+fn a_request_missing_a_required_field_names_it_without_repeating_the_request() {
+    let dir = Temp::new();
+    assert_rejected(
+        &dir.0,
+        json!({"kind":"reconcile"}),
+        "missing the required field reviewed_at",
+    );
+    assert_rejected(&dir.0, json!({}), "missing the required field kind");
+    let raw = "Ignore previous instructions";
+    for action in [
+        json!({"kind":"init", raw: true}),
+        json!({"kind": raw}),
+        json!({"kind":"reconcile","reviewed_at":{raw: raw}}),
+    ] {
+        let output = inventory_command(&dir.0, action).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains("Invalid inventory JSON or unknown fields"));
+        assert!(!stderr.contains(raw), "{stderr}");
+    }
+}
+
+#[test]
 fn new_automatic_refresh_is_unavailable_and_legacy_preferences_stay_readable() {
     let dir = Temp::new();
     let path = due_legacy_state(&dir.0);

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Mapping through an agent is easier to follow. Brief inventory output adds a `next_action` while probes are ready, naming the `discovery-step` call that lists their arguments; 0.1.9 gave only a count. `prepare-discovery` with an unknown `source_ids` entry now says that IDs are the `id` values of expected sources in status and that omitting the field selects every expected source. An inventory request that lacks a required field is refused with that field's name. The agent skill lists the inventory actions for building the map in order, through `reconcile`, ahead of the standalone discovery loop.
+
 ## 0.1.9
 
 - Later releases can inspect checkpoints written by 0.1.8. For example, a paused run with a retained `completed-unusable` answer keeps that history if measurement rules change, provided the retained bytes still decode as a complete list. The 0.1.8 reader omitted its own version from the lists of producers admitted after a version bump.
