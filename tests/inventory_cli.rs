@@ -272,12 +272,34 @@ fn an_empty_or_relative_data_folder_variable_is_treated_as_unset() {
         assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
     }
 
-    // With no usable folder at all there is no default inventory, and a query is still checked.
+    // An unusable first choice gives way to the next one.
+    let home = dir.0.join("home-c");
+    fs::create_dir_all(&home).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["env", "inventory", "--json", "--request"])
+        .arg(&request)
+        .current_dir(&work)
+        .env("LOCALAPPDATA", "")
+        .env_remove("XDG_DATA_HOME")
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(Path::new(report["state"].as_str().unwrap()).starts_with(&home));
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+}
+
+#[test]
+fn a_query_is_checked_when_no_default_inventory_location_exists() {
     use std::io::Write;
+    let dir = Temp::new();
+    let work = dir.0.join("work");
+    fs::create_dir_all(&work).unwrap();
     let mut check = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
         .args(["check", "-", "--json"])
         .current_dir(&work)
-        .env_remove("LOCALAPPDATA")
+        .env("LOCALAPPDATA", "")
         .env("XDG_DATA_HOME", "")
         .env("HOME", "relative-home")
         .stdin(std::process::Stdio::piped())
