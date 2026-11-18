@@ -1121,6 +1121,30 @@
         {
           "type": "object",
           "properties": {
+            "answer": {
+              "$ref": "#/$defs/DiscoveryAnswer"
+            },
+            "kind": {
+              "type": "string",
+              "const": "next-probe"
+            },
+            "run_index": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "kind": {
               "type": "string",
               "const": "pause-discovery"

@@ -183,12 +183,21 @@ pub fn is_resumable(state: &State) -> bool {
 }
 
 pub fn has_in_flight(state: &State) -> bool {
-    state.session.as_ref().is_some_and(|session| {
+    outstanding_attempt(state).is_some()
+}
+
+fn outstanding_attempt(state: &State) -> Option<&Attempt> {
+    state.session.as_ref().and_then(|session| {
         session
             .attempts
             .iter()
-            .any(|attempt| attempt_uncertain(session.transport, attempt))
+            .rfind(|attempt| attempt_uncertain(session.transport, attempt))
     })
+}
+
+pub fn outstanding_probe_id(state: &State) -> Option<String> {
+    outstanding_attempt(state)
+        .map(|attempt| discovery::probe_id(&state.request.environment.view, &attempt.probe))
 }
 
 fn ended(outcome: &str) -> bool {
@@ -798,6 +807,26 @@ fn current_output(state: &State) -> Result<StepOutput, Diagnostic> {
         _ => vec![],
     };
     Ok(progress(state, status, probes, false, diagnostics))
+}
+
+/// Read the exact outstanding MCP probe or the first ready probe without reserving it.
+pub fn inventory_probe(state: &State) -> Result<Option<Value>, Diagnostic> {
+    if state.status != "needs-probes" {
+        return Ok(None);
+    }
+    if let Some(attempt) = outstanding_attempt(state) {
+        let Some(session) = state.session.as_ref().filter(|session| {
+            session.transport == Transport::Mcp && attempt.outcome == "dispatched"
+        }) else {
+            return Ok(None);
+        };
+        // A reserved search must not be started once the run's time limit has passed.
+        session.remaining(state, &discovery::timestamp())?;
+        return Ok(Some(wire_probe(state, &attempt.probe)));
+    }
+    Ok(pending(state)?
+        .first()
+        .map(|probe| wire_probe(state, probe)))
 }
 
 pub fn dispatch(path: &Path, probe_id: &str) -> Result<StepOutput, Diagnostic> {
