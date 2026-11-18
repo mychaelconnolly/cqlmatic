@@ -713,6 +713,23 @@ fn capture_installs_through_different_links_to_one_file_take_turns() {
         2
     );
     assert_eq!(entries(&store), ["claude.json"]);
+
+    // A profile that holds its settings file directly meets other installers on it too.
+    let direct = home.0.join("profile-c");
+    fs::create_dir(&direct).unwrap();
+    let own = direct.join("settings.json");
+    fs::write(&own, "{}").unwrap();
+    let held = fs::File::open(&own).unwrap();
+    held.lock().unwrap();
+    let busy = install_in(&direct, "three").output().unwrap();
+    assert_eq!(
+        install_error(&busy)["message"],
+        "Another hook installation is running. Retry."
+    );
+    assert_eq!(fs::read(&own).unwrap(), b"{}");
+    drop(held);
+    let output = report(&mut install_in(&direct, "three"));
+    assert_eq!(output["installed"], true);
 }
 
 #[cfg(unix)]
