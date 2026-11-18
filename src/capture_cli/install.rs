@@ -498,33 +498,41 @@ fn lock_installation(settings: &Path, real: &Path) -> Result<Option<Vec<fs::File
             return Err(io_error(&path, "Cannot lock hook installation lock", e));
         }
     }
-    let mut locks = vec![lock];
     // A settings file can be reached by more than one path: through different links, or
     // through a link and directly. Those installers have different lock files, so every
     // installer of an existing file also meets the others on the file itself.
     #[cfg(unix)]
-    if fs::symlink_metadata(real).is_ok_and(|meta| meta.is_file()) {
-        let file = fs::File::open(real).map_err(|e| io_error(real, "Cannot open settings", e))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(fs::TryLockError::Error(e)) => {
-                return Err(io_error(real, "Cannot lock settings", e));
+    let locks = {
+        let mut locks = vec![lock];
+        if fs::symlink_metadata(real).is_ok_and(|meta| meta.is_file()) {
+            let file =
+                fs::File::open(real).map_err(|e| io_error(real, "Cannot open settings", e))?;
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(e)) => {
+                    return Err(io_error(real, "Cannot lock settings", e));
+                }
             }
+            // An installation that finished while this one waited swapped in a new file.
+            let current =
+                fs::metadata(real).map_err(|e| io_error(real, "Cannot inspect settings", e))?;
+            let locked = file
+                .metadata()
+                .map_err(|e| io_error(real, "Cannot inspect settings", e))?;
+            if unix_identity(&current) != unix_identity(&locked) {
+                return Err(settings_changed());
+            }
+            locks.push(file);
         }
-        // An installation that finished while this one waited swapped in a new file.
-        let current =
-            fs::metadata(real).map_err(|e| io_error(real, "Cannot inspect settings", e))?;
-        let locked = file
-            .metadata()
-            .map_err(|e| io_error(real, "Cannot inspect settings", e))?;
-        if unix_identity(&current) != unix_identity(&locked) {
-            return Err(settings_changed());
-        }
-        locks.push(file);
-    }
+        locks
+    };
+    // Elsewhere the lock file is the only lock.
     #[cfg(not(unix))]
-    let _ = real;
+    let locks = {
+        let _ = real;
+        vec![lock]
+    };
     Ok(Some(locks))
 }
 
