@@ -815,13 +815,14 @@ pub fn inventory_probe(state: &State) -> Result<Option<Value>, Diagnostic> {
         return Ok(None);
     }
     if let Some(attempt) = outstanding_attempt(state) {
-        let mcp = state
-            .session
-            .as_ref()
-            .is_some_and(|session| session.transport == Transport::Mcp);
-        return Ok(
-            (mcp && attempt.outcome == "dispatched").then(|| wire_probe(state, &attempt.probe))
-        );
+        let Some(session) = state.session.as_ref().filter(|session| {
+            session.transport == Transport::Mcp && attempt.outcome == "dispatched"
+        }) else {
+            return Ok(None);
+        };
+        // A reserved search must not be started once the run's time limit has passed.
+        session.remaining(state, &discovery::timestamp())?;
+        return Ok(Some(wire_probe(state, &attempt.probe)));
     }
     Ok(pending(state)?
         .first()

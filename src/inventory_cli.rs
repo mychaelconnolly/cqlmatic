@@ -725,11 +725,16 @@ fn next_probe(
     };
 
     let mut outstanding = mcp::outstanding_probe_id(&run.relay);
+    // An error while choosing or reserving the probe is reported in a normal response below.
+    let mut failure = None;
     let mut probe = if run.phase == "needs-probes"
         && diagnostics.is_empty()
         && !(supplied_answer && outstanding.is_some())
     {
-        mcp::inventory_probe(&run.relay).map_err(|d| discovery_run_diagnostic(index, d))?
+        mcp::inventory_probe(&run.relay).unwrap_or_else(|d| {
+            failure = Some(discovery_run_diagnostic(index, d));
+            None
+        })
     } else {
         None
     };
@@ -744,6 +749,7 @@ fn next_probe(
 
     let mut dispatched = false;
     let mut reservation_failed = false;
+    let mut expired = false;
     if let Some(candidate) = &probe
         && outstanding.is_none()
     {
@@ -760,20 +766,22 @@ fn next_probe(
                 outstanding = Some(probe_id);
                 dispatched = true;
             }
-            Err(error) => {
-                // The answer has its own commit. Poll to finalize expiry, then verify the
-                // checkpoint even if polling could not write the inventory.
-                let poll = step(vec![]);
-                let saved = inspect_next_probe_run(path, Some(index), &writer)
-                    .map_err(|read_error| poll.err().unwrap_or(read_error))?;
-                phase = saved.phase;
-                outstanding = mcp::outstanding_probe_id(&saved.relay);
-                cost = json!(mcp::cost(&saved.relay, 0));
-                probe = None;
-                reservation_failed = true;
-                diagnostics.push(reservation_diagnostic(error, outstanding.is_some()));
-            }
+            Err(error) => failure = Some(error),
         }
+    }
+    if let Some(error) = failure {
+        // The answer has its own commit. Poll to finalize expiry, then verify the
+        // checkpoint even if polling could not write the inventory.
+        let poll = step(vec![]);
+        let saved = inspect_next_probe_run(path, Some(index), &writer)
+            .map_err(|read_error| poll.err().unwrap_or(read_error))?;
+        phase = saved.phase;
+        outstanding = mcp::outstanding_probe_id(&saved.relay);
+        cost = json!(mcp::cost(&saved.relay, 0));
+        probe = None;
+        reservation_failed = true;
+        expired = error.code == "MCP_DEADLINE";
+        diagnostics.push(reservation_diagnostic(error, outstanding.is_some()));
     }
     let phase = if probe.is_some() { "probe" } else { &phase };
     let next_action = next_probe_guidance(
@@ -782,6 +790,7 @@ fn next_probe(
         dispatched,
         supplied_answer && !settled,
         reservation_failed,
+        expired,
         outstanding.is_some(),
     );
     let mut action = json!({"kind":"next-probe","run_index":index,"state":phase,
@@ -806,6 +815,7 @@ fn next_probe_guidance(
     dispatched: bool,
     refused: bool,
     reservation_failed: bool,
+    expired: bool,
     outstanding: bool,
 ) -> String {
     match phase {
@@ -815,24 +825,43 @@ fn next_probe_guidance(
         "probe" => format!(
             "This probe is already reserved. If its search ran, submit the saved result as answer with run_index={index}. Run the search only if it never started."
         ),
-        "complete" => "The run is complete. Submit reconcile with reviewed_at unless status already shows reconciliation done.".into(),
+        "complete" => format!(
+            "run_index={index} is complete. Submit reconcile with reviewed_at if it has not been reconciled."
+        ),
+        "needs-probes" if expired && outstanding => format!(
+            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index={index} to close the attempt. If it never started, do not run it; submit pause-discovery with run_index={index}, then next-probe with run_index={index} and no answer."
+        ),
         "needs-probes" if reservation_failed && outstanding => format!(
             "The reservation reported an error; see diagnostics. Submit next-probe with run_index={index} and no answer to read the outstanding probe."
         ),
         "needs-probes" if reservation_failed => format!(
-            "The next probe was not reserved; see diagnostics. Submit next-probe with run_index={index} and no answer after resolving it."
+            "The next probe was not reserved; see diagnostics. Submit next-probe with run_index={index} and no answer to try again. If the same error returns, submit pause-discovery with run_index={index}, then prepare-discovery to start a new run."
         ),
         "needs-probes" if refused => {
-            let next = if outstanding { "read the outstanding probe" } else { "request the next probe" };
-            format!("The answer was not accepted. Submit next-probe with run_index={index} and no answer to {next}.")
+            let next = if outstanding {
+                "read the outstanding probe"
+            } else {
+                "request the next probe"
+            };
+            format!(
+                "The answer was not accepted. Submit next-probe with run_index={index} and no answer to {next}."
+            )
         }
-        "paused" => format!("Submit resume-discovery with run_index={index} to continue this run."),
+        "paused" => format!(
+            "Submit resume-discovery with run_index={index} to continue this run, or prepare-discovery to start a new one."
+        ),
         "cancel-requested" | "cleanup-pending" => format!(
             "Settle the outstanding attempt for run_index={index} before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. Then submit resume-discovery with run_index={index}."
         ),
-        "failed" => "This run failed and hands out no more probes. Submit prepare-discovery to start a new run.".into(),
-        "superseded" => "This run was superseded by newer inventory evidence. Submit prepare-discovery to measure again.".into(),
-        _ => format!("Inspect run_index={index} with discovery-step, answers: [] and --json alone."),
+        "failed" => format!(
+            "run_index={index} failed and hands out no more probes. Read the reason with discovery-step, run_index={index}, answers: [] and --json alone before submitting prepare-discovery; a new run with the same sources and limits can fail the same way."
+        ),
+        "superseded" => format!(
+            "run_index={index} was superseded by newer inventory evidence. Submit prepare-discovery to measure again."
+        ),
+        _ => {
+            format!("Inspect run_index={index} with discovery-step, answers: [] and --json alone.")
+        }
     }
 }
 

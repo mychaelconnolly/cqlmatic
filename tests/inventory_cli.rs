@@ -1208,7 +1208,7 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     );
     assert_eq!(
         action["next_action"],
-        "The next probe was not reserved; see diagnostics. Submit next-probe with run_index=0 and no answer after resolving it."
+        "The next probe was not reserved; see diagnostics. Submit next-probe with run_index=0 and no answer to try again. If the same error returns, submit pause-discovery with run_index=0, then prepare-discovery to start a new run."
     );
     let repeat = json!({"kind":"next-probe","run_index":0});
     let compact = call(&dir.0, repeat.clone());
@@ -1216,6 +1216,11 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     assert_eq!(compact["action"]["state"], "needs-probes");
     assert_eq!(compact["action"]["diagnostics"], action["diagnostics"]);
     assert_eq!(brief_call(&dir.0, repeat), compact);
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    assert_eq!(
+        call(&dir.0, source_run_request(4))["action"]["run_index"],
+        1
+    );
 }
 
 #[test]
@@ -1243,6 +1248,115 @@ fn next_probe_marks_an_expired_first_reservation_failed() {
 }
 
 #[test]
+fn next_probe_does_not_hand_out_a_reserved_probe_after_the_time_limit() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let mut request = source_run_request(4);
+    request["max_seconds"] = json!(1);
+    call(&dir.0, request.clone());
+    let reserved = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(reserved["action"]["dispatched"], true);
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let expired = call(&dir.0, json!({"kind":"next-probe"}));
+    let action = &expired["action"];
+    assert_eq!(action["state"], "needs-probes", "{expired}");
+    assert!(action.get("probe").is_none());
+    assert_eq!(
+        action["outstanding_probe_id"],
+        reserved["action"]["probe"]["probe_id"]
+    );
+    assert_eq!(action["diagnostics"][0]["code"], "MCP_DEADLINE");
+    assert_eq!(
+        action["next_action"],
+        "The time limit of run_index=0 has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index=0 to close the attempt. If it never started, do not run it; submit pause-discovery with run_index=0, then next-probe with run_index=0 and no answer."
+    );
+
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let late = call(
+        &dir.0,
+        json!({"kind":"next-probe","run_index":0,"answer":{"probe_id":action["outstanding_probe_id"],"result_file":result}}),
+    );
+    assert_eq!(late["action"]["state"], "failed", "{late}");
+    assert_eq!(late["action"]["settled"], false);
+    assert_eq!(
+        late["action"]["next_action"],
+        "run_index=0 failed and hands out no more probes. Read the reason with discovery-step, run_index=0, answers: [] and --json alone before submitting prepare-discovery; a new run with the same sources and limits can fail the same way."
+    );
+    let reason = call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+    );
+    assert_eq!(
+        reason["action"]["relay"]["diagnostics"][0]["code"],
+        "MCP_DEADLINE"
+    );
+    assert_eq!(call(&dir.0, request)["action"]["run_index"], 1);
+}
+
+#[test]
+fn next_probe_leaves_an_expired_unstarted_probe_to_the_cancellation_steps() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let mut request = source_run_request(4);
+    request["max_seconds"] = json!(1);
+    call(&dir.0, request);
+    let reserved = call(&dir.0, json!({"kind":"next-probe"}));
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    call(&dir.0, json!({"kind":"next-probe"}));
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let canceled = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(canceled["action"]["state"], "cancel-requested");
+    assert_eq!(
+        canceled["action"]["outstanding_probe_id"],
+        reserved["action"]["probe"]["probe_id"]
+    );
+    assert!(
+        canceled["action"]["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("Settle the outstanding attempt for run_index=0 before continuing.")
+    );
+}
+
+#[test]
+fn next_probe_explains_a_run_that_ran_out_of_searches() {
+    let dir = Temp::new();
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":"synthetic-a"},{"type":"synthetic-b"}]}),
+    );
+    call(&dir.0, source_run_request(1));
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let ended = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":first["action"]["probe"]["probe_id"],"result_file":result}}),
+    );
+    let action = &ended["action"];
+    assert_eq!(action["state"], "failed", "{ended}");
+    assert_eq!(action["settled"], true);
+    assert!(
+        action["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("run_index=0 failed and hands out no more probes. Read the reason with discovery-step, run_index=0, answers: [] and --json alone")
+    );
+    let reason = call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+    );
+    assert_eq!(
+        reason["action"]["relay"]["diagnostics"][0]["message"],
+        "Discovery budget exhausted; the working pack must remain unchanged."
+    );
+}
+
+#[test]
 fn next_probe_guides_paused_and_cancel_requested_runs() {
     let dir = Temp::new();
     confirm_quick_source(&dir.0, "synthetic");
@@ -1251,7 +1365,7 @@ fn next_probe_guides_paused_and_cancel_requested_runs() {
     let paused = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
     assert_eq!(
         paused["action"]["next_action"],
-        "Submit resume-discovery with run_index=0 to continue this run."
+        "Submit resume-discovery with run_index=0 to continue this run, or prepare-discovery to start a new one."
     );
     call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
     let reserved = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
