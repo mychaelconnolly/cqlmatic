@@ -4,6 +4,7 @@
 
 - `cqlmatic env capture --client CLIENT --server SERVER --install` registers the scrappy-mode hook, replacing the client's settings file in one step with its existing content kept. It prints the entry for manual installation when the client or settings file requires it. Use `--dry-run` for a read-only preview or `--program TEXT` to specify a launcher.
 - `check` rejects `correlate` combined with `selfJoin` or `selfJoinFilter`, anywhere in the query, as `CQL_CORRELATION_JOIN_CONFLICT`. 0.1.9 applied the rule to `join` only and reported such queries as ready.
+- Mapping through an agent is easier to follow. Brief inventory output adds a `next_action` while probes are ready, naming the `discovery-step` call that lists their arguments; 0.1.9 gave only a count. `prepare-discovery` with an unknown `source_ids` entry now says that IDs are the `source_id` values of expected sources in `status --json --summary` and that omitting the field selects every expected source. Inventory input that lacks a required field is refused with that field's name, and `prepare-discovery` with no expected source says so instead of suggesting to omit `source_ids`. The agent skill lists the inventory actions for building the map in order, through `reconcile`, ahead of the standalone discovery loop, with what Full mode needs beyond Quick.
 
 ## 0.1.9
 
