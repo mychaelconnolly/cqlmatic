@@ -583,12 +583,33 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
     fs::create_dir_all(parent)
         .map_err(|e| io_error(path, "Cannot create settings directory", e))?;
 
-    // The candidate also excludes other installers for this file while we verify and write.
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .expect("A known settings filename");
-    let temporary = parent.join(format!(".{name}.cqlmatic.tmp"));
+    // Each installation writes a candidate of its own, so none can remove another's.
+    let prefix = format!(".{name}.cqlmatic.");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let temporary = parent.join(format!("{prefix}{}.{unique}.tmp", std::process::id()));
+    // Candidates left by interrupted installations are cleared once they are old.
+    for entry in fs::read_dir(parent).into_iter().flatten().flatten() {
+        let abandoned =
+            entry.file_name().to_str().is_some_and(|candidate| {
+                candidate.starts_with(&prefix) && candidate.ends_with(".tmp")
+            }) && entry.metadata().is_ok_and(|meta| {
+                meta.is_file()
+                    && meta
+                        .modified()
+                        .ok()
+                        .and_then(|at| at.elapsed().ok())
+                        .is_some_and(|age| age >= ABANDONED_CANDIDATE)
+            });
+        if abandoned {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -596,30 +617,9 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    // A candidate left by an interrupted installation must not block later ones for good.
-    let abandoned = fs::symlink_metadata(&temporary).is_ok_and(|meta| {
-        meta.is_file()
-            && meta
-                .modified()
-                .ok()
-                .and_then(|at| at.elapsed().ok())
-                .is_some_and(|age| age >= ABANDONED_CANDIDATE)
-    });
-    if abandoned {
-        fs::remove_file(&temporary)
-            .map_err(|e| io_error(path, "Cannot remove an abandoned settings candidate", e))?;
-    }
-    let mut file = options.open(&temporary).map_err(|e| {
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            file_error(
-                "LOCAL_IO",
-                path,
-                "Another installation is writing these settings. Retry in a minute",
-            )
-        } else {
-            io_error(path, "Cannot create settings candidate", e)
-        }
-    })?;
+    let mut file = options
+        .open(&temporary)
+        .map_err(|e| io_error(path, "Cannot create settings candidate", e))?;
     let staged = (|| {
         if let Settings::File { metadata, .. } = settings {
             #[cfg(unix)]

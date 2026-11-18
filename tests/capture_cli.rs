@@ -1466,30 +1466,35 @@ fn capture_install_registers_an_absolute_state_path() {
 }
 
 #[test]
-fn capture_install_recovers_from_an_abandoned_candidate_only() {
+fn capture_install_clears_only_old_candidates() {
     let home = Temp::new();
     let root = home.0.join(".codex");
     fs::create_dir(&root).unwrap();
-    let candidate = root.join(".hooks.json.cqlmatic.tmp");
-    // A fresh candidate belongs to an installation that may still be running.
-    fs::write(&candidate, "left over").unwrap();
-    let mut command = install(&home.0, "codex");
-    let refused = command.args(["--program", "launcher"]).output().unwrap();
-    assert!(!refused.status.success(), "{refused:?}");
-    assert!(!root.join("hooks.json").exists());
-    assert_eq!(fs::read(&candidate).unwrap(), b"left over");
-    // An old one is from an interrupted installation and is cleared.
-    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
-    fs::File::options()
-        .write(true)
-        .open(&candidate)
-        .unwrap()
-        .set_modified(old)
-        .unwrap();
+    // A fresh candidate may belong to an installation that is still running; an old one is
+    // from an interrupted installation. Neither blocks a new installation.
+    let fresh = root.join(".hooks.json.cqlmatic.1.1.tmp");
+    let old = root.join(".hooks.json.cqlmatic.2.2.tmp");
+    let unrelated = root.join(".hooks.json.other.tmp");
+    for path in [&fresh, &old, &unrelated] {
+        fs::write(path, "left over").unwrap();
+    }
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    for path in [&old, &unrelated] {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
     let mut command = install(&home.0, "codex");
     let output = report(command.args(["--program", "launcher"]));
     assert_eq!(output["installed"], true);
     assert_eq!(output["changed"], true);
     assert!(root.join("hooks.json").is_file());
-    assert!(!candidate.exists());
+    assert_eq!(fs::read(&fresh).unwrap(), b"left over");
+    assert!(!old.exists());
+    assert_eq!(fs::read(&unrelated).unwrap(), b"left over");
+    // Nothing of this installation's own is left behind.
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
 }
