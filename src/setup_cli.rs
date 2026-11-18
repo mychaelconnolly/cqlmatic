@@ -80,13 +80,18 @@ enum RegistrationProvenance {
 }
 
 pub(crate) fn default_state_path() -> Result<PathBuf, Diagnostic> {
+    // An empty or relative value names no folder; treat it as unset.
+    let folder = |name| {
+        env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
     #[cfg(windows)]
-    let root = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let root = folder("LOCALAPPDATA");
     #[cfg(not(windows))]
-    let root = env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state")));
-    root.filter(|p| p.is_absolute()).map(|p| p.join("cqlmatic/setup/state.json")).ok_or_else(|| err("SETUP_STATE_PATH", "Cannot determine OS-local setup storage; use --state with a dedicated private directory."))
+    let root =
+        folder("XDG_STATE_HOME").or_else(|| folder("HOME").map(|home| home.join(".local/state")));
+    root.map(|p| p.join("cqlmatic/setup/state.json")).ok_or_else(|| err("SETUP_STATE_PATH", "Cannot determine OS-local setup storage; use --state with a dedicated private directory."))
 }
 pub fn run(args: SetupArgs) -> Result<i32, Diagnostic> {
     let state_path = absolute(match args.state {

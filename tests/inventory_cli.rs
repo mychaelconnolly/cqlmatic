@@ -255,7 +255,46 @@ fn an_empty_or_relative_data_folder_variable_is_treated_as_unset() {
         );
         // Nothing is created where the command was started.
         assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
+
+        // Setup applies the same rule to its own folder.
+        let setup = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["setup", "--json"])
+            .current_dir(&work)
+            .env_remove("LOCALAPPDATA")
+            .env("XDG_STATE_HOME", value)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        // A new setup reports its status; it does not fail to find its folder.
+        assert!(setup.stderr.is_empty(), "{setup:?}");
+        let report: Value = serde_json::from_slice(&setup.stdout).unwrap();
+        assert_eq!(report["state"]["phase"], "new", "{setup:?}");
+        assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
     }
+
+    // With no usable folder at all there is no default inventory, and a query is still checked.
+    use std::io::Write;
+    let mut check = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["check", "-", "--json"])
+        .current_dir(&work)
+        .env_remove("LOCALAPPDATA")
+        .env("XDG_DATA_HOME", "")
+        .env("HOME", "relative-home")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    check
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"#repo=example | count()")
+        .unwrap();
+    let output = check.wait_with_output().unwrap();
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["outcome"], "ready", "{output:?}");
+    assert_eq!(fs::read_dir(&work).unwrap().count(), 0);
 }
 
 #[test]
