@@ -697,6 +697,11 @@ fn next_probe(
         })
     };
     let supplied_answer = answer.is_some();
+    let answered_before = run
+        .relay
+        .answers
+        .values()
+        .any(|answer| answer.outcome == "complete");
     let complete = |relay: &mcp::State, probe_id: &str| {
         relay
             .answers
@@ -792,9 +797,15 @@ fn next_probe(
         diagnostics.push(reservation_diagnostic(error, outstanding.is_some()));
     }
     let phase = if probe.is_some() { "probe" } else { &phase };
+    // A new probe after an answer this call did not settle: something else is delivering.
+    let delivered_elsewhere = probe.is_some() && dispatched && !settled && answered_before;
     let next_action = next_probe_guidance(
         index,
-        phase,
+        if delivered_elsewhere {
+            "probe-after-delivery"
+        } else {
+            phase
+        },
         dispatched,
         supplied_answer && !settled,
         reservation_failed,
@@ -886,6 +897,9 @@ fn next_probe_guidance(
     outstanding: bool,
 ) -> String {
     match phase {
+        "probe-after-delivery" => format!(
+            "Run the tool once with these exact arguments. The previous probe was answered before this call, so a capture hook or pass-through may be delivering results: after the search, submit next-probe with run_index={index} and no answer, and save and submit the result only if the same probe comes back."
+        ),
         "probe" if dispatched => format!(
             "Run the tool once with these exact arguments, save the whole result unedited, and submit next-probe with run_index={index} and answer."
         ),

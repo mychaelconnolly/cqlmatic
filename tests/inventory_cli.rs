@@ -1382,6 +1382,10 @@ fn next_probe_carries_on_when_the_answer_was_already_delivered() {
         first["action"]["probe"]["probe_id"]
     );
     assert_eq!(action["cost"]["searches"]["used"], 2);
+    assert_eq!(
+        action["next_action"],
+        "Run the tool once with these exact arguments. The previous probe was answered before this call, so a capture hook or pass-through may be delivering results: after the search, submit next-probe with run_index=0 and no answer, and save and submit the result only if the same probe comes back."
+    );
 
     // With a newer probe outstanding, the late answer still changes nothing.
     let again = call(

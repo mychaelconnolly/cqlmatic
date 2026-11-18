@@ -2124,6 +2124,20 @@ fn capture_answers_the_outstanding_probe_of_a_run() {
     assert_eq!(second["dispatched"], true);
     assert_ne!(second["probe"]["probe_id"], first["probe"]["probe_id"]);
     assert_eq!(second["cost"]["searches"]["used"], 2);
+    assert!(
+        first["next_action"]
+            .as_str()
+            .unwrap()
+            .ends_with("submit next-probe with run_index=0 and answer."),
+        "{first}"
+    );
+    assert!(
+        second["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("submit next-probe with run_index=0 and no answer"),
+        "{second}"
+    );
     assert_eq!(home.tally(), json!({"probe-answered": 1}));
     assert_eq!(
         names(&home.0.join("workflow/state.json.captures")),
