@@ -200,7 +200,9 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
     for (client, variable, default, file) in WRITTEN_CLIENTS {
         let home = Temp::new();
         let root = home.0.join("relocated client");
-        let file = root.join(file);
+        let file = file
+            .split('/')
+            .fold(root.clone(), |path, part| path.join(part));
         let state = home.0.join("inventory's state.json");
         let mut command = install(&home.0, client);
         command
@@ -1435,4 +1437,59 @@ fn pass_through_relays_every_message_unchanged_and_records_a_finished_search() {
     assert_eq!(missing.status.code(), Some(2));
     assert!(missing.stdout.is_empty());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("PASS_THROUGH"));
+}
+
+#[test]
+fn capture_install_registers_an_absolute_state_path() {
+    // The hook runs from whatever directory the client was started in.
+    let home = Temp::new();
+    let project = home.0.join("project");
+    fs::create_dir(&project).unwrap();
+    let mut command = install(&home.0, "codex");
+    command
+        .current_dir(&project)
+        .args(["--program", "launcher", "--state", "relative/state.json"]);
+    let output = report(&mut command);
+    let registered = output["command"].as_str().unwrap();
+    let expected = fs::canonicalize(&project)
+        .unwrap()
+        .join("relative")
+        .join("state.json");
+    let (_, state) = registered.split_once(" --state ").unwrap();
+    let state = Path::new(state.trim_matches(|c| c == '\'' || c == '"'));
+    assert!(state.is_absolute(), "{registered}");
+    assert_eq!(state.file_name(), expected.file_name(), "{registered}");
+    assert!(
+        state.ends_with("project/relative/state.json"),
+        "{registered}"
+    );
+}
+
+#[test]
+fn capture_install_recovers_from_an_abandoned_candidate_only() {
+    let home = Temp::new();
+    let root = home.0.join(".codex");
+    fs::create_dir(&root).unwrap();
+    let candidate = root.join(".hooks.json.cqlmatic.tmp");
+    // A fresh candidate belongs to an installation that may still be running.
+    fs::write(&candidate, "left over").unwrap();
+    let mut command = install(&home.0, "codex");
+    let refused = command.args(["--program", "launcher"]).output().unwrap();
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(!root.join("hooks.json").exists());
+    assert_eq!(fs::read(&candidate).unwrap(), b"left over");
+    // An old one is from an interrupted installation and is cleared.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    fs::File::options()
+        .write(true)
+        .open(&candidate)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let mut command = install(&home.0, "codex");
+    let output = report(command.args(["--program", "launcher"]));
+    assert_eq!(output["installed"], true);
+    assert_eq!(output["changed"], true);
+    assert!(root.join("hooks.json").is_file());
+    assert!(!candidate.exists());
 }

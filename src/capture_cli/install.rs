@@ -11,6 +11,8 @@ use std::{
 };
 
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
+/// Age after which a leftover candidate file is taken to be from an interrupted installation.
+const ABANDONED_CANDIDATE: std::time::Duration = std::time::Duration::from_secs(60);
 const POST_TOOL_USE: &str = "PostToolUse";
 const COPILOT_EVENT: &str = "postToolUse";
 
@@ -330,6 +332,9 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
     let server = shell.argument("--server", &args.server);
     let mut command = format!("{program} env capture --client {client} {server}");
     if let Some(state) = &args.state {
+        // The hook runs from whatever directory the client was started in.
+        let state = std::path::absolute(state)
+            .map_err(|_| Diagnostic::error("LOCAL_PATH", "Cannot resolve the --state path."))?;
         let state = state.to_str().ok_or_else(|| {
             Diagnostic::error(
                 "LOCAL_PATH",
@@ -591,9 +596,30 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
-        .open(&temporary)
-        .map_err(|e| io_error(path, "Cannot create settings candidate", e))?;
+    // A candidate left by an interrupted installation must not block later ones for good.
+    let abandoned = fs::symlink_metadata(&temporary).is_ok_and(|meta| {
+        meta.is_file()
+            && meta
+                .modified()
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age >= ABANDONED_CANDIDATE)
+    });
+    if abandoned {
+        fs::remove_file(&temporary)
+            .map_err(|e| io_error(path, "Cannot remove an abandoned settings candidate", e))?;
+    }
+    let mut file = options.open(&temporary).map_err(|e| {
+        if e.kind() == io::ErrorKind::AlreadyExists {
+            file_error(
+                "LOCAL_IO",
+                path,
+                "Another installation is writing these settings. Retry in a minute",
+            )
+        } else {
+            io_error(path, "Cannot create settings candidate", e)
+        }
+    })?;
     let staged = (|| {
         if let Settings::File { metadata, .. } = settings {
             #[cfg(unix)]
@@ -628,6 +654,8 @@ fn replace(path: &Path, settings: &Settings, bytes: &[u8]) -> Result<(), Diagnos
                 "Settings changed during installation. Inspect the file and retry",
             )
         };
+        // This reread catches a change made since the settings were first read. A save by
+        // another program in the instant between it and the rename is not detected.
         match (settings, read_settings(path)?) {
             (Settings::Missing, Settings::Missing) => {
                 // Creation must fail if another process created the destination in the meantime.
