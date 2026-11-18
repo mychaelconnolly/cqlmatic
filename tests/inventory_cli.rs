@@ -1208,7 +1208,7 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     );
     assert_eq!(
         action["next_action"],
-        "The next probe was not reserved; see diagnostics. Submit next-probe with run_index=0 and no answer to try again. If the same error returns, submit pause-discovery with run_index=0, then prepare-discovery to start a new run."
+        "The next probe was not reserved; the diagnostic says why. Resolve that, then submit next-probe with run_index=0 and no answer. If the diagnostic says the run started from an earlier inventory, submit pause-discovery with run_index=0, then prepare-discovery."
     );
     let repeat = json!({"kind":"next-probe","run_index":0});
     let compact = call(&dir.0, repeat.clone());
@@ -1365,7 +1365,7 @@ fn next_probe_guides_paused_and_cancel_requested_runs() {
     let paused = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
     assert_eq!(
         paused["action"]["next_action"],
-        "Submit resume-discovery with run_index=0 to continue this run, or prepare-discovery to start a new one."
+        "Submit resume-discovery with run_index=0 to continue this run."
     );
     call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
     let reserved = call(&dir.0, json!({"kind":"next-probe","run_index":0}));

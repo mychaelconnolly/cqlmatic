@@ -835,7 +835,7 @@ fn next_probe_guidance(
             "The reservation reported an error; see diagnostics. Submit next-probe with run_index={index} and no answer to read the outstanding probe."
         ),
         "needs-probes" if reservation_failed => format!(
-            "The next probe was not reserved; see diagnostics. Submit next-probe with run_index={index} and no answer to try again. If the same error returns, submit pause-discovery with run_index={index}, then prepare-discovery to start a new run."
+            "The next probe was not reserved; the diagnostic says why. Resolve that, then submit next-probe with run_index={index} and no answer. If the diagnostic says the run started from an earlier inventory, submit pause-discovery with run_index={index}, then prepare-discovery."
         ),
         "needs-probes" if refused => {
             let next = if outstanding {
@@ -847,9 +847,7 @@ fn next_probe_guidance(
                 "The answer was not accepted. Submit next-probe with run_index={index} and no answer to {next}."
             )
         }
-        "paused" => format!(
-            "Submit resume-discovery with run_index={index} to continue this run, or prepare-discovery to start a new one."
-        ),
+        "paused" => format!("Submit resume-discovery with run_index={index} to continue this run."),
         "cancel-requested" | "cleanup-pending" => format!(
             "Settle the outstanding attempt for run_index={index} before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. Then submit resume-discovery with run_index={index}."
         ),
