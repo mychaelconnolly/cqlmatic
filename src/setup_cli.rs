@@ -1021,6 +1021,34 @@ fn executable_fingerprint(file: &fs::File) -> Result<ExecutableFingerprint, Diag
         attributes: meta.file_attributes(),
     })
 }
+/// Options that open the named file itself, never the target of a link at that name.
+fn executable_open_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
+    }
+    // The value of O_NOFOLLOW on Linux depends on the architecture. Elsewhere the identity
+    // comparison in open_executable is the check.
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
+    }
+    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x8000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1).custom_flags(0x0020_0000); // Read sharing only; open reparse point itself.
+    }
+    options
+}
 fn open_executable(path: &Path) -> Result<(fs::File, ExecutableFingerprint), Diagnostic> {
     let meta = fs::symlink_metadata(path).map_err(|_| executable_error())?;
     if !meta.is_file() || meta.file_type().is_symlink() {
@@ -1032,27 +1060,16 @@ fn open_executable(path: &Path) -> Result<(fs::File, ExecutableFingerprint), Dia
             "Discovered executable exceeds the 1 GiB fingerprint byte budget.",
         ));
     }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
-    }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::windows::fs::MetadataExt;
         if meta.file_attributes() & 0x400 != 0 {
             return Err(executable_error());
         }
-        options.share_mode(1).custom_flags(0x0020_0000); // Read sharing only; open reparse point itself.
     }
-    let file = options.open(path).map_err(|_| executable_error())?;
+    let file = executable_open_options()
+        .open(path)
+        .map_err(|_| executable_error())?;
     let fingerprint = executable_fingerprint(&file)?;
     if meta.len() != fingerprint.len || meta.modified().ok() != Some(fingerprint.modified) {
         return Err(executable_error());
@@ -3163,6 +3180,21 @@ mod tests {
             open_executable(&linked).unwrap_err().code,
             "SETUP_EXECUTABLE_CHANGED"
         );
+        // Where the open carries a no-follow flag, the open alone refuses the link.
+        #[cfg(any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(
+                    target_arch = "x86_64",
+                    target_arch = "x86",
+                    target_arch = "aarch64",
+                    target_arch = "arm"
+                )
+            )
+        ))]
+        assert!(executable_open_options().open(&linked).is_err());
+        assert!(executable_open_options().open(&path).is_ok());
     }
     #[test]
     fn setup_detect_isolates_failing_clients_and_reports_selected_failure() {
