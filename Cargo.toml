@@ -16,7 +16,7 @@ default-run = "cqlmatic"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"] }
 sha2 = "0.11"

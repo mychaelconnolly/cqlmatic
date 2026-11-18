@@ -134,7 +134,7 @@ fn parent(path: &Path) -> Result<&Path, Diagnostic> {
         })
 }
 #[cfg(unix)]
-fn current_unix_uid() -> Result<u32, Diagnostic> {
+pub(crate) fn current_unix_uid() -> Result<u32, Diagnostic> {
     let output = Command::new("/usr/bin/id")
         .arg("-u")
         .env_clear()
@@ -959,7 +959,7 @@ fn executable_error() -> Diagnostic {
 }
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagnostic> {
+pub(crate) fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagnostic> {
     use std::{ffi::c_void, os::windows::io::AsRawHandle};
     #[repr(C)]
     struct FileInformation {

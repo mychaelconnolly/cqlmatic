@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `cqlmatic env capture --client CLIENT --server SERVER --install` registers the scrappy-mode hook, replacing the client's settings file in one step with its existing content kept. It prints the entry for manual installation when the client or settings file requires it. Use `--dry-run` for a read-only preview or `--program TEXT` to specify a launcher.
+
 ## 0.1.9
 
 - Later releases can inspect checkpoints written by 0.1.8. For example, a paused run with a retained `completed-unusable` answer keeps that history if measurement rules change, provided the retained bytes still decode as a complete list. The 0.1.8 reader omitted its own version from the lists of producers admitted after a version bump.
