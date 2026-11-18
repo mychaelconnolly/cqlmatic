@@ -368,17 +368,31 @@ cqlmatic env capture --client CLIENT --server SERVER
 
 `--client` names the payload format. `--server` is the server's name exactly as that client spells it. `--state FILE` selects a state other than the default.
 
-| `--client` | Hook event and where it is registered | `SERVER` |
-| --- | --- | --- |
-| `claude-code` | `PostToolUse` in `~/.claude/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
-| `cline` | A `PostToolUse` script in `~/.cline/hooks/` or `~/Documents/Cline/Hooks/` | As in tool names, `SERVER__TOOL` |
-| `codex` | `PostToolUse` in `~/.codex/hooks.json`; review and trust the new hook with `/hooks` before it runs | As in tool names, `mcp__SERVER__TOOL`, with hyphens written as underscores |
-| `copilot-cli`, `copilot-app`, `copilot-vscode` | `postToolUse` in a `*.json` file under `~/.copilot/hooks/` | As in tool names, `SERVER-TOOL` |
-| `cursor` | `afterMCPExecution` in `~/.cursor/hooks.json` | The server's key in `mcp.json` |
-| `gemini-cli` | `AfterTool` in `~/.gemini/settings.json` | The server's configured name |
-| `kiro` | `PostToolUse` in a `*.json` file under `~/.kiro/hooks/` | As in tool IDs, `mcp_SERVER_TOOL` (lowercase), or `@SERVER/TOOL` in Amazon Q Developer CLI |
-| `qwen-code` | `PostToolUse` in `~/.qwen/settings.json` | As in tool names, `mcp__SERVER__TOOL` |
-| `generic` | Any other client, plugin or wrapper script: a JSON object on stdin with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response` | As given in `tool_name` |
+Use `--install` to write the hook for clients marked **Writes** below. The JSON report gives the entry or instructions for the other clients. Use `--dry-run` to preview the edit and `--program TEXT` to supply a launcher prefix in place of the absolute executable path.
+
+```sh
+cqlmatic env capture --client CLIENT --server SERVER --install
+```
+
+`--dry-run` checks the settings and previews the change without creating a file or folder. The installer never edits a settings file in place. It writes the complete new file beside the old one and swaps it in, so an interrupted install leaves the old settings as they were. Existing content and formatting are kept. On macOS and Linux the file's permission bits and group are kept too; when the file belongs to a group you are not in, the new file takes its folder's group, with no more access for that group than everyone already had. One install at a time edits a settings file: a second is refused while the first runs and can be retried. The lock is an empty `.NAME.cqlmatic.lock` file that stays beside the settings.
+
+Where the installer will not edit the settings, the report gives the entry to add by hand and the reason, and nothing is changed. That happens when the settings path is a link; when the file is read-only, starts with a byte order mark (clients do not read such a file; save it as UTF-8 without the mark) or is not strict JSON of the expected shape, for example because it has comments; when the capture command is already registered under a different matcher or, for the Copilot clients, beside a different command for the other shell; and, on macOS and Linux, when the settings file or its folder belongs to another user or is writable by everyone. A symlinked or group-writable settings folder is accepted. On Windows the new file takes the access rules of its folder.
+
+The installer does not coordinate with the client. If the client saves its settings in the instant between the installer's last check and the swap, that save is lost. It recognizes only the entry it writes: remove a capture entry you added by hand with a different launcher before installing, or each search is captured twice.
+
+The registered command names the absolute path of the inventory state, given or default, so the hook records into the same inventory whatever directory and environment the client starts it with. On Windows the `claude-code` entry also sets `"shell": "powershell"`, so the hook runs the same way with or without Git Bash. The three Copilot clients read the same file and share one entry.
+
+| `--client` | Hook event and where it is registered | `SERVER` | `--install` |
+| --- | --- | --- | --- |
+| `claude-code` | `PostToolUse` in `~/.claude/settings.json` | As in tool names, `mcp__SERVER__TOOL` | **Writes**, honors `CLAUDE_CONFIG_DIR` |
+| `cline` | A `PostToolUse` script in `~/.cline/hooks/` or `~/Documents/Cline/Hooks/` | As in tool names, `SERVER__TOOL` | Prints script |
+| `codex` | `PostToolUse` in `~/.codex/hooks.json`; review and trust the new hook with `/hooks` before it runs | As in tool names, `mcp__SERVER__TOOL`, with hyphens written as underscores | **Writes**, honors `CODEX_HOME` |
+| `copilot-cli`, `copilot-app`, `copilot-vscode` | `postToolUse` in a `*.json` file under `~/.copilot/hooks/` | As in tool names, `SERVER-TOOL` | **Writes** `cqlmatic-capture.json`, honors `COPILOT_HOME` |
+| `cursor` | `afterMCPExecution` in `~/.cursor/hooks.json` | The server's key in `mcp.json` | Prints entry |
+| `gemini-cli` | `AfterTool` in `~/.gemini/settings.json` | The server's configured name | Prints entry |
+| `kiro` | `PostToolUse` in a `*.json` file under `~/.kiro/hooks/` | As in tool IDs, `mcp_SERVER_TOOL` (lowercase), or `@SERVER/TOOL` in Amazon Q Developer CLI | Prints entry |
+| `qwen-code` | `PostToolUse` in `~/.qwen/settings.json` | As in tool names, `mcp__SERVER__TOOL` | Prints entry |
+| `generic` | Any other client, plugin or wrapper script: a JSON object on stdin with `tool_name` (`mcp__SERVER__TOOL`), `tool_input` (the tool's arguments) and `tool_response` | As given in `tool_name` | Prints instructions |
 
 For `generic`, `tool_response` may be the result's JSON text or object, a list holding one text block, or the MCP result object with `content`. Where a client moves a large result into a file, the command reads it only from that client's own location: the session's saved tool results for `claude-code`, the temporary directory for the Copilot clients. A client whose hook does not pass the tool's result can use the pass-through below.
 
