@@ -401,16 +401,12 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
 }
 
 #[test]
-fn capture_install_keeps_a_byte_order_mark_and_shares_one_copilot_entry() {
+fn capture_install_shares_one_entry_among_the_copilot_clients() {
     let home = Temp::new();
     let file = home.0.join(".copilot/hooks/cqlmatic-capture.json");
-    fs::create_dir_all(file.parent().unwrap()).unwrap();
-    fs::write(&file, "\u{feff}{\"version\": 1}").unwrap();
     let first = report(&mut install(&home.0, "copilot-cli"));
     assert_eq!(first["changed"], true);
-    let written = fs::read_to_string(&file).unwrap();
-    let settings: Value = serde_json::from_str(written.strip_prefix('\u{feff}').unwrap()).unwrap();
-    assert_eq!(settings, first["entry"]);
+    let written = fs::read(&file).unwrap();
     // Every Copilot client reads this file, so another client adds nothing.
     for client in ["copilot-app", "copilot-vscode"] {
         let repeat = report(&mut install(&home.0, client));
@@ -418,7 +414,20 @@ fn capture_install_keeps_a_byte_order_mark_and_shares_one_copilot_entry() {
         assert_eq!(repeat["changed"], false, "{client}");
         assert_eq!(repeat["entry"], first["entry"], "{client}");
     }
-    assert_eq!(fs::read_to_string(&file).unwrap(), written);
+    assert_eq!(fs::read(&file).unwrap(), written);
+}
+
+#[test]
+fn capture_install_reports_a_byte_order_mark_for_manual_installation() {
+    // Clients do not read a settings file that starts with the mark.
+    let home = Temp::new();
+    let file = home.0.join(".codex/hooks.json");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let original = "\u{feff}{}";
+    fs::write(&file, original).unwrap();
+    let output = report(&mut install(&home.0, "codex"));
+    assert_manual(&output, "byte order mark");
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
 }
 
 #[test]
@@ -711,8 +720,14 @@ fn capture_install_prints_documented_manual_entries() {
         assert_eq!(output["changed"], false);
         assert_eq!(output["path"], json!(path));
         assert_eq!(output["event"], json!(event));
-        let command = format!("launcher env capture --client {client} --server '{SERVER}'");
-        assert_eq!(output["command"], command);
+        // The command names the state this installation resolved.
+        let command = output["command"].as_str().unwrap();
+        let (invocation, state) = command.split_once(" --state ").unwrap();
+        assert_eq!(
+            invocation,
+            format!("launcher env capture --client {client} --server '{SERVER}'")
+        );
+        assert!(state.contains("state.json"), "{command}");
         let expected = match client {
             "cline" => json!(format!("#!/bin/sh\n{command}\necho '{{}}'\n")),
             "cursor" => {
@@ -800,12 +815,13 @@ fn capture_install_preserves_existing_settings_permission_bits() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, "{}").unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o7764)).unwrap();
+    // The system can drop a special bit, for example in a folder of a group the user is not in.
+    let mode = || fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+    let before = mode();
+    assert_eq!(before & 0o777, 0o764);
 
     assert_eq!(report(&mut install(&home.0, "codex"))["changed"], true);
-    assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
-        0o7764
-    );
+    assert_eq!(mode(), before);
 }
 
 #[cfg(windows)]

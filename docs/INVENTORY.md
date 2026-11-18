@@ -374,13 +374,13 @@ Use `--install` to write the hook for clients marked **Writes** below. The JSON 
 cqlmatic env capture --client CLIENT --server SERVER --install
 ```
 
-`--dry-run` checks the settings and previews the change without creating a file or folder. The installer never edits a settings file in place. It writes the complete new file beside the old one and swaps it in, so an interrupted install leaves the old settings as they were. Existing content and formatting are kept, and on macOS and Linux so are the file's permission bits and group. One install runs at a time for a user; a second is refused while the first runs and can be retried.
+`--dry-run` checks the settings and previews the change without creating a file or folder. The installer never edits a settings file in place. It writes the complete new file beside the old one and swaps it in, so an interrupted install leaves the old settings as they were. Existing content and formatting are kept, and on macOS and Linux so are the file's permission bits and group. Installs that use the same CQLmatic data folder run one at a time; a second is refused while the first runs and can be retried.
 
-The report gives the entry to add by hand, with the reason, when the settings path is a link or is not a regular file, when the capture command is already registered under a different matcher or beside a different shell command, or, on macOS and Linux, when the settings file or its folder belongs to another user or is writable by everyone. A symlinked or group-writable settings folder is accepted. On Windows the new file takes the access rules of its folder.
+The report gives the entry to add by hand, with the reason, when the settings path is a link or is not a regular file, when the file starts with a byte order mark (clients do not read such a file; save it as UTF-8 without the mark), when the capture command is already registered under a different matcher or beside a different shell command, or, on macOS and Linux, when the settings file or its folder belongs to another user or is writable by everyone. A symlinked or group-writable settings folder is accepted. On Windows the new file takes the access rules of its folder.
 
-The installer does not coordinate with the client. If the client saves its settings in the instant between the installer's last check and the swap, that save is lost.
+The installer does not coordinate with the client. If the client saves its settings in the instant between the installer's last check and the swap, that save is lost. It recognizes only the entry it writes: remove a capture entry you added by hand with a different launcher before installing, or each search is captured twice.
 
-On Windows the `claude-code` entry also sets `"shell": "powershell"`, so the hook runs the same way with or without Git Bash. The three Copilot clients read the same file and share one entry.
+The registered command names the absolute path of the inventory state, given or default, so the hook records into the same inventory whatever directory and environment the client starts it with. On Windows the `claude-code` entry also sets `"shell": "powershell"`, so the hook runs the same way with or without Git Bash. The three Copilot clients read the same file and share one entry.
 
 | `--client` | Hook event and where it is registered | `SERVER` | `--install` |
 | --- | --- | --- | --- |

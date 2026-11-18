@@ -19,7 +19,6 @@ use std::{
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
 const POST_TOOL_USE: &str = "PostToolUse";
 const COPILOT_EVENT: &str = "postToolUse";
-const BYTE_ORDER_MARK: &[u8] = b"\xEF\xBB\xBF";
 
 pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
     if args.server.is_empty() {
@@ -80,15 +79,13 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 bytes.push(b'\n');
                 Edit::Write(bytes)
             }
-            Settings::File(snapshot) => {
-                // Some Windows editors start the file with a byte order mark. Keep it.
-                let marked = snapshot.bytes.starts_with(BYTE_ORDER_MARK);
-                let (mark, text) = snapshot.bytes.split_at(if marked { 3 } else { 0 });
-                match merge(&path, text, event, &hook)? {
-                    Edit::Write(bytes) => Edit::Write([mark, &bytes].concat()),
-                    edit => edit,
-                }
+            // Clients fail to read a settings file that starts with a byte order mark.
+            Settings::File(snapshot) if snapshot.bytes.starts_with(b"\xEF\xBB\xBF") => {
+                Edit::Manual(
+                    "Settings start with a byte order mark. Save the file as UTF-8 without it, then retry",
+                )
             }
+            Settings::File(snapshot) => merge(&path, &snapshot.bytes, event, &hook)?,
             Settings::Manual(reason) => Edit::Manual(reason),
             Settings::NonRegular => {
                 let reason = "Settings must be a regular file";
@@ -346,24 +343,17 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
     };
     let server = shell.argument("--server", &args.server);
     let mut command = format!("{program} env capture --client {client} {server}");
-    if let Some(state) = &args.state {
-        // The hook runs from whatever directory the client was started in.
-        let state = std::path::absolute(state)
-            .map_err(|_| Diagnostic::error("LOCAL_PATH", "Cannot resolve the --state path."))?;
-        if state.is_dir() {
-            return Err(crate::input_error(
-                "--state must name the inventory state file, not a directory.",
-            ));
-        }
-        let state = state.to_str().ok_or_else(|| {
-            Diagnostic::error(
-                "LOCAL_PATH",
-                "The --state path is not Unicode and cannot be registered.",
-            )
-        })?;
-        command.push(' ');
-        command.push_str(&shell.argument("--state", state));
+    // The client may start the hook in another directory and with another environment, so
+    // register the state this installation resolves, default or not.
+    let state = inventory_cli::state_path(args.state.clone())?;
+    if state.is_dir() {
+        return Err(crate::input_error(
+            "--state must name the inventory state file, not a directory.",
+        ));
     }
+    let state = state.to_str().expect("A resolved state path is Unicode");
+    command.push(' ');
+    command.push_str(&shell.argument("--state", state));
     Ok(command)
 }
 
@@ -867,7 +857,6 @@ fn replace(
         }
     })();
     let warning = commit.map_err(|error| cleanup_failed_install(&temporary, error))?;
-    cleanup_leftovers(parent, &prefix, &temporary);
     Ok(Replacement::Installed(warning))
 }
 
@@ -956,26 +945,6 @@ fn cleanup_failed_install(temporary: &Path, mut error: Diagnostic) -> Diagnostic
     error
 }
 
-fn cleanup_leftovers(parent: &Path, prefix: &str, temporary: &Path) {
-    if let Ok(entries) = fs::read_dir(parent) {
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.strip_prefix(prefix))
-                .is_some_and(|rest| rest.ends_with(".tmp"))
-            {
-                let path = entry.path();
-                if path != temporary
-                    && fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && !is_link(&m))
-                {
-                    let _ = fs::remove_file(path);
-                }
-            }
-        }
-    }
-}
-
 fn settings_changed() -> Diagnostic {
     Diagnostic::error("LOCAL_IO", "Settings changed during installation. Retry.")
 }
@@ -1009,7 +978,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn skips_occupied_candidates_and_cleans_regular_leftovers() {
+    fn skips_occupied_candidate_names_and_removes_only_its_own_file() {
         let temp = Temp::new("candidates");
         let path = temp.0.join("hooks.json");
         let prefix = format!(".hooks.json.cqlmatic.{}", std::process::id());
@@ -1030,8 +999,8 @@ mod tests {
         assert_eq!(fs::read_link(&symlink).unwrap(), sentinel);
         assert_eq!(fs::read(sentinel).unwrap(), b"sentinel");
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
-        assert!(!regular.exists());
-        assert!(!leftover.exists());
+        assert_eq!(fs::read(regular).unwrap(), b"sentinel");
+        assert_eq!(fs::read(leftover).unwrap(), b"leftover");
         assert!(!temp.0.join(format!("{prefix}.2.tmp")).exists());
     }
 
