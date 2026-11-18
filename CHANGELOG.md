@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `check` rejects `correlate` combined with `selfJoin` or `selfJoinFilter`, anywhere in the query, as `CQL_CORRELATION_JOIN_CONFLICT`. 0.1.9 applied the rule to `join` only and reported such queries as ready.
+
 ## 0.1.9
 
 - Later releases can inspect checkpoints written by 0.1.8. For example, a paused run with a retained `completed-unusable` answer keeps that history if measurement rules change, provided the retained bytes still decode as a complete list. The 0.1.8 reader omitted its own version from the lists of producers admitted after a version bump.
