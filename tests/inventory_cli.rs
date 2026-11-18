@@ -1357,6 +1357,56 @@ fn next_probe_explains_a_run_that_ran_out_of_searches() {
 }
 
 #[test]
+fn next_probe_carries_on_when_the_answer_was_already_delivered() {
+    let dir = Temp::new();
+    prepare_two_source_run(&dir.0);
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let answer = json!({"probe_id":first["action"]["probe"]["probe_id"],"result_file":result});
+    // Something else settles the probe first, as a capture hook does.
+    call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,"answers":[answer.clone()]}),
+    );
+    let late = call(
+        &dir.0,
+        json!({"kind":"next-probe","run_index":0,"answer":answer.clone()}),
+    );
+    let action = &late["action"];
+    assert_eq!(action["state"], "probe", "{late}");
+    assert_eq!(action["dispatched"], true);
+    assert_eq!(action["settled"], false);
+    assert!(action.get("diagnostics").is_none());
+    assert_ne!(
+        action["probe"]["probe_id"],
+        first["action"]["probe"]["probe_id"]
+    );
+    assert_eq!(action["cost"]["searches"]["used"], 2);
+
+    // With a newer probe outstanding, the late answer still changes nothing.
+    let again = call(
+        &dir.0,
+        json!({"kind":"next-probe","run_index":0,"answer":answer}),
+    );
+    assert_eq!(again["action"]["state"], "needs-probes", "{again}");
+    assert_eq!(again["action"]["settled"], false);
+    assert_eq!(
+        again["action"]["outstanding_probe_id"],
+        action["probe"]["probe_id"]
+    );
+    assert_eq!(again["action"]["cost"]["searches"]["used"], 2);
+    assert_eq!(
+        again["action"]["cost"]["answer_bytes"],
+        action["cost"]["answer_bytes"]
+    );
+    let status = call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+    );
+    assert_eq!(status["action"]["relay"]["diagnostics"], json!([]));
+}
+
+#[test]
 fn next_probe_guides_paused_and_cancel_requested_runs() {
     let dir = Temp::new();
     confirm_quick_source(&dir.0, "synthetic");

@@ -94,8 +94,8 @@ struct Search {
     start: String,
     end: Option<String>,
     body: Option<Vec<u8>>,
-    /// The search tool's whole arguments, as the call gave them.
-    arguments: Value,
+    /// The search tool's whole arguments, when the call passed nothing besides them.
+    arguments: Option<Value>,
 }
 
 pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
@@ -146,7 +146,10 @@ pub(crate) fn record(state: Option<PathBuf>, call: Call) -> Result<(), Diagnosti
         None => observe(&path, &directory, &state, environment, search),
     };
     let counted = tally(&directory, outcome);
-    if matches!(outcome, "recorded" | "not-recorded") {
+    if matches!(
+        outcome,
+        "recorded" | "not-recorded" | "probe-answered" | "probe-not-answered"
+    ) {
         tidy(&path, &directory);
     }
     counted
@@ -161,16 +164,20 @@ fn answer_probe(
     state: &InventoryState,
     search: &Search,
 ) -> Option<&'static str> {
-    let unfinished = state
-        .discovery_runs
-        .last()
-        .is_some_and(|run| !matches!(run.status.as_str(), "complete" | "superseded"));
-    let body = search.body.as_ref().filter(|_| unfinished)?;
+    let (body, arguments) = (search.body.as_ref()?, search.arguments.as_ref()?);
+    // Most searches answer no probe: find that out before waiting for any lock.
+    let index = inventory_cli::run_awaiting(state, arguments)?;
     // A failed search stays with the agent, which can run it again on the same reservation.
     mcp::normalize(body).ok()?;
-    let file = directory.join(format!("probe-{}.json", &cqlmatic::sha256_hex(body)[..12]));
-    let mut saved = false;
+    // Named like a capture's copy, so one left by a stopped hook is tidied with them.
+    let file = directory.join(format!(
+        "probe-{}-{}.json",
+        std::process::id(),
+        copy_name(&discovery::timestamp(), &cqlmatic::sha256_hex(body))
+    ));
+    let (mut matched, mut saved) = (false, false);
     let mut save = || {
+        matched = true;
         if !saved {
             private_file(&file, body)?;
             saved = true;
@@ -178,7 +185,7 @@ fn answer_probe(
         Ok(file.to_string_lossy().into_owned())
     };
     let settled =
-        patiently(|| inventory_cli::answer_outstanding_probe(path, &search.arguments, &mut save));
+        patiently(|| inventory_cli::answer_outstanding_probe(path, index, arguments, &mut save));
     if saved {
         // The checkpoint keeps its own copy of an answer it was given.
         let _ = fs::remove_file(&file);
@@ -187,7 +194,7 @@ fn answer_probe(
         Ok(Some(true)) => Some("probe-answered"),
         // The search matched a probe, and its result was refused or could not be handed over.
         Ok(Some(false)) => Some("probe-not-answered"),
-        Err(_) if saved => Some("probe-not-answered"),
+        Err(_) if matched => Some("probe-not-answered"),
         Ok(None) | Err(_) => None,
     }
 }
@@ -639,7 +646,13 @@ fn search(call: Call) -> Option<Search> {
         start: text("start")?,
         end: text("end"),
         body: body(&call),
-        arguments: arguments.clone(),
+        // A gateway call that passes anything else is not the search a probe asked for.
+        arguments: (call.tool == SEARCH_TOOL
+            || call
+                .arguments
+                .as_object()
+                .is_some_and(|outer| outer.len() == 2))
+        .then(|| arguments.clone()),
     })
 }
 
@@ -717,7 +730,7 @@ mod tests {
             start: "2026-01-01T00:00:00Z".into(),
             end: Some("2026-01-01T01:00:00Z".into()),
             body: Some(br#"{"result":[{"user":"ann"}]}"#.to_vec()),
-            arguments: Value::Null,
+            arguments: None,
         };
         assert_eq!(
             observe(&path, &directory, &state, &environment, search),
