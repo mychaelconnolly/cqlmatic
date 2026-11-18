@@ -30,7 +30,7 @@ Keep query writing available from validated committed evidence while a user-requ
    - `prepare-discovery` (`start`, `end`, `max_queries`, `max_seconds`). Omit `source_ids` to use every expected source; they are the `source_id` values in `status --json --summary`, not repository names.
    - Call `next-probe` without an answer. While `action.state` is `probe`, call `action.probe.tool` once with its exact `arguments`, save the whole result unedited, and call `next-probe` with `run_index` and `answer` containing `probe_id` and `result_file`. A call without `answer` recovers a lost probe descriptor. If the search already ran, recover its result before continuing.
    - When the run reports `complete`, `reconcile` (`reviewed_at`). That finishes a Quick scope, which needs no parser review or binding. In Full, follow `next_actions` in status for anything still pending. Read `quick_scope_complete`, `selected_scope_complete` or `full_map_complete` in status before reporting the map complete.
-   - If a command exits 2, inspect the protected state before retrying with `--json` alone. For a refused answer, inspect the protected checkpoint or inventory failures.
+   - A `--brief` call that exits 2 hides its reason: repeat that request with `--json` alone to read it. If `next-probe` exits 2, call it again without `answer`; that never charges a second search for the same probe. A refused answer is reported with codes only; `next-probe` without `answer` then shows the run's state and what to do next.
 
    Without an inventory, when observed pack evidence is needed, initialize MCP discovery with an authorized versioned request:
 

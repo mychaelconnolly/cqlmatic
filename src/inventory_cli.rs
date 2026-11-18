@@ -964,10 +964,10 @@ fn action_summary(action: &Value) -> Value {
         if relay.get("status").and_then(Value::as_str) == Some("needs-probes") {
             let selection = action["run_index"]
                 .as_u64()
-                .map(|index| format!("run_index={index}, "))
+                .map(|index| format!(" with run_index={index}"))
                 .unwrap_or_default();
             compact["next_action"] = json!(format!(
-                "Submit discovery-step with {selection}answers=[] and --json without --summary to obtain exact pending probe arguments."
+                "Submit next-probe{selection} to receive the next probe with its exact arguments."
             ));
         } else if let Some(compact) = compact.as_object_mut() {
             compact.remove("next_action");
@@ -1057,10 +1057,10 @@ fn action_brief(action: &Value) -> Value {
         if !probes.is_empty() && action["relay"]["status"] == "needs-probes" {
             let selection = action["run_index"]
                 .as_u64()
-                .map(|index| format!("run_index={index}, "))
+                .map(|index| format!(" with run_index={index}"))
                 .unwrap_or_default();
             compact["next_action"] = json!(format!(
-                "Submit discovery-step with {selection}answers=[] and --json without --brief to obtain exact pending probe arguments."
+                "Submit next-probe{selection} to receive the next probe with its exact arguments."
             ));
         }
     }
@@ -3763,7 +3763,7 @@ mod tests {
         assert_eq!(value["action"]["pending_probe_count"], 1);
         assert_eq!(
             value["action"]["next_action"],
-            "Submit discovery-step with run_index=3, answers=[] and --json without --brief to obtain exact pending probe arguments."
+            "Submit next-probe with run_index=3 to receive the next probe with its exact arguments."
         );
         assert!(
             action_brief(&json!({"relay":{"status":"complete","probes":[]}}))
