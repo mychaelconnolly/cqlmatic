@@ -720,10 +720,12 @@ fn capture_bytes(raw_hex: &str, raw_sha256: &str) -> Result<Vec<u8>, Diagnostic>
     }
     Ok(raw)
 }
-// A checkpoint from an earlier release keeps the diagnostic that release recorded for an answer
-// whose `result` is an error object.
+// Releases before 0.1.8 recorded a shape error when the hosted `result` was an error object.
 fn earlier_hosted_diagnostic(producer: &str, raw: &[u8], saved: &Diagnostic) -> bool {
-    producer != env!("CARGO_PKG_VERSION")
+    matches!(
+        producer,
+        "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
+    ) && producer != env!("CARGO_PKG_VERSION")
         && normalize_classified(raw, false).is_err_and(|earlier| same_diagnostic(saved, &earlier))
 }
 fn same_diagnostic(a: &Diagnostic, b: &Diagnostic) -> bool {
@@ -1982,7 +1984,7 @@ mod recovery_tests {
         assert_eq!(fs::read(&run.state).unwrap(), before);
     }
 
-    const V018_HOSTED_ENDINGS: [(&str, &[u8]); 3] = [
+    const HOSTED_ENDINGS: [(&str, &[u8]); 3] = [
         (
             "timed-out",
             include_bytes!("../tests/fixtures/mcp/hosted-timeout.json"),
@@ -2015,7 +2017,70 @@ mod recovery_tests {
     }
 
     #[test]
-    fn version_018_ended_attempts_revalidate_retained_bytes_without_remeasuring_lists() {
+    fn legacy_hosted_diagnostic_is_limited_to_legacy_producers() {
+        let run = empty_run();
+        let request =
+            serde_json::from_str(include_str!("../examples/mcp/discover.request.json")).unwrap();
+        let output = init(request, &run.state, &run.pack, &run.receipt).unwrap();
+        let probe_id = output.probes[0]["probe_id"].as_str().unwrap().to_owned();
+        let reply = run.directory.join("answer.json");
+        fs::write(&reply, HOSTED_ENDINGS[0].1).unwrap();
+        let output = step(&run.state, &[(probe_id.clone(), reply)]).unwrap();
+        assert_eq!(output.status, "failed");
+
+        let mut state = read_state(&run.state).unwrap();
+        assert_eq!(state.schema_version, 2);
+        let answer = state.answers.get_mut(&probe_id).unwrap();
+        assert_eq!(answer.diagnostic.as_ref().unwrap().code, "MCP_DEADLINE");
+        answer.diagnostic = Some(Diagnostic::error(
+            "MCP_SHAPE",
+            "MCP search result must have a result array",
+        ));
+
+        let outcomes = ["0.1.7", "0.1.8", "0.1.9"].map(|producer| {
+            state.producer_version = producer.into();
+            let writer = storage::Writer::acquire(&run.state).unwrap();
+            store(&writer, &state).unwrap();
+            (
+                producer,
+                inspect_state(&run.state)
+                    .map(|history| history.producer_version)
+                    .map_err(|diagnostic| diagnostic.code),
+            )
+        });
+        assert_eq!(
+            outcomes,
+            [
+                ("0.1.7", Ok("0.1.7".into())),
+                ("0.1.8", Err("MCP_STATE_TAMPERED".into())),
+                ("0.1.9", Err("MCP_STATE_TAMPERED".into())),
+            ]
+        );
+    }
+
+    fn inspect_ended_history(
+        path: &Path,
+        writer_version: &str,
+        reader_version: &str,
+    ) -> Result<State, Diagnostic> {
+        if writer_version == env!("CARGO_PKG_VERSION") && writer_version != reader_version {
+            // Before the version bump, exercise the later reader's session validation directly.
+            let state = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            session::validate(&state, reader_version)?;
+            Ok(state)
+        } else {
+            inspect_state_for_producer(path, reader_version)
+        }
+    }
+
+    #[test]
+    fn released_ended_attempts_revalidate_retained_bytes_without_remeasuring_lists() {
+        for writer_version in ["0.1.8", "0.1.9"] {
+            assert_ended_attempt_history(writer_version, "0.1.10");
+        }
+    }
+
+    fn assert_ended_attempt_history(writer_version: &str, reader_version: &str) {
         let run = ready_kind(false, true);
         let mut saved = serde_json::to_value(read_state(&run.state).unwrap()).unwrap();
         let mut attempt = saved["session"]["attempts"][0].clone();
@@ -2031,7 +2096,7 @@ mod recovery_tests {
         )
         .unwrap();
 
-        saved["producer_version"] = json!("0.1.8");
+        saved["producer_version"] = json!(writer_version);
         saved["status"] = json!("paused");
         saved["answers"] = json!({});
         let store_attempt = |saved: &mut Value, attempt: &mut Value, label: &str, raw: &[u8]| {
@@ -2041,20 +2106,21 @@ mod recovery_tests {
             saved["session"]["attempts"] = json!([attempt]);
             fs::write(&run.state, serde_json::to_vec(saved).unwrap()).unwrap();
         };
-        for (label, raw) in V018_HOSTED_ENDINGS
+        for (label, raw) in HOSTED_ENDINGS
             .into_iter()
             .chain([("completed-unusable", accepted_raw.as_slice())])
         {
             store_attempt(&mut saved, &mut attempt, label, raw);
             let before = fs::read(&run.state).unwrap();
-            let history = inspect_state_for_producer(&run.state, "0.1.9").unwrap();
+            let history = inspect_ended_history(&run.state, writer_version, reader_version)
+                .unwrap_or_else(|diagnostic| panic!("{writer_version} {label}: {diagnostic:?}"));
             assert_eq!(history.status, "paused");
             assert!(!has_in_flight(&history));
             assert_eq!(fs::read(&run.state).unwrap(), before);
             if label == "completed-unusable" {
                 // These rows satisfy today's measurement, as shown by their accepted record.
                 assert_eq!(
-                    inspect_state_for_producer(&run.state, "0.1.8")
+                    inspect_state_for_producer(&run.state, writer_version)
                         .unwrap_err()
                         .code,
                     "MCP_STATE_TAMPERED"
@@ -2067,7 +2133,7 @@ mod recovery_tests {
                 br#"{"result":[],"partial":true}"#,
             );
             assert_eq!(
-                inspect_state_for_producer(&run.state, "0.1.9")
+                inspect_ended_history(&run.state, writer_version, reader_version)
                     .unwrap_err()
                     .code,
                 "MCP_STATE_TAMPERED"
@@ -2077,10 +2143,10 @@ mod recovery_tests {
             &mut saved,
             &mut attempt,
             "failed-after-start",
-            V018_HOSTED_ENDINGS[0].1,
+            HOSTED_ENDINGS[0].1,
         );
         assert_eq!(
-            inspect_state_for_producer(&run.state, "0.1.9")
+            inspect_ended_history(&run.state, writer_version, reader_version)
                 .unwrap_err()
                 .code,
             "MCP_STATE_TAMPERED"
@@ -2090,13 +2156,31 @@ mod recovery_tests {
     #[test]
     #[ignore = "Set CQLMATIC_V018_BINARY to the unmodified release executable"]
     fn genuine_version_018_ended_attempts_are_readable_by_a_later_producer() {
+        assert_genuine_ended_attempt_history("CQLMATIC_V018_BINARY", "0.1.8", "0.1.10");
+    }
+
+    #[test]
+    #[ignore = "Set CQLMATIC_V019_BINARY to the unmodified release executable"]
+    fn genuine_version_019_ended_attempts_are_readable_by_a_later_producer() {
+        assert_genuine_ended_attempt_history("CQLMATIC_V019_BINARY", "0.1.9", "0.1.10");
+    }
+
+    fn assert_genuine_ended_attempt_history(
+        variable: &str,
+        writer_version: &str,
+        reader_version: &str,
+    ) {
         use std::process::Command;
-        let binary = std::env::var_os("CQLMATIC_V018_BINARY")
-            .expect("Set CQLMATIC_V018_BINARY to the unmodified CQLmatic 0.1.8 executable");
+        let binary = std::env::var_os(variable).unwrap_or_else(|| {
+            panic!("Set {variable} to the unmodified CQLmatic {writer_version} executable")
+        });
         let version = Command::new(&binary).arg("--version").output().unwrap();
         assert!(version.status.success());
-        assert_eq!(version.stdout, b"cqlmatic 0.1.8\n");
-        for (label, raw) in V018_HOSTED_ENDINGS
+        assert_eq!(
+            version.stdout,
+            format!("cqlmatic {writer_version}\n").as_bytes()
+        );
+        for (label, raw) in HOSTED_ENDINGS
             .into_iter()
             .chain([("completed-unusable", b"{\"result\":[]}".as_slice())])
         {
@@ -2137,9 +2221,10 @@ mod recovery_tests {
             assert_eq!(output.status.code(), Some(3), "{output:?}");
             let before = fs::read(&run.state).unwrap();
             let saved: Value = serde_json::from_slice(&before).unwrap();
-            assert_eq!(saved["producer_version"], "0.1.8");
+            assert_eq!(saved["producer_version"], writer_version);
             assert_eq!(saved["session"]["attempts"][0]["outcome"], label);
-            let history = inspect_state_for_producer(&run.state, "0.1.9").unwrap();
+            let history = inspect_ended_history(&run.state, writer_version, reader_version)
+                .unwrap_or_else(|diagnostic| panic!("{writer_version} {label}: {diagnostic:?}"));
             assert_eq!(history.status, "paused");
             assert!(!has_in_flight(&history));
             assert_eq!(fs::read(&run.state).unwrap(), before);

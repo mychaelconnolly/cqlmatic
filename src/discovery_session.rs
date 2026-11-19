@@ -434,7 +434,8 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
     let mut pending = 0;
     let mut completed_probes = BTreeSet::new();
     let mut last_dispatch = environment::parse_time(&state.created_at)?;
-    let historical_018 = state.producer_version == "0.1.8" && state.producer_version != producer;
+    let historical_ended_attempts = matches!(state.producer_version.as_str(), "0.1.8" | "0.1.9")
+        && state.producer_version != producer;
     for (index, attempt) in session.attempts.iter().enumerate() {
         let id = discovery::probe_id(&state.request.environment.view, &attempt.probe);
         if !matches!(
@@ -465,7 +466,7 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
         if ended(&attempt.outcome)
             && (session.transport != Transport::Mcp
                 || attempt.terminal.is_none()
-                || (state.producer_version != producer && !historical_018))
+                || (state.producer_version != producer && !historical_ended_attempts))
         {
             return Err(tampered());
         }
@@ -534,12 +535,13 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
         {
             let raw = capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)?;
             if terminal && ended(&attempt.outcome) {
-                let valid_ending = if historical_018 && attempt.outcome == "completed-unusable" {
-                    // Historical list completion is independent of current measurement rules.
-                    normalize(&raw).is_ok()
-                } else {
-                    attempt_ending(&raw, &attempt.probe) == Some(attempt.outcome.as_str())
-                };
+                let valid_ending =
+                    if historical_ended_attempts && attempt.outcome == "completed-unusable" {
+                        // Historical list completion is independent of current measurement rules.
+                        normalize(&raw).is_ok()
+                    } else {
+                        attempt_ending(&raw, &attempt.probe) == Some(attempt.outcome.as_str())
+                    };
                 if !valid_ending
                     || (crate::mcp::hosted_answer_identifies_call(&raw)
                         && reused_evidence(state, index, &evidence.raw_sha256))
