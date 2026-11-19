@@ -516,7 +516,19 @@ struct Saved {
     name: &'static str,
 }
 
+/// The server's name as the client spells it in tool names. Codex writes a configured
+/// name's hyphens as underscores, so `cs-mcp` and `cs_mcp` name the same server there.
+fn codex_server(client: Client, server: &str) -> String {
+    if client == Client::Codex {
+        server.replace('-', "_")
+    } else {
+        server.into()
+    }
+}
+
 fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
+    let server = codex_server(client, server);
+    let server = server.as_str();
     let hook: Value = serde_json::from_slice(payload).ok()?;
     let text = |name: &str| hook[name].as_str();
     // Some clients hand over arguments or results as JSON text.
