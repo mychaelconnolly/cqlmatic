@@ -300,9 +300,21 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         } else {
             client
         };
+        // Codex starts hooks with cmd.exe on Windows, which quotes with double quotes.
+        let quote = if cfg!(windows) && client == "codex" {
+            '"'
+        } else {
+            '\''
+        };
+        // Codex writes a server's hyphens as underscores, and the entry uses that spelling.
+        let server = if client == "codex" {
+            SERVER.replace('-', "_")
+        } else {
+            SERVER.into()
+        };
         let check_command = |value: &Value| {
             let value = value.as_str().unwrap();
-            assert!(value.starts_with(&format!("launcher --label capture env capture --client {registered} --server '{SERVER}' --state ")));
+            assert!(value.starts_with(&format!("launcher --label capture env capture --client {registered} --server {quote}{server}{quote} --state ")));
             assert!(value.contains("inventory"), "{value}");
             assert!(value.contains("state.json"), "{value}");
         };
@@ -323,7 +335,7 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
                 handler["shell"] = json!("powershell");
             }
             json!({"hooks": {"PostToolUse": [{
-                "matcher": "mcp__synthetic-server__.*",
+                "matcher": format!("mcp__{server}__.*"),
                 "hooks": [handler],
             }]}})
         };
@@ -1087,16 +1099,28 @@ fn powershell() -> Command {
     shell
 }
 
+/// The built executable under a name and folder that need quoting.
+fn runner_in(directory: &Path) -> PathBuf {
+    let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
+    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
+        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
+        // Another test's child process, started during the copy, can hold the new file open
+        // for writing for a moment, and Linux will not run a file in that state.
+        while let Err(error) = Command::new(&executable).arg("--version").output() {
+            assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    executable
+}
+
 #[test]
 fn installed_hook_runs_the_native_command_and_captures_evidence() {
     let dir = Temp::new();
     let directory = dir.0.join("work folder's $data; settings");
     let state = directory.join("state.json");
     dir.confirm_at(&state);
-    let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
-    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
-        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
-    }
+    let executable = runner_in(&directory);
     let server = "synthetic $server's (name)";
     let mut installer = Command::new(&executable);
     isolated(&mut installer, &dir.0)
@@ -1166,15 +1190,12 @@ fn installed_hook_runs_the_native_command_and_captures_evidence() {
 #[test]
 fn installed_codex_hook_runs_the_way_codex_starts_it() {
     let dir = Temp::new();
-    let directory = dir.0.join("work & folder's $data; (settings)");
+    let directory = dir.0.join("work & folder's $data; ^(settings)!");
     let state = directory.join("state.json");
     dir.confirm_at(&state);
-    let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
-    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
-        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
-    }
-    // Codex spells a server's name with underscores in tool names.
-    let server = "synthetic_server";
+    let executable = runner_in(&directory);
+    // The name as configured; Codex spells it with underscores in tool names.
+    let server = "synthetic-server";
     let mut installer = Command::new(&executable);
     isolated(&mut installer, &dir.0)
         .args([
@@ -1202,7 +1223,20 @@ fn installed_codex_hook_runs_the_way_codex_starts_it() {
             "content": [{"type": "text", "text": response}], "isError": false,
         }),
     );
-    payload["tool_name"] = json!(format!("mcp__{server}__execute_tool"));
+    payload["tool_name"] = json!("mcp__synthetic_server__execute_tool");
+    assert_eq!(
+        settings["hooks"]["PostToolUse"][0]["matcher"],
+        "mcp__synthetic_server__.*"
+    );
+    // Installing under Codex's own spelling finds the same entry.
+    let mut again = Command::new(&executable);
+    isolated(&mut again, &dir.0)
+        .args(["env", "capture", "--client", "codex", "--server"])
+        .args(["synthetic_server", "--install", "--state"])
+        .arg(&state);
+    let again = report(&mut again);
+    assert_eq!(again["installed"], true);
+    assert_eq!(again["changed"], false);
     // Codex passes the command to the login shell, or to `cmd.exe /C` inside one pair of quotes.
     #[cfg(unix)]
     let mut shell = {
@@ -1405,9 +1439,10 @@ fn capture_reads_codex_and_generic_payloads() {
         payload
     };
     let text = body(json!([{"user": "ann"}]));
+    // The configured spelling, hyphens and all, names the same server.
     dir.capture_as(
         "codex",
-        "synthetic_server",
+        SERVER,
         codex(json!({
             "content": [{"type": "text", "text": text}],
             "structuredContent": serde_json::from_str::<Value>(&text).unwrap()

@@ -49,7 +49,8 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             )
         } else {
             let command = command(args, name.get_name(), Shell::for_client(client))?;
-            let mut hook = matcher_hook(&matcher("mcp__", &args.server, "__.*"), &command, true);
+            let server = super::codex_server(client, &args.server);
+            let mut hook = matcher_hook(&matcher("mcp__", &server, "__.*"), &command, true);
             // Claude Code on Windows would otherwise pick Git Bash whenever it is installed.
             if cfg!(windows) && client == Client::ClaudeCode {
                 hook["hooks"][0]["shell"] = json!("powershell");
@@ -409,8 +410,10 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
             Shell::PowerShell => format!("& {}", shell.quote(text)),
         }
     };
-    cmd_text(shell, "server name", &args.server)?;
-    let server = shell.argument("--server", &args.server);
+    // One spelling per server, so installing under either leaves one entry.
+    let server = super::codex_server(args.client, &args.server);
+    cmd_text(shell, "server name", &server)?;
+    let server = shell.argument("--server", &server);
     let mut command = format!("{program} env capture --client {client} {server}");
     // The client may start the hook in another directory and with another environment, so
     // register the state this installation resolves, default or not.
@@ -431,7 +434,7 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
 fn cmd_text(shell: Shell, what: &str, text: &str) -> Result<(), Diagnostic> {
     if matches!(shell, Shell::Cmd) && text.contains(['"', '%']) {
         return Err(crate::input_error(&format!(
-            "This client starts hooks with cmd.exe, which cannot pass a double quote and may expand a percent sign. Use a {what} without either."
+            "This client starts hooks with cmd.exe, which cannot pass a double quote and may expand a percent sign. The {what} cannot contain either."
         )));
     }
     Ok(())
@@ -1102,6 +1105,31 @@ mod tests {
             assert!(cmd_text(Shell::Bash, "server name", text).is_ok());
         }
         assert!(cmd_text(shell, "server name", "it's $x & (1)").is_ok());
+
+        // The whole command is refused for each part cmd.exe cannot carry.
+        let build = |server: &str, state: &str| {
+            let args = CaptureArgs {
+                client: Client::Codex,
+                server: server.into(),
+                state: Some(env::temp_dir().join(state).join("state.json")),
+                install: true,
+                dry_run: true,
+                program: Some("launcher".into()),
+            };
+            command(&args, "codex", shell)
+        };
+        assert!(
+            build("a-b", "plain")
+                .unwrap()
+                .starts_with(r#"launcher env capture --client codex --server "a_b" --state ""#)
+        );
+        for (server, state, what) in [
+            ("100%", "plain", "server name"),
+            ("a", "100%", "state path"),
+        ] {
+            let error = build(server, state).unwrap_err();
+            assert!(error.message.contains(what), "{error:?}");
+        }
     }
 
     #[cfg(unix)]

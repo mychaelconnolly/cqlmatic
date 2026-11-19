@@ -397,7 +397,7 @@ The registered command names the absolute path of the inventory state, given or 
 | --- | --- | --- | --- |
 | `claude-code` | `PostToolUse` in `~/.claude/settings.json` | As in tool names, `mcp__SERVER__TOOL` | **Writes**, honors `CLAUDE_CONFIG_DIR` |
 | `cline` | A `PostToolUse` script in `~/.cline/hooks/` or `~/Documents/Cline/Hooks/` | As in tool names, `SERVER__TOOL` | Prints script |
-| `codex` | `PostToolUse` in `~/.codex/hooks.json`; review and trust the new hook with `/hooks` before it runs | As in tool names, `mcp__SERVER__TOOL`, with hyphens written as underscores | **Writes**, honors `CODEX_HOME` |
+| `codex` | `PostToolUse` in `~/.codex/hooks.json`; review and trust the new hook with `/hooks` before it runs | The configured name, or as in tool names, `mcp__SERVER__TOOL`, where Codex writes hyphens as underscores: `cs-mcp` and `cs_mcp` are the same server | **Writes**, honors `CODEX_HOME` |
 | `copilot-cli`, `copilot-app`, `copilot-vscode` | `postToolUse` in a `*.json` file under `~/.copilot/hooks/` | As in tool names, `SERVER-TOOL` | **Writes** `cqlmatic-capture.json`, honors `COPILOT_HOME` |
 | `cursor` | `afterMCPExecution` in `~/.cursor/hooks.json` | The server's key in `mcp.json` | Prints entry |
 | `gemini-cli` | `AfterTool` in `~/.gemini/settings.json` | The server's configured name | Prints entry |
