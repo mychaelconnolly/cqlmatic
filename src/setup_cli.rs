@@ -963,22 +963,24 @@ fn executable_error() -> Diagnostic {
     )
 }
 #[cfg(windows)]
+#[repr(C)]
+struct WindowsFileInformation {
+    attributes: u32,
+    creation_time: [u32; 2],
+    access_time: [u32; 2],
+    write_time: [u32; 2],
+    volume: u32,
+    size_high: u32,
+    size_low: u32,
+    links: u32,
+    index_high: u32,
+    index_low: u32,
+}
+#[cfg(windows)]
 #[allow(unsafe_code)]
-pub(crate) fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagnostic> {
+fn windows_file_information(file: &fs::File) -> Result<WindowsFileInformation, Diagnostic> {
     use std::{ffi::c_void, os::windows::io::AsRawHandle};
-    #[repr(C)]
-    struct FileInformation {
-        attributes: u32,
-        creation_time: [u32; 2],
-        access_time: [u32; 2],
-        write_time: [u32; 2],
-        volume: u32,
-        size_high: u32,
-        size_low: u32,
-        links: u32,
-        index_high: u32,
-        index_low: u32,
-    }
+    type FileInformation = WindowsFileInformation;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetFileInformationByHandle(handle: *mut c_void, info: *mut FileInformation) -> i32;
@@ -988,11 +990,20 @@ pub(crate) fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagn
         return Err(executable_error());
     }
     // The successful Windows call initialized the complete fixed-layout structure.
-    let info = unsafe { info.assume_init() };
+    Ok(unsafe { info.assume_init() })
+}
+#[cfg(windows)]
+pub(crate) fn windows_file_identity(file: &fs::File) -> Result<(u64, u64), Diagnostic> {
+    let info = windows_file_information(file)?;
     Ok((
         u64::from(info.volume),
         (u64::from(info.index_high) << 32) | u64::from(info.index_low),
     ))
+}
+/// How many names the open file has.
+#[cfg(windows)]
+pub(crate) fn windows_link_count(file: &fs::File) -> Result<u32, Diagnostic> {
+    Ok(windows_file_information(file)?.links)
 }
 fn executable_fingerprint(file: &fs::File) -> Result<ExecutableFingerprint, Diagnostic> {
     let meta = file.metadata().map_err(|_| executable_error())?;

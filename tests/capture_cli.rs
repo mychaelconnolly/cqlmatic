@@ -769,7 +769,6 @@ fn capture_installs_through_different_links_to_one_file_take_turns() {
     assert_eq!(output["installed"], true);
 }
 
-#[cfg(unix)]
 #[test]
 fn capture_install_reports_hard_linked_settings_for_manual_installation() {
     // Swapping in a new file would leave the second name pointing at the old one.
@@ -1138,6 +1137,84 @@ fn installed_hook_runs_the_native_command_and_captures_evidence() {
         shell
             .arg("& ([ScriptBlock]::Create($env:CQLMATIC_TEST_HOOK))")
             .env("CQLMATIC_TEST_HOOK", command);
+        shell
+    };
+    let mut child = isolated(&mut shell, &dir.0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+    let state: Value = serde_json::from_slice(&fs::read(state).unwrap()).unwrap();
+    assert_eq!(
+        state["captured_observations"][0]["fields"][0]["field"],
+        "synthetic_field"
+    );
+}
+
+#[test]
+fn installed_codex_hook_runs_the_way_codex_starts_it() {
+    let dir = Temp::new();
+    let directory = dir.0.join("work & folder's $data; (settings)");
+    let state = directory.join("state.json");
+    dir.confirm_at(&state);
+    let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
+    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
+        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
+    }
+    // Codex spells a server's name with underscores in tool names.
+    let server = "synthetic_server";
+    let mut installer = Command::new(&executable);
+    isolated(&mut installer, &dir.0)
+        .args([
+            "env",
+            "capture",
+            "--client",
+            "codex",
+            "--server",
+            server,
+            "--install",
+            "--state",
+        ])
+        .arg(&state);
+    let installed = report(&mut installer);
+    let settings: Value =
+        serde_json::from_slice(&fs::read(dir.0.join(".codex/hooks.json")).unwrap()).unwrap();
+    let command = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert_eq!(installed["command"], command);
+    let response = body(json!([{"synthetic_field": "seen"}]));
+    let mut payload = search(
+        "#type=synthetic | head(5)",
+        json!({
+            "content": [{"type": "text", "text": response}], "isError": false,
+        }),
+    );
+    payload["tool_name"] = json!(format!("mcp__{server}__execute_tool"));
+    // Codex passes the command to the login shell, or to `cmd.exe /C` inside one pair of quotes.
+    #[cfg(unix)]
+    let mut shell = {
+        let mut shell = Command::new("/bin/sh");
+        shell.args(["-c", command]);
+        shell
+    };
+    #[cfg(windows)]
+    let mut shell = {
+        use std::os::windows::process::CommandExt;
+        let mut shell = Command::new(std::env::var_os("COMSPEC").unwrap());
+        shell.arg("/C").raw_arg(format!("\"{command}\""));
         shell
     };
     let mut child = isolated(&mut shell, &dir.0)

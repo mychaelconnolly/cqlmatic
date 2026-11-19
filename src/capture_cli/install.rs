@@ -320,24 +320,36 @@ fn matcher_hook(matcher: &str, command: &str, asynchronous: bool) -> Value {
     json!({"matcher": matcher, "hooks": [hook]})
 }
 
+// PowerShell is that shell's name.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy)]
 enum Shell {
     Bash,
+    Cmd,
     PowerShell,
 }
 
 impl Shell {
     fn for_client(client: Client) -> Self {
-        if cfg!(windows) && client != Client::Cline {
-            Self::PowerShell
-        } else {
+        if !cfg!(windows) || client == Client::Cline {
             Self::Bash
+        } else if client == Client::Codex {
+            // Codex starts a hook command on Windows with `cmd.exe /C`.
+            Self::Cmd
+        } else {
+            Self::PowerShell
         }
     }
 
     fn quote(self, text: &str) -> String {
         match self {
             Self::Bash => format!("'{}'", text.replace('\'', "'\\''")),
+            // The program splits its own command line, where backslashes before a quote
+            // count as escapes, so those before the closing quote are doubled.
+            Self::Cmd => {
+                let slashes = text.len() - text.trim_end_matches('\\').len();
+                format!("\"{text}{}\"", "\\".repeat(slashes))
+            }
             Self::PowerShell => {
                 let mut quoted = String::from("'");
                 for c in text.chars() {
@@ -390,12 +402,14 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
             }
             _ => text.strip_prefix(r"\\?\").unwrap_or(text).to_owned(),
         };
+        cmd_text(shell, "executable path", text)?;
         match shell {
             Shell::Bash if cfg!(windows) => shell.quote(&text.replace('\\', "/")),
-            Shell::Bash => shell.quote(text),
+            Shell::Bash | Shell::Cmd => shell.quote(text),
             Shell::PowerShell => format!("& {}", shell.quote(text)),
         }
     };
+    cmd_text(shell, "server name", &args.server)?;
     let server = shell.argument("--server", &args.server);
     let mut command = format!("{program} env capture --client {client} {server}");
     // The client may start the hook in another directory and with another environment, so
@@ -407,9 +421,20 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
         ));
     }
     let state = state.to_str().expect("A resolved state path is Unicode");
+    cmd_text(shell, "state path", state)?;
     command.push(' ');
     command.push_str(&shell.argument("--state", state));
     Ok(command)
+}
+
+/// `cmd.exe` expands `%NAME%` inside quotes and has no escape for a quote within them.
+fn cmd_text(shell: Shell, what: &str, text: &str) -> Result<(), Diagnostic> {
+    if matches!(shell, Shell::Cmd) && text.contains(['"', '%']) {
+        return Err(crate::input_error(&format!(
+            "This client starts hooks with cmd.exe, which cannot pass a double quote and may expand a percent sign. Use a {what} without either."
+        )));
+    }
+    Ok(())
 }
 
 enum Settings {
@@ -644,7 +669,11 @@ fn read_settings(path: &Path, user: &User) -> Result<Settings, Diagnostic> {
     }
     // Swapping in a new file would leave the other names pointing at the old one.
     #[cfg(unix)]
-    if metadata.nlink() > 1 {
+    let links = metadata.nlink();
+    #[cfg(windows)]
+    let links = setup_cli::windows_link_count(&file)
+        .map_err(|_| file_error("LOCAL_IO", path, "Cannot identify open settings"))?;
+    if links > 1 {
         return Ok(Settings::Manual(
             "Settings file has more than one hard link, and replacing it would separate them",
         ));
@@ -1052,6 +1081,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn quotes_for_cmd_and_refuses_what_it_cannot_carry() {
+        let shell = Shell::Cmd;
+        assert_eq!(
+            shell.quote(r"C:\Users\A & B\it's $x (1); ^.exe"),
+            r#""C:\Users\A & B\it's $x (1); ^.exe""#
+        );
+        // A backslash before the closing quote would otherwise escape it.
+        assert_eq!(shell.quote(r"name\"), r#""name\\""#);
+        assert_eq!(shell.argument("--server", "-dash"), r#""--server=-dash""#);
+        assert_eq!(shell.argument("--server", "name"), r#"--server "name""#);
+        for text in [r#"a"b"#, "100%"] {
+            let error = cmd_text(shell, "server name", text).unwrap_err();
+            assert_eq!(error.code, "CLI_INPUT");
+            assert!(error.message.contains("server name"), "{error:?}");
+            assert!(cmd_text(Shell::PowerShell, "server name", text).is_ok());
+            assert!(cmd_text(Shell::Bash, "server name", text).is_ok());
+        }
+        assert!(cmd_text(shell, "server name", "it's $x & (1)").is_ok());
     }
 
     #[cfg(unix)]
