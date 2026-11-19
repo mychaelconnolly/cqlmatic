@@ -1,5 +1,8 @@
 use super::*;
 
+const RELEASED_WRITER_KNOWLEDGE_REVISION: &str =
+    "b71fce37fea7286d253252ca224899b70ad35ba0ed84e8a2b2d986a0ad46284a";
+
 const RELEASE_PHASES: [&str; 5] = [
     "activated",
     "paused",
@@ -111,7 +114,7 @@ fn release_fixture(writer: &Path, dir: &Path, phase: &str) -> usize {
     assert_eq!(pack["profile_id"], "cqlmatic-ngsiem-core-v3");
     assert_eq!(
         pack["knowledge_revision"],
-        "b71fce37fea7286d253252ca224899b70ad35ba0ed84e8a2b2d986a0ad46284a"
+        RELEASED_WRITER_KNOWLEDGE_REVISION
     );
     assert_eq!(
         inventory["active_pack"]["content_digest"],
@@ -141,7 +144,7 @@ fn release_status_and_pack(reader: &Path, dir: &Path) -> Value {
     assert_eq!(pack["profile_id"], "cqlmatic-ngsiem-core-v3");
     assert_eq!(
         pack["knowledge_revision"],
-        "b71fce37fea7286d253252ca224899b70ad35ba0ed84e8a2b2d986a0ad46284a"
+        RELEASED_WRITER_KNOWLEDGE_REVISION
     );
     assert_eq!(
         inventory["active_pack"]["content_digest"],

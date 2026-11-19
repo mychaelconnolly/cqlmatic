@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.10
 
+- CQLmatic 0.1.10 can inspect discovery checkpoints written by 0.1.9 in formats 2 and 3. Resume or settle unfinished runs with the executable that wrote them.
 - The `next-probe` inventory action settles one saved discovery answer and reserves the next ready probe in one call. Use `env inventory --json --next-probe` with optional answer flags or a JSON request. The response reports acceptance and any outstanding probe ID. A repeat call can recover an outstanding reservation without charging another search.
 - During a discovery run, the scrappy-mode hook and pass-through settle the outstanding probe when a completed search used exactly that probe's arguments, so an agent with either set up runs each search and asks for the next probe without saving or submitting the result. A failed search and a search with other arguments are left to the agent.
 - `prepare-discovery` no longer refuses a request identical to a paused run when that run has used its whole time limit. Such a run can never resume, and the refusal pointed back to `resume-discovery`.
@@ -154,7 +155,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v019).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v0110).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

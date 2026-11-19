@@ -15,7 +15,7 @@ use std::{
 #[path = "support/inventory_release.rs"]
 mod released;
 
-const PREVIOUS_PRODUCER: &str = "0.1.8";
+const PREVIOUS_PRODUCER: &str = "0.1.9";
 
 struct Temp(PathBuf);
 impl Temp {

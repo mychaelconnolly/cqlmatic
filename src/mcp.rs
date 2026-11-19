@@ -997,9 +997,13 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
                         | "0.1.6"
                         | "0.1.7"
                         | "0.1.8"
+                        | "0.1.9"
                 )
         }
-        3 => matches!(state.producer_version.as_str(), "0.1.6" | "0.1.7" | "0.1.8"),
+        3 => matches!(
+            state.producer_version.as_str(),
+            "0.1.6" | "0.1.7" | "0.1.8" | "0.1.9"
+        ),
         _ => false,
     };
     if state.format != "cqlmatic-mcp-state"
@@ -2000,19 +2004,21 @@ mod recovery_tests {
     ];
 
     #[test]
-    fn version_018_checkpoint_formats_are_readable_by_a_later_producer() {
-        for resumable in [false, true] {
-            let run = ready_kind(false, resumable);
-            assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
-            let mut state = read_state(&run.state).unwrap();
-            state.producer_version = "0.1.8".into();
-            let writer = storage::Writer::acquire(&run.state).unwrap();
-            store(&writer, &state).unwrap();
-            let before = fs::read(&run.state).unwrap();
-            let history = inspect_state_for_producer(&run.state, "0.1.9").unwrap();
-            assert_eq!(history.schema_version, if resumable { 3 } else { 2 });
-            assert_eq!(history.status, "activated");
-            assert_eq!(fs::read(&run.state).unwrap(), before);
+    fn released_checkpoint_formats_are_readable_by_later_producers() {
+        for (writer_version, reader_version) in [("0.1.8", "0.1.9"), ("0.1.9", "0.1.10")] {
+            for resumable in [false, true] {
+                let run = ready_kind(false, resumable);
+                assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+                let mut state = read_state(&run.state).unwrap();
+                state.producer_version = writer_version.into();
+                let writer = storage::Writer::acquire(&run.state).unwrap();
+                store(&writer, &state).unwrap();
+                let before = fs::read(&run.state).unwrap();
+                let history = inspect_state_for_producer(&run.state, reader_version).unwrap();
+                assert_eq!(history.schema_version, if resumable { 3 } else { 2 });
+                assert_eq!(history.status, "activated");
+                assert_eq!(fs::read(&run.state).unwrap(), before);
+            }
         }
     }
 
