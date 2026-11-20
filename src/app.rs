@@ -688,6 +688,8 @@ struct Flow {
     removed: BTreeSet<String>,
     // Removals no later step could have undone by creating fields.
     unwritten_removals: BTreeSet<String>,
+    // What the current step removes, including names an earlier step already removed.
+    removing: BTreeSet<String>,
     split_unknown: BTreeSet<(String, bool)>,
     unverified_fields: BTreeSet<String>,
     unknown_enrichment: bool,
@@ -731,6 +733,10 @@ impl Flow {
                         .is_some_and(|tail| tail.starts_with('.') || tail.starts_with('['))
             }))
             && !self.produces(field)
+    }
+    fn remove(&mut self, field: String) {
+        self.removing.insert(field.clone());
+        self.removed.insert(field);
     }
     fn removed_in(&self, removed: &BTreeSet<String>, field: &str) -> bool {
         removed.iter().any(|removed| {
@@ -1017,7 +1023,7 @@ fn apply_split(state: &mut Flow, args: &BTreeMap<String, &Value>) {
         state.derived.remove(field);
         state.conditional.remove(field);
         state.definite.remove(field);
-        state.removed.insert(field.clone());
+        state.remove(field.clone());
         if let Some(fields) = &mut state.available {
             fields.remove(field);
         }
@@ -2294,7 +2300,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                     state.definite.remove(old);
                                     state.derived.remove(old);
                                     state.conditional.remove(old);
-                                    state.removed.insert(old.into());
+                                    state.remove(old.into());
                                     if let Some(available) = &mut state.available {
                                         available.remove(old);
                                     }
@@ -2344,7 +2350,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                     continue;
                                 }
                                 let prefix = array.trim_end_matches("[]");
-                                state.removed.insert(array.into());
+                                state.remove(array.into());
                                 state.derived.retain(|field| !path_contains(prefix, field));
                                 state
                                     .conditional
@@ -2370,7 +2376,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                     state.definite.remove(&field);
                                     state.derived.remove(&field);
                                     state.conditional.remove(&field);
-                                    state.removed.insert(field.clone());
+                                    state.remove(field.clone());
                                     if let Some(available) = &mut state.available {
                                         available.remove(&field);
                                     }
@@ -2429,22 +2435,40 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
         if !adds_no_fields(step) {
             state.unwritten_removals.clear();
         }
+        let removing = std::mem::take(&mut state.removing);
         state
             .unwritten_removals
-            .extend(state.removed.difference(&removed).cloned());
+            .extend(state.removed.difference(&removed).cloned().chain(removing));
     }
     state
 }
 
 fn adds_no_fields(step: &Step) -> bool {
     match step {
-        Step::Filter(filter) => transparent_kind_filter(filter),
+        Step::Filter(filter) => filter_adds_no_fields(filter),
         Step::Call(call) => {
             transparent_kind_call(call)
                 || crate::catalog::resolve(call)
                     .is_some_and(|r| r.diagnostics.is_empty() && r.function.name == "drop")
         }
         _ => false,
+    }
+}
+
+/// Only a regex with named captures, or a call that writes fields, creates fields in a filter.
+fn filter_adds_no_fields(filter: &Filter) -> bool {
+    match filter {
+        Filter::Compare {
+            value: Pattern::Regex { pattern, .. },
+            ..
+        }
+        | Filter::Text(Pattern::Regex { pattern, .. }) => {
+            language::validate::regex_captures(pattern).is_empty()
+        }
+        Filter::Compare { .. } | Filter::Text(_) | Filter::Bool(_) => true,
+        Filter::Call(call) => transparent_kind_call(call),
+        Filter::And(filters) | Filter::Or(filters) => filters.iter().all(filter_adds_no_fields),
+        Filter::Not(filter) => filter_adds_no_fields(filter),
     }
 }
 
@@ -2839,12 +2863,12 @@ fn ground(
     );
     // Lenient warnings: reads of removed fields, selections that no mapped source can match,
     // and fields that no selected source lists, keyed by the selected sources' labels. Strict
-    // mode reports gaps through grounding.missing, so it builds none of this, and an in()
-    // selector leaves the selected sources unresolved.
+    // mode reports gaps through grounding.missing, so it builds none of this. An in() selector
+    // leaves the selected sources unresolved, so fields are not compared; literal selectors are.
     let lenient = !context.require_observed;
     let compare = lenient && !in_selector;
     let pack_sources: Vec<_> = pack
-        .filter(|_| compare)
+        .filter(|_| lenient)
         .iter()
         .flat_map(|p| &p.data.sources)
         .filter_map(|v| environment::source(v).ok())
@@ -2935,7 +2959,7 @@ fn ground(
         // A literal selector is compared even when another selector is unresolved. A query
         // without #repo or #type can read every source, including one recorded without selectors.
         let mut selected = Vec::new();
-        if compare && pack.is_some() && r.origin == Origin::Deployment {
+        if lenient && pack.is_some() && r.origin == Origin::Deployment {
             selected = pack_sources
                 .iter()
                 .filter(|source| {
@@ -3151,25 +3175,36 @@ fn ground(
                 g.missing.push(key);
             }
         }
-        if !selected.is_empty()
+        if compare
+            && !selected.is_empty()
             && !r.field.starts_with('@')
             && !selected.iter().any(|s| records_kind_field(s, &r.field))
         {
-            let found = selected.iter().filter_map(|s| records.get(&s.id)).flatten();
-            match map_gap(found, &map_path(&r.field, r.field.starts_with('#'))) {
-                Some(MapGap::Unlisted) => {
+            // Each source is judged by its own records; a field one source has stays quiet.
+            let read = map_path(&r.field, r.field.starts_with('#'));
+            let mut unlisted = Vec::new();
+            let mut absent = BTreeMap::<Option<String>, Vec<_>>::new();
+            let has_field = selected.iter().any(|s| {
+                match map_gap(records.get(&s.id).into_iter().flatten(), &read) {
+                    Some(MapGap::Unlisted) => unlisted.push(*s),
+                    Some(MapGap::NotObserved(window)) => absent.entry(window).or_default().push(*s),
+                    None => return true,
+                }
+                false
+            });
+            if !has_field {
+                if !unlisted.is_empty() {
                     unmapped_fields
-                        .entry(labels(selected))
+                        .entry(labels(unlisted))
                         .or_default()
                         .insert(r.field.clone());
                 }
-                Some(MapGap::NotObserved(window)) => {
+                for (window, sources) in absent {
                     measured_absent
-                        .entry((labels(selected), window))
+                        .entry((labels(sources), window))
                         .or_default()
                         .insert(r.field.clone());
                 }
-                None => {}
             }
         }
     }
@@ -3368,7 +3403,7 @@ enum MapGap {
     NotObserved(Option<String>),
 }
 
-/// The map rule for a field read in the selected sources, given their records keyed by
+/// The map rule for a field read in one selected source, given its records keyed by
 /// `map_path`. An exact record decides: a listed one is quiet, and one measured and not
 /// observed warns with its window. Without one, a documented object or array parent is
 /// quiet. A read of a whole array `x[]` is exact for a record of any of its elements.
