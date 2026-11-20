@@ -1,0 +1,136 @@
+use cqlmatic::{app, contracts::*};
+
+fn check_with(query: &str, require_observed: bool) -> Analysis {
+    app::check(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: query.into(),
+            context: Context {
+                require_observed,
+                ..Context::default()
+            },
+        },
+        None,
+    )
+}
+
+fn check(query: &str) -> Analysis {
+    check_with(query, false)
+}
+
+fn messages<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
+    result
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == code)
+        .inspect(|d| assert_eq!(d.severity, Severity::Warning, "{d:?}"))
+        .map(|d| d.message.as_str())
+        .collect()
+}
+
+const JOIN: &str = "kind=login | login_at := @timestamp | join({kind=alert | alert_at := @timestamp}, field=[user], include=[alert_at]";
+
+#[test]
+fn join_without_max_warns_before_a_comparison_of_a_joined_value() {
+    for (rest, compared) in [
+        (") | test(alert_at >= login_at)", "alert_at"),
+        (", mode=inner, limit=5000) | test(alert_at > login_at)", "alert_at"),
+        (") | gap := alert_at - login_at | test(gap <= 60000)", "gap"),
+        (") | gap := alert_at - login_at | gap >= \"0\"", "gap"),
+        (") | gap := alert_at - login_at | gap > 0 gap < 60000", "gap"),
+    ] {
+        let query = format!("{JOIN}{rest}");
+        let result = check(&query);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {:?}", result.diagnostics);
+        assert_eq!(
+            messages(&result, "CQL_JOIN_MAX"),
+            [format!(
+                "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} tests only that row. Set max to the largest number of matches one key can have."
+            )],
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
+    for rest in [
+        ", max=500) | test(alert_at >= login_at)",
+        ", max=1) | gap := alert_at - login_at | test(gap <= 60000)",
+        ") | groupBy([user], function=count())",
+        ") | alert_at = \"x\"",
+        ") | test(login_at > 0)",
+        ") | alert_at := login_at | test(alert_at > 0)",
+    ] {
+        let query = format!("{JOIN}{rest}");
+        let result = check(&query);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {:?}", result.diagnostics);
+        assert!(messages(&result, "CQL_JOIN_MAX").is_empty(), "{query}");
+    }
+    let result = check(
+        "kind=login | test(login_at > 0) | join({kind=alert}, field=[user], include=[alert_at])",
+    );
+    assert!(messages(&result, "CQL_JOIN_MAX").is_empty());
+}
+
+const SEQUENCE: &str = "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m)";
+
+#[test]
+fn correlate_names_a_field_it_does_not_export_and_its_query() {
+    let cases = [
+        (
+            format!("{SEQUENCE} | groupBy([first.host], limit=max)"),
+            "first.host is not exported by correlate query first.",
+        ),
+        (
+            format!("{SEQUENCE} | groupBy([host, user], limit=max)"),
+            "host, user are not exported by correlate, which names the fields of each query QUERY.FIELD.",
+        ),
+        (
+            // The aggregation query's columns are unknown, but an unprefixed name is still not one.
+            "correlate(query=first: { kind=a }, aggregation=[later: { kind=b | user <=> first.user | head(1) }], within=5m, root=\"first\") | groupBy([host], limit=max)".into(),
+            "host is not exported by correlate, which names the fields of each query QUERY.FIELD.",
+        ),
+        (
+            // Sequence order reads @timestamp from each query.
+            "correlate(first: { kind=a | select([user]) } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m) | groupBy([first.user], limit=max)".into(),
+            "@timestamp is not exported by correlate query first.",
+        ),
+        (
+            "correlate(first: { kind=a | select([user, @timestamp]) } include: [user], second: { kind=b | user <=> first.account }, sequence=true, within=5m) | groupBy([first.user], limit=max)".into(),
+            "account is not exported by correlate query first.",
+        ),
+    ];
+    for (query, message) in cases {
+        let result = check(&query);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {:?}", result.diagnostics);
+        assert_eq!(messages(&result, "CQL_UNEXPORTED_FIELD"), [message], "{query}");
+    }
+}
+
+#[test]
+fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
+    for query in [
+        format!("{SEQUENCE} | groupBy([first.user, second.user], limit=max)"),
+        format!("{SEQUENCE} | groupBy([first.user], function=count(@id), limit=max)"),
+        "kind=a | groupBy([user], function=count(), limit=max) | test(host > 0)".into(),
+    ] {
+        let result = check(&query);
+        assert!(
+            messages(&result, "CQL_UNEXPORTED_FIELD").is_empty(),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    let result = check_with(&format!("{SEQUENCE} | groupBy([first.host], limit=max)"), true);
+    assert!(messages(&result, "CQL_UNEXPORTED_FIELD").is_empty());
+    assert!(
+        result
+            .grounding
+            .missing
+            .contains(&"*:*:first.host: not exported by preceding query.".to_string()),
+        "{:?}",
+        result.grounding.missing
+    );
+}
