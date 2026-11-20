@@ -43,7 +43,7 @@ fn messages<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
 
 fn join_warning(compared: &str) -> String {
     format!(
-        "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} tests only that row. Set max to the largest number of matches one key can have."
+        "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} may test only one of several matches."
     )
 }
 
@@ -68,18 +68,7 @@ fn join_without_max_warns_before_a_comparison_of_a_joined_value() {
             ") | eval(seen = alert_at, gap = seen - login_at) | test(gap > 0)",
             "gap",
         ),
-        (
-            ") | rename(alert_at, as=seen_at) | test(seen_at > login_at)",
-            "seen_at",
-        ),
-        (
-            ") | case { kind=vpn | alert_at := 1; * | note := 1 } | alert_at > 1",
-            "alert_at",
-        ),
-        (
-            ") | case { kind=vpn | seen_at := alert_at; * } | test(seen_at > login_at)",
-            "seen_at",
-        ),
+        (") | kind=alert | test(alert_at > login_at)", "alert_at"),
     ] {
         let query = format!("{JOIN}{rest}");
         assert_eq!(
@@ -100,7 +89,16 @@ fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
         ") | test(login_at > 0)",
         ") | alert_at := login_at | test(alert_at > 0)",
         ") | eval(alert_at = login_at) | test(alert_at > 0)",
-        ") | case { kind=vpn | alert_at := 1; * | alert_at := 2 } | alert_at > 1",
+        // The check stops at any stage other than a filter, test(), := or eval.
+        ") | rename(alert_at, as=seen_at) | test(seen_at > login_at)",
+        ") | rename(host, as=hostname) | test(alert_at > login_at)",
+        ") | seen_at := rename(\"alert_at\") | test(seen_at > login_at)",
+        ") | seen_at := lower(alert_at) | test(seen_at > login_at)",
+        ") | rename(alert_at, as=seen) | groupBy([user], function=count(as=seen), limit=max) | seen > 1",
+        ") | groupBy([user], function=max(alert_at, as=alert_at), limit=max) | alert_at > 0",
+        ") | case { kind=vpn | note := 1; * } | test(alert_at > login_at)",
+        ") | kind match { vpn => note := 1; * => * } | test(alert_at > login_at)",
+        ") | formatTime(\"%H\", field=login_at, as=hour) | test(alert_at > login_at)",
     ] {
         let query = format!("{JOIN}{rest}");
         assert!(
@@ -135,8 +133,12 @@ fn join_to_a_subquery_with_one_row_per_key_is_quiet() {
     }
     for subquery in [
         "groupBy([user, host, process], function=max(@timestamp, as=alert_at), limit=max)",
+        // Grouped by only some of the join keys, the subquery no longer has the others to join on.
+        "groupBy([user], function=max(@timestamp, as=alert_at), limit=max)",
         "alert_at := @timestamp | groupBy([user, host], function=head(2), limit=max)",
         "alert_at := @timestamp | head(2)",
+        // A groupBy limit is not taken into account.
+        "groupBy([user, process], function=max(@timestamp, as=alert_at), limit=1)",
     ] {
         let query = joined(subquery);
         assert_eq!(
@@ -198,13 +200,36 @@ fn correlate_names_a_field_it_does_not_export_and_its_query() {
         ),
     ];
     for (query, message) in cases {
-        let result = ready(&query);
         assert_eq!(
-            messages(&result, "CQL_UNEXPORTED_FIELD"),
+            messages(&ready(&query), "CQL_UNEXPORTED_FIELD"),
             [message],
             "{query}"
         );
-        assert!(messages(&result, "CQL_DROPPED_FIELD").is_empty(), "{query}");
+    }
+}
+
+#[test]
+fn a_read_both_warnings_describe_gets_both() {
+    for (query, unexported, dropped) in [
+        (
+            format!("{SEQUENCE} | groupBy([first.host], limit=max)"),
+            "first.host is not exported by correlate query first.",
+            "'first.host' is not among the known projected/aggregate outputs.",
+        ),
+        (
+            // A removes user and reads it; B, separately, does not export it.
+            "correlate(A: { select([other, @timestamp]) | user=* }, B: { select(@timestamp) | user <=> A.other })".into(),
+            "user is not exported by correlate query B.",
+            "'user' is not among the known projected/aggregate outputs.",
+        ),
+    ] {
+        let result = ready(&query);
+        assert_eq!(
+            messages(&result, "CQL_UNEXPORTED_FIELD"),
+            [unexported],
+            "{query}"
+        );
+        assert_eq!(messages(&result, "CQL_DROPPED_FIELD"), [dropped], "{query}");
     }
 }
 
@@ -255,7 +280,7 @@ fn generate(plan: serde_json::Value) -> Analysis {
 }
 
 #[test]
-fn generate_reports_a_field_correlate_does_not_export_once() {
+fn generate_reports_a_field_correlate_does_not_export() {
     let linked = generate(
         serde_json::json!({"source": {}, "steps": [{"op": "correlate", "within": "5m",
         "queries": [
@@ -279,7 +304,10 @@ fn generate_reports_a_field_correlate_does_not_export_once() {
         messages(&read, "CQL_UNEXPORTED_FIELD"),
         ["first.host is not exported by correlate query first."]
     );
-    assert!(messages(&read, "CQL_DROPPED_FIELD").is_empty());
+    assert_eq!(
+        messages(&read, "CQL_DROPPED_FIELD"),
+        ["'first.host' is not among the known projected/aggregate outputs."]
+    );
 }
 
 #[test]
