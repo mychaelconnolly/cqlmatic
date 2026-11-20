@@ -204,10 +204,7 @@ fn correlate_names_a_field_it_does_not_export_and_its_query() {
             [message],
             "{query}"
         );
-        assert!(
-            messages(&result, "CQL_DROPPED_FIELD").is_empty(),
-            "{query}"
-        );
+        assert!(messages(&result, "CQL_DROPPED_FIELD").is_empty(), "{query}");
     }
 }
 
@@ -259,13 +256,15 @@ fn generate(plan: serde_json::Value) -> Analysis {
 
 #[test]
 fn generate_reports_a_field_correlate_does_not_export_once() {
-    let linked = generate(serde_json::json!({"source": {}, "steps": [{"op": "correlate", "within": "5m",
+    let linked = generate(
+        serde_json::json!({"source": {}, "steps": [{"op": "correlate", "within": "5m",
         "queries": [
             {"name": "first", "plan": {"source": {}, "filters": [{"op": "eq", "field": "kind", "value": "a"}]}},
             {"name": "second", "plan": {"source": {}, "filters": [{"op": "eq", "field": "kind", "value": "b"}],
                 "steps": [{"op": "select", "fields": ["@timestamp"]}]}}
         ],
-        "links": [{"from": "second", "field": "user", "to": "first", "key": "user"}]}]}));
+        "links": [{"from": "second", "field": "user", "to": "first", "key": "user"}]}]}),
+    );
     assert_eq!(
         messages(&linked, "CQL_UNEXPORTED_FIELD"),
         ["user is not exported by correlate query second."]

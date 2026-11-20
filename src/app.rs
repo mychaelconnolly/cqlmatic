@@ -514,8 +514,8 @@ fn finish(
     let report = language::validate::validate(pipeline, query);
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
-    let (dropped, unmapped);
-    (result.grounding, dropped, unmapped) = ground(pipeline, context, pack, evidence);
+    let (dropped, unmapped, unexported);
+    (result.grounding, dropped, unmapped, unexported) = ground(pipeline, context, pack, evidence);
     let capability_evidence = evidence.and_then(|e| e.capabilities).filter(|e| {
         report.status == Acceptance::Accepted
             && evidence.is_some_and(|outer| outer.environment == e.environment)
@@ -607,6 +607,13 @@ fn finish(
             ));
         }
     }
+    // A read that CQL_UNEXPORTED_FIELD traces to a correlate needs no generic warning too.
+    result.diagnostics.retain(|d| {
+        d.code != "CQL_DROPPED_FIELD"
+            || !unexported
+                .iter()
+                .any(|field| d.message == language::validate::dropped_field_message(field))
+    });
     result.diagnostics.extend(unmapped);
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
@@ -646,6 +653,8 @@ struct GroundingScan<'a> {
     first_pipeline: bool,
     skip_next_kind_check: bool,
     in_selector: bool,
+    /// The label of the correlate query being scanned, which its links read their fields from.
+    query: Option<String>,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Origin {
@@ -690,10 +699,12 @@ struct Flow {
 /// What a correlate exports, so that a field missing from it can be traced to it.
 #[derive(Clone)]
 enum Export {
-    /// The stream after a correlate, until a projection: its query labels and output fields.
+    /// The stream after a correlate, until a projection: its query labels, output fields and the
+    /// `QUERY.FIELD` names its queries removed.
     Correlate {
         labels: BTreeSet<String>,
         outputs: BTreeSet<String>,
+        removed: BTreeSet<String>,
     },
     /// One correlate query's output, which correlate reads include, link and order fields from.
     Query(String),
@@ -702,8 +713,15 @@ impl Flow {
     fn unexported_by(&self, field: &str) -> Option<String> {
         match self.export.as_ref()? {
             Export::Query(name) => Some(format!("correlate query {name}")),
-            Export::Correlate { labels, outputs } => {
-                (!outputs.contains(field)).then(|| match field.split_once('.') {
+            Export::Correlate {
+                labels,
+                outputs,
+                removed,
+            } => {
+                // A field removed after the correlate is not one it failed to export.
+                let missing = removed.contains(field)
+                    || !outputs.contains(field) && !self.removed.contains(field);
+                missing.then(|| match field.split_once('.') {
                     Some((label, _)) if labels.contains(label) => {
                         format!("correlate query {label}")
                     }
@@ -1089,6 +1107,7 @@ fn requirements(
         first_pipeline: true,
         skip_next_kind_check: false,
         in_selector: false,
+        query: None,
     };
     scan_pipeline(
         p,
@@ -1291,6 +1310,7 @@ fn correlation_inputs(
         first_pipeline: false,
         skip_next_kind_check: true,
         in_selector: false,
+        query: None,
     };
     let mut start = 0;
     let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
@@ -1309,6 +1329,7 @@ fn correlation_inputs(
         );
         trace.requirements.clear();
         if step_aggregates(step) {
+            state.export = out.query.clone().map(Export::Query);
             correlation_input_fields(&state, args, out);
             return None;
         }
@@ -1392,6 +1413,7 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             {
                 // Correlation aggregation queries are scanned in pieces for field flow.
                 check_record_kinds(pipeline, state, out, true);
+                out.query = Some(name.clone());
                 let export = Some(Export::Query(name.clone()));
                 if *aggregation {
                     if let Some(mut input) =
@@ -1414,6 +1436,7 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
                 contexts.insert(name.clone(), local);
             }
         }
+        out.query = None;
         for (value, aggregation) in &queries {
             let Value::Query {
                 label: Some(name),
@@ -1450,16 +1473,23 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             .collect();
         let (outputs, unknown_prefixes) =
             crate::catalog::correlation_outputs(&resolved.arguments, &queries, &columns);
+        // A field a query removed stays absent under an include-all export of that query.
+        let removed: BTreeSet<String> = contexts
+            .iter()
+            .flat_map(|(name, flow)| flow.removed.iter().map(move |f| format!("{name}.{f}")))
+            .collect();
         return Some(Flow {
             target: state.target.clone(),
             field_target: state.target.clone(),
             derived: outputs.clone(),
             available: Some(outputs.clone()),
+            removed: removed.clone(),
             unknown_prefixes,
             tables: state.tables.clone(),
             export: Some(Export::Correlate {
                 labels: contexts.into_keys().collect(),
                 outputs,
+                removed,
             }),
             ..Flow::default()
         });
@@ -2161,7 +2191,11 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                     .collect();
                 state = merge_branches(&state, results);
             }
-            Step::Link { field, .. } => add(&state, field, out),
+            Step::Link { field, .. } => {
+                let mut linked = state.clone();
+                linked.export = out.query.clone().map(Export::Query);
+                add(&linked, field, out);
+            }
             Step::Call(c) => {
                 let exported = scan_call(c, &state, out, false);
                 if let Some(resolved) = crate::catalog::resolve(c) {
@@ -2807,7 +2841,7 @@ fn ground(
     context: &Context,
     pack: Option<&Pack>,
     evidence: Option<GroundingEvidence<'_>>,
-) -> (Grounding, BTreeSet<String>, Vec<Diagnostic>) {
+) -> (Grounding, BTreeSet<String>, Vec<Diagnostic>, BTreeSet<String>) {
     let mut g = Grounding {
         policy: context.into(),
         ..Grounding::default()
@@ -2823,7 +2857,7 @@ fn ground(
         if p.validate().is_err() {
             g.conflicting
                 .push("Pack integrity or version validation failed.".into());
-            return (g, BTreeSet::new(), Vec::new());
+            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
         }
         if context
             .environment
@@ -2832,7 +2866,7 @@ fn ground(
         {
             g.conflicting
                 .push("Cloud, tenant or searchable target conflicts with selected pack.".into());
-            return (g, BTreeSet::new(), Vec::new());
+            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
         }
     }
     let mut kind_packs = pack.into_iter().collect::<Vec<_>>();
@@ -2846,7 +2880,7 @@ fn ground(
         {
             g.conflicting
                 .push("Query evidence conflicts with the selected environment identity.".into());
-            return (g, BTreeSet::new(), Vec::new());
+            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
         }
         if evidence.query_observations.len() > 1000
             || evidence.captured_observations.len() > 1000
@@ -2861,13 +2895,13 @@ fn ground(
         {
             g.conflicting
                 .push("Query observation integrity, identity or budget validation failed.".into());
-            return (g, BTreeSet::new(), Vec::new());
+            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
         }
         if let Some(active) = evidence.active_pack {
             if active.validate().is_err() || &active.environment != evidence.environment {
                 g.conflicting
                     .push("Active pack integrity or environment validation failed.".into());
-                return (g, BTreeSet::new(), Vec::new());
+                return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
             }
             if !kind_packs
                 .iter()
@@ -3231,6 +3265,7 @@ fn ground(
             }
         }
     }
+    let unexported_fields = unexported.values().flatten().cloned().collect();
     let mut warnings = unexported
         .into_iter()
         .map(|(source, fields)| {
@@ -3351,7 +3386,7 @@ fn ground(
     g.stale.sort();
     g.stale.dedup();
     warnings.extend(unmapped);
-    (g, dropped, warnings)
+    (g, dropped, warnings, unexported_fields)
 }
 
 fn listed(field: &environment::LegacyField) -> bool {

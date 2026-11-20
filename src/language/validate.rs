@@ -392,7 +392,7 @@ impl Checker<'_> {
                 self.dropped.insert(field.clone());
                 self.emit(
                     "CQL_DROPPED_FIELD",
-                    format!("'{field}' is not among the known projected/aggregate outputs."),
+                    dropped_field_message(field),
                     call,
                     true,
                 );
@@ -3656,6 +3656,10 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
         Filter::Not(filter) => compared_fields(filter, fields),
         _ => false,
     }
+}
+
+pub(crate) fn dropped_field_message(field: &str) -> String {
+    format!("'{field}' is not among the known projected/aggregate outputs.")
 }
 
 /// For a join that keeps its default of one subquery row per key, the first field that a later
