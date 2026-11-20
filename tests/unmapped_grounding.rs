@@ -116,18 +116,18 @@ fn assert_no_warning(query: &str) {
 #[test]
 fn a_field_the_selected_source_lacks_warns_and_names_the_source() {
     let result = check(
-        r#"#repo=alpha_repo | url.domain="x" | count()"#,
+        r#"#repo=alpha_repo | dest.made_up="x" | count()"#,
         Some(&pack()),
         false,
     );
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     let found = warnings(&result, "CQL_UNMAPPED_FIELD");
     assert_eq!(found.len(), 1, "{:?}", result.diagnostics);
-    assert!(found[0].contains("url.domain"), "{}", found[0]);
+    assert!(found[0].contains("dest.made_up"), "{}", found[0]);
     assert!(found[0].contains(ALPHA), "{}", found[0]);
     assert!(!found[0].contains(BETA), "{}", found[0]);
     assert_eq!(
-        result.grounding.basis["alpha_repo:*:url.domain"],
+        result.grounding.basis["alpha_repo:*:dest.made_up"],
         "query-supplied; not measured in selected pack"
     );
     assert_eq!(result.exit_code(true), 1);
@@ -135,10 +135,10 @@ fn a_field_the_selected_source_lacks_warns_and_names_the_source() {
 
 #[test]
 fn a_field_no_mapped_source_has_names_every_source_when_the_query_selects_none() {
-    let result = check(r#"winlog.event_id=4624 | count()"#, Some(&pack()), false);
+    let result = check(r#"audit.made_up_id=4624 | count()"#, Some(&pack()), false);
     let found = warnings(&result, "CQL_UNMAPPED_FIELD");
     assert_eq!(found.len(), 1, "{:?}", result.diagnostics);
-    assert!(found[0].contains("winlog.event_id"), "{}", found[0]);
+    assert!(found[0].contains("audit.made_up_id"), "{}", found[0]);
     assert!(
         found[0].contains(ALPHA) && found[0].contains(BETA),
         "{}",
@@ -224,7 +224,7 @@ fn a_repository_no_mapped_source_has_warns_and_names_the_mapped_selectors() {
 fn the_target_view_name_used_as_a_repository_is_called_the_view() {
     for query in [
         r#"#repo=synthetic-view | src.ip="10.0.0.1" | count()"#,
-        r#"#repo="synthetic-view" | url.domain="x" | count()"#,
+        r#"#repo="synthetic-view" | dest.made_up="x" | count()"#,
     ] {
         let result = check(query, Some(&pack()), false);
         let found = warnings(&result, "CQL_UNMAPPED_SOURCE");
@@ -259,8 +259,8 @@ fn the_target_view_name_used_as_a_repository_is_called_the_view() {
 fn strict_mode_output_is_unchanged() {
     for (query, missing) in [
         (
-            r#"#repo=alpha_repo | url.domain="x" | count()"#,
-            vec!["alpha_repo:*:url.domain"],
+            r#"#repo=alpha_repo | dest.made_up="x" | count()"#,
+            vec!["alpha_repo:*:dest.made_up"],
         ),
         (
             r#"#repo=synthetic-view | src.ip="10.0.0.1" | count()"#,
