@@ -1,0 +1,1 @@
+- Accept positional fields in `select`, leading literal `]` in regex character classes, quoted numbers in `sample` percentages and percentile lists, omitted fields in `xml:prettyPrint` and `time:dayOfWeek`, fallbacks for missing tags in `default`, custom `top` remainder labels, and aliases in standalone aggregate lists.

@@ -385,7 +385,7 @@ impl Parser<'_> {
             let mut args = Vec::new();
             if !self.eat("]") {
                 loop {
-                    args.push(self.expression(0)?);
+                    args.push(self.aggregate_list_item()?);
                     if self.eat("]") {
                         break;
                     }
@@ -714,7 +714,7 @@ impl Parser<'_> {
                             .or_else(|| spec.positional.get(positional).copied())
                             .is_some_and(|arg| spec.argument_kind(arg) == Some("g"))
                     });
-                    let value = if name.eq_ignore_ascii_case("defineTable")
+                    let mut value = if name.eq_ignore_ascii_case("defineTable")
                         && argname.as_deref() == Some("include")
                         && p.eat("*")
                     {
@@ -730,6 +730,18 @@ impl Parser<'_> {
                     } else {
                         p.expression_with_aggregate_aliases(0, aggregate_argument)?
                     };
+                    if name.eq_ignore_ascii_case("sample")
+                        && matches!(argname.as_deref(), None | Some("percentage"))
+                    {
+                        coerce_quoted_percentage(&mut value, 0.01);
+                    } else if name.eq_ignore_ascii_case("percentile")
+                        && argname.as_deref() == Some("percentiles")
+                        && let Value::Array(values) = &mut value
+                    {
+                        for value in values {
+                            coerce_quoted_percentage(value, 0.0);
+                        }
+                    }
                     positional += usize::from(argname.is_none());
                     args.push(Arg {
                         name: argname,
@@ -740,6 +752,12 @@ impl Parser<'_> {
                     }
                     p.expect(",")?;
                 }
+            }
+            if name.eq_ignore_ascii_case("select") && args.len() > 1 && positional == args.len() {
+                args = vec![Arg {
+                    name: None,
+                    value: Value::Array(args.into_iter().map(|arg| arg.value).collect()),
+                }];
             }
             Ok(Call {
                 name,
@@ -1022,6 +1040,17 @@ impl Parser<'_> {
             }
             Ok(left)
         })
+    }
+}
+
+fn coerce_quoted_percentage(value: &mut Value, minimum: f64) {
+    if let Value::String(text) = value
+        && text
+            .trim()
+            .parse::<f64>()
+            .is_ok_and(|number| (minimum..=100.0).contains(&number))
+    {
+        *value = Value::Number(text.trim().into());
     }
 }
 

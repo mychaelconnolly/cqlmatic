@@ -49,6 +49,7 @@ fn check_accepts_valid_shapes() {
         "/[]z]/",
         "/^[^]]+$/",
         r#"sample(percentage="75")"#,
+        r#"sample("0.01")"#,
         r#"percentile(quantity, percentiles=["50", 75]) | table([_50, _75])"#,
         "xml:prettyPrint()",
         "time:dayOfWeek()",
@@ -88,8 +89,14 @@ fn check_rejects_near_misses_of_valid_shapes() {
         ("/[^]/", "CQL_REGEX_SYNTAX"),
         ("/[z-a]/", "CQL_REGEX_SYNTAX"),
         (r#"sample(percentage="many")"#, "CQL_ARGUMENT_TYPE"),
+        (r#"sample(percentage="0")"#, "CQL_ARGUMENT_TYPE"),
+        (r#"sample(percentage="100.01")"#, "CQL_ARGUMENT_TYPE"),
         (
             r#"percentile(quantity, percentiles=["NaN"])"#,
+            "CQL_ARGUMENT_TYPE",
+        ),
+        (
+            r#"percentile(quantity, percentiles=["101"])"#,
             "CQL_ARGUMENT_TYPE",
         ),
         ("[smallest := quantity]", "CQL_SYNTAX"),
@@ -515,9 +522,7 @@ fn numeric_parameters_keep_finite_types_and_documented_bounds() {
     ] {
         ready(query);
     }
-    for query in ["sample(percentage=true)", r#"sample(percentage="1")"#] {
-        invalid(query, "CQL_ARGUMENT_TYPE");
-    }
+    invalid("sample(percentage=true)", "CQL_ARGUMENT_TYPE");
 }
 
 #[test]
@@ -747,30 +752,6 @@ fn time_intervals_reject_provably_reversed_endpoints() {
 }
 
 #[test]
-fn top_rest_rejects_arbitrary_labels_in_raw_and_typed_calls() {
-    invalid(r#"top(user,rest="others")"#, "CQL_ARGUMENT_VALUE");
-    let request = serde_json::from_value(serde_json::json!({
-        "schema_version": 1,
-        "input": {"mode": "plan", "plan": {"source": {}, "steps": [{
-            "op": "call", "function": "top", "args": [
-                {"name": "field", "value": {"kind": "field", "name": "user"}},
-                {"name": "rest", "value": {"kind": "literal", "value": "others"}}
-            ]
-        }]}}
-    }))
-    .unwrap();
-    let result = app::generate(request, None);
-    assert_eq!(result.outcome, Outcome::Invalid, "{result:?}");
-    assert!(result.query.is_none());
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "CQL_ARGUMENT_VALUE")
-    );
-}
-
-#[test]
 fn interval_end_rejects_malformed_values() {
     unsupported(
         r#"setTimeInterval(start="7d",end="garbage")"#,
@@ -792,34 +773,13 @@ fn interval_endpoints_keep_relative_absolute_and_epoch_forms() {
 }
 
 #[test]
-fn top_rest_accepts_boolean_spellings_of_its_string_choices() {
+fn top_rest_accepts_boolean_spellings() {
     for value in ["true", "false", r#""true""#, r#""false""#] {
         ready(&format!("top(user,rest={value})"));
     }
-    for query in [
-        r#"top(user,rest="yes")"#,
-        "top(user,rest=yes)",
-        r#"top(user,rest="others")"#,
-    ] {
-        invalid(query, "CQL_ARGUMENT_VALUE");
-    }
-    invalid("top(user,rest=1)", "CQL_ARGUMENT_VALUE");
+    invalid("top(user,rest=[label])", "CQL_ARGUMENT_TYPE");
     invalid("lower(user,as=true)", "CQL_ARGUMENT_TYPE");
     invalid("sort(user,order=true)", "CQL_ARGUMENT_TYPE");
-
-    let boolean_strings = catalog::FUNCTIONS
-        .iter()
-        .flat_map(|function| {
-            catalog::parameter_rules(function.name)
-                .iter()
-                .filter(|rule| {
-                    function.argument_kind(&rule.name) == Some("s")
-                        && rule.choices == ["false", "true"]
-                })
-                .map(move |rule| (function.name, rule.name.as_str()))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(boolean_strings, [("top", "rest")]);
 }
 
 #[test]
@@ -857,12 +817,13 @@ fn named_remote_tables_and_documented_positional_forms_keep_their_bindings() {
 }
 
 #[test]
-fn typed_top_rest_preserves_boolean_and_string_choices() {
+fn typed_top_rest_preserves_booleans_and_labels() {
     for value in [
         serde_json::json!(true),
         serde_json::json!(false),
         serde_json::json!("true"),
         serde_json::json!("false"),
+        serde_json::json!("remaining values"),
     ] {
         let request = serde_json::from_value(serde_json::json!({
             "schema_version": 1,

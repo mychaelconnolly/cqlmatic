@@ -1925,8 +1925,15 @@ impl Checker<'_> {
         if spec.name == "default"
             && let Some(fields) = args.get("field")
         {
+            let fills_missing_only = args
+                .get("replaceEmpty")
+                .is_none_or(|value| !has_parameter(value) && value.boolean() == Some(false));
             for field in catalog::fields(fields) {
-                self.output_field(&field, Some(c));
+                if field.starts_with('#') && fills_missing_only {
+                    self.mutation(&field, Some(c));
+                } else {
+                    self.output_field(&field, Some(c));
+                }
             }
         }
         for (name, value) in &args {
@@ -1959,12 +1966,8 @@ impl Checker<'_> {
                 );
                 continue;
             }
-            // Boolean tokens also spell the two string choices of top.rest.
-            let boolean_string = kind == "s"
-                && matches!(value, Value::Bool(_))
-                && catalog::parameter_rules(spec.name)
-                    .iter()
-                    .any(|rule| rule.name == *name && rule.choices == ["false", "true"]);
+            let boolean_string =
+                spec.name == "top" && name == "rest" && matches!(value, Value::Bool(_));
             if !argument_type(value, kind) && !boolean_string {
                 if kind == "d" && value.text().is_some() {
                     self.unsupported("CQL_UNSUPPORTED_DURATION", "Only positive whole-number fixed durations are supported; other relative-time spellings and explicit zero are unsupported.", Some(c), false);
@@ -2250,7 +2253,10 @@ impl Checker<'_> {
                 Value::Array(values) => values.as_slice(),
                 value => std::slice::from_ref(value),
             };
-            if !rule.choices.is_empty() && matches!(kind, "s" | "S" | "s[]") {
+            if !rule.choices.is_empty()
+                && matches!(kind, "s" | "S" | "s[]")
+                && !(spec.name == "top" && rule.name == "rest")
+            {
                 for value in values {
                     if !has_parameter(value)
                         && let Some(choice) = value
@@ -3760,17 +3766,14 @@ pub fn regex_analysis(pattern: &str) -> std::result::Result<RegexAnalysis, (bool
             if self.xs.get(self.at) == Some(&'^') {
                 self.at += 1;
             }
-            let mut count = 0;
+            let start = self.at;
             let mut prev = None;
             loop {
                 let Some(c) = self.xs.get(self.at).copied() else {
                     return self.err(false, "Unclosed regex character class.");
                 };
                 self.at += 1;
-                if c == ']' {
-                    if count == 0 {
-                        return self.err(false, "Empty character class.");
-                    }
+                if c == ']' && self.at > start + 1 {
                     return Ok(());
                 }
                 let current = if c == '\\' {
@@ -3812,7 +3815,6 @@ pub fn regex_analysis(pattern: &str) -> std::result::Result<RegexAnalysis, (bool
                 } else {
                     prev = current;
                 }
-                count += 1;
             }
         }
         fn group(&mut self, inside: bool) -> std::result::Result<Facts, (bool, String)> {

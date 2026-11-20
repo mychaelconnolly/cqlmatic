@@ -251,12 +251,8 @@ fn calendar_functions_cover_defaults_options_and_scalar_assignments() {
         );
         args.retain(|argument| argument["name"] != "as");
         ready(generate(&function, args, true));
-        if *name == "dayOfWeek" {
-            assert_eq!(check(&format!("{function}()")).outcome, Outcome::Invalid);
-        } else {
-            ready(check(&format!("{function}()")));
-            ready(generate(&function, vec![], true));
-        }
+        ready(check(&format!("{function}()")));
+        ready(generate(&function, vec![], true));
         assert_eq!(
             catalog::function(&function)
                 .unwrap()
