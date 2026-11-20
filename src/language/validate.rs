@@ -599,9 +599,15 @@ impl Checker<'_> {
                     self.info(code, message, call);
                 }
             }
-            if !self.fixed_time_noted && fixed_time_comparison(step) {
+            // Only a cutoff on the main query's own stages moves to the request without changing
+            // the answer, and setTimeInterval overrides the request's window.
+            if self.nesting == 1
+                && !self.time_interval_seen
+                && !self.fixed_time_noted
+                && fixed_time_comparison(step)
+            {
                 self.fixed_time_noted = true;
-                self.info("CQL_ABSOLUTE_TIME_FILTER", "@timestamp is compared with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.", None);
+                self.info("CQL_ABSOLUTE_TIME_FILTER", "A top-level filter compares @timestamp with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.", None);
             }
             match step {
                 Step::Filter(f) => {
@@ -3785,7 +3791,8 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
     None
 }
 
-/// Whether a filter or `test()` stage compares @timestamp by order with a number.
+/// Whether a filter or `test()` stage removes every event outside a fixed time: it compares
+/// @timestamp by order with a number, on its own or joined to the rest of the filter by AND.
 fn fixed_time_comparison(step: &Step) -> bool {
     fn ordered(op: &str) -> bool {
         matches!(op, "<" | "<=" | ">" | ">=")
@@ -3794,21 +3801,15 @@ fn fixed_time_comparison(step: &Step) -> bool {
         matches!(value, Value::Word(field) if field == "@timestamp")
     }
     fn number(value: &Value) -> bool {
-        matches!(value, Value::Number(_))
+        numeric_literal(value).is_some()
             || matches!(value, Value::String(text) if text.parse::<serde_json::Number>().is_ok())
     }
-    fn compared(value: &Value) -> bool {
-        match value {
-            Value::Binary { left, op, right } if ordered(op) => {
-                timestamp(left) && number(right) || number(left) && timestamp(right)
-            }
-            Value::Binary { left, right, .. } => compared(left) || compared(right),
-            Value::Unary { value, .. } => compared(value),
-            _ => false,
-        }
-    }
     fn tested(call: &Call) -> bool {
-        call.name.eq_ignore_ascii_case("test") && call.args.iter().any(|a| compared(&a.value))
+        call.name.eq_ignore_ascii_case("test")
+            && call.args.iter().any(|a| {
+                matches!(&a.value, Value::Binary { left, op, right } if ordered(op)
+                    && (timestamp(left) && number(right) || number(left) && timestamp(right)))
+            })
     }
     fn filtered(filter: &Filter) -> bool {
         match filter {
@@ -3817,8 +3818,7 @@ fn fixed_time_comparison(step: &Step) -> bool {
                 op,
                 value: Pattern::Text(text),
             } => field == "@timestamp" && ordered(op) && text.parse::<serde_json::Number>().is_ok(),
-            Filter::And(filters) | Filter::Or(filters) => filters.iter().any(filtered),
-            Filter::Not(filter) => filtered(filter),
+            Filter::And(filters) => filters.iter().any(filtered),
             Filter::Call(call) => tested(call),
             _ => false,
         }

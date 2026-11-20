@@ -47,11 +47,7 @@ fn a_fixed_time_comparison_of_timestamp_gets_one_informational_note() {
         "kind=a | @timestamp >= -86400000",
         "kind=a | test(@timestamp >= -86400000)",
     ] {
-        assert_eq!(
-            notes(&ready(query)),
-            [(MESSAGE, Severity::Info)],
-            "{query}"
-        );
+        assert_eq!(notes(&ready(query)), [(MESSAGE, Severity::Info)], "{query}");
     }
 }
 
@@ -105,9 +101,11 @@ fn generate_keeps_the_plan_comparison_and_adds_the_note() {
         )
     );
     assert_eq!(notes(&result), [(MESSAGE, Severity::Info)]);
-    let signed = generate(json!([{"op":"call","function":"test","args":[{"value":{"kind":"compare",
+    let signed = generate(
+        json!([{"op":"call","function":"test","args":[{"value":{"kind":"compare",
         "left":{"kind":"field","name":"@timestamp"},"operator":"ge",
-        "right":{"kind":"unary","operator":"negative","value":{"kind":"literal","value":86400000}}}}]}]));
+        "right":{"kind":"unary","operator":"negative","value":{"kind":"literal","value":86400000}}}}]}]),
+    );
     assert_eq!(notes(&signed), [(MESSAGE, Severity::Info)]);
     let either = generate(json!([{"op":"any","items":[
         {"op":"eq","field":"kind","value":"alert"},
