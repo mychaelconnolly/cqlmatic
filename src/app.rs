@@ -513,8 +513,8 @@ fn finish(
     let report = language::validate::validate(pipeline, query);
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
-    let unmapped;
-    (result.grounding, unmapped) = ground(pipeline, context, pack, evidence);
+    let (dropped, unmapped);
+    (result.grounding, dropped, unmapped) = ground(pipeline, context, pack, evidence);
     let capability_evidence = evidence.and_then(|e| e.capabilities).filter(|e| {
         report.status == Acceptance::Accepted
             && evidence.is_some_and(|outer| outer.environment == e.environment)
@@ -598,7 +598,20 @@ fn finish(
             });
         }
     }
-    // Strict mode reports what the map lacks through grounding.missing, so ground() returns none.
+    // Strict mode reports both through grounding.missing, so ground() returns them empty there.
+    for field in dropped {
+        // The projection check names a read of a field a projection or aggregate left out.
+        if !result
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_DROPPED_FIELD" && d.message.starts_with(&format!("'{field}' ")))
+        {
+            result.diagnostics.push(Diagnostic::warning(
+                "CQL_DROPPED_FIELD",
+                format!("'{field}' is not available here; an earlier step removed it."),
+            ));
+        }
+    }
     result.diagnostics.extend(unmapped);
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
@@ -619,6 +632,8 @@ struct Requirement {
     relaxed_type: bool,
     relaxed_event: bool,
     unavailable: bool,
+    // An earlier drop, rename or split removed the field; projections are the validator's.
+    removed: bool,
 }
 impl Requirement {
     fn is_direct_deployment_input(&self) -> bool {
@@ -711,10 +726,13 @@ impl Flow {
             }))
             && !self.produces(field)
     }
-    fn absent(&self, field: &str) -> bool {
+    fn was_removed(&self, field: &str) -> bool {
         self.removed.iter().any(|removed| {
             removed == field || removed.contains("[]") && array_element(field, removed)
         }) && !self.produces(field)
+    }
+    fn absent(&self, field: &str) -> bool {
+        self.was_removed(field)
             || !self.unverified(field)
                 && self.available.as_ref().is_some_and(|fields| {
                     !fields.contains(field)
@@ -1111,6 +1129,7 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
             relaxed_type: state.relaxed_type,
             relaxed_event: state.relaxed_event,
             unavailable,
+            removed: false,
         });
         return;
     }
@@ -1132,6 +1151,7 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: state.absent(field),
+        removed: state.was_removed(field),
     });
 }
 fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
@@ -1147,6 +1167,7 @@ fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: state.array_absent(&field),
+        removed: false,
         field,
     });
 }
@@ -1164,6 +1185,7 @@ fn add_unknown(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: false,
+        removed: false,
     });
 }
 fn expression_fields(v: &Value, state: &Flow, out: &mut GroundingScan<'_>) {
@@ -2710,7 +2732,7 @@ fn ground(
     context: &Context,
     pack: Option<&Pack>,
     evidence: Option<GroundingEvidence<'_>>,
-) -> (Grounding, Vec<Diagnostic>) {
+) -> (Grounding, BTreeSet<String>, Vec<Diagnostic>) {
     let mut g = Grounding {
         policy: context.into(),
         ..Grounding::default()
@@ -2726,7 +2748,7 @@ fn ground(
         if p.validate().is_err() {
             g.conflicting
                 .push("Pack integrity or version validation failed.".into());
-            return (g, Vec::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
         if context
             .environment
@@ -2735,7 +2757,7 @@ fn ground(
         {
             g.conflicting
                 .push("Cloud, tenant or searchable target conflicts with selected pack.".into());
-            return (g, Vec::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
     }
     let mut kind_packs = pack.into_iter().collect::<Vec<_>>();
@@ -2749,7 +2771,7 @@ fn ground(
         {
             g.conflicting
                 .push("Query evidence conflicts with the selected environment identity.".into());
-            return (g, Vec::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
         if evidence.query_observations.len() > 1000
             || evidence.captured_observations.len() > 1000
@@ -2764,13 +2786,13 @@ fn ground(
         {
             g.conflicting
                 .push("Query observation integrity, identity or budget validation failed.".into());
-            return (g, Vec::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
         if let Some(active) = evidence.active_pack {
             if active.validate().is_err() || &active.environment != evidence.environment {
                 g.conflicting
                     .push("Active pack integrity or environment validation failed.".into());
-                return (g, Vec::new());
+                return (g, BTreeSet::new(), Vec::new());
             }
             if !kind_packs
                 .iter()
@@ -2786,9 +2808,9 @@ fn ground(
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
     let mut query_observed = false;
-    // Lenient warnings: selections that no mapped source can match, and fields that no
-    // selected source lists, keyed by the selected sources' labels. Strict mode reports gaps
-    // through grounding.missing, so it builds none of this.
+    // Lenient warnings: reads of removed fields, selections that no mapped source can match,
+    // and fields that no selected source lists, keyed by the selected sources' labels. Strict
+    // mode reports gaps through grounding.missing, so it builds none of this.
     let lenient = !context.require_observed;
     let pack_sources: Vec<_> = pack
         .filter(|_| lenient)
@@ -2825,6 +2847,7 @@ fn ground(
             .any(|s| selector(s, repo).is_none())
     };
     let view = primary_target.as_deref();
+    let mut dropped = BTreeSet::new();
     let mut unmapped_selections = BTreeSet::new();
     let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
     let mut measured_absent = BTreeMap::<(String, Option<String>), BTreeSet<String>>::new();
@@ -2855,6 +2878,8 @@ fn ground(
             if context.require_observed {
                 g.missing
                     .push(format!("{key}: not exported by preceding query."));
+            } else if r.removed {
+                dropped.insert(r.field.clone());
             }
             continue;
         }
@@ -3233,7 +3258,7 @@ fn ground(
     g.missing.dedup();
     g.stale.sort();
     g.stale.dedup();
-    (g, unmapped)
+    (g, dropped, unmapped)
 }
 
 /// A map field counts as listed unless the map measured it, did not observe it, and holds no
