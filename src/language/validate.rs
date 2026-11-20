@@ -641,9 +641,11 @@ impl Checker<'_> {
                             if let Some(writes) = catalog::output_writes(&call) {
                                 fields.extend(writes.fields);
                             }
-                            for (old, new) in catalog::rename_bindings(&args) {
-                                fields.remove(old);
-                                fields.insert(new.into());
+                            if call.name.eq_ignore_ascii_case("rename") {
+                                for (old, new) in catalog::rename_bindings(&args) {
+                                    fields.remove(old);
+                                    fields.insert(new.into());
+                                }
                             }
                         }
                     } else if let Some(call) = catalog::assigned_aggregate(value) {
@@ -1977,7 +1979,8 @@ impl Checker<'_> {
                 let complex = matches!(
                     value,
                     Value::Call(_) | Value::Binary { .. } | Value::Unary { .. }
-                ) && !matches!(value, Value::Call(call) if call.name.eq_ignore_ascii_case("formatTime"));
+                ) && !(kind == "f"
+                    && matches!(value, Value::Call(call) if call.name.eq_ignore_ascii_case("formatTime")));
                 let emit = if complex {
                     Self::unsupported
                 } else {

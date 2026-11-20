@@ -1,1 +1,1 @@
-- Accept assignment aliases in aggregate function lists. Require an output field for `formatTime` inside `eval`.
+- Accept assignment aliases in aggregate function lists. Require `as` for `formatTime` unless a direct `name := formatTime(...)` assignment supplies the output field.

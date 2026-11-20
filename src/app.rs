@@ -2043,6 +2043,8 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
             }
             Step::Assign { field, value } => {
                 if let Some(call) = crate::catalog::aliased_call(field, value) {
+                    let definite = call.name.eq_ignore_ascii_case("formatTime")
+                        && state.definite.contains(field);
                     state = scan_pipeline(
                         &Pipeline {
                             advisories: vec![],
@@ -2051,6 +2053,9 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                         state,
                         out,
                     );
+                    if definite {
+                        write(&mut state, field.clone(), true);
+                    }
                     continue;
                 }
                 expression_fields(value, &state, out);

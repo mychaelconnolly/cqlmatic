@@ -78,6 +78,11 @@ fn format_time_requires_an_output_field() {
     for (query, code) in [
         (r#"eval(hour=formatTime("%H"))"#, "CQL_ARGUMENT_REQUIRED"),
         (r#"formatTime("%H")"#, "CQL_ARGUMENT_REQUIRED"),
+        (r#"test(formatTime("%H") == "01")"#, "CQL_ARGUMENT_REQUIRED"),
+        (
+            r#"label := if(score == 1, then=formatTime("%H"), else="unknown")"#,
+            "CQL_ARGUMENT_REQUIRED",
+        ),
         (
             r#"eval(hour=formatTime("%H") + "h")"#,
             "CQL_ARGUMENT_REQUIRED",

@@ -206,6 +206,9 @@ impl Parser<'_> {
         if self.rest().starts_with('"') {
             return self.string();
         }
+        self.unquoted_identifier()
+    }
+    fn unquoted_identifier(&mut self) -> Result<String> {
         let start = self.pos;
         while let Some(c) = self.rest().chars().next() {
             if c.is_alphanumeric() || "_@#.".contains(c) {
@@ -239,6 +242,16 @@ impl Parser<'_> {
         } else {
             Ok(self.input[start..self.pos].into())
         }
+    }
+    fn check_assignment_target(&mut self, start: usize, field: &str) -> Result<()> {
+        if !self.input[start..].starts_with('"') && reserved_field_prefix(field) {
+            self.pos = start;
+            return self.fail(
+                "Quote assignment field names whose initial segment is NOT, AND or OR.",
+                true,
+            );
+        }
+        Ok(())
     }
     fn pipeline(&mut self) -> Result<Pipeline> {
         self.nested(|p| {
@@ -294,13 +307,7 @@ impl Parser<'_> {
         self.pos = start;
         if let Ok(name) = self.identifier() {
             if self.eat(":=") {
-                if !self.input[start..].starts_with('"') && reserved_field_prefix(&name) {
-                    self.pos = start;
-                    return self.fail(
-                        "Quote assignment field names whose initial segment is NOT, AND or OR.",
-                        true,
-                    );
-                }
+                self.check_assignment_target(start, &name)?;
                 return Ok(Step::Assign {
                     field: name,
                     value: self.expression(0)?,
@@ -684,6 +691,7 @@ impl Parser<'_> {
             let mut args = Vec::new();
             let mut positional = 0;
             if !p.eat(")") {
+                let spec = crate::catalog::function(&name);
                 loop {
                     let before = p.pos;
                     let mut argname = None;
@@ -700,14 +708,12 @@ impl Parser<'_> {
                     } else {
                         p.pos = before;
                     }
-                    p.space();
-                    let aggregate_list = p.rest().starts_with('[')
-                        && crate::catalog::function(&name).is_some_and(|spec| {
-                            argname
-                                .as_deref()
-                                .or_else(|| spec.positional.get(positional).copied())
-                                .is_some_and(|arg| spec.argument_kind(arg) == Some("g"))
-                        });
+                    let aggregate_argument = spec.is_some_and(|spec| {
+                        argname
+                            .as_deref()
+                            .or_else(|| spec.positional.get(positional).copied())
+                            .is_some_and(|arg| spec.argument_kind(arg) == Some("g"))
+                    });
                     let value = if name.eq_ignore_ascii_case("defineTable")
                         && argname.as_deref() == Some("include")
                         && p.eat("*")
@@ -722,7 +728,7 @@ impl Parser<'_> {
                             p.expression(0)?
                         }
                     } else {
-                        p.expression_with_aggregate_aliases(0, aggregate_list)?
+                        p.expression_with_aggregate_aliases(0, aggregate_argument)?
                     };
                     positional += usize::from(argname.is_none());
                     args.push(Arg {
@@ -858,7 +864,9 @@ impl Parser<'_> {
         if let Ok(alias) = self.identifier()
             && self.eat(":=")
         {
-            let name = self.identifier();
+            self.check_assignment_target(start, &alias)?;
+            self.saved_call()?;
+            let name = self.unquoted_identifier();
             self.space();
             if let Ok(name) = name
                 && self.rest().starts_with('(')
@@ -884,7 +892,7 @@ impl Parser<'_> {
     fn expression_with_aggregate_aliases(
         &mut self,
         min: u8,
-        aggregate_list: bool,
+        aggregate_argument: bool,
     ) -> Result<Value> {
         self.nested(|p| {
             p.saved_call()?;
@@ -914,7 +922,7 @@ impl Parser<'_> {
                 let mut xs = Vec::new();
                 if !p.eat("]") {
                     loop {
-                        xs.push(if aggregate_list {
+                        xs.push(if aggregate_argument {
                             p.aggregate_list_item()?
                         } else {
                             p.expression(0)?
@@ -951,8 +959,8 @@ impl Parser<'_> {
             } else {
                 p.space();
                 let before = p.pos;
-                let word = p.identifier()?;
-                if p.eat(":=") {
+                let word = p.unquoted_identifier()?;
+                if aggregate_argument && p.eat(":=") {
                     return p.fail("Use ':=' aliases inside an aggregate function list.", false);
                 } else if p.eat(":") {
                     p.expect("{")?;
