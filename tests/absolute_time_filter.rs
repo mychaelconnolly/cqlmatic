@@ -35,24 +35,22 @@ fn notes(result: &Analysis) -> Vec<(&str, Severity)> {
 const MESSAGE: &str = "A top-level filter compares @timestamp with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.";
 
 #[test]
-fn a_fixed_time_comparison_of_timestamp_gets_one_informational_note() {
+fn a_fixed_time_comparison_in_the_leading_filter_gets_one_informational_note() {
     for query in [
         "@timestamp >= 1700000000000 @timestamp < 1700003600000 | count()",
         "@timestamp >= \"1700000000000\" | count()",
         "@timestamp >= 1700000000000 AND @timestamp < 1700003600000 | count()",
         "kind=a AND @timestamp >= 1700000000000 | count()",
-        "kind=a | test(@timestamp >= 1700000000000) | test(@timestamp < 1700003600000)",
-        "kind=a | test((@timestamp <= 1700003600000))",
-        "kind=a | test(1700000000000 < @timestamp)",
+        "#repo=example_repo kind=a | @timestamp > 1700000000000 | @timestamp <= 1700003600000 | count()",
         "kind=a | @timestamp >= -86400000",
-        "kind=a | test(@timestamp >= -86400000)",
+        "kind=a | @timestamp >= 1700000000000 | case { level=high | points := 3; * | points := 0 } | groupBy([user], function=sum(points, as=score), limit=max) | sort(score, limit=3)",
     ] {
         assert_eq!(notes(&ready(query)), [(MESSAGE, Severity::Info)], "{query}");
     }
 }
 
 #[test]
-fn a_comparison_that_does_not_bound_the_whole_search_gets_no_note() {
+fn a_comparison_outside_the_leading_filter_or_in_a_query_that_uses_the_window_gets_no_note() {
     for query in [
         "count()",
         "kind=a | test(@timestamp > now() - 3600000)",
@@ -60,10 +58,23 @@ fn a_comparison_that_does_not_bound_the_whole_search_gets_no_note() {
         "event_time >= 1700000000000 | count()",
         "@timestamp = 1700000000000 | count()",
         "kind=a OR @timestamp >= 1700000000000 | count()",
+        "kind=a !(@timestamp >= 1700000000000) | count()",
         "kind=a | !test(@timestamp >= 1700000000000)",
-        "kind=a | join({kind=b | @timestamp > 1700000000000}, field=[user], include=[host], max=10)",
+        "kind=a | test(@timestamp >= 1700000000000) | count()",
+        "sort(@timestamp, order=desc, limit=1) | @timestamp < 1700000000000",
+        "parseTimestamp(field=logged_at, format=millis) | @timestamp >= 1700000000000",
+        "kind=a | seen := 1 | @timestamp >= 1700000000000 | count()",
+        "kind=a | !cidr(ip, subnet=\"10.0.0.0/8\") | @timestamp >= 1700000000000 | count()",
         "kind=a | case { @timestamp >= 1700000000000 | recent := 1; * | recent := 0 }",
+        "kind=a | join({kind=b | @timestamp > 1700000000000}, field=[user], include=[host], max=10)",
+        "kind=a @timestamp >= 1700000000000 | join({kind=b}, field=[user], include=[host], max=10)",
+        "@timestamp >= 1700000000000 | correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, within=5m)",
+        "defineTable(query={kind=b}, name=\"t\", include=[user]) | @timestamp >= 1700000000000 | match(table=\"t\", field=user)",
         "setTimeInterval(start=\"7d\") | @timestamp >= 1700000000000 | count()",
+        "kind=a @timestamp >= 1700000000000 | timeChart(span=1h)",
+        "kind=a @timestamp >= 1700000000000 | bucket(buckets=10)",
+        "kind=a @timestamp >= 1700000000000 | start() | count()",
+        "kind=a @timestamp >= 1700000000000 | case { level=high | end(as=window_end); * } | count()",
     ] {
         let result = ready(query);
         assert!(
@@ -101,15 +112,16 @@ fn generate_keeps_the_plan_comparison_and_adds_the_note() {
         )
     );
     assert_eq!(notes(&result), [(MESSAGE, Severity::Info)]);
-    let signed = generate(
+    for filters in [
         json!([{"op":"call","function":"test","args":[{"value":{"kind":"compare",
         "left":{"kind":"field","name":"@timestamp"},"operator":"ge",
-        "right":{"kind":"unary","operator":"negative","value":{"kind":"literal","value":86400000}}}}]}]),
-    );
-    assert_eq!(notes(&signed), [(MESSAGE, Severity::Info)]);
-    let either = generate(json!([{"op":"any","items":[
-        {"op":"eq","field":"kind","value":"alert"},
-        {"op":"compare","field":"@timestamp","operator":"ge","value":1700000000000_i64}
-    ]}]));
-    assert!(notes(&either).is_empty(), "{:?}", either.diagnostics);
+        "right":{"kind":"literal","value":1700000000000_i64}}}]}]),
+        json!([{"op":"any","items":[
+            {"op":"eq","field":"kind","value":"alert"},
+            {"op":"compare","field":"@timestamp","operator":"ge","value":1700000000000_i64}
+        ]}]),
+    ] {
+        let result = generate(filters);
+        assert!(notes(&result).is_empty(), "{:?}", result.diagnostics);
+    }
 }
