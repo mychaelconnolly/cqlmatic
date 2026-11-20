@@ -42,6 +42,92 @@ fn unsupported(query: &str, code: &str) {
 }
 
 #[test]
+fn check_accepts_valid_shapes() {
+    let mut failures = Vec::new();
+    for query in [
+        r#"select(category, "quantity", status) | groupBy([category, quantity, status])"#,
+        "/[]z]/",
+        "/^[^]]+$/",
+        r#"sample(percentage="75")"#,
+        r#"percentile(quantity, percentiles=["50", 75]) | table([_50, _75])"#,
+        "xml:prettyPrint()",
+        "time:dayOfWeek()",
+        r##"default(field=["#category", quantity], value="unknown") | groupBy(["#category", quantity])"##,
+        r##"default(field="#category", value="unknown", replaceEmpty=false)"##,
+        "top(category, limit=1, rest=remainder)",
+        r#"top(category, limit=1, rest="remaining values")"#,
+        "top(category, rest=0)",
+        "[smallest := min(quantity), largest := max(quantity)] | select(smallest, largest)",
+    ] {
+        let result = check(query);
+        if result.outcome != Outcome::Ready {
+            failures.push(format!(
+                "{query}: {:?}",
+                result
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == Severity::Error)
+                    .map(|d| d.code.as_str())
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn check_rejects_near_misses_of_valid_shapes() {
+    for (query, code) in [
+        ("select()", "CQL_ARGUMENT_REQUIRED"),
+        ("select(fields=category,quantity)", "CQL_DUPLICATE_ARGUMENT"),
+        (
+            "select(fields=category,fields=quantity)",
+            "CQL_DUPLICATE_ARGUMENT",
+        ),
+        ("/[]/", "CQL_REGEX_SYNTAX"),
+        ("/[^]/", "CQL_REGEX_SYNTAX"),
+        ("/[z-a]/", "CQL_REGEX_SYNTAX"),
+        (r#"sample(percentage="many")"#, "CQL_ARGUMENT_TYPE"),
+        (
+            r#"percentile(quantity, percentiles=["NaN"])"#,
+            "CQL_ARGUMENT_TYPE",
+        ),
+        ("[smallest := quantity]", "CQL_SYNTAX"),
+        ("[smallest := lower(quantity)]", "CQL_AGGREGATE_REQUIRED"),
+        ("top(rest=remainder)", "CQL_ARGUMENT_REQUIRED"),
+        ("setField(value=1)", "CQL_ARGUMENT_REQUIRED"),
+        (
+            r#"objectArray:eval("items[]", function={out:=1})"#,
+            "CQL_ARGUMENT_REQUIRED",
+        ),
+        (
+            r##"default(field="#category", value="unknown", replaceEmpty=true)"##,
+            "CQL_OUTPUT_FIELD",
+        ),
+    ] {
+        invalid(query, code);
+    }
+}
+
+#[test]
+fn required_arguments_do_not_have_usable_documented_defaults() {
+    let mut conflicts = Vec::new();
+    for function in catalog::FUNCTIONS {
+        for rule in catalog::parameter_rules(function.name) {
+            if rule.default.is_some() && function.required.contains(&rule.name.as_str()) {
+                conflicts.push((function.name, rule.name.as_str()));
+            }
+        }
+    }
+    conflicts.sort_unstable();
+    // Both reference tables mark these parameters required. Omitting either is rejected.
+    assert_eq!(
+        conflicts,
+        [("objectArray:eval", "asArray"), ("setField", "target")]
+    );
+}
+
+#[test]
 fn function_arguments_require_calls_including_inside_arrays() {
     for query in [
         "x=1 | stats(count)",
