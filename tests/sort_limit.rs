@@ -25,7 +25,7 @@ fn check(query: &str) -> Analysis {
 }
 
 #[test]
-fn generate_uses_head_limit_for_adjacent_typed_sort() {
+fn generate_keeps_the_default_sort_limit_below_a_larger_head() {
     let result = generate(json!([
         {"op": "sort", "fields": ["score", "host"], "order": "asc", "type": "string"},
         {"op": "head", "limit": 300},
