@@ -165,6 +165,40 @@ The command writes `cqlmatic-companion/SKILL.md` and, under `cqlmatic-companion/
 
 Installing the skill makes no network call, changes no client configuration and grants no search authorization. Start a new agent session, or use the client's skill reload command, so the client reads it.
 
+## Check each search before it runs
+
+In Claude Code and Codex, CQLmatic can check every NG-SIEM search the agent makes before the client runs it, whether or not the agent used CQLmatic for the query. Close the client, then install the hooks for the CrowdStrike MCP server:
+
+```sh
+cqlmatic env capture --client claude-code --server SERVER --install
+```
+
+Use `--client codex` for Codex, and spell `SERVER` as in the [capture hook table](INVENTORY.md#scrappy-mode-capture-the-agents-searches). The command writes two entries into the client's settings that run the same command: the capture hook after each search, and the guard before it. Codex asks you to review and trust the new hooks with `/hooks`.
+
+The guard checks the call's `query_string` and answers the client:
+
+| Check finds | The client | The agent sees |
+| --- | --- | --- |
+| One of the errors listed below | Refuses the search | A reason that begins `CQLmatic check rejected this query, so the search did not run.` and lists check's errors |
+| Any other error or warning, or part of the query that check does not cover | Goes on with the call, including its own approval of it | A note that begins `CQLmatic check found the issues below and did not block this search. Wait for the tool result.` |
+| Nothing to report | Goes on with the call | Nothing |
+
+The guard refuses a search only for these errors: `CQL_ARGUMENT_RANGE`, `CQL_ARGUMENT_REQUIRED`, `CQL_ARGUMENT_UNKNOWN`, `CQL_ASSIGN_ALIAS`, `CQL_DUPLICATE_ARGUMENT`, `CQL_FUNCTION_FILTER_COMPOSITION`, `CQL_QUOTE` and `CQL_RESERVED_WORD`. Each diagnostic is one line, `- CODE at line L, column C: MESSAGE`, without the query. A refusal is kept within 20 lines and 2,000 characters, and a note within 200 lines and 8,000 characters; one that would be longer ends with `- and N more. Run cqlmatic check on the query to see all.`
+
+The guard uses the inventory's map only when the call's `repository` is the map's confirmed view, with `search-all` for a call that names none. Otherwise, or when the inventory cannot be read, it checks the query without a map, so map warnings drop out and refusals stay the same. It saves no query leads and writes no file.
+
+The registered command ends with exit status 0 and prints nothing when CQLmatic cannot answer: when the program is missing, when an older copy at that path rejects the arguments, or when the shell cannot parse a `--program` prefix. The client then goes on with the call as if no hook were registered. Claude Code's guard entry also sets `"onFailure": "continue"`, so a guard that fails or runs past its 5-second `timeout` lets the call go ahead there.
+
+Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer leaves exactly the chosen entries for this program, client, server and state, and keeps every other byte of the settings file. Its report gives each hook's result in `hooks`: `present`, `added`, `removed`, `absent`, or `manual` when the chosen state needs a change by hand. An entry that runs CQLmatic for the same server and state but differs from what this installation writes, because you edited it or because a copy of CQLmatic in another folder wrote it, is listed in `next_actions` with its command and left in place.
+
+```sh
+cqlmatic env capture --client claude-code --server SERVER --install --hooks capture
+```
+
+Close the client before you install, switch or remove the hooks: a settings change the client saves during the installation can be lost. Upgrading CQLmatic changes no settings, so run the install command again after an upgrade. It replaces the capture entry that 0.1.10 wrote for the same program, server and state, and adds the guard. Before you go back to an earlier release, remove both hooks with this release's `--hooks none`, then install with the earlier one.
+
+The client keeps one settings file. Each installation adds hooks for its server name there, so the hooks of two environments with the same server name all run on every search. To keep several environments apart on one machine, give each its own client profile, through `CLAUDE_CONFIG_DIR` for Claude Code or `CODEX_HOME` for Codex, and install into each profile with that environment's `--state`.
+
 ## Parser inventory is a separate connection
 
 CQLmatic's MCP search workflow does not retrieve the parser catalog. Create a Falcon API client with **NGSIEM Parsers: READ** for catalog and definition/template reads. Parser write permissions are unnecessary. This client supplements MCP scouting and field measurement.
