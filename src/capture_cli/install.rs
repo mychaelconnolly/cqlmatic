@@ -61,6 +61,9 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         config_path(client)?
     {
         let copilot = is_copilot(client);
+        // How a command that any copy of CQLmatic wrote for this client, server and state ends,
+        // whatever program it runs.
+        let mut endings = Vec::new();
         let (command, managed) = if copilot {
             // The Copilot clients read the same file and send the same payload, so they share
             // one entry. A second entry would run the capture twice for every search.
@@ -69,6 +72,9 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 .expect("A capture client has a name");
             let bash = command(args, shared.get_name(), Shell::Bash)?;
             let powershell = command(args, shared.get_name(), Shell::PowerShell)?;
+            for shell in [Shell::Bash, Shell::PowerShell] {
+                endings.push(arguments(args, shared.get_name(), shell)?);
+            }
             (
                 json!({"bash": bash, "powershell": powershell}),
                 vec![Managed {
@@ -84,6 +90,14 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             let direct = command(args, name.get_name(), shell)?;
             // Both events run the same command.
             let command = shell.fail_open(&direct);
+            // An earlier release ran the command as it is; this one wraps it.
+            let ending = arguments(args, name.get_name(), shell)?;
+            endings.push(format!(
+                "{}{}",
+                shell.escape(&ending),
+                shell.fail_open_parts().1
+            ));
+            endings.push(ending);
             let server = super::codex_server(client, &args.server);
             let matcher = matcher("mcp__", &server, "__.*");
             let mut entries = [
@@ -135,12 +149,10 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             .filter(|hook| hook.wanted)
             .map(|hook| hook.event)
             .collect();
-        // Another copy's entry names the same server and state, whatever program it runs.
-        let state = inventory_cli::state_path(args.state.clone())?;
-        let state = state.to_str().expect("A resolved state path is Unicode");
-        let server = super::codex_server(client, &args.server);
         let names_this_target = |command: &str| {
-            command.contains("env capture") && command.contains(&server) && command.contains(state)
+            endings
+                .iter()
+                .any(|ending| command.ends_with(ending.as_str()))
         };
 
         let destination = path
@@ -489,23 +501,31 @@ impl Shell {
 
     fn quote(self, text: &str) -> String {
         match self {
-            Self::Bash => format!("'{}'", text.replace('\'', "'\\''")),
             // The program splits its own command line, where backslashes before a quote
             // count as escapes, so those before the closing quote are doubled.
             Self::Cmd => {
                 let slashes = text.len() - text.trim_end_matches('\\').len();
                 format!("\"{text}{}\"", "\\".repeat(slashes))
             }
+            Self::Bash | Self::PowerShell => format!("'{}'", self.escape(text)),
+        }
+    }
+
+    /// `text` as it is written inside this shell's single quotes. `cmd.exe` has none, so for it
+    /// the text is unchanged.
+    fn escape(self, text: &str) -> String {
+        match self {
+            Self::Bash => text.replace('\'', "'\\''"),
+            Self::Cmd => text.to_owned(),
             Self::PowerShell => {
-                let mut quoted = String::from("'");
+                let mut escaped = String::new();
                 for c in text.chars() {
                     if "'\u{2018}\u{2019}\u{201a}\u{201b}".contains(c) {
-                        quoted.push(c);
+                        escaped.push(c);
                     }
-                    quoted.push(c);
+                    escaped.push(c);
                 }
-                quoted.push('\'');
-                quoted
+                escaped
             }
         }
     }
@@ -521,15 +541,31 @@ impl Shell {
     /// Runs `command` so that every failure, including one to start it, ends with exit status
     /// 0 and nothing printed: a client refuses the tool call on exit status 2.
     fn fail_open(self, command: &str) -> String {
+        let (before, after) = self.fail_open_parts();
+        format!("{before}{}{after}", self.escape(command))
+    }
+
+    /// What `fail_open` writes before and after the escaped command.
+    fn fail_open_parts(self) -> (String, &'static str) {
         match self {
             // The command reaches a second parser as data, so text it cannot parse fails there
-            // and not in the client's shell.
-            Self::Bash => format!("/bin/sh -c {} 2>/dev/null; exit 0", self.quote(command)),
-            Self::PowerShell => format!(
-                "try {{ Invoke-Expression {} 2>$null }} catch {{}}; exit 0",
-                self.quote(command)
+            // and not in the client's shell. The script around it always exits 0, so an option
+            // such as errexit in the client's shell has no failure to act on, and it prints the
+            // command's output only when the command succeeded.
+            Self::Bash => (
+                format!(
+                    "/bin/sh -c {} sh '",
+                    self.quote(
+                        r#"if out=$(/bin/sh -c "$1") && [ -n "$out" ]; then printf '%s\n' "$out"; fi; exit 0"#
+                    )
+                ),
+                "' 2>/dev/null; exit 0",
             ),
-            Self::Cmd => format!("{command} 2>nul & exit 0"),
+            Self::PowerShell => (
+                "try { Invoke-Expression '".into(),
+                "' 2>$null } catch {}; exit 0",
+            ),
+            Self::Cmd => (String::new(), " 2>nul & exit 0"),
         }
     }
 }
@@ -539,6 +575,12 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
         if program.trim().is_empty() || program.chars().any(char::is_control) {
             return Err(crate::input_error(
                 "--program must be non-empty and contain no control characters.",
+            ));
+        }
+        // cmd.exe would read the rest of the command line as part of the quoted text.
+        if matches!(shell, Shell::Cmd) && program.matches('"').count() % 2 == 1 {
+            return Err(crate::input_error(
+                "This client starts hooks with cmd.exe. --program has a double quote that is not closed.",
             ));
         }
         program.clone()
@@ -570,11 +612,16 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
             Shell::PowerShell => format!("& {}", shell.quote(text)),
         }
     };
+    Ok(program + &arguments(args, client, shell)?)
+}
+
+/// What follows the program in a hook command, from ` env capture` to the end. Every copy of
+/// CQLmatic writes the same text for the same client, server and state.
+fn arguments(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Diagnostic> {
     // One spelling per server, so installing under either leaves one entry.
     let server = super::codex_server(args.client, &args.server);
     cmd_text(shell, "server name", &server)?;
     let server = shell.argument("--server", &server);
-    let mut command = format!("{program} env capture --client {client} {server}");
     // The client may start the hook in another directory and with another environment, so
     // register the state this installation resolves, default or not.
     let state = inventory_cli::state_path(args.state.clone())?;
@@ -585,9 +632,8 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
     }
     let state = state.to_str().expect("A resolved state path is Unicode");
     cmd_text(shell, "state path", state)?;
-    command.push(' ');
-    command.push_str(&shell.argument("--state", state));
-    Ok(command)
+    let state = shell.argument("--state", state);
+    Ok(format!(" env capture --client {client} {server} {state}"))
 }
 
 /// `cmd.exe` expands `%NAME%` inside quotes and has no escape for a quote within them.
@@ -1001,8 +1047,14 @@ fn edit(
             Status::Absent
         };
         statuses.push(status);
+        // A wanted entry keeps its first copy; a copy after it would run the command again.
+        let mut keep_one = hook.wanted;
         output = remove(&output, hook.event, |entry| {
-            Some(entry) == legacy || !hook.wanted && *entry == hook.entry
+            if *entry == hook.entry {
+                !std::mem::replace(&mut keep_one, false)
+            } else {
+                Some(entry) == legacy
+            }
         });
     }
     for hook in additions {
@@ -1082,10 +1134,10 @@ fn offset(bytes: &[u8], raw: &RawValue) -> usize {
     raw.get().as_ptr().addr() - bytes.as_ptr().addr()
 }
 
-/// Deletes the entries of `hooks.EVENT` that `doomed` picks, each with one adjoining comma and
-/// the white space beside it, and keeps the rest. An array left without entries keeps its
-/// brackets.
-fn remove(bytes: &[u8], event: &str, doomed: impl Fn(&Value) -> bool) -> Vec<u8> {
+/// Deletes the entries of `hooks.EVENT` that `doomed` picks, in order, each with one adjoining
+/// comma and the white space beside it, and keeps the rest. An array left without entries keeps
+/// its brackets.
+fn remove(bytes: &[u8], event: &str, mut doomed: impl FnMut(&Value) -> bool) -> Vec<u8> {
     let Some(array) = raw_member(bytes, &["hooks", event]) else {
         return bytes.to_vec();
     };

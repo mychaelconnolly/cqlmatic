@@ -317,7 +317,11 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         // exit status 0 and no output; the command inside it is quoted once more for that.
         // Codex starts hooks with cmd.exe on Windows, which quotes with double quotes.
         let (before, quote, after) = match (client, cfg!(windows)) {
-            ("claude-code" | "codex", false) => ("/bin/sh -c '", r"'\''", "' 2>/dev/null; exit 0"),
+            ("claude-code" | "codex", false) => (
+                r#"/bin/sh -c 'if out=$(/bin/sh -c "$1") && [ -n "$out" ]; then printf '\''%s\n'\'' "$out"; fi; exit 0' sh '"#,
+                r"'\''",
+                "' 2>/dev/null; exit 0",
+            ),
             ("claude-code", true) => (
                 "try { Invoke-Expression '",
                 "''",
@@ -2567,7 +2571,7 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
             assert_eq!(
                 note(dir.ask(client, gateway, "third-party", INVALID)),
                 format!(
-                    "{REJECT_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'."
+                    "{REJECT_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'.\n- CQL_JOIN_COST at line 1, column 19: join scans both sides and caps subquery rows and matches. Verify the requested cardinality and completion."
                 )
             );
             assert_eq!(
@@ -2616,7 +2620,7 @@ fn guard_never_blocks_and_lists_errors_first() {
         for client in ["claude-code", "codex"] {
             let context = note(dir.ask(client, true, "third-party", query));
             assert!(
-                context.starts_with(&format!("{REJECT_HEADING}\n- {code} at line 1")),
+                context.starts_with(&format!("{REJECT_HEADING}\n- {code}")),
                 "{context}"
             );
         }

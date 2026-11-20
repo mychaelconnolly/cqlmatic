@@ -38,11 +38,7 @@ const UNREFERENCED_AFTER: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Args)]
 pub struct CaptureArgs {
-    #[arg(
-        long,
-        value_enum,
-        help = "Client whose post-tool hook payload arrives on stdin"
-    )]
+    #[arg(long, value_enum, help = "Client whose hook payload arrives on stdin")]
     client: Client,
     #[arg(
         long,
@@ -56,12 +52,12 @@ pub struct CaptureArgs {
         help = "Workflow state; defaults to local cqlmatic/inventory/state.json"
     )]
     state: Option<PathBuf>,
-    #[arg(long, help = "Install or print the hook for the selected client")]
+    #[arg(long, help = "Install or print the hooks for the selected client")]
     install: bool,
     #[arg(
         long,
         requires = "install",
-        help = "Report the hook without writing files"
+        help = "Report the hooks without writing files"
     )]
     dry_run: bool,
     #[arg(
@@ -142,34 +138,14 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
 /// The hook event that runs before a tool call.
 const GUARD_EVENT: &str = "PreToolUse";
 
-/// Clients whose hook can stop a search before it runs.
+/// Clients whose hook runs before a search and can add a note the agent reads.
 fn guards(client: Client) -> bool {
     matches!(client, Client::ClaudeCode | Client::Codex)
 }
 
-/// Errors the guard blocks a search on. Check reports other errors for some queries the search
-/// platform runs, so those reach the agent as a note and the search goes ahead.
-const BLOCKING: [&str; 8] = [
-    "CQL_ARGUMENT_RANGE",
-    "CQL_ARGUMENT_REQUIRED",
-    "CQL_ARGUMENT_UNKNOWN",
-    "CQL_ASSIGN_ALIAS",
-    "CQL_DUPLICATE_ARGUMENT",
-    "CQL_FUNCTION_FILTER_COMPOSITION",
-    "CQL_QUOTE",
-    "CQL_RESERVED_WORD",
-];
-
-/// What the guard tells the client about a search, with the diagnostic lines it gives.
-#[derive(Debug, PartialEq)]
-enum Decision {
-    Deny(Vec<String>),
-    Note(Vec<String>),
-    Silent,
-}
-
 /// Check's verdict on a search before it runs, as the client's answer. `None` lets the search
-/// run with nothing said, which is also the answer to anything that is not a search.
+/// run with nothing said, which is also the answer to anything that is not a search. No answer
+/// makes a permission decision, so the search always goes ahead as the client would run it.
 fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
     let call = call(hook, &args.server, args.client)?;
     let arguments = search_arguments(&call)?;
@@ -178,76 +154,46 @@ fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
         .as_str()
         .unwrap_or(DEFAULT_REPOSITORY);
     let state = inventory_cli::state_path(args.state.clone()).ok();
-    answer(decide(&crate::guard_check(
-        query,
-        state.as_deref(),
-        repository,
-    )))
+    note(&crate::guard_check(query, state.as_deref(), repository)).map(answer)
 }
 
-fn decide(analysis: &Analysis) -> Decision {
-    let lines = |severity: Severity| {
-        analysis
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == severity)
-            .map(|d| {
-                let message = d.message.replace(['\r', '\n'], " ");
-                match &d.span {
-                    Some(span) => format!(
-                        "- {} at line {}, column {}: {message}",
-                        d.code, span.line, span.column
-                    ),
-                    None => format!("- {}: {message}", d.code),
-                }
-            })
-            .collect::<Vec<_>>()
-    };
-    let blocked = analysis.outcome == Outcome::Invalid
-        && analysis
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == Severity::Error && BLOCKING.contains(&d.code.as_str()));
-    if analysis.outcome == Outcome::Error {
-        Decision::Silent
-    } else if blocked {
-        Decision::Deny(lines(Severity::Error))
-    } else {
-        let mut notes = lines(Severity::Error);
-        notes.extend(lines(Severity::Warning));
-        if notes.is_empty() {
-            Decision::Silent
-        } else {
-            Decision::Note(notes)
-        }
+/// Check's errors and then its warnings, under a heading that says whether check expects the
+/// platform to reject the query; nothing when there are none or check could not run.
+fn note(analysis: &Analysis) -> Option<String> {
+    let lines: Vec<_> = [Severity::Error, Severity::Warning]
+        .iter()
+        .flat_map(|severity| {
+            analysis
+                .diagnostics
+                .iter()
+                .filter(move |d| d.severity == *severity)
+        })
+        .map(|d| {
+            let message = d.message.replace(['\r', '\n'], " ");
+            match &d.span {
+                Some(span) => format!(
+                    "- {} at line {}, column {}: {message}",
+                    d.code, span.line, span.column
+                ),
+                None => format!("- {}: {message}", d.code),
+            }
+        })
+        .collect();
+    if analysis.outcome == Outcome::Error || lines.is_empty() {
+        return None;
     }
+    let heading = if analysis.outcome == Outcome::Invalid {
+        "CQLmatic check expects the search platform to reject this query, but did not block the search. Wait for the tool result. If the search failed, fix the errors below."
+    } else {
+        "CQLmatic check found the issues below and did not block this search. Wait for the tool result."
+    };
+    Some(fit(heading, lines, (200, 8_000)))
 }
 
 /// The client's answer as one line of JSON. Non-ASCII characters are escaped, so a shell that
 /// re-encodes the hook's output cannot change it.
-fn answer(decision: Decision) -> Option<String> {
-    let output = match decision {
-        Decision::Silent => return None,
-        // Claude Code shortens a longer reason to 2,000 characters or 20 lines.
-        Decision::Deny(lines) => json!({
-            "hookEventName": GUARD_EVENT,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": fit(
-                "CQLmatic check rejected this query, so the search did not run. Fix the errors below and search again.",
-                lines,
-                (20, 2_000),
-            ),
-        }),
-        // No permission decision, so the client's own approval of the call still applies.
-        Decision::Note(lines) => json!({
-            "hookEventName": GUARD_EVENT,
-            "additionalContext": fit(
-                "CQLmatic check found the issues below and did not block this search. Wait for the tool result.",
-                lines,
-                (200, 8_000),
-            ),
-        }),
-    };
+fn answer(context: String) -> String {
+    let output = json!({"hookEventName": GUARD_EVENT, "additionalContext": context});
     let mut text = String::new();
     for c in json!({ "hookSpecificOutput": output }).to_string().chars() {
         if c.is_ascii() {
@@ -258,11 +204,11 @@ fn answer(decision: Decision) -> Option<String> {
             }
         }
     }
-    Some(text)
+    text
 }
 
 /// The heading and as many lines as fit within `(lines, characters)`, counting a closing line
-/// that says how many were left out.
+/// that says how many were left out. Lines are left out from the end.
 fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize, usize)) -> String {
     let total = lines.len();
     let mut kept = lines;
