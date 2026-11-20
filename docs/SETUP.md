@@ -175,21 +175,21 @@ cqlmatic env capture --client claude-code --server SERVER --install
 
 Use `--client codex` for Codex, and spell `SERVER` as in the [capture hook table](INVENTORY.md#scrappy-mode-capture-the-agents-searches). The command writes two entries into the client's settings that run the same command: the capture hook after each search, and the guard before it. Codex asks you to review and trust the new hooks with `/hooks`.
 
-The guard checks the call's `query_string` and answers the client:
+The guard checks the call's `query_string` and tells the agent what check found. It never stops a search: no answer makes a permission decision, so the client goes on with the call as it would without the hook, including its own approval of it.
 
-| Check finds | The client | The agent sees |
-| --- | --- | --- |
-| One of the errors listed below | Refuses the search | A reason that begins `CQLmatic check rejected this query, so the search did not run.` and lists check's errors |
-| Any other error or warning, or part of the query that check does not cover | Goes on with the call, including its own approval of it | A note that begins `CQLmatic check found the issues below and did not block this search. Wait for the tool result.` |
-| Nothing to report | Goes on with the call | Nothing |
+| Check finds | The agent sees |
+| --- | --- |
+| The query is `invalid` | A note that begins `CQLmatic check expects the search platform to reject this query, but did not block the search.` and lists check's errors, then its warnings |
+| Any other error or warning, such as a part of the query that check does not cover | A note that begins `CQLmatic check found the issues below and did not block this search. Wait for the tool result.` |
+| Nothing to report | Nothing |
 
-The guard refuses a search only for these errors: `CQL_ARGUMENT_RANGE`, `CQL_ARGUMENT_REQUIRED`, `CQL_ARGUMENT_UNKNOWN`, `CQL_ASSIGN_ALIAS`, `CQL_DUPLICATE_ARGUMENT`, `CQL_FUNCTION_FILTER_COMPOSITION`, `CQL_QUOTE` and `CQL_RESERVED_WORD`. Each diagnostic is one line, `- CODE at line L, column C: MESSAGE`, without the query. A refusal is kept within 20 lines and 2,000 characters, and a note within 200 lines and 8,000 characters; one that would be longer ends with `- and N more. Run cqlmatic check on the query to see all.`
+Each diagnostic is one line, `- CODE at line L, column C: MESSAGE`, or `- CODE: MESSAGE` when check gives no position, without the query. Errors come before warnings. A note is kept within 200 lines and 8,000 characters. A longer note leaves out lines from the end, warnings before any error, and ends with `- and N more. Run cqlmatic check on the query to see all.`
 
-The guard uses the inventory's map only when the call's `repository` is the map's confirmed view, with `search-all` for a call that names none. Otherwise, or when the inventory cannot be read, it checks the query without a map, so map warnings drop out and refusals stay the same. It saves no query leads and writes no file.
+The guard uses the inventory's map only when the call's `repository` is the map's confirmed view, with `search-all` for a call that names none. Otherwise, or when the inventory cannot be read, it checks the query without a map, so map warnings drop out. It saves no query leads and writes no file.
 
-The registered command ends with exit status 0 and prints nothing when CQLmatic cannot answer: when the program is missing, when an older copy at that path rejects the arguments, or when the shell cannot parse a `--program` prefix. The client then goes on with the call as if no hook were registered. Claude Code's guard entry also sets `"onFailure": "continue"`, so a guard that fails or runs past its 5-second `timeout` lets the call go ahead there.
+The registered command ends with exit status 0 and prints nothing when CQLmatic cannot answer: when the program is missing, when an older copy at that path rejects the arguments, or when the shell cannot parse a `--program` prefix. On macOS and Linux it also prints nothing when a `--program` prefix prints a line and then fails to start its program, and a login shell that exits at the first failing command, such as zsh with `setopt ERR_EXIT` or bash with `set -e`, does not change the exit status. The client then goes on with the call as if no hook were registered. Claude Code's guard entry also sets `"onFailure": "continue"`, so a guard that fails or runs past its 5-second `timeout` lets the call go ahead there.
 
-Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer leaves exactly the chosen entries for this program, client, server and state, and keeps the rest of the settings file's content and formatting. Its report gives each hook's result in `hooks`: `present`, `added`, `removed`, `absent`, or `manual` when the chosen state needs a change by hand. An entry that runs CQLmatic for the same server and state but differs from what this installation writes, because you edited it or because a copy of CQLmatic in another folder wrote it, is listed in `next_actions` with its command and left in place.
+Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer leaves exactly the chosen entries for this program, client, server and state, and keeps the rest of the settings file's content and formatting. It keeps one copy of an entry that appears several times. Its report gives each hook's result in `hooks`: `present`, `added`, `removed`, `absent`, or `manual` when the chosen state needs a change by hand. An entry that runs the same command but differs from what this installation writes, and one that a copy of CQLmatic in another folder wrote for the same client, server and state, are listed in `next_actions` with their commands and left in place.
 
 ```sh
 cqlmatic env capture --client claude-code --server SERVER --install --hooks capture
