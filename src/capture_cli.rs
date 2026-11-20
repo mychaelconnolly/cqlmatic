@@ -1,22 +1,24 @@
-//! Records inventory evidence from a client's post-tool hook payload.
+//! Records inventory evidence from a client's post-tool hook payload, and checks a search
+//! before it runs when the payload is Claude Code's or Codex's pre-tool event.
 //!
 //! A hook's output and exit status can reach the model, so the recorder prints nothing and
 //! always exits 0. Each search it sees is counted by outcome in `tally.json`, in the
-//! `<state file>.captures` folder beside the state.
+//! `<state file>.captures` folder beside the state. The guard also exits 0; it answers with
+//! one line of JSON, or with nothing to let the search run unremarked.
 mod install;
 
 use crate::{inventory_cli, setup_cli};
 use clap::{Args, ValueEnum};
 use cqlmatic::{
     app,
-    contracts::{Diagnostic, EnvironmentId},
+    contracts::{Analysis, Diagnostic, EnvironmentId, Outcome, Severity},
     discovery,
     inventory::{InventoryAction, InventoryState, QueryObservation, QueryResultAssertion},
     mcp,
     setup::SEARCH_TOOL,
     storage,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -69,6 +71,22 @@ pub struct CaptureArgs {
         help = "Use this command prefix verbatim instead of the running executable"
     )]
     program: Option<String>,
+    #[arg(
+        long,
+        requires = "install",
+        value_enum,
+        value_delimiter = ',',
+        value_name = "LIST",
+        help = "Hooks to keep installed, comma-separated: capture, guard, or none to remove both; claude-code and codex default to capture,guard, other clients to capture"
+    )]
+    hooks: Vec<HookName>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum HookName {
+    Capture,
+    Guard,
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -108,14 +126,167 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
         .read_to_end(&mut payload)
         .is_ok()
         && payload.len() as u64 <= MAX_PAYLOAD_BYTES
+        && let Ok(hook) = serde_json::from_slice::<Value>(&payload)
     {
-        let _ = capture(&args, &payload);
+        if hook["hook_event_name"] == GUARD_EVENT && guards(args.client) {
+            if let Some(answer) = guard(&args, &hook) {
+                let _ = crate::line(&answer);
+            }
+        } else {
+            let _ = capture(&args, &hook);
+        }
     }
     Ok(0)
 }
 
-fn capture(args: &CaptureArgs, payload: &[u8]) -> Result<(), Diagnostic> {
-    match call(payload, &args.server, args.client) {
+/// The hook event that runs before a tool call.
+const GUARD_EVENT: &str = "PreToolUse";
+
+/// Clients whose hook can stop a search before it runs.
+fn guards(client: Client) -> bool {
+    matches!(client, Client::ClaudeCode | Client::Codex)
+}
+
+/// Errors the guard blocks a search on. Check reports other errors for some queries the search
+/// platform runs, so those reach the agent as a note and the search goes ahead.
+const BLOCKING: [&str; 8] = [
+    "CQL_ARGUMENT_RANGE",
+    "CQL_ARGUMENT_REQUIRED",
+    "CQL_ARGUMENT_UNKNOWN",
+    "CQL_ASSIGN_ALIAS",
+    "CQL_DUPLICATE_ARGUMENT",
+    "CQL_FUNCTION_FILTER_COMPOSITION",
+    "CQL_QUOTE",
+    "CQL_RESERVED_WORD",
+];
+
+/// What the guard tells the client about a search, with the diagnostic lines it gives.
+#[derive(Debug, PartialEq)]
+enum Decision {
+    Deny(Vec<String>),
+    Note(Vec<String>),
+    Silent,
+}
+
+/// Check's verdict on a search before it runs, as the client's answer. `None` lets the search
+/// run with nothing said, which is also the answer to anything that is not a search.
+fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
+    let call = call(hook, &args.server, args.client)?;
+    let arguments = search_arguments(&call)?;
+    let query = arguments["query_string"].as_str()?.to_owned();
+    let repository = arguments["repository"]
+        .as_str()
+        .unwrap_or(DEFAULT_REPOSITORY);
+    let state = inventory_cli::state_path(args.state.clone()).ok();
+    answer(decide(&crate::guard_check(
+        query,
+        state.as_deref(),
+        repository,
+    )))
+}
+
+fn decide(analysis: &Analysis) -> Decision {
+    let lines = |severity: Severity| {
+        analysis
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == severity)
+            .map(|d| {
+                let message = d.message.replace(['\r', '\n'], " ");
+                match &d.span {
+                    Some(span) => format!(
+                        "- {} at line {}, column {}: {message}",
+                        d.code, span.line, span.column
+                    ),
+                    None => format!("- {}: {message}", d.code),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let blocked = analysis.outcome == Outcome::Invalid
+        && analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && BLOCKING.contains(&d.code.as_str()));
+    if analysis.outcome == Outcome::Error {
+        Decision::Silent
+    } else if blocked {
+        Decision::Deny(lines(Severity::Error))
+    } else {
+        let mut notes = lines(Severity::Error);
+        notes.extend(lines(Severity::Warning));
+        if notes.is_empty() {
+            Decision::Silent
+        } else {
+            Decision::Note(notes)
+        }
+    }
+}
+
+/// The client's answer as one line of JSON. Non-ASCII characters are escaped, so a shell that
+/// re-encodes the hook's output cannot change it.
+fn answer(decision: Decision) -> Option<String> {
+    let output = match decision {
+        Decision::Silent => return None,
+        // Claude Code shortens a longer reason to 2,000 characters or 20 lines.
+        Decision::Deny(lines) => json!({
+            "hookEventName": GUARD_EVENT,
+            "permissionDecision": "deny",
+            "permissionDecisionReason": fit(
+                "CQLmatic check rejected this query, so the search did not run. Fix the errors below and search again.",
+                lines,
+                (20, 2_000),
+            ),
+        }),
+        // No permission decision, so the client's own approval of the call still applies.
+        Decision::Note(lines) => json!({
+            "hookEventName": GUARD_EVENT,
+            "additionalContext": fit(
+                "CQLmatic check found the issues below and did not block this search. Wait for the tool result.",
+                lines,
+                (200, 8_000),
+            ),
+        }),
+    };
+    let mut text = String::new();
+    for c in json!({ "hookSpecificOutput": output }).to_string().chars() {
+        if c.is_ascii() {
+            text.push(c);
+        } else {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                text.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    Some(text)
+}
+
+/// The heading and as many lines as fit within `(lines, characters)`, counting a closing line
+/// that says how many were left out.
+fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize, usize)) -> String {
+    let total = lines.len();
+    let mut kept = lines;
+    loop {
+        let mut text = vec![heading.to_owned()];
+        text.extend(kept.iter().cloned());
+        if kept.len() < total {
+            text.push(format!(
+                "- and {} more. Run cqlmatic check on the query to see all.",
+                total - kept.len()
+            ));
+        }
+        let joined = text.join("\n");
+        if kept.is_empty()
+            || text.len() <= most_lines && joined.encode_utf16().count() <= most_characters
+        {
+            return joined;
+        }
+        kept.pop();
+    }
+}
+
+fn capture(args: &CaptureArgs, hook: &Value) -> Result<(), Diagnostic> {
+    match call(hook, &args.server, args.client) {
         Some(call) => record(args.state.clone(), call),
         None => Ok(()),
     }
@@ -526,10 +697,9 @@ fn codex_server(client: Client, server: &str) -> String {
     }
 }
 
-fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
+fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
     let server = codex_server(client, server);
     let server = server.as_str();
-    let hook: Value = serde_json::from_slice(payload).ok()?;
     let text = |name: &str| hook[name].as_str();
     // Some clients hand over arguments or results as JSON text.
     let parsed = |value: &Value| match value {
@@ -644,13 +814,20 @@ fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
     })
 }
 
-fn search(call: Call) -> Option<Search> {
-    let arguments = match call.tool.as_str() {
-        SEARCH_TOOL => &call.arguments,
+/// The search tool's arguments, when the call is a search.
+fn search_arguments(call: &Call) -> Option<&Value> {
+    match call.tool.as_str() {
+        SEARCH_TOOL => Some(&call.arguments),
         // The hosted server runs its tools through one gateway tool.
-        "execute_tool" if call.arguments["name"] == SEARCH_TOOL => &call.arguments["arguments"],
-        _ => return None,
-    };
+        "execute_tool" if call.arguments["name"] == SEARCH_TOOL => {
+            Some(&call.arguments["arguments"])
+        }
+        _ => None,
+    }
+}
+
+fn search(call: Call) -> Option<Search> {
+    let arguments = search_arguments(&call)?;
     let text = |name: &str| arguments[name].as_str().map(str::to_owned);
     Some(Search {
         repository: text("repository").unwrap_or_else(|| DEFAULT_REPOSITORY.into()),

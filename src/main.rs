@@ -952,28 +952,9 @@ fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>
     };
     let capability_now = discovery::timestamp();
     let capability_context = request.context.execution_context_id.clone();
-    let evidence = quick.as_ref().map(|quick| app::GroundingEvidence {
-        environment: &quick
-            .state
-            .target
-            .as_ref()
-            .expect("confirmed target")
-            .environment,
-        active_pack: quick.active_pack.as_ref(),
-        query_observations: &quick.state.query_observations,
-        captured_observations: &quick.state.captured_observations,
-        capabilities: Some(cqlmatic::capability::CapabilityEvidence {
-            runs: &quick.state.capability_runs,
-            environment: &quick
-                .state
-                .target
-                .as_ref()
-                .expect("confirmed target")
-                .environment,
-            execution_context_id: capability_context.as_deref(),
-            now: &capability_now,
-        }),
-    });
+    let evidence = quick
+        .as_ref()
+        .map(|quick| check_evidence(quick, capability_context.as_deref(), &capability_now));
     let query = request.query.clone();
     let primary = pack.or_else(|| quick.as_ref().and_then(|quick| quick.active_pack.as_ref()));
     let result = app::check_with_evidence(request, primary, evidence);
@@ -987,6 +968,64 @@ fn analyze_check(mut request: CheckRequest, common: &Common, pack: Option<&Pack>
         notice,
         Some(query),
     )
+}
+
+fn check_evidence<'a>(
+    quick: &'a SavedInventory,
+    execution_context_id: Option<&'a str>,
+    now: &'a str,
+) -> app::GroundingEvidence<'a> {
+    let environment = &quick
+        .state
+        .target
+        .as_ref()
+        .expect("confirmed target")
+        .environment;
+    app::GroundingEvidence {
+        environment,
+        active_pack: quick.active_pack.as_ref(),
+        query_observations: &quick.state.query_observations,
+        captured_observations: &quick.state.captured_observations,
+        capabilities: Some(cqlmatic::capability::CapabilityEvidence {
+            runs: &quick.state.capability_runs,
+            environment,
+            execution_context_id,
+            now,
+        }),
+    }
+}
+
+/// The search guard's check. It saves nothing, and the inventory's map applies only when its
+/// target view is the searched repository; otherwise, or when the inventory cannot be used,
+/// the query is checked without a map.
+pub(crate) fn guard_check(query: String, state: Option<&Path>, repository: &str) -> Analysis {
+    let mut request = CheckRequest {
+        schema_version: 1,
+        id: None,
+        query,
+        context: Context::default(),
+    };
+    let quick = match state.map(|state| select_inventory(Some(state), &mut request.context, None)) {
+        Some(Ok((Some(quick), _)))
+            if quick
+                .state
+                .target
+                .as_ref()
+                .is_some_and(|target| target.environment.view == repository) =>
+        {
+            Some(quick)
+        }
+        _ => {
+            request.context = Context::default();
+            None
+        }
+    };
+    let now = discovery::timestamp();
+    let evidence = quick
+        .as_ref()
+        .map(|quick| check_evidence(quick, None, &now));
+    let primary = quick.as_ref().and_then(|quick| quick.active_pack.as_ref());
+    app::check_with_evidence(request, primary, evidence)
 }
 
 /// Bounded line reader drains oversized records before continuing to the next request.
