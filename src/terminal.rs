@@ -1,4 +1,20 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
+
+/// The longest line accepted at an interactive prompt, with room for a pasted list of field names.
+const MAX_PROMPT_BYTES: u64 = 1_048_576;
+
+/// Reads one line typed at a prompt, refusing a line longer than the limit.
+pub(crate) fn read_line(input: &mut impl BufRead, line: &mut String) -> io::Result<usize> {
+    #[expect(clippy::disallowed_methods, reason = "`take` limits this read")]
+    let read = input.by_ref().take(MAX_PROMPT_BYTES + 1).read_line(line)?;
+    if read as u64 > MAX_PROMPT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "The line exceeds the prompt limit.",
+        ));
+    }
+    Ok(read)
+}
 
 pub(crate) fn uses_color(terminal: bool, term: Option<&str>, no_color: bool) -> bool {
     // IsTerminal and TERM do not establish Windows console ANSI processing.
@@ -58,6 +74,35 @@ pub(crate) fn warning_stderr(message: &str) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_line_is_read_whole_or_refused_at_the_limit() {
+        let mut line = String::new();
+        let mut input = "yes\nnext\n".as_bytes();
+        assert_eq!(read_line(&mut input, &mut line).unwrap(), 4);
+        assert_eq!(line, "yes\n");
+        assert_eq!(input, b"next\n");
+        assert_eq!(read_line(&mut "".as_bytes(), &mut line).unwrap(), 0);
+
+        let limit = MAX_PROMPT_BYTES as usize;
+        for longest in [format!("{}\n", "a".repeat(limit - 1)), "a".repeat(limit)] {
+            line.clear();
+            assert_eq!(
+                read_line(&mut longest.as_bytes(), &mut line).unwrap(),
+                limit
+            );
+        }
+        assert_eq!(limit, 1_048_576);
+        let too_long = "a".repeat(limit + 10);
+        let mut input = too_long.as_bytes();
+        line.clear();
+        assert_eq!(
+            read_line(&mut input, &mut line).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // The read stops one byte past the limit and leaves the rest unread.
+        assert_eq!(input.len(), 9);
+    }
 
     #[test]
     fn warning_color_follows_its_own_stream_and_opt_out() {

@@ -23,6 +23,9 @@ SCHEMAS = ("generate", "check", "pack", "discovery", "result", "assess", "setup"
 CARGO = ["cargo", "+1.99.1"] if os.name == "nt" else [str(REPO / "dev")]
 WINDOWS_TARGET = "x86_64-pc-windows-msvc"
 CLIPPY = ["clippy", "--offline", "--locked", "--all-targets", "--", "-D", "warnings"]
+# clippy.toml lists reads with no size limit. Tests may use them, so they are denied for shipped code only.
+CLIPPY_SHIPPED = ["clippy", "--offline", "--locked", "--lib", "--bins", "--",
+                  "-D", "warnings", "-D", "clippy::disallowed_methods"]
 
 
 def execute(command, out, name, accepted=(0,), env=None):
@@ -148,10 +151,12 @@ def main():
             "assets": ([sys.executable, "tools/asset_metadata.py"], None),
             "fmt": ([*CARGO, "fmt", "--all", "--check"], None),
             "clippy": ([*CARGO, *CLIPPY], None),
+            "clippy-shipped": ([*CARGO, *CLIPPY_SHIPPED], None),
         }
         if os.name != "nt" and not args.no_windows_lint:
             env = windows_lint_environment()
-            commands["clippy-windows"] = ([*CARGO, CLIPPY[0], "--target", WINDOWS_TARGET, *CLIPPY[1:]], env)
+            for name, lint in (("clippy-windows", CLIPPY), ("clippy-windows-shipped", CLIPPY_SHIPPED)):
+                commands[name] = ([*CARGO, lint[0], "--target", WINDOWS_TARGET, *lint[1:]], env)
         commands.update({
             "test": ([*CARGO, "test", "--offline", "--locked", "--no-fail-fast"], None),
             "launcher": (["node", "--test", "npm/launcher.test.cjs"], None),
