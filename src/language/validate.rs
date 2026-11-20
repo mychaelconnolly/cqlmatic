@@ -885,14 +885,7 @@ impl Checker<'_> {
                                     true,
                                 );
                             }
-                            if !args.contains_key("max")
-                                && let Some(field) = args.get("include").and_then(|include| {
-                                    joined_comparison(
-                                        catalog::fields(include),
-                                        &p.steps[index + 1..],
-                                    )
-                                })
-                            {
+                            if let Some(field) = joined_comparison(&args, &p.steps[index + 1..]) {
                                 self.emit("CQL_JOIN_MAX", format!("join keeps one matching subquery row per key unless max is set, so the later comparison of {field} tests only that row. Set max to the largest number of matches one key can have."), Some(c), true);
                             }
                             projected = None;
@@ -3665,9 +3658,11 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
     }
 }
 
-/// The first field that a later filter or `test()` in `steps` compares by order and that holds
-/// a value from `joined`, directly or through an assignment.
-fn joined_comparison(mut joined: BTreeSet<String>, steps: &[Step]) -> Option<String> {
+/// For a join that keeps its default of one subquery row per key, the first field that a later
+/// filter or `test()` in `steps` compares by order and that holds an included value, directly or
+/// through an assignment. A subquery that ends grouped by some of the join keys already has one
+/// row per key.
+fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<String> {
     fn ordered(op: &str) -> bool {
         matches!(op, "<" | "<=" | ">" | ">=")
     }
@@ -3712,6 +3707,24 @@ fn joined_comparison(mut joined: BTreeSet<String>, steps: &[Step]) -> Option<Str
             _ => None,
         }
     }
+    let keys = catalog::fields(args.get("key").or(args.get("field"))?);
+    let grouped = match args.get("query") {
+        Some(Value::Query { pipeline, .. }) => match pipeline.steps.last() {
+            Some(Step::Call(call)) => catalog::resolve(call).is_some_and(|resolved| {
+                resolved.function.name == "groupBy"
+                    && resolved
+                        .arguments
+                        .get("field")
+                        .is_some_and(|fields| catalog::fields(fields).is_subset(&keys))
+            }),
+            _ => false,
+        },
+        _ => false,
+    };
+    if args.contains_key("max") || grouped {
+        return None;
+    }
+    let mut joined = catalog::fields(args.get("include")?);
     for step in steps {
         match step {
             Step::Assign { field, value } => {
