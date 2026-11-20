@@ -3659,9 +3659,9 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
 }
 
 /// For a join that keeps its default of one subquery row per key, the first field that a later
-/// filter or `test()` in `steps` compares by order and that holds an included value, directly or
-/// through an assignment. A subquery that ends grouped by some of the join keys already has one
-/// row per key.
+/// filter or `test()` in `steps` compares by order and that holds an included value other than a
+/// join key, directly, through `:=` or `eval`, or renamed. A subquery that returns one row, or ends
+/// in a `groupBy` on join keys with a one-row function and then only `select`, has nothing to drop.
 fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<String> {
     fn ordered(op: &str) -> bool {
         matches!(op, "<" | "<=" | ">" | ">=")
@@ -3707,45 +3707,83 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             _ => None,
         }
     }
+    fn assign(field: &str, value: &Value, joined: &mut BTreeSet<String>) {
+        if joined_word(value, joined).is_some() {
+            joined.insert(field.into());
+        } else {
+            joined.remove(field);
+        }
+    }
+    // A value stays joined until every path through a stage overwrites it.
+    fn written(step: &Step, joined: &mut BTreeSet<String>) {
+        let branches: Vec<&Pipeline> = match step {
+            Step::Assign { field, value } => return assign(field, value, joined),
+            Step::Call(call) => {
+                match catalog::resolve(call) {
+                    Some(resolved) if resolved.function.name == "eval" => {
+                        for (field, value) in &resolved.ordered {
+                            assign(field, value, joined);
+                        }
+                    }
+                    Some(resolved) if resolved.function.name == "rename" => {
+                        for (old, new) in catalog::rename_bindings(&resolved.arguments) {
+                            if joined.remove(old) {
+                                joined.insert(new.into());
+                            } else {
+                                joined.remove(new);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            Step::Case(branches) => branches.iter().collect(),
+            Step::Match { arms, .. } => arms.iter().map(|(_, branch)| branch).collect(),
+            _ => return,
+        };
+        let incoming = std::mem::take(joined);
+        for branch in branches {
+            let mut path = incoming.clone();
+            for step in &branch.steps {
+                written(step, &mut path);
+            }
+            joined.extend(path);
+        }
+    }
     let keys = catalog::fields(args.get("key").or(args.get("field"))?);
-    let grouped = match args.get("query") {
-        Some(Value::Query { pipeline, .. }) => match pipeline.steps.last() {
-            Some(Step::Call(call)) => catalog::resolve(call).is_some_and(|resolved| {
-                resolved.function.name == "groupBy"
-                    && resolved
-                        .arguments
-                        .get("field")
-                        .is_some_and(|fields| catalog::fields(fields).is_subset(&keys))
-            }),
-            _ => false,
-        },
+    let one_row = match args.get("query") {
+        Some(Value::Query { pipeline, .. }) => {
+            let last = pipeline.steps.iter().rev().find(
+                |step| !matches!(step, Step::Call(call) if call.name.eq_ignore_ascii_case("select")),
+            );
+            bounded_single(pipeline, false)
+                || matches!(last, Some(Step::Call(call)) if catalog::resolve(call).is_some_and(|resolved| {
+                    resolved.function.name == "groupBy"
+                        && resolved
+                            .arguments
+                            .get("field")
+                            .is_some_and(|fields| catalog::fields(fields).is_subset(&keys))
+                        && resolved.arguments.get("function").is_none_or(|f| single_aggregate(f))
+                }))
+        }
         _ => false,
     };
-    if args.contains_key("max") || grouped {
+    if args.contains_key("max") || one_row {
         return None;
     }
-    let mut joined = catalog::fields(args.get("include")?);
+    // Every match of a key carries the same key value, so comparing it cannot tell matches apart.
+    let mut joined = &catalog::fields(args.get("include")?) - &keys;
     for step in steps {
-        match step {
-            Step::Assign { field, value } => {
-                if joined_word(value, &joined).is_some() {
-                    joined.insert(field.clone());
-                } else {
-                    joined.remove(field);
-                }
-            }
-            Step::Filter(filter) => {
-                if let Some(field) = filtered(filter, &joined) {
-                    return Some(field.clone());
-                }
-            }
-            Step::Call(call) => {
-                if let Some(field) = tested(call, &joined) {
-                    return Some(field.clone());
-                }
-            }
-            _ => {}
+        let compared = match step {
+            Step::Filter(filter) => filtered(filter, &joined),
+            Step::Call(call) => tested(call, &joined),
+            _ => None,
+        };
+        if let Some(field) = compared {
+            return Some(field.clone());
         }
+        written(step, &mut joined);
     }
     None
 }
