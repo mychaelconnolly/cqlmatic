@@ -145,6 +145,14 @@ def main():
     else:
         out = Path(tempfile.mkdtemp(prefix="cqlmatic-checks-")).resolve()
     summary = {"platform": sys.platform, "gates": {}}
+    # In a target folder shared with another checkout, Cargo takes that checkout's results
+    # for this one and reports success without compiling. Give this checkout its own part.
+    metadata, _, _ = execute([*CARGO, "metadata", "--format-version=1", "--no-deps", "--offline", "--locked"],
+                             out, "metadata")
+    target = Path(json.loads(metadata)["target_directory"])
+    if REPO not in target.parents:
+        target = target / ("cqlmatic-" + hashlib.sha256(str(REPO).encode("utf-8")).hexdigest()[:16])
+    os.environ["CARGO_TARGET_DIR"] = str(target)
     if not args.smoke_only:
         python = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         commands = {
@@ -174,7 +182,6 @@ def main():
         args.binary = args.binary or Path(next(
             a["executable"] for a in artifacts
             if a.get("reason") == "compiler-artifact" and a.get("executable") and a["target"]["name"] == "cqlmatic"))
-    target = Path(os.environ.get("CARGO_TARGET_DIR", str(REPO / "target")))
     binary = (args.binary or target / "release" / ("cqlmatic.exe" if os.name == "nt" else "cqlmatic")).resolve()
     summary["binary_sha256"] = hashlib.sha256(binary.read_bytes()).hexdigest()
     execute([str(binary), "--version"], out, "version")
