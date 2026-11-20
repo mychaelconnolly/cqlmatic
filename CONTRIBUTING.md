@@ -39,6 +39,8 @@ Use Rust 1.99.1 and the checked-in lockfile. For first setup, run `./dev fetch -
 ./dev build --release --locked --offline
 ```
 
+Before pushing, run `python3 tools/local_checks.py`: it is the command the Ubuntu CI job runs, and on macOS and Linux it also lints the Windows build. See [development](docs/DEVELOPMENT.md).
+
 Add a focused regression for non-trivial behavior. Update affected public types, adapters, examples, schemas, coverage, and documentation together. Intentional schema changes follow [the development procedure](docs/DEVELOPMENT.md#contract-changes). Do not add a dependency or abstraction when existing code solves the problem.
 
 Pure modules stay pure. The CLI remains deterministic and offline for generation/checking. Network and filesystem behavior belongs at the existing boundaries. Preserve strict input validation, snapshot integrity, explicit source grounding, finite search budgets, and known-job cleanup.
