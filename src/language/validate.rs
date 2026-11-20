@@ -3661,8 +3661,9 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
 /// For a join that keeps its default of one subquery row per key, the first field that a later
 /// filter or `test()` in `steps` compares by order and that holds an included value other than a
 /// join key, directly or through a `:=` or `eval` expression. Any other stage ends the trace. A
-/// subquery that returns one row, or ends in a `groupBy` on exactly the join keys with a one-row
-/// function and then only `select`, has nothing to drop.
+/// subquery that returns one row, or ends in a `groupBy` on the join keys with a one-row function
+/// and then only `select`, has nothing to drop. The groupBy may leave out join keys that its
+/// function carries over with `include`.
 fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<String> {
     fn ordered(op: &str) -> bool {
         matches!(op, "<" | "<=" | ">" | ">=")
@@ -3715,6 +3716,17 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             joined.remove(field);
         }
     }
+    /// The fields a `selectFromMax` or `selectFromMin` in a groupBy function carries over.
+    fn included(function: &Value) -> BTreeSet<String> {
+        match function {
+            Value::Call(call) => catalog::resolve(call)
+                .filter(|r| matches!(r.function.name, "selectFromMax" | "selectFromMin"))
+                .and_then(|r| r.arguments.get("include").map(|v| catalog::fields(v)))
+                .unwrap_or_default(),
+            Value::Array(functions) => functions.iter().flat_map(included).collect(),
+            _ => BTreeSet::new(),
+        }
+    }
     let keys = catalog::fields(args.get("key").or(args.get("field"))?);
     let one_row = match args.get("query") {
         Some(Value::Query { pipeline, .. }) => {
@@ -3723,12 +3735,16 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             );
             bounded_single(pipeline, false)
                 || matches!(last, Some(Step::Call(call)) if catalog::resolve(call).is_some_and(|resolved| {
+                    let groups = resolved.arguments.get("field").map(|f| catalog::fields(f));
                     resolved.function.name == "groupBy"
-                        && resolved
-                            .arguments
-                            .get("field")
-                            .is_some_and(|fields| catalog::fields(fields) == keys)
-                        && resolved.arguments.get("function").is_none_or(|f| single_aggregate(f))
+                        && groups.as_ref().is_some_and(|groups| {
+                            let rest = &keys - groups;
+                            groups.is_subset(&keys)
+                                && match resolved.arguments.get("function") {
+                                    None => rest.is_empty(),
+                                    Some(f) => single_aggregate(f) && rest.is_subset(&included(f)),
+                                }
+                        })
                 }))
         }
         _ => false,
@@ -3748,7 +3764,14 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             return Some(field.clone());
         }
         match step {
-            Step::Filter(_) => {}
+            // A named capture overwrites its field.
+            Step::Filter(filter) => {
+                for pattern in positive_regexes(filter) {
+                    for capture in regex_captures(pattern) {
+                        joined.remove(&capture);
+                    }
+                }
+            }
             Step::Call(call) if call.name.eq_ignore_ascii_case("test") => {}
             // `x := f(...)` is the function f, so only an expression is followed as a copy.
             Step::Assign { field, value } if !matches!(value, Value::Call(_)) => {
