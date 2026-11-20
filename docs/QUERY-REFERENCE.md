@@ -104,6 +104,8 @@ A standalone exact distinct count first excludes missing values, then groups the
 
 Dedicated typed `sort`, `head` and `tail` stages require a JSON integer limit. Generic calls and raw CQL additionally accept the literal `max` for `sort`, `head`, `tail` and `table`; it uses the target's configurable `StateRowLimit`, whose documented default is 200,000. `top` and `collect` remain integer-only. A row cap does not prove complete input processing.
 
+When a typed `head` stage immediately follows a typed `sort` stage, `generate` emits one `sort` call with the limit from `head`. For handwritten top-N CQL, use `sort(score, order=desc, limit=3)`. `check` reports `CQL_SORT_HEAD` when `head` immediately follows `sort`.
+
 `join` stage exposes one field/key pair; generic `call` supports equal-length nonempty field/key arrays for multi-key joins. The generic form also exposes target/window arguments. A typed correlation query is `{"name":"LABEL","plan":PLAN}`; each link is `{"from":"LABEL","field":"FIELD","to":"OTHER","key":"FIELD"}`. Unknown/self links are rejected. For named-query include/anchors and correlation aggregation, use the generic typed `correlate` call.
 
 ## All nine recipes

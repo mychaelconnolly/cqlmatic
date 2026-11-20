@@ -1,0 +1,1 @@
+- Generate top-N queries with `sort(..., limit=N)` when a typed plan places `head(N)` immediately after `sort`. Warn with `CQL_SORT_HEAD` when checking CQL that puts `head` immediately after `sort`.

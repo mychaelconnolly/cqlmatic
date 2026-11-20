@@ -787,6 +787,17 @@ impl Checker<'_> {
                     }
                     let previous = std::mem::take(&mut self.fields);
                     let preamble = self.nesting == 1 && !has_input && self.definitions == 0;
+                    if spec.name == "head"
+                        && index > 0
+                        && matches!(&p.steps[index - 1], Step::Call(sort) if sort.name.eq_ignore_ascii_case("sort"))
+                    {
+                        self.emit(
+                            "CQL_SORT_HEAD",
+                            "head after sort can select a different set of rows from the first N in the sorted order. Use sort(..., limit=N) to select the first N rows in that order.",
+                            Some(c),
+                            true,
+                        );
+                    }
                     if spec.name == "tail"
                         && projected
                             .as_ref()

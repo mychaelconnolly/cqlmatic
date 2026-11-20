@@ -1,5 +1,5 @@
 use super::ast::{self, Arg, Call, Filter, Pattern, Pipeline, Step, Value};
-use crate::contracts::*;
+use crate::{catalog, contracts::*};
 use std::collections::BTreeSet;
 
 pub type Result<T> = std::result::Result<T, Diagnostic>;
@@ -604,7 +604,8 @@ fn lower_at(plan: &Plan, depth: usize) -> Result<Pipeline> {
     for f in &plan.filters {
         append_filter(&mut q, predicate(f, depth + 1)?)?;
     }
-    for (i, stage) in plan.steps.iter().enumerate() {
+    let mut stages = plan.steps.iter().enumerate().peekable();
+    while let Some((i, stage)) = stages.next() {
         let start = q.steps.len();
         let r: Result<()> = (|| {
             match stage {
@@ -759,6 +760,20 @@ fn lower_at(plan: &Plan, depth: usize) -> Result<Pipeline> {
                     for f in fields {
                         checked_field(f)?;
                     }
+                    let limit = match stages.peek() {
+                        Some((_, Stage::Head { limit: head_limit }))
+                            if *head_limit > 0
+                                && !catalog::parameter_rules("sort").iter().any(|rule| {
+                                    rule.name == "limit"
+                                        && rule.maximum.is_some_and(|max| f64::from(*limit) > max)
+                                }) =>
+                        {
+                            let limit = *head_limit;
+                            stages.next();
+                            limit
+                        }
+                        _ => *limit,
+                    };
                     q.steps.push(call(
                         "sort",
                         vec![

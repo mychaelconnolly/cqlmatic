@@ -56,6 +56,17 @@ fn generate_preserves_standalone_head_and_rejects_zero_limits() {
 }
 
 #[test]
+fn generate_checks_both_typed_limits_against_the_row_ceiling() {
+    for (sort, head) in [(200001, 3), (200, 200001)] {
+        let result = generate(json!([
+            {"op": "sort", "fields": ["score"], "limit": sort},
+            {"op": "head", "limit": head}
+        ]));
+        assert_eq!(result.outcome, Outcome::Invalid, "{:?}", result.diagnostics);
+    }
+}
+
+#[test]
 fn check_warns_on_sort_followed_by_head() {
     for query in [
         "sort(score, order=desc) | head(3)",
