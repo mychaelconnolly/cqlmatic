@@ -2822,18 +2822,8 @@ fn ground(
         .iter()
         .filter(|source| source.selectors.is_some())
         .collect();
-    let mut fields_by_source = BTreeMap::<String, Vec<environment::LegacyField>>::new();
-    for field in pack
-        .filter(|_| lenient)
-        .iter()
-        .flat_map(|p| &p.data.fields)
-        .filter_map(|v| environment::field(v).ok())
-    {
-        fields_by_source
-            .entry(field.source_id.clone())
-            .or_default()
-            .push(field);
-    }
+    // Built on the first field no exact match covers, then shared by every later lookup.
+    let mut fields_by_source = None::<BTreeMap<String, Vec<environment::LegacyField>>>;
     let recorded = |value: &str, repo: bool| {
         mapped
             .iter()
@@ -3130,9 +3120,24 @@ fn ground(
             && !matches.iter().any(listed)
             && !selected.iter().any(|s| records_kind_field(s, &r.field))
         {
+            let index = fields_by_source.get_or_insert_with(|| {
+                let mut index = BTreeMap::<_, Vec<_>>::new();
+                for field in p
+                    .data
+                    .fields
+                    .iter()
+                    .filter_map(|v| environment::field(v).ok())
+                {
+                    index
+                        .entry(field.source_id.clone())
+                        .or_default()
+                        .push(field);
+                }
+                index
+            });
             let records: Vec<_> = selected
                 .iter()
-                .filter_map(|s| fields_by_source.get(&s.id))
+                .filter_map(|s| index.get(&s.id))
                 .flatten()
                 .filter(|f| same_mapped_data(f, &r.field))
                 .collect();
