@@ -104,3 +104,105 @@ fn format_time_requires_an_output_field() {
         expect_check(query, Outcome::Ready, None);
     }
 }
+
+#[test]
+fn aggregate_alias_advice_only_applies_to_aggregate_arguments() {
+    let result = expect_check(
+        "stats(function=total:=count())",
+        Outcome::Invalid,
+        Some("CQL_SYNTAX"),
+    );
+    assert!(
+        result.diagnostics[0]
+            .message
+            .contains("aggregate function list")
+    );
+
+    for query in [
+        "eval(total := 1)",
+        "if(score == 1, then=total:=1, else=2)",
+        "test(total := score)",
+        "concat([total:=score, suffix], as=label)",
+    ] {
+        let result = expect_check(query, Outcome::Invalid, Some("CQL_SYNTAX"));
+        assert_eq!(result.diagnostics[0].message, "Expected '{'.", "{query}");
+    }
+}
+
+#[test]
+fn assigned_format_time_preserves_existing_value_for_grounding() {
+    let pack = serde_json::from_str(include_str!("fixtures/legacy-core-v1-pack.json")).unwrap();
+    let result = app::check(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: r#"formatted := "unknown" | formatted := formatTime("%H", field=0) | label := formatted | select([label])"#.into(),
+            context: Context {
+                require_observed: true,
+                ..Context::default()
+            },
+        },
+        Some(&pack),
+    );
+    assert_eq!(
+        result.outcome,
+        Outcome::Ready,
+        "{:?}",
+        result.grounding.missing
+    );
+}
+
+#[test]
+fn assigned_format_time_preserves_the_timestamp_for_tail() {
+    for query in [
+        r#"createEvents(["sample"]) | select([@timestamp]) | formatted := formatTime("%H", field=@timestamp) | tail(1)"#,
+        r#"createEvents(["sample"]) | select([@timestamp]) | formatTime("%H", field=@timestamp, as=formatted) | tail(1)"#,
+    ] {
+        let result = expect_check(query, Outcome::Ready, None);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_TAIL_WITHOUT_TIMESTAMP"),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_time_as_a_computed_string_selector_is_unsupported() {
+    expect_check(
+        r#"callFunction(function=formatTime("sum", field=0, as=selector), field=points)"#,
+        Outcome::Unsupported,
+        Some("CQL_UNSUPPORTED_ARGUMENT_EXPRESSION"),
+    );
+}
+
+#[test]
+fn aggregate_aliases_follow_function_name_quoting() {
+    expect_check(
+        r#"stats([total:="count"()])"#,
+        Outcome::Invalid,
+        Some("CQL_SYNTAX"),
+    );
+}
+
+#[test]
+fn aggregate_aliases_follow_assignment_target_quoting() {
+    expect_check(
+        "stats([OR:=count()])",
+        Outcome::Unsupported,
+        Some("CQL_UNSUPPORTED_SYNTAX"),
+    );
+    expect_check(r#"stats(["OR":=count()])"#, Outcome::Ready, None);
+}
+
+#[test]
+fn saved_calls_in_aggregate_aliases_require_resolution() {
+    expect_check(
+        "stats([total:=$example()])",
+        Outcome::Unsupported,
+        Some("CQL_UNSUPPORTED_SYNTAX"),
+    );
+}
