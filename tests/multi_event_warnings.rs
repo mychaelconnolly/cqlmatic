@@ -198,12 +198,89 @@ fn correlate_names_a_field_it_does_not_export_and_its_query() {
         ),
     ];
     for (query, message) in cases {
+        let result = ready(&query);
         assert_eq!(
-            messages(&ready(&query), "CQL_UNEXPORTED_FIELD"),
+            messages(&result, "CQL_UNEXPORTED_FIELD"),
+            [message],
+            "{query}"
+        );
+        assert!(
+            messages(&result, "CQL_DROPPED_FIELD").is_empty(),
+            "{query}"
+        );
+    }
+}
+
+#[test]
+fn correlate_names_a_field_its_query_removed_before_correlate_reads_it() {
+    for (query, message) in [
+        (
+            "correlate(first: { kind=a }, second: { kind=b | select([@timestamp]) | user <=> first.user }, within=5m)",
+            "user is not exported by correlate query second.",
+        ),
+        (
+            "correlate(query=first: { kind=a }, aggregation=[later: { kind=b | select([user]) | user <=> first.user | count() }], within=5m, root=\"first\")",
+            "@timestamp is not exported by correlate query later.",
+        ),
+        (
+            "correlate(first: { kind=a | drop([host]) } include: *, second: { kind=b | user <=> first.user }, within=5m) | first.host = *",
+            "first.host is not exported by correlate query first.",
+        ),
+        (
+            "correlate(first: { kind=a | rename(host, as=hostname) } include: *, second: { kind=b | user <=> first.user }, within=5m) | first.host = *",
+            "first.host is not exported by correlate query first.",
+        ),
+    ] {
+        assert_eq!(
+            messages(&ready(query), "CQL_UNEXPORTED_FIELD"),
             [message],
             "{query}"
         );
     }
+}
+
+#[test]
+fn a_field_removed_after_correlate_is_not_reported_against_it() {
+    let query = "correlate(first: { kind=a | host := \"h1\" } include: *, second: { kind=b | user <=> first.user }, within=5m) | drop([first.host]) | first.host != *";
+    assert!(messages(&ready(query), "CQL_UNEXPORTED_FIELD").is_empty());
+}
+
+fn generate(plan: serde_json::Value) -> Analysis {
+    let result = app::generate(
+        serde_json::from_value(
+            serde_json::json!({"schema_version": 1, "input": {"mode": "plan", "plan": plan}}),
+        )
+        .unwrap(),
+        None,
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    result
+}
+
+#[test]
+fn generate_reports_a_field_correlate_does_not_export_once() {
+    let linked = generate(serde_json::json!({"source": {}, "steps": [{"op": "correlate", "within": "5m",
+        "queries": [
+            {"name": "first", "plan": {"source": {}, "filters": [{"op": "eq", "field": "kind", "value": "a"}]}},
+            {"name": "second", "plan": {"source": {}, "filters": [{"op": "eq", "field": "kind", "value": "b"}],
+                "steps": [{"op": "select", "fields": ["@timestamp"]}]}}
+        ],
+        "links": [{"from": "second", "field": "user", "to": "first", "key": "user"}]}]}));
+    assert_eq!(
+        messages(&linked, "CQL_UNEXPORTED_FIELD"),
+        ["user is not exported by correlate query second."]
+    );
+    let read = generate(serde_json::json!({"source": {}, "steps": [
+        {"op": "call", "function": "correlate", "args": [{"value": {"kind": "named-query", "name": "first",
+            "plan": {"source": {}, "filters": [{"op": "eq", "field": "kind", "value": "a"}]},
+            "include": {"mode": "fields", "fields": ["user"]}}}]},
+        {"op": "filter", "predicate": {"op": "exists", "field": "first.host"}}
+    ]}));
+    assert_eq!(
+        messages(&read, "CQL_UNEXPORTED_FIELD"),
+        ["first.host is not exported by correlate query first."]
+    );
+    assert!(messages(&read, "CQL_DROPPED_FIELD").is_empty());
 }
 
 #[test]
@@ -226,6 +303,8 @@ fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
     );
     assert_eq!(result.outcome, Outcome::NeedsContext);
     assert!(messages(&result, "CQL_UNEXPORTED_FIELD").is_empty());
+    // Without the named warning, the generic one still reports the read.
+    assert_eq!(messages(&result, "CQL_DROPPED_FIELD").len(), 1);
     assert!(
         result
             .grounding
