@@ -155,6 +155,8 @@ Empty/whitespace input and `*` are valid match-all checks. Static acceptance doe
 
 `groupBy(..., limit=max)` emits informational `CQL_GROUPBY_LIMIT`; numeric or omitted grouping limits warn. Therefore `--fail-on-warning` does not reject the informational form. Group and memory ceilings still apply.
 
+With an environment map, from `--pack` or a matching inventory, generation and checking warn about what the map lacks. `CQL_UNMAPPED_SOURCE` reports a `#repo` or `#type` value that matches no mapped source, names mapped selectors, and says so when the value is the target view's name. `CQL_UNMAPPED_FIELD` reports a field the query reads that no selected source lists as observed or documented; a query without `#repo` or `#type` is compared with every mapped source. Fields the query produces and `@` metadata fields are not reported, and a selector with a wildcard, a regex or several values is not compared. Without a map, or for fields the map lists, no grounding warning is added; `grounding.basis` keeps the evidence for each field. `--require-observed` keeps its stricter rule and reports these gaps through `grounding.missing`.
+
 Performance notes are informational too. `ComputerName=a | #event_simpleName=ProcessRollup2` reports `CQL_TAG_FILTER_ORDER`, and `y := lower(a) | ComputerName=b` reports `CQL_FILTER_AFTER_TRANSFORM`: filter on `#` fields first and transform last. `CQL_SORT_COST`, `CQL_SPLIT_COST`, `CQL_WILDCARD_IGNORE_CASE` and `CQL_REGEX_ALL_FIELDS` cover single stages; see [coverage](docs/COVERAGE.md).
 
 ## Assess saved results
