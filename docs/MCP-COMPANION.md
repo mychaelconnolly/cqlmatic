@@ -141,7 +141,7 @@ Retain the exact emitted `query` bytes in `.local/query.cql` for the execution a
 
 ## 3. Execute the exact query via MCP
 
-With explicit authorization for the selected target and time window, call `falcon_search_ngsiem` using the **exact generated query bytes** as `query_string`. Set MCP `repository` to the confirmed `environment.view` used for the evidence and authorized execution. Keep plan-derived source selectors, such as `#repo=synthetic_repo`, inside the emitted CQL; they do not replace the searchable target. The synthetic example below uses `search-all` only because its example environment does. Preserve the actual confirmed target when adapting it. Use absolute UTC `start` and `end`. The following is an illustrative tool argument shape, **not** a literal runnable search:
+With explicit authorization for the selected target and time window, call `falcon_search_ngsiem` using the **exact bytes of the checked `.local/query.cql`** as `query_string`: the generated query, or a query you wrote and checked with `check --file`. Set MCP `repository` to the confirmed `environment.view` used for the evidence and authorized execution. Keep plan-derived source selectors, such as `#repo=synthetic_repo`, inside the emitted CQL; they do not replace the searchable target. The synthetic example below uses `search-all` only because its example environment does. Preserve the actual confirmed target when adapting it. Use absolute UTC `start` and `end`. The following is an illustrative tool argument shape, **not** a literal runnable search:
 
 ```json
 {
