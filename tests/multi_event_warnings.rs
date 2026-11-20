@@ -89,6 +89,7 @@ fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
         ") | test(login_at > 0)",
         ") | alert_at := login_at | test(alert_at > 0)",
         ") | eval(alert_at = login_at) | test(alert_at > 0)",
+        ") | message=/(?<alert_at>[0-9]+)/ | test(alert_at > login_at)",
         // The check stops at any stage other than a filter, test(), := or eval.
         ") | rename(alert_at, as=seen_at) | test(seen_at > login_at)",
         ") | rename(host, as=hostname) | test(alert_at > login_at)",
@@ -124,6 +125,8 @@ fn join_to_a_subquery_with_one_row_per_key_is_quiet() {
         "groupBy([user, host], function=[count(as=alerts), max(@timestamp, as=alert_at)], limit=max)",
         "groupBy([user, host], function=max(@timestamp, as=alert_at), limit=max) | select([user, host, alert_at])",
         "alert_at := @timestamp | head(1)",
+        // One row per user that carries its host is one row per user and host.
+        "alert_at := @timestamp | groupBy([user], function=selectFromMax(field=@timestamp, include=[host, alert_at]), limit=max)",
     ] {
         let query = joined(subquery);
         assert!(
