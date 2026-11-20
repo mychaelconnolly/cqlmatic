@@ -414,6 +414,11 @@ fn reading_a_field_an_earlier_step_removed_warns_with_or_without_a_map() {
         "#repo=alpha_repo | drop(src.ip) | user.name=* | src.ip=*",
         "#repo=alpha_repo | drop(src.ip) | drop(user.name) | src.ip=*",
         "#repo=alpha_repo | drop(src.ip) | x := src.ip",
+        r#"#repo=alpha_repo | drop(src.ip) | "login" | src.ip=*"#,
+        "#repo=alpha_repo | drop(src.ip) | /login/ | src.ip=*",
+        // A removal after a parser counts even when an earlier step removed the same name.
+        "#repo=alpha_repo | rename(field=src.ip, as=old_ip) | parseJson(field=user.name) | drop(src.ip) | src.ip=*",
+        "#repo=alpha_repo | drop(src.ip) | parseJson(field=user.name) | rename(field=src.ip, as=new_ip) | src.ip=*",
     ] {
         let message = one_warning(&check(query, Some(&mapped), false), "CQL_DROPPED_FIELD");
         assert!(message.starts_with("'src.ip' "), "{query}: {message}");
@@ -425,6 +430,7 @@ fn reading_a_field_an_earlier_step_removed_warns_with_or_without_a_map() {
         "#repo=alpha_repo | drop(src.ip) | x := 1 | src.ip=*",
         r#"#repo=alpha_repo | drop(src.ip) | format("%s", field=user.name, as=y) | src.ip=*"#,
         "#repo=alpha_repo | drop(src.ip) | user.name=/(?<k>x)/ | src.ip=*",
+        "#repo=alpha_repo | drop(src.ip) | /(?<k>x)/ | src.ip=*",
     ] {
         let result = check(query, Some(&mapped), false);
         assert_eq!(result.outcome, Outcome::Ready, "{query}");
@@ -456,6 +462,7 @@ fn in_selectors_are_not_compared() {
         r##"made.up=* | in(field="#type", values=["alpha-json"])"##,
         r##"in(field="#repo", values=["gamma_repo"], ignoreCase=true) | count()"##,
         r##"in(field="#repo", values=["gamma_repo", "delta_repo"]) | count()"##,
+        r##"#repo=alpha_repo | in(field="#type", values=["alpha-json", "gamma-json"]) | made.up=*"##,
     ] {
         assert_no_warning(query, &pack());
     }
@@ -490,6 +497,7 @@ fn a_literal_selector_is_checked_when_the_other_selector_is_not_literal() {
         "#repo=synthetic-view #type=/alpha/ | count()",
         "#repo=synthetic-view #type=alpha* | count()",
         "#repo=synthetic-view #type!=alpha-json | count()",
+        r##"#repo=synthetic-view | in(field="#type", values=["alpha-json", "beta-syslog"]) | count()"##,
     ] {
         let message = one_warning(&check(query, Some(&pack()), false), "CQL_UNMAPPED_SOURCE");
         assert!(
@@ -498,6 +506,18 @@ fn a_literal_selector_is_checked_when_the_other_selector_is_not_literal() {
         );
         assert!(message.contains("target view"), "{query}: {message}");
     }
+    let message = one_warning(
+        &check(
+            r##"#repo=gamma_repo | in(field="#type", values=["alpha-json", "beta-syslog"]) | count()"##,
+            Some(&pack()),
+            false,
+        ),
+        "CQL_UNMAPPED_SOURCE",
+    );
+    assert!(
+        message.starts_with("#repo=gamma_repo matches no mapped source."),
+        "{message}"
+    );
     assert_no_warning(
         "#repo=alpha_repo #type=alpha* | src.ip=* | count()",
         &pack(),
@@ -747,5 +767,43 @@ fn a_field_measured_absent_warns_with_its_window_and_a_declared_field_is_quiet()
     assert!(
         message.contains("not observed, documented or declared"),
         "{message}"
+    );
+}
+
+#[test]
+fn each_selected_source_is_judged_by_its_own_records() {
+    let documented_obj = |source: &str| {
+        json!({
+            "id": format!("env:field:{source}:obj"),
+            "source_id": source,
+            "path": "obj",
+            "data_type": "object",
+            "is_tag": false,
+            "evidence_kind": "documented",
+            "provenance_ids": ["prov:synthetic"]
+        })
+    };
+    let mut fields = fields();
+    fields.push(measured_absent("obj.zero_only", false));
+    fields.push(documented_obj("env:repo:alpha"));
+    fields.push(documented_obj("env:repo:beta"));
+    fields.push(measured_absent("zero_only", false));
+    let pack = pack_from(sources(), fields, "synthetic-view");
+    // Beta documents the parent object, so alpha's measurement does not warn for both.
+    let result = check("obj.zero_only=* | count()", Some(&pack), false);
+    no_warning(&result, "CQL_UNMAPPED_FIELD");
+    // Each warning names only the sources it describes.
+    let result = check("zero_only=* | count()", Some(&pack), false);
+    let found = warnings(&result, "CQL_UNMAPPED_FIELD");
+    assert_eq!(found.len(), 2, "{:?}", result.diagnostics);
+    let measured = found.iter().find(|m| m.contains(WINDOW)).unwrap();
+    assert!(
+        measured.contains(ALPHA) && !measured.contains(BETA),
+        "{measured}"
+    );
+    let unlisted = found.iter().find(|m| !m.contains(WINDOW)).unwrap();
+    assert!(
+        unlisted.contains(BETA) && !unlisted.contains(ALPHA),
+        "{unlisted}"
     );
 }
