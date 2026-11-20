@@ -35,14 +35,25 @@ const JOIN: &str = "kind=login | login_at := @timestamp | join({kind=alert | ale
 fn join_without_max_warns_before_a_comparison_of_a_joined_value() {
     for (rest, compared) in [
         (") | test(alert_at >= login_at)", "alert_at"),
-        (", mode=inner, limit=5000) | test(alert_at > login_at)", "alert_at"),
+        (
+            ", mode=inner, limit=5000) | test(alert_at > login_at)",
+            "alert_at",
+        ),
         (") | gap := alert_at - login_at | test(gap <= 60000)", "gap"),
         (") | gap := alert_at - login_at | gap >= \"0\"", "gap"),
-        (") | gap := alert_at - login_at | gap > 0 gap < 60000", "gap"),
+        (
+            ") | gap := alert_at - login_at | gap > 0 gap < 60000",
+            "gap",
+        ),
     ] {
         let query = format!("{JOIN}{rest}");
         let result = check(&query);
-        assert_eq!(result.outcome, Outcome::Ready, "{query}: {:?}", result.diagnostics);
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{query}: {:?}",
+            result.diagnostics
+        );
         assert_eq!(
             messages(&result, "CQL_JOIN_MAX"),
             [format!(
@@ -65,7 +76,12 @@ fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
     ] {
         let query = format!("{JOIN}{rest}");
         let result = check(&query);
-        assert_eq!(result.outcome, Outcome::Ready, "{query}: {:?}", result.diagnostics);
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{query}: {:?}",
+            result.diagnostics
+        );
         assert!(messages(&result, "CQL_JOIN_MAX").is_empty(), "{query}");
     }
     let result = check(
@@ -104,8 +120,17 @@ fn correlate_names_a_field_it_does_not_export_and_its_query() {
     ];
     for (query, message) in cases {
         let result = check(&query);
-        assert_eq!(result.outcome, Outcome::Ready, "{query}: {:?}", result.diagnostics);
-        assert_eq!(messages(&result, "CQL_UNEXPORTED_FIELD"), [message], "{query}");
+        assert_eq!(
+            result.outcome,
+            Outcome::Ready,
+            "{query}: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(
+            messages(&result, "CQL_UNEXPORTED_FIELD"),
+            [message],
+            "{query}"
+        );
     }
 }
 
@@ -123,7 +148,10 @@ fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
             result.diagnostics
         );
     }
-    let result = check_with(&format!("{SEQUENCE} | groupBy([first.host], limit=max)"), true);
+    let result = check_with(
+        &format!("{SEQUENCE} | groupBy([first.host], limit=max)"),
+        true,
+    );
     assert!(messages(&result, "CQL_UNEXPORTED_FIELD").is_empty());
     assert!(
         result
