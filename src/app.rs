@@ -408,7 +408,8 @@ fn inventory_requirements(query: &str) -> Result<Vec<Requirement>, Diagnostic> {
         &Context::default(),
         &[],
         &mut Grounding::default(),
-    ))
+    )
+    .0)
 }
 
 pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnostic> {
@@ -632,7 +633,8 @@ struct Requirement {
     relaxed_type: bool,
     relaxed_event: bool,
     unavailable: bool,
-    // An earlier drop, rename or split removed the field; projections are the validator's.
+    // A drop, rename or split removed the field and no later step can have recreated it;
+    // projections are the validator's.
     removed: bool,
 }
 impl Requirement {
@@ -649,6 +651,8 @@ struct GroundingScan<'a> {
     record_kind_context: Option<(&'a Context, Vec<&'a Pack>, &'a mut Grounding)>,
     first_pipeline: bool,
     skip_next_kind_check: bool,
+    // An in() on #repo or #type selects sources the map comparison does not resolve.
+    in_selector: bool,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Origin {
@@ -682,6 +686,8 @@ struct Flow {
     locals: BTreeMap<String, ElementBinding>,
     available: Option<BTreeSet<String>>,
     removed: BTreeSet<String>,
+    // Removals no later step could have undone by creating fields.
+    unwritten_removals: BTreeSet<String>,
     split_unknown: BTreeSet<(String, bool)>,
     unverified_fields: BTreeSet<String>,
     unknown_enrichment: bool,
@@ -726,13 +732,13 @@ impl Flow {
             }))
             && !self.produces(field)
     }
-    fn was_removed(&self, field: &str) -> bool {
-        self.removed.iter().any(|removed| {
+    fn removed_in(&self, removed: &BTreeSet<String>, field: &str) -> bool {
+        removed.iter().any(|removed| {
             removed == field || removed.contains("[]") && array_element(field, removed)
         }) && !self.produces(field)
     }
     fn absent(&self, field: &str) -> bool {
-        self.was_removed(field)
+        self.removed_in(&self.removed, field)
             || !self.unverified(field)
                 && self.available.as_ref().is_some_and(|fields| {
                     !fields.contains(field)
@@ -1053,12 +1059,13 @@ fn requirements(
     context: &Context,
     packs: &[&Pack],
     grounding: &mut Grounding,
-) -> Vec<Requirement> {
+) -> (Vec<Requirement>, bool) {
     let mut out = GroundingScan {
         requirements: Vec::new(),
         record_kind_context: (!packs.is_empty()).then(|| (context, packs.to_vec(), grounding)),
         first_pipeline: true,
         skip_next_kind_check: false,
+        in_selector: false,
     };
     scan_pipeline(
         p,
@@ -1069,7 +1076,7 @@ fn requirements(
         },
         &mut out,
     );
-    out.requirements
+    (out.requirements, out.in_selector)
 }
 fn array_element(field: &str, array: &str) -> bool {
     indexed_member(field, array).is_some_and(|tail| array.ends_with("[]") || tail.is_empty())
@@ -1133,26 +1140,30 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         });
         return;
     }
-    // Reading `x[]` reads the elements of an array the query split out or wrote by index.
     let array = field.ends_with("[]");
-    let elements =
-        |fields: &BTreeSet<String>| fields.iter().any(|f| indexed_member(f, field) == Some(""));
     out.requirements.push(Requirement {
         target: state.field_target.clone(),
         array: false,
         scope: state.scope.clone(),
         field: field.into(),
         derived: state.produces(field)
-            || array && (state.array_produces(field) || elements(&state.derived)),
+            || array && state.array_produces(field)
+            || element_written(&state.derived, field),
         conditional: state.conditional(field)
-            || array && (state.array_conditional(field) || elements(&state.conditional)),
+            || array && state.array_conditional(field)
+            || element_written(&state.conditional, field),
         origin: state.origin,
         uncertain_source: state.uncertain_source || state.unverified(field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: state.absent(field),
-        removed: state.was_removed(field),
+        removed: state.removed_in(&state.removed, field)
+            && state.removed_in(&state.unwritten_removals, field),
     });
+}
+/// Reading `x[]` reads what an earlier write to an element (`x[0]`, `x[1].y`) produced.
+fn element_written(fields: &BTreeSet<String>, array: &str) -> bool {
+    array.ends_with("[]") && fields.iter().any(|field| array_element(field, array))
 }
 fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
     let field = local_field(state, array);
@@ -1160,8 +1171,8 @@ fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
         target: state.field_target.clone(),
         array: true,
         scope: state.scope.clone(),
-        derived: state.array_produces(&field),
-        conditional: state.array_conditional(&field),
+        derived: state.array_produces(&field) || element_written(&state.derived, &field),
+        conditional: state.array_conditional(&field) || element_written(&state.conditional, &field),
         origin: state.origin,
         uncertain_source: state.uncertain_source || state.unverified(&field),
         relaxed_type: state.relaxed_type,
@@ -1251,6 +1262,7 @@ fn correlation_inputs(
         record_kind_context: None,
         first_pipeline: false,
         skip_next_kind_check: true,
+        in_selector: false,
     };
     let mut start = 0;
     let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
@@ -1315,6 +1327,12 @@ fn correlation_inputs(
 
 fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool) -> Option<Flow> {
     let resolved = crate::catalog::resolve(c)?;
+    out.in_selector |= resolved.function.name == "in"
+        && resolved.arguments.get("field").is_some_and(|value| {
+            fields_of(value)
+                .iter()
+                .any(|field| matches!(field.as_str(), "#repo" | "#type"))
+        });
     if !resolved.diagnostics.is_empty() {
         return None;
     }
@@ -1734,14 +1752,6 @@ fn selectors(filter: &Filter, found: &mut [BTreeSet<String>; 3]) {
             };
             found[index].insert(text.clone());
         }
-        // A single literal, case-sensitive in() selects like equality.
-        Filter::Call(call) => {
-            for (index, field) in ["#repo", "#type"].into_iter().enumerate() {
-                if let Some(value) = positive_kind_call(call, field) {
-                    found[index].insert(value);
-                }
-            }
-        }
         Filter::And(xs) => {
             for x in xs {
                 selectors(x, found);
@@ -2045,13 +2055,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
         {
             constrain(&mut state, &p.steps[index..]);
         }
-        if let Step::Call(c) = step
-            && ["#repo", "#type"]
-                .into_iter()
-                .any(|field| positive_kind_call(c, field).is_some())
-        {
-            constrain(&mut state, &[Step::Filter(Filter::Call(c.clone()))]);
-        }
+        let removed = state.removed.clone();
         match step {
             Step::Filter(f) => {
                 scan_filter(f, &state, out, false);
@@ -2422,8 +2426,26 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                 }
             }
         }
+        if !adds_no_fields(step) {
+            state.unwritten_removals.clear();
+        }
+        state
+            .unwritten_removals
+            .extend(state.removed.difference(&removed).cloned());
     }
     state
+}
+
+fn adds_no_fields(step: &Step) -> bool {
+    match step {
+        Step::Filter(filter) => transparent_kind_filter(filter),
+        Step::Call(call) => {
+            transparent_kind_call(call)
+                || crate::catalog::resolve(call)
+                    .is_some_and(|r| r.diagnostics.is_empty() && r.function.name == "drop")
+        }
+        _ => false,
+    }
 }
 
 fn record_basis(grounding: &mut Grounding, key: String, evidence: String) {
@@ -2808,12 +2830,21 @@ fn ground(
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
     let mut query_observed = false;
+    let (reads, in_selector) = requirements(
+        pipeline,
+        primary_target.clone(),
+        context,
+        &kind_packs,
+        &mut g,
+    );
     // Lenient warnings: reads of removed fields, selections that no mapped source can match,
     // and fields that no selected source lists, keyed by the selected sources' labels. Strict
-    // mode reports gaps through grounding.missing, so it builds none of this.
+    // mode reports gaps through grounding.missing, so it builds none of this, and an in()
+    // selector leaves the selected sources unresolved.
     let lenient = !context.require_observed;
+    let compare = lenient && !in_selector;
     let pack_sources: Vec<_> = pack
-        .filter(|_| lenient)
+        .filter(|_| compare)
         .iter()
         .flat_map(|p| &p.data.sources)
         .filter_map(|v| environment::source(v).ok())
@@ -2822,8 +2853,19 @@ fn ground(
         .iter()
         .filter(|source| source.selectors.is_some())
         .collect();
-    // Built on the first field no exact match covers, then shared by every later lookup.
-    let mut fields_by_source = None::<BTreeMap<String, Vec<environment::LegacyField>>>;
+    let mut records = BTreeMap::<String, Vec<(String, environment::LegacyField)>>::new();
+    for field in pack
+        .filter(|_| compare)
+        .iter()
+        .flat_map(|p| &p.data.fields)
+        .filter_map(|v| environment::field(v).ok())
+    {
+        let tag = field.is_tag == Some(true) || field.path.starts_with('#');
+        records
+            .entry(field.source_id.clone())
+            .or_default()
+            .push((map_path(&field.path, tag), field));
+    }
     let recorded = |value: &str, repo: bool| {
         mapped
             .iter()
@@ -2841,13 +2883,7 @@ fn ground(
     let mut unmapped_selections = BTreeSet::new();
     let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
     let mut measured_absent = BTreeMap::<(String, Option<String>), BTreeSet<String>>::new();
-    for r in requirements(
-        pipeline,
-        primary_target.clone(),
-        context,
-        &kind_packs,
-        &mut g,
-    ) {
+    for r in reads {
         let key = format!(
             "{}{}:{}:{}",
             r.target
@@ -2899,7 +2935,7 @@ fn ground(
         // A literal selector is compared even when another selector is unresolved. A query
         // without #repo or #type can read every source, including one recorded without selectors.
         let mut selected = Vec::new();
-        if lenient && pack.is_some() && r.origin == Origin::Deployment {
+        if compare && pack.is_some() && r.origin == Origin::Deployment {
             selected = pack_sources
                 .iter()
                 .filter(|source| {
@@ -3117,41 +3153,23 @@ fn ground(
         }
         if !selected.is_empty()
             && !r.field.starts_with('@')
-            && !matches.iter().any(listed)
             && !selected.iter().any(|s| records_kind_field(s, &r.field))
         {
-            let index = fields_by_source.get_or_insert_with(|| {
-                let mut index = BTreeMap::<_, Vec<_>>::new();
-                for field in p
-                    .data
-                    .fields
-                    .iter()
-                    .filter_map(|v| environment::field(v).ok())
-                {
-                    index
-                        .entry(field.source_id.clone())
+            let found = selected.iter().filter_map(|s| records.get(&s.id)).flatten();
+            match map_gap(found, &map_path(&r.field, r.field.starts_with('#'))) {
+                Some(MapGap::Unlisted) => {
+                    unmapped_fields
+                        .entry(labels(selected))
                         .or_default()
-                        .push(field);
+                        .insert(r.field.clone());
                 }
-                index
-            });
-            let records: Vec<_> = selected
-                .iter()
-                .filter_map(|s| index.get(&s.id))
-                .flatten()
-                .filter(|f| same_mapped_data(f, &r.field))
-                .collect();
-            if records.is_empty() {
-                unmapped_fields
-                    .entry(labels(selected))
-                    .or_default()
-                    .insert(r.field.clone());
-            } else if !records.iter().any(|f| listed(f)) {
-                let window = records.iter().find_map(|f| f.observation_window.clone());
-                measured_absent
-                    .entry((labels(selected), window))
-                    .or_default()
-                    .insert(r.field.clone());
+                Some(MapGap::NotObserved(window)) => {
+                    measured_absent
+                        .entry((labels(selected), window))
+                        .or_default()
+                        .insert(r.field.clone());
+                }
+                None => {}
             }
         }
     }
@@ -3325,33 +3343,58 @@ fn labels<'a>(sources: impl IntoIterator<Item = &'a environment::LegacySource>) 
         .join("; ")
 }
 
-/// A map field covers a query field in the same tag or data namespace when, ignoring array
-/// positions, the paths are equal, the map path is a member of the query field, or the query
-/// field is a member of an object or array the map lists: `event.category[0]` covers
-/// `event.category[]`, and `src.ip` does not cover `src.ip.octet` unless `src.ip` is an object.
-fn same_mapped_data(f: &environment::LegacyField, field: &str) -> bool {
-    let plain = |name: &str| {
-        let mut depth = 0usize;
-        name.trim_start_matches('#')
-            .chars()
-            .filter(|c| match c {
-                '[' => {
-                    depth += 1;
-                    false
-                }
-                ']' => {
-                    depth = depth.saturating_sub(1);
-                    false
-                }
-                _ => depth == 0,
-            })
-            .collect::<String>()
-    };
-    let tag = f.is_tag == Some(true) || f.path.starts_with('#');
-    let (path, query) = (plain(&f.path), plain(field));
-    tag == field.starts_with('#')
-        && (path_contains(&query, &path)
-            || matches!(f.data_type.as_str(), "object" | "array") && path_contains(&path, &query))
+/// A field path keyed by namespace, `#` for a tag, with each numeric array index written as
+/// `[]`: `event.category[0]` and `event.category[9]` compare equal, `event[0].category` does not.
+fn map_path(path: &str, tag: bool) -> String {
+    let mut out = String::from(if tag { "#" } else { "" });
+    let mut rest = path.trim_start_matches('#');
+    while let Some((head, tail)) = rest.split_once('[') {
+        out.push_str(head);
+        out.push('[');
+        rest = match tail.split_once(']') {
+            Some((index, after)) if index.bytes().all(|b| b.is_ascii_digit()) => {
+                out.push(']');
+                after
+            }
+            _ => tail,
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+enum MapGap {
+    Unlisted,
+    NotObserved(Option<String>),
+}
+
+/// The map rule for a field read in the selected sources, given their records keyed by
+/// `map_path`. An exact record decides: a listed one is quiet, and one measured and not
+/// observed warns with its window. Without one, a documented object or array parent is
+/// quiet. A read of a whole array `x[]` is exact for a record of any of its elements.
+fn map_gap<'a>(
+    records: impl Iterator<Item = &'a (String, environment::LegacyField)> + Clone,
+    read: &str,
+) -> Option<MapGap> {
+    let exact: Vec<_> = records
+        .clone()
+        .filter(|(path, _)| path == read || read.ends_with("[]") && path_contains(read, path))
+        .map(|(_, field)| field)
+        .collect();
+    if exact.iter().any(|field| listed(field)) {
+        None
+    } else if !exact.is_empty() {
+        let window = exact.iter().find_map(|f| f.observation_window.clone());
+        Some(MapGap::NotObserved(window))
+    } else if records.into_iter().any(|(path, field)| {
+        field.evidence_kind == "documented"
+            && matches!(field.data_type.as_str(), "object" | "array")
+            && path_contains(path, read)
+    }) {
+        None
+    } else {
+        Some(MapGap::Unlisted)
+    }
 }
 
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {
