@@ -392,7 +392,7 @@ impl Checker<'_> {
                 self.dropped.insert(field.clone());
                 self.emit(
                     "CQL_DROPPED_FIELD",
-                    dropped_field_message(field),
+                    format!("'{field}' is not among the known projected/aggregate outputs."),
                     call,
                     true,
                 );
@@ -886,7 +886,7 @@ impl Checker<'_> {
                                 );
                             }
                             if let Some(field) = joined_comparison(&args, &p.steps[index + 1..]) {
-                                self.emit("CQL_JOIN_MAX", format!("join keeps one matching subquery row per key unless max is set, so the later comparison of {field} tests only that row. Set max to the largest number of matches one key can have."), Some(c), true);
+                                self.emit("CQL_JOIN_MAX", format!("join keeps one matching subquery row per key unless max is set, so the later comparison of {field} may test only one of several matches."), Some(c), true);
                             }
                             projected = None;
                         }
@@ -3658,14 +3658,11 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
     }
 }
 
-pub(crate) fn dropped_field_message(field: &str) -> String {
-    format!("'{field}' is not among the known projected/aggregate outputs.")
-}
-
 /// For a join that keeps its default of one subquery row per key, the first field that a later
 /// filter or `test()` in `steps` compares by order and that holds an included value other than a
-/// join key, directly, through `:=` or `eval`, or renamed. A subquery that returns one row, or ends
-/// in a `groupBy` on join keys with a one-row function and then only `select`, has nothing to drop.
+/// join key, directly or through a `:=` or `eval` expression. Any other stage ends the trace. A
+/// subquery that returns one row, or ends in a `groupBy` on exactly the join keys with a one-row
+/// function and then only `select`, has nothing to drop.
 fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<String> {
     fn ordered(op: &str) -> bool {
         matches!(op, "<" | "<=" | ">" | ">=")
@@ -3718,43 +3715,6 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             joined.remove(field);
         }
     }
-    // A value stays joined until every path through a stage overwrites it.
-    fn written(step: &Step, joined: &mut BTreeSet<String>) {
-        let branches: Vec<&Pipeline> = match step {
-            Step::Assign { field, value } => return assign(field, value, joined),
-            Step::Call(call) => {
-                match catalog::resolve(call) {
-                    Some(resolved) if resolved.function.name == "eval" => {
-                        for (field, value) in &resolved.ordered {
-                            assign(field, value, joined);
-                        }
-                    }
-                    Some(resolved) if resolved.function.name == "rename" => {
-                        for (old, new) in catalog::rename_bindings(&resolved.arguments) {
-                            if joined.remove(old) {
-                                joined.insert(new.into());
-                            } else {
-                                joined.remove(new);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                return;
-            }
-            Step::Case(branches) => branches.iter().collect(),
-            Step::Match { arms, .. } => arms.iter().map(|(_, branch)| branch).collect(),
-            _ => return,
-        };
-        let incoming = std::mem::take(joined);
-        for branch in branches {
-            let mut path = incoming.clone();
-            for step in &branch.steps {
-                written(step, &mut path);
-            }
-            joined.extend(path);
-        }
-    }
     let keys = catalog::fields(args.get("key").or(args.get("field"))?);
     let one_row = match args.get("query") {
         Some(Value::Query { pipeline, .. }) => {
@@ -3767,7 +3727,7 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
                         && resolved
                             .arguments
                             .get("field")
-                            .is_some_and(|fields| catalog::fields(fields).is_subset(&keys))
+                            .is_some_and(|fields| catalog::fields(fields) == keys)
                         && resolved.arguments.get("function").is_none_or(|f| single_aggregate(f))
                 }))
         }
@@ -3787,7 +3747,21 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
         if let Some(field) = compared {
             return Some(field.clone());
         }
-        written(step, &mut joined);
+        match step {
+            Step::Filter(_) => {}
+            Step::Call(call) if call.name.eq_ignore_ascii_case("test") => {}
+            // `x := f(...)` is the function f, so only an expression is followed as a copy.
+            Step::Assign { field, value } if !matches!(value, Value::Call(_)) => {
+                assign(field, value, &mut joined)
+            }
+            Step::Call(call) => {
+                let eval = catalog::resolve(call).filter(|r| r.function.name == "eval")?;
+                for (field, value) in &eval.ordered {
+                    assign(field, value, &mut joined);
+                }
+            }
+            _ => return None,
+        }
     }
     None
 }

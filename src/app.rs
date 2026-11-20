@@ -514,8 +514,8 @@ fn finish(
     let report = language::validate::validate(pipeline, query);
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
-    let (dropped, unmapped, unexported);
-    (result.grounding, dropped, unmapped, unexported) = ground(pipeline, context, pack, evidence);
+    let (dropped, unmapped);
+    (result.grounding, dropped, unmapped) = ground(pipeline, context, pack, evidence);
     let capability_evidence = evidence.and_then(|e| e.capabilities).filter(|e| {
         report.status == Acceptance::Accepted
             && evidence.is_some_and(|outer| outer.environment == e.environment)
@@ -607,13 +607,6 @@ fn finish(
             ));
         }
     }
-    // A read that CQL_UNEXPORTED_FIELD traces to a correlate needs no generic warning too.
-    result.diagnostics.retain(|d| {
-        d.code != "CQL_DROPPED_FIELD"
-            || !unexported
-                .iter()
-                .any(|field| d.message == language::validate::dropped_field_message(field))
-    });
     result.diagnostics.extend(unmapped);
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
@@ -2841,7 +2834,7 @@ fn ground(
     context: &Context,
     pack: Option<&Pack>,
     evidence: Option<GroundingEvidence<'_>>,
-) -> (Grounding, BTreeSet<String>, Vec<Diagnostic>, BTreeSet<String>) {
+) -> (Grounding, BTreeSet<String>, Vec<Diagnostic>) {
     let mut g = Grounding {
         policy: context.into(),
         ..Grounding::default()
@@ -2857,7 +2850,7 @@ fn ground(
         if p.validate().is_err() {
             g.conflicting
                 .push("Pack integrity or version validation failed.".into());
-            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
         if context
             .environment
@@ -2866,7 +2859,7 @@ fn ground(
         {
             g.conflicting
                 .push("Cloud, tenant or searchable target conflicts with selected pack.".into());
-            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
     }
     let mut kind_packs = pack.into_iter().collect::<Vec<_>>();
@@ -2880,7 +2873,7 @@ fn ground(
         {
             g.conflicting
                 .push("Query evidence conflicts with the selected environment identity.".into());
-            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
         if evidence.query_observations.len() > 1000
             || evidence.captured_observations.len() > 1000
@@ -2895,13 +2888,13 @@ fn ground(
         {
             g.conflicting
                 .push("Query observation integrity, identity or budget validation failed.".into());
-            return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
+            return (g, BTreeSet::new(), Vec::new());
         }
         if let Some(active) = evidence.active_pack {
             if active.validate().is_err() || &active.environment != evidence.environment {
                 g.conflicting
                     .push("Active pack integrity or environment validation failed.".into());
-                return (g, BTreeSet::new(), Vec::new(), BTreeSet::new());
+                return (g, BTreeSet::new(), Vec::new());
             }
             if !kind_packs
                 .iter()
@@ -3265,7 +3258,6 @@ fn ground(
             }
         }
     }
-    let unexported_fields = unexported.values().flatten().cloned().collect();
     let mut warnings = unexported
         .into_iter()
         .map(|(source, fields)| {
@@ -3386,7 +3378,7 @@ fn ground(
     g.stale.sort();
     g.stale.dedup();
     warnings.extend(unmapped);
-    (g, dropped, warnings, unexported_fields)
+    (g, dropped, warnings)
 }
 
 fn listed(field: &environment::LegacyField) -> bool {
