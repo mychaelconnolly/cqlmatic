@@ -1082,8 +1082,9 @@ fn offset(bytes: &[u8], raw: &RawValue) -> usize {
     raw.get().as_ptr().addr() - bytes.as_ptr().addr()
 }
 
-/// Deletes the entries of `hooks.EVENT` that `doomed` picks, each with one adjoining comma,
-/// and keeps every other byte. An array left without entries keeps its brackets.
+/// Deletes the entries of `hooks.EVENT` that `doomed` picks, each with one adjoining comma and
+/// the white space beside it, and keeps the rest. An array left without entries keeps its
+/// brackets.
 fn remove(bytes: &[u8], event: &str, doomed: impl Fn(&Value) -> bool) -> Vec<u8> {
     let Some(array) = raw_member(bytes, &["hooks", event]) else {
         return bytes.to_vec();
