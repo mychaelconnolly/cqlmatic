@@ -40,6 +40,7 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         enclosed_queries: 0,
         stored_input: true,
         time_interval_seen: false,
+        fixed_time_noted: false,
     };
     checker.pipeline(pipeline, QueryContext::Plain, &mut BTreeSet::new());
     if checker.definitions > 0 && checker.joins {
@@ -306,6 +307,7 @@ struct Checker<'a> {
     enclosed_queries: usize,
     stored_input: bool,
     time_interval_seen: bool,
+    fixed_time_noted: bool,
 }
 impl Checker<'_> {
     fn emit(&mut self, code: &str, message: impl Into<String>, call: Option<&Call>, warning: bool) {
@@ -596,6 +598,10 @@ impl Checker<'_> {
                     };
                     self.info(code, message, call);
                 }
+            }
+            if !self.fixed_time_noted && fixed_time_comparison(step) {
+                self.fixed_time_noted = true;
+                self.info("CQL_ABSOLUTE_TIME_FILTER", "@timestamp is compared with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.", None);
             }
             match step {
                 Step::Filter(f) => {
@@ -3777,6 +3783,51 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
         }
     }
     None
+}
+
+/// Whether a filter or `test()` stage compares @timestamp by order with a number.
+fn fixed_time_comparison(step: &Step) -> bool {
+    fn ordered(op: &str) -> bool {
+        matches!(op, "<" | "<=" | ">" | ">=")
+    }
+    fn timestamp(value: &Value) -> bool {
+        matches!(value, Value::Word(field) if field == "@timestamp")
+    }
+    fn number(value: &Value) -> bool {
+        matches!(value, Value::Number(_))
+            || matches!(value, Value::String(text) if text.parse::<serde_json::Number>().is_ok())
+    }
+    fn compared(value: &Value) -> bool {
+        match value {
+            Value::Binary { left, op, right } if ordered(op) => {
+                timestamp(left) && number(right) || number(left) && timestamp(right)
+            }
+            Value::Binary { left, right, .. } => compared(left) || compared(right),
+            Value::Unary { value, .. } => compared(value),
+            _ => false,
+        }
+    }
+    fn tested(call: &Call) -> bool {
+        call.name.eq_ignore_ascii_case("test") && call.args.iter().any(|a| compared(&a.value))
+    }
+    fn filtered(filter: &Filter) -> bool {
+        match filter {
+            Filter::Compare {
+                field,
+                op,
+                value: Pattern::Text(text),
+            } => field == "@timestamp" && ordered(op) && text.parse::<serde_json::Number>().is_ok(),
+            Filter::And(filters) | Filter::Or(filters) => filters.iter().any(filtered),
+            Filter::Not(filter) => filtered(filter),
+            Filter::Call(call) => tested(call),
+            _ => false,
+        }
+    }
+    match step {
+        Step::Filter(filter) => filtered(filter),
+        Step::Call(call) => tested(call),
+        _ => false,
+    }
 }
 
 fn filter_calls<'a>(filter: &'a Filter, calls: &mut Vec<&'a Call>) {
