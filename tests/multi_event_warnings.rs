@@ -90,6 +90,21 @@ fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
     assert!(messages(&result, "CQL_JOIN_MAX").is_empty());
 }
 
+#[test]
+fn join_to_a_subquery_with_one_row_per_key_is_quiet() {
+    let grouped = "kind=login | join({kind=alert | groupBy([GROUP], function=max(@timestamp, as=alert_at), limit=max)}, field=[user, host], include=[alert_at]) | test(alert_at > @timestamp)";
+    for group in ["user", "user, host"] {
+        let result = check(&grouped.replace("GROUP", group));
+        assert!(messages(&result, "CQL_JOIN_MAX").is_empty(), "{group}");
+    }
+    let result = check(&grouped.replace("GROUP", "user, process"));
+    assert_eq!(messages(&result, "CQL_JOIN_MAX").len(), 1);
+    let result = check(
+        "kind=login | join({kind=alert | groupBy([account], function=count(as=alerts), limit=max)}, field=[user], key=[account], include=[alerts]) | alerts > 0",
+    );
+    assert!(messages(&result, "CQL_JOIN_MAX").is_empty());
+}
+
 const SEQUENCE: &str = "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m)";
 
 #[test]
