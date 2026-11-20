@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 const ALPHA: &str = "#repo=alpha_repo #type=alpha-json";
 const BETA: &str = "#repo=beta_repo #type=beta-syslog";
+const WINDOW: &str = "2026-01-01T00:00:00Z/2026-01-01T00:15:00Z";
 
 fn source(id: &str, repo: &str, type_: &str) -> Value {
     json!({
@@ -33,29 +34,56 @@ fn field(source: &str, path: &str, observed: bool) -> Value {
     })
 }
 
-/// Two mapped sources: one observed field, a documented field, a tag and an array element in
-/// alpha, and documented fields only in beta.
+/// A field the map measured in alpha's sample window and did not observe.
+fn measured_absent(path: &str, declared: bool) -> Value {
+    json!({
+        "id": format!("env:field:alpha:{path}"),
+        "source_id": "env:repo:alpha",
+        "path": path,
+        "data_type": "unknown",
+        "is_tag": false,
+        "evidence_kind": "observed",
+        "observation_window": WINDOW,
+        "coverage": {"declared": declared, "observed": false, "rate": 0},
+        "provenance_ids": ["prov:synthetic"]
+    })
+}
+
+fn sources() -> Vec<Value> {
+    vec![
+        source("env:repo:alpha", "alpha_repo", "alpha-json"),
+        source("env:repo:beta", "beta_repo", "beta-syslog"),
+    ]
+}
+
+/// One observed field, a documented field, a tag and an array element in alpha, and
+/// documented fields only in beta.
+fn fields() -> Vec<Value> {
+    vec![
+        field("env:repo:alpha", "src.ip", true),
+        field("env:repo:alpha", "#Vendor", true),
+        field("env:repo:alpha", "user.name", false),
+        field("env:repo:alpha", "event.category[0]", false),
+        field("env:repo:beta", "host.name", false),
+        field("env:repo:beta", "process.name", false),
+    ]
+}
+
 fn pack() -> Pack {
+    pack_from(sources(), fields(), "synthetic-view")
+}
+
+fn pack_from(sources: Vec<Value>, fields: Vec<Value>, view: &str) -> Pack {
     Pack::new(
         EnvironmentId {
             cloud: Cloud::Us1,
             tenant: "0".repeat(32),
-            view: "synthetic-view".into(),
+            view: view.into(),
         },
         "2026-01-02T00:00:00Z".into(),
         PackData {
-            sources: vec![
-                source("env:repo:alpha", "alpha_repo", "alpha-json"),
-                source("env:repo:beta", "beta_repo", "beta-syslog"),
-            ],
-            fields: vec![
-                field("env:repo:alpha", "src.ip", true),
-                field("env:repo:alpha", "#Vendor", true),
-                field("env:repo:alpha", "user.name", false),
-                field("env:repo:alpha", "event.category[0]", false),
-                field("env:repo:beta", "host.name", false),
-                field("env:repo:beta", "process.name", false),
-            ],
+            sources,
+            fields,
             provenance: vec![json!({
                 "id": "prov:synthetic",
                 "source_type": "mcp-observation",
@@ -94,8 +122,8 @@ fn warnings<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
         .collect()
 }
 
-fn assert_no_warning(query: &str) {
-    let result = check(query, Some(&pack()), false);
+fn assert_no_warning(query: &str, pack: &Pack) {
+    let result = check(query, Some(pack), false);
     assert_eq!(
         result.outcome,
         Outcome::Ready,
@@ -145,40 +173,84 @@ fn a_field_no_mapped_source_has_names_every_source_when_the_query_selects_none()
         found[0]
     );
     // A field one mapped source documents is quiet when the query selects no source.
-    assert_no_warning(r#"process.name="x" | count()"#);
+    assert_no_warning(r#"process.name="x" | count()"#, &pack());
+}
+
+/// Ready, with the expected evidence for the field and neither map warning.
+fn assert_quiet(query: &str, pack: &Pack, key: &str, basis: &str) {
+    let result = check(query, Some(pack), false);
+    assert_eq!(
+        result.outcome,
+        Outcome::Ready,
+        "{query}: {:?}",
+        result.diagnostics
+    );
+    assert_eq!(
+        result.grounding.basis.get(key).map(String::as_str),
+        Some(basis),
+        "{query}: {:?}",
+        result.grounding.basis
+    );
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .all(|d| !d.code.starts_with("CQL_UNMAPPED_") && d.code != "CQL_GROUNDING_LENIENT"),
+        "{query}: {:?}",
+        result.diagnostics
+    );
 }
 
 #[test]
 fn documented_produced_tag_array_and_metadata_fields_are_quiet() {
-    for query in [
-        r#"#repo=alpha_repo | user.name="x" | count()"#,
-        r#"#repo=alpha_repo | n := length(src.ip) | n > 3 | count()"#,
-        r#"#repo=alpha_repo | #Vendor="x" | count()"#,
-        r#"#repo=alpha_repo | event.category[0]="network" | count()"#,
-        r#"#repo=alpha_repo | array:contains(array="event.category[]", value="network") | count()"#,
-        r#"#repo=alpha_repo | @ingesttimestamp > 0 | count()"#,
+    let unmeasured = "query-supplied; not measured in selected pack";
+    let listed = "listed field namespace; population not measured";
+    for (query, key, basis) in [
+        (
+            r#"#repo=alpha_repo | user.name="x" | count()"#,
+            "alpha_repo:*:user.name",
+            listed,
+        ),
+        (
+            r#"#repo=alpha_repo | n := length(src.ip) | n > 3 | count()"#,
+            "alpha_repo:*:n",
+            "query-produced; conditional; incoming field unverified",
+        ),
+        (
+            r#"#repo=alpha_repo | #Vendor="x" | count()"#,
+            "alpha_repo:*:#Vendor",
+            "observed in a bounded sample",
+        ),
+        (
+            r#"#repo=alpha_repo | event.category[0]="network" | count()"#,
+            "alpha_repo:*:event.category[0]",
+            listed,
+        ),
+        (
+            r#"#repo=alpha_repo | array:contains(array="event.category[]", value="network") | count()"#,
+            "alpha_repo:*:event.category[]",
+            unmeasured,
+        ),
+        (
+            r#"#repo=alpha_repo | @ingesttimestamp > 0 | count()"#,
+            "alpha_repo:*:@ingesttimestamp",
+            unmeasured,
+        ),
     ] {
-        let result = check(query, Some(&pack()), false);
-        assert!(
-            warnings(&result, "CQL_UNMAPPED_FIELD").is_empty(),
-            "{query}: {:?}",
-            result.diagnostics
-        );
-        assert!(
-            result
-                .diagnostics
-                .iter()
-                .all(|d| d.code != "CQL_GROUNDING_LENIENT"),
-            "{query}: {:?}",
-            result.diagnostics
-        );
+        assert_quiet(query, &pack(), key, basis);
     }
 }
 
 #[test]
 fn a_correct_query_with_a_map_gets_no_grounding_warning() {
-    assert_no_warning(r#"#repo=alpha_repo | src.ip="10.0.0.1" | groupBy([user.name], limit=max)"#);
-    assert_no_warning(r#"#repo=beta_repo #type=beta-syslog | host.name="h" | count()"#);
+    assert_no_warning(
+        r#"#repo=alpha_repo | src.ip="10.0.0.1" | groupBy([user.name], limit=max)"#,
+        &pack(),
+    );
+    assert_no_warning(
+        r#"#repo=beta_repo #type=beta-syslog | host.name="h" | count()"#,
+        &pack(),
+    );
 }
 
 #[test]
@@ -301,5 +373,293 @@ fn without_a_map_check_adds_no_grounding_warning() {
     assert_eq!(
         result.grounding.basis["*:*:user"],
         "query-supplied; deployment unverified"
+    );
+}
+
+fn one_warning(result: &Analysis, code: &str) -> String {
+    let found = warnings(result, code);
+    assert_eq!(found.len(), 1, "{code}: {:?}", result.diagnostics);
+    found[0].to_string()
+}
+
+fn no_warning(result: &Analysis, code: &str) {
+    assert!(
+        warnings(result, code).is_empty(),
+        "{:?}",
+        result.diagnostics
+    );
+}
+
+#[test]
+fn reading_a_field_an_earlier_step_removed_warns_with_or_without_a_map() {
+    let mapped = pack();
+    for query in [
+        "#repo=alpha_repo | drop(src.ip) | src.ip=*",
+        "#repo=alpha_repo | rename(field=src.ip, as=source_ip) | src.ip=*",
+    ] {
+        for pack in [Some(&mapped), None] {
+            let result = check(query, pack, false);
+            assert_eq!(result.outcome, Outcome::Ready, "{query}");
+            let message = one_warning(&result, "CQL_DROPPED_FIELD");
+            assert!(message.starts_with("'src.ip' "), "{message}");
+            assert_eq!(result.exit_code(true), 1, "{query}");
+        }
+    }
+    assert_no_warning(
+        "#repo=alpha_repo | rename(field=src.ip, as=source_ip) | source_ip=*",
+        &mapped,
+    );
+    // A read the projection check already reports is not reported twice.
+    let result = check(
+        "#repo=alpha_repo | select([src.ip]) | user.name=*",
+        Some(&mapped),
+        false,
+    );
+    one_warning(&result, "CQL_DROPPED_FIELD");
+    let result = check(
+        "#repo=alpha_repo | drop(src.ip) | src.ip=*",
+        Some(&mapped),
+        true,
+    );
+    let codes: Vec<_> = result.diagnostics.iter().map(|d| d.code.as_str()).collect();
+    assert_eq!(codes, ["CQL_CONTEXT_REQUIRED"]);
+}
+
+#[test]
+fn a_single_literal_in_selects_a_source_like_equality() {
+    let result = check(
+        r##"in(field="#repo", values=["alpha_repo"]) | host.name=*"##,
+        Some(&pack()),
+        false,
+    );
+    let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
+    assert!(message.starts_with("host.name "), "{message}");
+    assert!(
+        message.contains(ALPHA) && !message.contains(BETA),
+        "{message}"
+    );
+    for query in [
+        r##"in(field="#repo", values=["synthetic-view"]) | count()"##,
+        r#"#repo=~in(values=["synthetic-view"]) | count()"#,
+    ] {
+        let message = one_warning(&check(query, Some(&pack()), false), "CQL_UNMAPPED_SOURCE");
+        assert!(message.contains("target view"), "{query}: {message}");
+    }
+    // Case-insensitive or several values select no single source.
+    for query in [
+        r##"in(field="#repo", values=["gamma_repo"], ignoreCase=true) | count()"##,
+        r##"in(field="#repo", values=["gamma_repo", "delta_repo"]) | count()"##,
+    ] {
+        assert_no_warning(query, &pack());
+    }
+}
+
+#[test]
+fn a_literal_selector_is_checked_when_the_other_selector_is_not_literal() {
+    for query in [
+        "#repo=synthetic-view #type=/alpha/ | count()",
+        "#repo=synthetic-view #type=alpha* | count()",
+        "#repo=synthetic-view #type!=alpha-json | count()",
+    ] {
+        let message = one_warning(&check(query, Some(&pack()), false), "CQL_UNMAPPED_SOURCE");
+        assert!(
+            message.starts_with("#repo=synthetic-view matches no mapped source."),
+            "{query}: {message}"
+        );
+        assert!(message.contains("target view"), "{query}: {message}");
+    }
+    assert_no_warning(
+        "#repo=alpha_repo #type=alpha* | src.ip=* | count()",
+        &pack(),
+    );
+}
+
+#[test]
+fn tag_and_data_namespaces_and_member_paths_stay_distinct() {
+    for (query, field) in [
+        ("#repo=alpha_repo | Vendor=* | count()", "Vendor"),
+        ("#repo=alpha_repo | #src.ip=* | count()", "#src.ip"),
+        (
+            "#repo=alpha_repo | src.ip.octet=* | count()",
+            "src.ip.octet",
+        ),
+    ] {
+        let message = one_warning(&check(query, Some(&pack()), false), "CQL_UNMAPPED_FIELD");
+        assert!(message.starts_with(&format!("{field} ")), "{message}");
+    }
+    let mut fields = fields();
+    fields.push(json!({
+        "id": "env:field:alpha:obj",
+        "source_id": "env:repo:alpha",
+        "path": "obj",
+        "data_type": "object",
+        "is_tag": false,
+        "evidence_kind": "documented",
+        "provenance_ids": ["prov:synthetic"]
+    }));
+    let pack = pack_from(sources(), fields, "synthetic-view");
+    let unmeasured = "query-supplied; not measured in selected pack";
+    // A member of a listed object, and an array position the sample did not show, stay quiet.
+    assert_quiet(
+        "#repo=alpha_repo | obj.inner=* | count()",
+        &pack,
+        "alpha_repo:*:obj.inner",
+        unmeasured,
+    );
+    assert_quiet(
+        "#repo=alpha_repo | event.category[9]=* | count()",
+        &pack,
+        "alpha_repo:*:event.category[9]",
+        unmeasured,
+    );
+}
+
+#[test]
+fn recorded_datasets_and_record_kind_fields_count_as_mapped() {
+    let mut sources = sources();
+    sources[0]["relationship"] = json!({
+        "datasets": ["audit", "auth"],
+        "record_kinds": [{"field": "#event.kind", "values": ["login", "logout"], "truncated": false}]
+    });
+    let pack = pack_from(sources, fields(), "synthetic-view");
+    for query in [
+        "#repo=alpha_repo | #event.dataset=auth | count()",
+        "#repo=alpha_repo | #event.kind=login | count()",
+    ] {
+        let result = check(query, Some(&pack), false);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}");
+        no_warning(&result, "CQL_UNMAPPED_FIELD");
+    }
+    let result = check(
+        "#repo=beta_repo | #event.dataset=auth | count()",
+        Some(&pack),
+        false,
+    );
+    let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
+    assert!(message.starts_with("#event.dataset "), "{message}");
+}
+
+#[test]
+fn arrays_the_query_creates_are_not_reported() {
+    for query in [
+        r#"#repo=alpha_repo | splitString(by=".", field=src.ip, as=picked) | concatArray("picked[]")"#,
+        r#"#repo=alpha_repo | "picked[0]" := "network" | concatArray("picked[]")"#,
+        r#"#repo=alpha_repo | eval("picked[0]"="network") | concatArray("picked[]")"#,
+    ] {
+        let result = check(query, Some(&pack()), false);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}");
+        no_warning(&result, "CQL_UNMAPPED_FIELD");
+    }
+    // An array the query only reads is still compared with the map.
+    let result = check(
+        r#"#repo=alpha_repo | concatArray("picked[]")"#,
+        Some(&pack()),
+        false,
+    );
+    let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
+    assert!(message.starts_with("picked[] "), "{message}");
+}
+
+#[test]
+fn a_source_without_selectors_is_compared_when_the_query_selects_none() {
+    let mut sources = sources();
+    sources[1].as_object_mut().unwrap().remove("selectors");
+    let pack = pack_from(sources, fields(), "synthetic-view");
+    assert_no_warning("host.name=* | count()", &pack);
+    let message = one_warning(
+        &check("made.up=* | count()", Some(&pack), false),
+        "CQL_UNMAPPED_FIELD",
+    );
+    assert!(
+        message.contains(ALPHA) && message.contains("beta_repo"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_view_name_as_a_repository_warns_where_a_source_records_no_repository() {
+    let mut sources = sources();
+    sources[1]["selectors"] = json!({"type": "beta-syslog"});
+    let pack = pack_from(sources, fields(), "synthetic-view");
+    let message = one_warning(
+        &check("#repo=synthetic-view | count()", Some(&pack), false),
+        "CQL_UNMAPPED_SOURCE",
+    );
+    assert!(message.contains("target view"), "{message}");
+    // Beta records no repository, so another repository name is not compared.
+    assert_no_warning("#repo=gamma_repo | count()", &pack);
+}
+
+#[test]
+fn the_view_hint_appears_only_when_no_mapped_selector_has_the_value() {
+    let view_is_repo = pack_from(sources(), fields(), "alpha_repo");
+    let message = one_warning(
+        &check(
+            "#repo=alpha_repo #type=missing | count()",
+            Some(&view_is_repo),
+            false,
+        ),
+        "CQL_UNMAPPED_SOURCE",
+    );
+    assert!(
+        message.starts_with("#type=missing matches no mapped source."),
+        "{message}"
+    );
+    assert!(!message.contains("target view"), "{message}");
+    let message = one_warning(
+        &check("#type=synthetic-view | count()", Some(&pack()), false),
+        "CQL_UNMAPPED_SOURCE",
+    );
+    assert!(message.contains("target view"), "{message}");
+}
+
+#[test]
+fn a_field_measured_absent_warns_with_its_window_and_a_declared_field_is_quiet() {
+    let mut fields = fields();
+    fields.push(measured_absent("zero_only", false));
+    fields.push(measured_absent("decl.absent", true));
+    fields.push(json!({
+        "id": "env:field:alpha:decl.field",
+        "source_id": "env:repo:alpha",
+        "path": "decl.field",
+        "data_type": "unknown",
+        "is_tag": false,
+        "evidence_kind": "declared",
+        "coverage": {"declared": true},
+        "provenance_ids": ["prov:synthetic"]
+    }));
+    let pack = pack_from(sources(), fields, "synthetic-view");
+    let result = check(
+        "#repo=alpha_repo | zero_only=* | count()",
+        Some(&pack),
+        false,
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+    let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
+    assert!(message.starts_with("zero_only "), "{message}");
+    assert!(
+        message.contains(ALPHA) && message.contains(WINDOW),
+        "{message}"
+    );
+    assert_eq!(result.exit_code(true), 1);
+    for query in [
+        "#repo=alpha_repo | decl.field=1 | count()",
+        "#repo=alpha_repo | decl.absent=1 | count()",
+    ] {
+        let result = check(query, Some(&pack), false);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}");
+        no_warning(&result, "CQL_UNMAPPED_FIELD");
+    }
+    let message = one_warning(
+        &check(
+            r#"#repo=alpha_repo | dest.made_up="x" | count()"#,
+            Some(&pack),
+            false,
+        ),
+        "CQL_UNMAPPED_FIELD",
+    );
+    assert!(
+        message.contains("not observed, documented or declared"),
+        "{message}"
     );
 }
