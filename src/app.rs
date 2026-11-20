@@ -3045,9 +3045,10 @@ fn ground(
         let matches = decoded_p
             .fields
             .iter()
+            // The name and namespace rule out most fields before the sources are scanned.
             .filter(|f| {
-                sources.iter().any(|s| s.id == f.source_id)
-                    && field_matches_requirement(f, &r)
+                field_matches_requirement(f, &r)
+                    && sources.iter().any(|s| s.id == f.source_id)
                     && (!r.array || f.is_array == Some(true) || f.data_type == "array")
             })
             .collect::<Vec<_>>();
@@ -3496,8 +3497,8 @@ fn query_observation_basis(
             .fields
             .iter()
             .filter(|field| {
-                sources.iter().any(|source| source.id == field.source_id)
-                    && field_matches_requirement(field, r)
+                field_matches_requirement(field, r)
+                    && sources.iter().any(|source| source.id == field.source_id)
             })
             .collect::<Vec<_>>();
         let mut provenance_ids = BTreeSet::new();
