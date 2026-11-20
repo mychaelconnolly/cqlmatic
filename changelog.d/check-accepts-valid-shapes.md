@@ -1,1 +1,2 @@
 - Accept positional fields in `select`, leading literal `]` in regex character classes, quoted numbers in `sample` percentages and percentile lists, omitted fields in `xml:prettyPrint` and `time:dayOfWeek`, fallbacks for missing tags in `default`, custom `top` remainder labels, and aliases in standalone aggregate lists.
+- Apply the same bounds to bare and quoted sample percentages and percentile values. Check named `top` remainder rows against the grouping value in saved results. Require unquoted function names.

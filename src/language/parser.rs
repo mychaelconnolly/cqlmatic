@@ -317,7 +317,7 @@ impl Parser<'_> {
                 let negated = self.eat("!");
                 self.space();
                 let call_start = self.pos;
-                let n = self.identifier()?;
+                let n = self.unquoted_identifier()?;
                 let mut c = self.call(n, call_start)?;
                 c.args.push(Arg {
                     name: Some("field".into()),
@@ -363,9 +363,12 @@ impl Parser<'_> {
                 }
                 return Ok(Step::Match { field: name, arms });
             }
-            if !name.eq_ignore_ascii_case("not") && self.eat("(") {
+            if !name.eq_ignore_ascii_case("not")
+                && !self.input[start..].starts_with('"')
+                && self.eat("(")
+            {
                 self.pos = start;
-                let name = self.identifier()?;
+                let name = self.unquoted_identifier()?;
                 let call = self.call(name, start)?;
                 let end = self.pos;
                 let composition =
@@ -509,7 +512,7 @@ impl Parser<'_> {
             let start = p.pos;
             if let Ok(name) = p.identifier() {
                 p.space();
-                if p.rest().starts_with('(') {
+                if !p.input[start..].starts_with('"') && p.rest().starts_with('(') {
                     return Ok(Filter::Call(p.call(name, start)?));
                 }
                 for op in ["!=", ">=", "<=", "=", ">", "<"] {
@@ -733,13 +736,13 @@ impl Parser<'_> {
                     if name.eq_ignore_ascii_case("sample")
                         && matches!(argname.as_deref(), None | Some("percentage"))
                     {
-                        coerce_quoted_percentage(&mut value, 0.01);
+                        coerce_quoted_number(&mut value);
                     } else if name.eq_ignore_ascii_case("percentile")
                         && argname.as_deref() == Some("percentiles")
                         && let Value::Array(values) = &mut value
                     {
                         for value in values {
-                            coerce_quoted_percentage(value, 0.0);
+                            coerce_quoted_number(value);
                         }
                     }
                     positional += usize::from(argname.is_none());
@@ -1043,12 +1046,9 @@ impl Parser<'_> {
     }
 }
 
-fn coerce_quoted_percentage(value: &mut Value, minimum: f64) {
+fn coerce_quoted_number(value: &mut Value) {
     if let Value::String(text) = value
-        && text
-            .trim()
-            .parse::<f64>()
-            .is_ok_and(|number| (minimum..=100.0).contains(&number))
+        && text.trim().parse::<f64>().is_ok_and(f64::is_finite)
     {
         *value = Value::Number(text.trim().into());
     }

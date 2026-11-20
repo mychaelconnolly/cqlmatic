@@ -1968,7 +1968,9 @@ impl Checker<'_> {
             }
             let boolean_string =
                 spec.name == "top" && name == "rest" && matches!(value, Value::Bool(_));
-            if !argument_type(value, kind) && !boolean_string {
+            let sample_number =
+                spec.name == "sample" && name == "percentage" && numeric_literal(value).is_some();
+            if !argument_type(value, kind) && !boolean_string && !sample_number {
                 if kind == "d" && value.text().is_some() {
                     self.unsupported("CQL_UNSUPPORTED_DURATION", "Only positive whole-number fixed durations are supported; other relative-time spellings and explicit zero are unsupported.", Some(c), false);
                     continue;
@@ -2291,6 +2293,19 @@ impl Checker<'_> {
                 }
             }
             if matches!(kind, "i" | "j" | "l" | "n" | "N") {
+                let (minimum, maximum, range_message) = match (spec.name, rule.name.as_str()) {
+                    ("sample", "percentage") => (
+                        Some(0.01),
+                        rule.maximum,
+                        Some("Sample percentage must be between 0.01 and 100 inclusive."),
+                    ),
+                    ("percentile", "percentiles") => (
+                        Some(0.0),
+                        Some(100.0),
+                        Some("Percentiles must be between 0 and 100 inclusive."),
+                    ),
+                    _ => (rule.minimum, rule.maximum, None),
+                };
                 for value in values {
                     let converted;
                     let value = if matches!(kind, "i" | "j" | "l")
@@ -2302,18 +2317,21 @@ impl Checker<'_> {
                         value
                     };
                     if !has_parameter(value)
-                        && (rule.minimum.is_some_and(|minimum| {
+                        && (minimum.is_some_and(|minimum| {
                             compare_numeric_literal(value, minimum) == Some(Ordering::Less)
-                        }) || rule.maximum.is_some_and(|maximum| {
+                        }) || maximum.is_some_and(|maximum| {
                             compare_numeric_literal(value, maximum) == Some(Ordering::Greater)
                         }) || numeric_literal(value).is_some_and(|number| {
-                            rule.minimum.is_some_and(|minimum| number < minimum)
-                                || rule.maximum.is_some_and(|maximum| number > maximum)
+                            minimum.is_some_and(|minimum| number < minimum)
+                                || maximum.is_some_and(|maximum| number > maximum)
                         }))
                     {
                         self.emit(
                             "CQL_ARGUMENT_RANGE",
-                            format!("'{}' is outside its documented bounds.", rule.name),
+                            range_message.map_or_else(
+                                || format!("'{}' is outside its documented bounds.", rule.name),
+                                str::to_owned,
+                            ),
                             Some(c),
                             false,
                         );

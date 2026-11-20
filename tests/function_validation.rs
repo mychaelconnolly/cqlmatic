@@ -61,19 +61,40 @@ fn check_accepts_valid_shapes() {
         "[smallest := min(quantity), largest := max(quantity)] | select(smallest, largest)",
     ] {
         let result = check(query);
-        if result.outcome != Outcome::Ready {
+        if result.outcome != Outcome::Ready
+            || result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_DROPPED_FIELD")
+        {
             failures.push(format!(
                 "{query}: {:?}",
                 result
                     .diagnostics
                     .iter()
-                    .filter(|d| d.severity == Severity::Error)
+                    .filter(|d| d.severity == Severity::Error || d.code == "CQL_DROPPED_FIELD")
                     .map(|d| d.code.as_str())
                     .collect::<Vec<_>>()
             ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for query in [
+        "select(category, quantity) | groupBy(typo)",
+        r#"percentile(quantity, percentiles=["50"]) | table([_typo])"#,
+        "[smallest := min(quantity), largest := max(quantity)] | select(smallest, typo)",
+    ] {
+        let result = check(query);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_DROPPED_FIELD"),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
 }
 
 #[test]
@@ -89,14 +110,8 @@ fn check_rejects_near_misses_of_valid_shapes() {
         ("/[^]/", "CQL_REGEX_SYNTAX"),
         ("/[z-a]/", "CQL_REGEX_SYNTAX"),
         (r#"sample(percentage="many")"#, "CQL_ARGUMENT_TYPE"),
-        (r#"sample(percentage="0")"#, "CQL_ARGUMENT_TYPE"),
-        (r#"sample(percentage="100.01")"#, "CQL_ARGUMENT_TYPE"),
         (
             r#"percentile(quantity, percentiles=["NaN"])"#,
-            "CQL_ARGUMENT_TYPE",
-        ),
-        (
-            r#"percentile(quantity, percentiles=["101"])"#,
             "CQL_ARGUMENT_TYPE",
         ),
         ("[smallest := quantity]", "CQL_SYNTAX"),
@@ -113,6 +128,60 @@ fn check_rejects_near_misses_of_valid_shapes() {
         ),
     ] {
         invalid(query, code);
+    }
+}
+
+#[test]
+fn sample_and_percentile_apply_the_same_bounds_to_quoted_and_bare_numbers() {
+    for (argument, out_of_range, in_range) in [
+        (
+            "sample(percentage=NUMBER)",
+            ["-1", "0", "0.009", "100.01"],
+            ["0.01", "100"],
+        ),
+        (
+            "percentile(quantity, percentiles=[NUMBER])",
+            ["-1", "-0.01", "100.01", "101"],
+            ["0", "100"],
+        ),
+    ] {
+        for value in out_of_range {
+            invalid(&argument.replace("NUMBER", value), "CQL_ARGUMENT_RANGE");
+            invalid(
+                &argument.replace("NUMBER", &format!("\"{value}\"")),
+                "CQL_ARGUMENT_RANGE",
+            );
+        }
+        for value in in_range {
+            ready(&argument.replace("NUMBER", value));
+            ready(&argument.replace("NUMBER", &format!("\"{value}\"")));
+        }
+    }
+}
+
+#[test]
+fn quoted_names_do_not_dispatch_as_function_calls() {
+    for query in [
+        r#""top"(category, rest=others)"#,
+        r#""xml:prettyPrint"()"#,
+        r#""time:dayOfWeek"()"#,
+        r#"text OR "regex"("x", field=message)"#,
+    ] {
+        invalid(query, "CQL_SYNTAX");
+    }
+    unsupported(r#"message =~ "regex"("x")"#, "CQL_UNSUPPORTED_SYNTAX");
+    invalid(
+        r#"text OR regex("x", field=message)"#,
+        "CQL_FUNCTION_FILTER_COMPOSITION",
+    );
+    for query in [
+        r#""top""#,
+        r#""top" (category=example)"#,
+        r#""top" := category"#,
+        r#""top"=example"#,
+        r#"message =~ regex("x")"#,
+    ] {
+        ready(query);
     }
 }
 
@@ -514,7 +583,6 @@ fn numeric_parameters_keep_finite_types_and_documented_bounds() {
         invalid(query, "CQL_ARGUMENT_RANGE");
     }
     for query in [
-        "sample(percentage=0)",
         "sample(percentage=100)",
         "sample(percentage=1e1)",
         "top(user,error=2.5)",

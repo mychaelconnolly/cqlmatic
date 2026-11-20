@@ -1570,12 +1570,43 @@ fn assigned_aggregates_use_the_assignment_name_for_outputs_and_counts() {
 
 #[test]
 fn custom_top_rest_label_counts_as_the_extra_row() {
-    let result = assess_accepted(
+    for query in [
         r#"top(user, limit=1, rest="remaining values")"#,
-        json!({"result":[{"user":"a","_count":1},{"user":"remaining values","_count":1}]}),
+        r#"top(user, limit=1, rest="remaining values") | select([user, _count])"#,
+    ] {
+        let result = assess_accepted(
+            query,
+            json!({"result":[{"user":"a","_count":6},{"user":"b","_count":1}]}),
+        );
+        assert_eq!(
+            result.outcome,
+            AssessOutcome::Inconclusive,
+            "{:?}",
+            result.findings
+        );
+        finding(&result, "RESULT_CAP_EXCEEDED", Severity::Warning);
+        let matched = assess_accepted(
+            query,
+            json!({"result":[{"user":"a","_count":6},{"user":"remaining values","_count":1}]}),
+        );
+        assert_eq!(
+            matched.outcome,
+            AssessOutcome::NoFindings,
+            "{:?}",
+            matched.findings
+        );
+    }
+
+    let hidden = assess_accepted(
+        r#"top(user, limit=1, rest="remaining values") | select(_count)"#,
+        json!({"result":[{"_count":6},{"_count":1}]}),
     );
-    assert_eq!(result.outcome, AssessOutcome::NoFindings);
-    finding(&result, "RESULT_CAP_REACHED", Severity::Info);
+    assert_eq!(
+        hidden.outcome,
+        AssessOutcome::NoFindings,
+        "{:?}",
+        hidden.findings
+    );
 }
 
 #[test]
