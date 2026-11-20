@@ -19,6 +19,18 @@ fn check(query: &str) -> Analysis {
     check_with(query, false)
 }
 
+/// The check result of a query that must be ready, so that a missing warning is not an invalid query.
+fn ready(query: &str) -> Analysis {
+    let result = check(query);
+    assert_eq!(
+        result.outcome,
+        Outcome::Ready,
+        "{query}: {:?}",
+        result.diagnostics
+    );
+    result
+}
+
 fn messages<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
     result
         .diagnostics
@@ -27,6 +39,12 @@ fn messages<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
         .inspect(|d| assert_eq!(d.severity, Severity::Warning, "{d:?}"))
         .map(|d| d.message.as_str())
         .collect()
+}
+
+fn join_warning(compared: &str) -> String {
+    format!(
+        "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} tests only that row. Set max to the largest number of matches one key can have."
+    )
 }
 
 const JOIN: &str = "kind=login | login_at := @timestamp | join({kind=alert | alert_at := @timestamp}, field=[user], include=[alert_at]";
@@ -45,20 +63,28 @@ fn join_without_max_warns_before_a_comparison_of_a_joined_value() {
             ") | gap := alert_at - login_at | gap > 0 gap < 60000",
             "gap",
         ),
+        (") | eval(gap = alert_at - login_at) | gap < 60000", "gap"),
+        (
+            ") | eval(seen = alert_at, gap = seen - login_at) | test(gap > 0)",
+            "gap",
+        ),
+        (
+            ") | rename(alert_at, as=seen_at) | test(seen_at > login_at)",
+            "seen_at",
+        ),
+        (
+            ") | case { kind=vpn | alert_at := 1; * | note := 1 } | alert_at > 1",
+            "alert_at",
+        ),
+        (
+            ") | case { kind=vpn | seen_at := alert_at; * } | test(seen_at > login_at)",
+            "seen_at",
+        ),
     ] {
         let query = format!("{JOIN}{rest}");
-        let result = check(&query);
         assert_eq!(
-            result.outcome,
-            Outcome::Ready,
-            "{query}: {:?}",
-            result.diagnostics
-        );
-        assert_eq!(
-            messages(&result, "CQL_JOIN_MAX"),
-            [format!(
-                "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} tests only that row. Set max to the largest number of matches one key can have."
-            )],
+            messages(&ready(&query), "CQL_JOIN_MAX"),
+            [join_warning(compared)],
             "{query}"
         );
     }
@@ -73,18 +99,16 @@ fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
         ") | alert_at = \"x\"",
         ") | test(login_at > 0)",
         ") | alert_at := login_at | test(alert_at > 0)",
+        ") | eval(alert_at = login_at) | test(alert_at > 0)",
+        ") | case { kind=vpn | alert_at := 1; * | alert_at := 2 } | alert_at > 1",
     ] {
         let query = format!("{JOIN}{rest}");
-        let result = check(&query);
-        assert_eq!(
-            result.outcome,
-            Outcome::Ready,
-            "{query}: {:?}",
-            result.diagnostics
+        assert!(
+            messages(&ready(&query), "CQL_JOIN_MAX").is_empty(),
+            "{query}"
         );
-        assert!(messages(&result, "CQL_JOIN_MAX").is_empty(), "{query}");
     }
-    let result = check(
+    let result = ready(
         "kind=login | test(login_at > 0) | join({kind=alert}, field=[user], include=[alert_at])",
     );
     assert!(messages(&result, "CQL_JOIN_MAX").is_empty());
@@ -92,17 +116,57 @@ fn join_with_max_or_without_a_comparison_of_a_joined_value_is_quiet() {
 
 #[test]
 fn join_to_a_subquery_with_one_row_per_key_is_quiet() {
-    let grouped = "kind=login | join({kind=alert | groupBy([GROUP], function=max(@timestamp, as=alert_at), limit=max)}, field=[user, host], include=[alert_at]) | test(alert_at > @timestamp)";
-    for group in ["user", "user, host"] {
-        let result = check(&grouped.replace("GROUP", group));
-        assert!(messages(&result, "CQL_JOIN_MAX").is_empty(), "{group}");
+    let joined = |subquery: &str| {
+        format!(
+            "kind=login | join({{kind=alert | {subquery}}}, field=[user, host], include=[alert_at]) | test(alert_at > @timestamp)"
+        )
+    };
+    for subquery in [
+        "groupBy([user, host], function=max(@timestamp, as=alert_at), limit=max)",
+        "groupBy([user, host], function=[count(as=alerts), max(@timestamp, as=alert_at)], limit=max)",
+        "groupBy([user, host], function=max(@timestamp, as=alert_at), limit=max) | select([user, host, alert_at])",
+        "alert_at := @timestamp | head(1)",
+    ] {
+        let query = joined(subquery);
+        assert!(
+            messages(&ready(&query), "CQL_JOIN_MAX").is_empty(),
+            "{query}"
+        );
     }
-    let result = check(&grouped.replace("GROUP", "user, process"));
-    assert_eq!(messages(&result, "CQL_JOIN_MAX").len(), 1);
-    let result = check(
+    for subquery in [
+        "groupBy([user, host, process], function=max(@timestamp, as=alert_at), limit=max)",
+        "alert_at := @timestamp | groupBy([user, host], function=head(2), limit=max)",
+        "alert_at := @timestamp | head(2)",
+    ] {
+        let query = joined(subquery);
+        assert_eq!(
+            messages(&ready(&query), "CQL_JOIN_MAX"),
+            [join_warning("alert_at")],
+            "{query}"
+        );
+    }
+    let result = ready(
         "kind=login | join({kind=alert | groupBy([account], function=count(as=alerts), limit=max)}, field=[user], key=[account], include=[alerts]) | alerts > 0",
     );
     assert!(messages(&result, "CQL_JOIN_MAX").is_empty());
+}
+
+#[test]
+fn join_compared_on_its_own_key_is_quiet() {
+    for query in [
+        "kind=conn | join({flagged=true}, field=local_port, key=port, include=port) | port > 1023 | count()",
+        "kind=conn | join({flagged=true}, field=[user], include=[user]) | test(user > \"m\")",
+    ] {
+        assert!(
+            messages(&ready(query), "CQL_JOIN_MAX").is_empty(),
+            "{query}"
+        );
+    }
+    let query = "kind=conn | join({flagged=true}, field=local_port, key=port, include=[port, seen]) | seen > 1023 | count()";
+    assert_eq!(
+        messages(&ready(query), "CQL_JOIN_MAX"),
+        [join_warning("seen")]
+    );
 }
 
 const SEQUENCE: &str = "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m)";
@@ -134,15 +198,8 @@ fn correlate_names_a_field_it_does_not_export_and_its_query() {
         ),
     ];
     for (query, message) in cases {
-        let result = check(&query);
         assert_eq!(
-            result.outcome,
-            Outcome::Ready,
-            "{query}: {:?}",
-            result.diagnostics
-        );
-        assert_eq!(
-            messages(&result, "CQL_UNEXPORTED_FIELD"),
+            messages(&ready(&query), "CQL_UNEXPORTED_FIELD"),
             [message],
             "{query}"
         );
@@ -156,7 +213,7 @@ fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
         format!("{SEQUENCE} | groupBy([first.user], function=count(@id), limit=max)"),
         "kind=a | groupBy([user], function=count(), limit=max) | test(host > 0)".into(),
     ] {
-        let result = check(&query);
+        let result = ready(&query);
         assert!(
             messages(&result, "CQL_UNEXPORTED_FIELD").is_empty(),
             "{query}: {:?}",
@@ -167,6 +224,7 @@ fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
         &format!("{SEQUENCE} | groupBy([first.host], limit=max)"),
         true,
     );
+    assert_eq!(result.outcome, Outcome::NeedsContext);
     assert!(messages(&result, "CQL_UNEXPORTED_FIELD").is_empty());
     assert!(
         result
