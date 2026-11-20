@@ -39,7 +39,9 @@ Use Rust 1.99.1 and the checked-in lockfile. For first setup, run `./dev fetch -
 ./dev build --release --locked --offline
 ```
 
-Add a focused regression for non-trivial behavior. Update affected public types, adapters, examples, schemas, coverage, and documentation together. Intentional schema changes follow [the development procedure](docs/DEVELOPMENT.md#contract-changes). Do not add a dependency or abstraction when existing code solves the problem.
+Before pushing, run `python3 tools/local_checks.py`: it is the command the Ubuntu CI job runs, and on macOS and Linux it also lints the Windows build. See [development](docs/DEVELOPMENT.md).
+
+Add a focused regression for non-trivial behavior. Describe a change users will notice in its own new file, `changelog.d/NAME.md`, as one or more lines that start with `- `; leave `CHANGELOG.md` alone, because two branches that both edit it cannot both merge. A release moves those entries into `CHANGELOG.md`. Update affected public types, adapters, examples, schemas, coverage, and documentation together. Intentional schema changes follow [the development procedure](docs/DEVELOPMENT.md#contract-changes). Do not add a dependency or abstraction when existing code solves the problem.
 
 Pure modules stay pure. The CLI remains deterministic and offline for generation/checking. Network and filesystem behavior belongs at the existing boundaries. Preserve strict input validation, snapshot integrity, explicit source grounding, finite search budgets, and known-job cleanup.
 

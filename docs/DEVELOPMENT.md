@@ -12,6 +12,14 @@ Use Rust 1.99.1 and the checked-in lockfile. `./dev` resolves the pinned compile
 
 The build produces `cqlmatic`. Tests run locally without credentials or network access.
 
+Before pushing, run the checks with one command. The Ubuntu CI job runs the same command with `--no-windows-lint`, because the Windows job lints on Windows:
+
+```sh
+python3 tools/local_checks.py
+```
+
+It runs the asset and changelog checks, the `fmt`, `clippy`, `test` and `build` commands above, the npm launcher and tooling tests, then smoke-tests the release executable, its nine schemas and the synthetic MCP replay. Logs go to a new temporary folder, or to `--out`. When Cargo's target folder lies outside the checkout, the command builds in a subfolder of it named for this checkout, because Cargo otherwise takes another checkout's results in a shared folder as its own. A second Clippy pass over the library and executable denies the reads listed in `clippy.toml`, which have no size limit; read files with `storage::read_bytes(path, limit)` and prompt input with `terminal::read_line`. Tests may read fixtures freely. The pass does not detect `read_to_end` on a reader that has no `take`. Website checks are separate and are listed below. On macOS and Linux it also lints the Windows build (`--target x86_64-pc-windows-msvc`), so code behind `cfg(windows)` is compiled before the hosted Windows job sees it. That step needs the Rust target (`rustup target add x86_64-pc-windows-msvc`), a C compiler for 64-bit Windows (`x86_64-w64-mingw32-gcc` from mingw-w64) and an archiver that takes MSVC `lib` arguments (`llvm-lib` from LLVM); nothing is linked. From macOS and Linux it does not run Windows tests: those run on Windows, in the hosted job. The command needs Python 3.11 or later.
+
 The optional npm launcher uses Node.js 22+ built-ins and has no npm dependencies. Use a [supported, patched Node.js release](../README.md#try-v0110); the package's engine field describes API compatibility, not security-patch status. Run its isolated native-fixture checks with `node --test npm/launcher.test.cjs`. Native executables are added only when producing the reviewed npm archive; they are not stored in the source tree. See [release preparation](RELEASING.md#npm-package) for packaging and platform requirements.
 
 `CQLMATIC_CARGO_HOME` overrides the wrapper's project-local Cargo cache; ordinary Cargo settings such as `CARGO_TARGET_DIR` can place build artifacts elsewhere. This does not change the pinned compiler requirement.

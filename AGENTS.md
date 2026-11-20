@@ -15,6 +15,12 @@ Run from the repository root with Rust **1.99.1**, edition **2024**. `./dev` use
 ./target/release/cqlmatic --version
 ```
 
+Before pushing, run the asset, changelog, Rust, launcher and tooling checks with one command. The Ubuntu job runs this command with `--no-windows-lint`. On macOS and Linux the command also lints the Windows build, which the hosted Windows job does on Windows. Site checks are separate: `npm --prefix site ci`, then `npm --prefix site test`.
+
+```sh
+python3 tools/local_checks.py
+```
+
 Focused checks and intentional schema regeneration:
 
 ```sh
@@ -106,3 +112,18 @@ Weigh each finding by what it changes for a person using CQLmatic to write, chec
 - Code that edits a file belonging to another program must not corrupt it or lose its contents, and must work on ordinary setups. It is not required to defend that file's owner against other local users who can already change it.
 - Do not raise an attacker or failure model that the feature's documented guarantee excludes. If the guarantee itself looks wrong, say so once.
 - Prefer a feature that works on ordinary setups and states its limits over one that refuses them.
+
+## Rules and what enforces them
+
+Each rule below is paired with what enforces it. On macOS and Linux, `python3 tools/local_checks.py` runs every named gate. The Ubuntu job runs the same command without the two Windows gates, and the hosted Windows job runs both Clippy passes on Windows. A rule is listed only when its check has been shown to fail on the mistake. When a mistake happens a second time, add its rule together with such a check, in the same change. Remove a row once its mistake can no longer be made.
+
+| Rule | Enforced by |
+| --- | --- |
+| Run the check command on the commit you push. | `python3 tools/local_checks.py`; the Ubuntu job runs it and fails on any gate. Site checks run in the Site job. |
+| Code behind `cfg(windows)`, and any change to a `cfg` attribute, compiles and passes Clippy for Windows before it is pushed. | Gates `clippy-windows` and `clippy-windows-shipped` on macOS and Linux; the hosted Windows job. From macOS and Linux this compiles and lints only; Windows tests run on Windows, in the hosted job. |
+| Shipped code does not call the reads listed in `clippy.toml`, which have no size limit of their own. Use `storage::read_bytes(path, limit)` for a file, `terminal::read_line` for a prompt, and `Read::take(limit + 1)` before `read_to_end` for another stream. | Gates `clippy-shipped` and `clippy-windows-shipped`; the error names the replacement. A `read_to_end` without `take` is not detected. |
+| An unreleased changelog entry is its own file, `changelog.d/NAME.md`. `CHANGELOG.md` changes only through `python3 tools/changelog.py release`. | Gate `changelog`. |
+| The bundled JSON schemas match the Rust request and result types. | Schema drift test in gate `test`. |
+| Tracked images and binary files carry no embedded metadata. | Gate `assets`. |
+
+A listed read that `take` already limits is marked at the call with `#[expect(clippy::disallowed_methods, reason = "...")]`.

@@ -154,6 +154,7 @@ public static class CqlmaticValidationOwner {
     Invoke-Checked 'cargo' @('+1.99.1', 'fetch', '--locked')
     Invoke-Checked 'cargo' @('+1.99.1', 'fmt', '--all', '--check')
     Invoke-Checked 'cargo' @('+1.99.1', 'clippy', '--offline', '--locked', '--all-targets', '--', '-D', 'warnings')
+    Invoke-Checked 'cargo' @('+1.99.1', 'clippy', '--offline', '--locked', '--lib', '--bins', '--', '-D', 'warnings', '-D', 'clippy::disallowed_methods')
     Invoke-Checked 'cargo' @('+1.99.1', 'test', '--offline', '--locked')
     # Explicit targeting keeps the static CRT flag away from host build scripts and proc macros.
     if ($repo -match '\s' -or $env:CARGO_HOME -match '\s') { throw 'Build paths must contain no whitespace.' }

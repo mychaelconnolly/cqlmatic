@@ -29,6 +29,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 proptest = "1"
 schemars = "1"
 
+[lints.clippy]
+# Denied for the library and executable by tools/local_checks.py; tests read fixtures freely.
+disallowed_methods = "allow"
+
 [profile.release]
 lto = "thin"
 strip = "none"

@@ -23,97 +23,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check tracked assets for embedded metadata
-        run: python3 tools/asset_metadata.py
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
       - name: Fetch locked dependencies
         run: ./dev fetch --locked
-      - name: Check formatting
-        run: ./dev fmt --all --check
-      - name: Run Clippy
-        run: ./dev clippy --offline --locked --all-targets -- -D warnings
-      - name: Run tests
-        run: ./dev test --offline --locked
       - name: Install pinned Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.22.1
           package-manager-cache: false
-      - name: Test npm launcher
-        run: node --test npm/launcher.test.cjs
-      - name: Test release and deployment tooling
-        env:
-          PYTHONDONTWRITEBYTECODE: 1
-        run: python3 -m unittest discover -s tools -p 'test_*.py'
-      - name: Build release
-        run: ./dev build --release --locked --offline
-      - name: Smoke-test CLI
-        run: |
-          ./target/release/cqlmatic --version
-          ./target/release/cqlmatic generate --request examples/generate.request.json --json
-      - name: Replay synthetic MCP discovery and assess offline
-        run: |
-          set -euo pipefail
-          umask 077
-          work=.local/ci-mcp-replay
-          mkdir -p "$work"
-          trap 'rm -rf "$work"' EXIT
-          set +e
-          ./target/release/cqlmatic env discover --mcp --request examples/mcp/discover.request.json --state "$work/state.json" --pack "$work/pack.json" --receipt "$work/receipt.json" > "$work/step.json"
-          code=$?
-          set -e
-          test "$code" -eq 3
-          for round in 1 2 3 4; do
-            status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/step.json")"
-            if [ "$status" = complete ]; then break; fi
-            test "$status" = needs-probes
-            # Same probe-to-answer mapping as tests/mcp_discovery.rs fixture().
-            answers="$(python3 -c 'import json,sys
-          def name(p):
-              kind, field = p["kind"], p.get("field")
-              if kind == "tag-detect":
-                  return "count" if field == "event_simpleName" else "zero"
-              if kind == "record-kind-facet":
-                  return {"#type": "kind", "#event_simpleName": "simple-name"}[field]
-              return {"census": "census", "volume": "count", "dataset-facet": "dataset", "fieldset": "fieldset", "population": "population", "value-facet": "value"}[kind]
-          print("\n".join(p["probe_id"] + "=examples/mcp/" + name(p) + ".json" for p in json.load(open(sys.argv[1]))["probes"]))' "$work/step.json")"
-            test -n "$answers"
-            while IFS= read -r answer; do
-              probe_id="${answer%%=*}"
-              set +e
-              ./target/release/cqlmatic env discover --mcp --state "$work/state.json" --dispatch "$probe_id" > "$work/dispatched.json"
-              code=$?
-              set -e
-              test "$code" -eq 3
-              set +e
-              ./target/release/cqlmatic env discover --mcp --state "$work/state.json" --answer "$answer" > "$work/step.json"
-              code=$?
-              set -e
-              if [ "$code" -eq 0 ]; then break; fi
-              test "$code" -eq 3
-            done <<< "$answers"
-          done
-          test "$code" -eq 0
-          test "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$work/step.json")" = complete
-          test -s "$work/pack.json"
-          test -s "$work/receipt.json"
-          # The synthetic source has two #type record kinds: unconstrained generation must ask for context ...
-          set +e
-          ./target/release/cqlmatic generate --intent 'show events from synthetic_repo where user equals "synthetic-user" select user limit 20' --pack "$work/pack.json" --require-observed --json > "$work/generate-ambiguous.json"
-          code=$?
-          set -e
-          test "$code" -eq 1
-          python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); assert result["outcome"]=="needs-context", result["outcome"]; assert any(d["code"]=="CQL_RECORD_KIND_AMBIGUOUS" for d in result["diagnostics"]), result["diagnostics"]' "$work/generate-ambiguous.json"
-          # ... and explicit acceptance of mixed kinds is ready with the warning kept.
-          ./target/release/cqlmatic generate --intent 'show events from synthetic_repo where user equals "synthetic-user" select user limit 20' --pack "$work/pack.json" --require-observed --accept-mixed-record-kinds --json > "$work/generate.json"
-          python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); assert result["outcome"]=="ready", result["diagnostics"]; assert any(d["code"]=="CQL_RECORD_KIND_AMBIGUOUS" and d["severity"]=="warning" for d in result["diagnostics"]), result["diagnostics"]; open(sys.argv[2],"w",encoding="utf-8").write(result["query"])' "$work/generate.json" "$work/query.cql"
-          set +e
-          ./target/release/cqlmatic assess --query-file "$work/query.cql" --result examples/mcp/value.json --pack "$work/pack.json" --json > "$work/assess.json"
-          code=$?
-          set -e
-          test "$code" -eq 1
-          python3 -c 'import json,sys; result=json.load(open(sys.argv[1])); assert result["outcome"]=="advisory", result["findings"]; assert result["rows"]==1; assert any(f["code"]=="RESULT_COMPLETENESS_UNATTESTED" and f["severity"]=="info" for f in result["findings"]); assert any(f["code"]=="RESULT_KEY_COVERAGE" and f["severity"]=="warning" for f in result["findings"])' "$work/assess.json"
+      - name: Run every check
+        # The Windows job lints the Windows build on Windows itself.
+        run: python3 tools/local_checks.py --no-windows-lint --out "$RUNNER_TEMP/checks"
   rust-windows:
     name: Rust (Windows)
     runs-on: windows-latest

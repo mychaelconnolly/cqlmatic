@@ -2988,8 +2988,7 @@ fn prompt(label: &str) -> Result<String, Diagnostic> {
 
 fn read_response(input: &mut impl BufRead) -> Result<String, Diagnostic> {
     let mut line = String::new();
-    if input
-        .read_line(&mut line)
+    if crate::terminal::read_line(input, &mut line)
         .map_err(|_| fail("Cannot read inventory response."))?
         == 0
     {

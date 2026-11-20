@@ -467,7 +467,7 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), Diagnostic> {
 fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
     let path = directory.join("tally.json");
     let writer = patiently(|| storage::Writer::acquire(&path))?;
-    let mut counts: BTreeMap<String, u64> = fs::read(&path)
+    let mut counts: BTreeMap<String, u64> = storage::read_bytes(&path, MAX_TALLY_BYTES)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();

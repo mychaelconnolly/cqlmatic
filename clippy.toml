@@ -1,0 +1,12 @@
+# Production code reads files and streams through a size limit. The check command
+# (tools/local_checks.py) denies these in the library and executable; tests may use them.
+disallowed-methods = [
+    { path = "std::fs::read", reason = "it reads a whole file with no size limit; use storage::read_bytes(path, limit)" },
+    { path = "std::fs::read_to_string", reason = "it reads a whole file with no size limit; use storage::read_bytes(path, limit)" },
+    { path = "std::io::read_to_string", reason = "it reads a whole stream with no size limit; read through Read::take(limit)" },
+    { path = "std::io::BufRead::read_line", reason = "it buffers a whole line with no size limit; read through Read::take(limit) and check the length" },
+    { path = "std::io::BufRead::read_until", reason = "it buffers up to the delimiter with no size limit; read through Read::take(limit) and check the length" },
+    { path = "std::io::BufRead::lines", reason = "it buffers each whole line with no size limit; read through Read::take(limit) and check the length" },
+    { path = "std::io::Stdin::read_line", reason = "it buffers a whole line with no size limit; read through Read::take(limit) and check the length" },
+    { path = "std::io::Stdin::lines", reason = "it buffers each whole line with no size limit; read through Read::take(limit) and check the length" },
+]

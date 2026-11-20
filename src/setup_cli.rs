@@ -2685,7 +2685,7 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
         // Read exactly once per prompt. Do not compete with native-client consent stdin.
         while read_rx.recv().is_ok() {
             line.clear();
-            match io::stdin().read_line(&mut line) {
+            match crate::terminal::read_line(&mut io::stdin().lock(), &mut line) {
                 Ok(0) => {
                     let _ = tx.send(Ok(None));
                     break;
