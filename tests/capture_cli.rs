@@ -2479,8 +2479,8 @@ fn capture_answers_the_probe_of_a_resumed_earlier_run() {
     assert_eq!(home.tally()["probe-answered"], 1);
 }
 
-const DENIED: &str = "#type=synthetic | join(query={#type=other | head(1)}, key=user_id)";
-const DENY_HEADING: &str = "CQLmatic check rejected this query, so the search did not run. Fix the errors below and search again.";
+const INVALID: &str = "#type=synthetic | join(query={#type=other | head(1)}, key=user_id)";
+const REJECT_HEADING: &str = "CQLmatic check expects the search platform to reject this query, but did not block the search. Wait for the tool result. If the search failed, fix the errors below.";
 const NOTE_HEADING: &str = "CQLmatic check found the issues below and did not block this search. Wait for the tool result.";
 
 /// A search as Claude Code or Codex reports it before the call, to the search tool directly or
@@ -2546,18 +2546,6 @@ impl Temp {
     }
 }
 
-/// The reason a denial gives, after checking that it is one.
-fn denial(answer: Option<Value>) -> String {
-    let answer = answer.expect("a denial");
-    let output = &answer["hookSpecificOutput"];
-    assert_eq!(output["hookEventName"], "PreToolUse", "{answer}");
-    assert_eq!(output["permissionDecision"], "deny", "{answer}");
-    output["permissionDecisionReason"]
-        .as_str()
-        .unwrap()
-        .to_owned()
-}
-
 /// The context a note adds, after checking that it makes no permission decision.
 fn note(answer: Option<Value>) -> String {
     let answer = answer.expect("a note");
@@ -2577,9 +2565,9 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
     for client in ["claude-code", "codex"] {
         for gateway in [false, true] {
             assert_eq!(
-                denial(dir.ask(client, gateway, "third-party", DENIED)),
+                note(dir.ask(client, gateway, "third-party", INVALID)),
                 format!(
-                    "{DENY_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'."
+                    "{REJECT_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'."
                 )
             );
             assert_eq!(
@@ -2604,11 +2592,13 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
 }
 
 #[test]
-fn guard_blocks_only_on_the_listed_errors() {
+fn guard_never_blocks_and_lists_errors_first() {
     let dir = Temp::new();
+    // Check expects the platform to reject these queries; each still runs, with check's errors.
     for (code, query) in [
         ("CQL_ARGUMENT_RANGE", "#type=synthetic | head(limit=0)"),
-        ("CQL_ARGUMENT_REQUIRED", DENIED),
+        ("CQL_ARGUMENT_REQUIRED", INVALID),
+        ("CQL_ARGUMENT_TYPE", "#type=synthetic | head(limit=abc)"),
         ("CQL_ARGUMENT_UNKNOWN", "#type=synthetic | head(bogus=1)"),
         ("CQL_ASSIGN_ALIAS", "#type=synthetic | x := count(as=y)"),
         (
@@ -2621,29 +2611,58 @@ fn guard_blocks_only_on_the_listed_errors() {
         ),
         ("CQL_QUOTE", "#type=synthetic | user=\u{2018}abc\u{2019}"),
         ("CQL_RESERVED_WORD", "#type=synthetic | AND"),
-    ] {
-        let reason = denial(dir.ask("claude-code", false, "third-party", query));
-        assert!(reason.contains(&format!("\n- {code}")), "{reason}");
-    }
-    // Every other error, and the parts of a query check does not cover, reach the agent as a
-    // note and the search goes ahead.
-    for (code, query) in [
-        (
-            "CQL_OUTPUT_FIELD",
-            "#type=synthetic | default(field=[\"#event.dataset\", alpha_field, beta_field], value=\"<missing>\") | groupBy([alpha_field, beta_field])",
-        ),
-        (
-            "CQL_ARGUMENT_COUNT",
-            "#type=synthetic | select(alpha_field, beta_field)",
-        ),
-        ("CQL_REGEX_SYNTAX", "#type=synthetic | regex(\"[]a]\")"),
-        ("CQL_ARGUMENT_TYPE", "#type=synthetic | head(limit=abc)"),
         ("CQL_SYNTAX", "#type=synthetic | head(5"),
-        ("CQL_UNSUPPORTED_SYNTAX", "#type=synthetic | count() = 5"),
     ] {
-        let context = note(dir.ask("codex", true, "third-party", query));
-        assert!(context.starts_with(NOTE_HEADING), "{context}");
-        assert!(context.contains(&format!("\n- {code}")), "{context}");
+        for client in ["claude-code", "codex"] {
+            let context = note(dir.ask(client, true, "third-party", query));
+            assert!(
+                context.starts_with(&format!("{REJECT_HEADING}\n- {code} at line 1")),
+                "{context}"
+            );
+        }
+    }
+    // An error comes before a warning, wherever each is in the query.
+    let context = note(dir.ask(
+        "claude-code",
+        false,
+        "third-party",
+        "#type=synthetic | x := \"v\" | series(x, memlimit=\"1kb\") | count()",
+    ));
+    let lines: Vec<_> = context.lines().collect();
+    assert_eq!(lines[0], REJECT_HEADING, "{context}");
+    assert!(lines[1].starts_with("- CQL_ARGUMENT_RANGE "), "{context}");
+    assert!(lines[2].starts_with("- CQL_TEMPORAL_STREAM "), "{context}");
+    // A part of the query check does not cover gets the ordinary note.
+    let context = note(dir.ask(
+        "codex",
+        true,
+        "third-party",
+        "#type=synthetic | count() = 5",
+    ));
+    assert!(
+        context.starts_with(&format!("{NOTE_HEADING}\n- CQL_UNSUPPORTED_SYNTAX ")),
+        "{context}"
+    );
+    // Queries the platform runs pass silently or with a note.
+    for (query, code) in [
+        ("#type=synthetic | xml:prettyPrint()", None),
+        ("#type=synthetic | time:dayOfWeek()", None),
+        (
+            "#type=synthetic | default(field=[\"#event.dataset\", alpha_field, beta_field], value=\"<missing>\") | groupBy([alpha_field, beta_field])",
+            Some("CQL_GROUPBY_LIMIT"),
+        ),
+    ] {
+        let answer = dir.ask("claude-code", false, "third-party", query);
+        match code {
+            None => assert_eq!(answer, None, "{query}"),
+            Some(code) => {
+                let context = note(answer);
+                assert!(
+                    context.starts_with(&format!("{NOTE_HEADING}\n- {code} ")),
+                    "{context}"
+                );
+            }
+        }
     }
 }
 
@@ -2651,11 +2670,11 @@ fn guard_blocks_only_on_the_listed_errors() {
 fn guard_lets_what_it_cannot_judge_pass_silently() {
     let dir = Temp::new();
     let edited = |change: fn(&mut Value)| {
-        let mut payload = pre_search("claude-code", true, "third-party", DENIED);
+        let mut payload = pre_search("claude-code", true, "third-party", INVALID);
         change(&mut payload);
         payload.to_string().into_bytes()
     };
-    let mut oversized = pre_search("claude-code", true, "third-party", DENIED);
+    let mut oversized = pre_search("claude-code", true, "third-party", INVALID);
     oversized["padding"] = json!("x".repeat(17 * 1024 * 1024));
     for payload in [
         b"invalid JSON".to_vec(),
@@ -2678,7 +2697,7 @@ fn guard_lets_what_it_cannot_judge_pass_silently() {
     }
     // Only Claude Code and Codex answer before a call; for another client the payload goes to
     // capture, which prints nothing.
-    let payload = pre_search("claude-code", true, "third-party", DENIED).to_string();
+    let payload = pre_search("claude-code", true, "third-party", INVALID).to_string();
     assert_eq!(dir.guard("qwen-code", payload.as_bytes()), None);
 }
 
@@ -2768,60 +2787,59 @@ fn guard_uses_the_map_only_for_its_own_view_and_writes_nothing() {
         .remove("repository");
     assert_eq!(dir.guard("codex", unnamed.to_string().as_bytes()), None);
     // Check saves query leads; the guard does not.
-    assert!(denial(dir.ask("claude-code", false, "third-party", DENIED)).contains("'field'"));
+    assert!(note(dir.ask("claude-code", false, "third-party", INVALID)).contains("'field'"));
     assert_eq!(snapshot(&dir.0), before);
 
-    // An inventory the guard cannot read leaves the check of the language, which still blocks.
+    // An inventory the guard cannot read leaves the check of the language.
     fs::write(dir.state(), b"{").unwrap();
-    assert!(denial(dir.ask("claude-code", false, "third-party", DENIED)).contains("'field'"));
+    assert!(note(dir.ask("claude-code", false, "third-party", INVALID)).contains("'field'"));
     assert_eq!(dir.ask("claude-code", false, "third-party", unmapped), None);
 }
 
 #[test]
 fn guard_answers_in_ascii_within_the_client_limits() {
     let dir = Temp::new();
-    // The reason quotes a curly quote, which goes out escaped.
-    let reason = denial(dir.ask(
+    // The note quotes a curly quote, which goes out escaped.
+    let context = note(dir.ask(
         "claude-code",
         false,
         "third-party",
         "#type=synthetic | user=\u{2018}abc\u{2019}",
     ));
     assert!(
-        reason.contains("'\u{2018}' is not a string delimiter"),
-        "{reason}"
+        context.contains("'\u{2018}' is not a string delimiter"),
+        "{context}"
     );
 
-    // Claude Code shortens a reason past 20 lines or 2,000 characters, so the guard says how
-    // many lines it left out instead.
-    let query = (0..25)
-        .map(|n| format!("head(unknown{n}=1)"))
+    // Past 200 lines or 8,000 characters the guard says how many lines it left out. Warnings
+    // are left out first, so the error at the end of the query is still shown.
+    let steps = (0..100)
+        .map(|n| format!("groupBy([alpha_{n}])"))
         .collect::<Vec<_>>()
         .join(" | ");
-    let reason = denial(dir.ask(
+    let context = note(dir.ask(
         "codex",
         false,
         "third-party",
-        &format!("#type=synthetic | {query}"),
+        &format!("#type=synthetic | {steps} | head(limit=0)"),
     ));
-    let lines: Vec<_> = reason.lines().collect();
-    assert!(lines.len() <= 20, "{reason}");
-    assert!(reason.encode_utf16().count() <= 2_000, "{reason}");
-    assert_eq!(lines[0], DENY_HEADING);
+    let lines: Vec<_> = context.lines().collect();
+    assert!(lines.len() <= 200, "{context}");
+    assert!(context.encode_utf16().count() <= 8_000, "{context}");
+    assert_eq!(lines[0], REJECT_HEADING);
+    assert!(lines[1].starts_with("- CQL_ARGUMENT_RANGE "), "{context}");
     let shown = lines.len() - 2;
     assert!(
-        lines[1..=shown]
-            .iter()
-            .all(|line| line.starts_with("- CQL_ARGUMENT_UNKNOWN at line 1")),
-        "{reason}"
+        lines[2..=shown].iter().all(|line| {
+            line.starts_with("- CQL_GROUPBY_LIMIT ") || line.starts_with("- CQL_DROPPED_FIELD ")
+        }),
+        "{context}"
     );
-    assert_eq!(
-        lines[shown + 1],
-        format!(
-            "- and {} more. Run cqlmatic check on the query to see all.",
-            25 - shown
-        )
-    );
+    let left_out = lines[shown + 1]
+        .strip_prefix("- and ")
+        .and_then(|rest| rest.strip_suffix(" more. Run cqlmatic check on the query to see all."))
+        .unwrap();
+    assert!(left_out.parse::<usize>().unwrap() > 0, "{context}");
 }
 
 fn settings_file(home: &Path, client: &str) -> PathBuf {
@@ -3052,11 +3070,120 @@ fn guard_install_replaces_the_earlier_capture_entry_and_reports_entries_it_did_n
             "{actions}"
         );
         assert!(actions.contains("/older/copy/cqlmatic"), "{actions}");
+        // Each names the settings file as the report spells it on this platform.
+        let path = kept["path"].as_str().unwrap();
+        let different: Vec<_> = kept["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|action| action.contains("different hook entry"))
+            .collect();
+        assert_eq!(different.len(), 2, "{actions}");
         assert!(
-            actions.contains(file.to_str().unwrap().replace('\\', "\\\\").as_str()),
+            different
+                .iter()
+                .all(|action| action.ends_with(&format!(" ({path})."))),
             "{actions}"
         );
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
+    }
+}
+
+/// An installation that registers `program` for `server` and `state`.
+fn install_copy(home: &Path, client: &str, server: &str, program: &str, state: &Path) -> Command {
+    let mut command = install_for(home, client, server);
+    command.args(["--program", program, "--state"]).arg(state);
+    command
+}
+
+#[test]
+fn guard_install_finds_another_copy_by_its_complete_server_and_state() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let file = settings_file(&home.0, client);
+        // An apostrophe in the state path is written escaped in the command.
+        let state = home.0.join("O'Brien").join("state.json");
+        let first = report(&mut install_copy(
+            &home.0,
+            client,
+            SERVER,
+            "/first/copy/cqlmatic",
+            &state,
+        ));
+        assert_eq!(
+            first["hooks"],
+            json!({"capture": "added", "guard": "added"})
+        );
+        let written = fs::read_to_string(&file).unwrap();
+        // Another copy cannot remove the first copy's entries, and says where they are.
+        let mut second = install_copy(&home.0, client, SERVER, "/second/copy/cqlmatic", &state);
+        let none = report(second.args(["--hooks", "none"]));
+        assert_eq!(
+            none["hooks"],
+            json!({"capture": "manual", "guard": "manual"}),
+            "{none}"
+        );
+        assert_eq!(none["installed"], false);
+        let actions = none["next_actions"].to_string();
+        assert_eq!(
+            actions.matches("holds a different hook entry").count(),
+            2,
+            "{actions}"
+        );
+        assert!(actions.contains("/first/copy/cqlmatic"), "{actions}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), written);
+
+        // A server whose name starts with another's is a different server.
+        let home = Temp::new();
+        report(&mut install_copy(
+            &home.0,
+            client,
+            "falcon-dev",
+            "/first/copy/cqlmatic",
+            &state,
+        ));
+        let written = fs::read_to_string(settings_file(&home.0, client)).unwrap();
+        let mut other = install_copy(&home.0, client, "falcon", "/second/copy/cqlmatic", &state);
+        let none = report(other.args(["--hooks", "none"]));
+        assert_eq!(
+            none["hooks"],
+            json!({"capture": "absent", "guard": "absent"}),
+            "{none}"
+        );
+        assert!(
+            !none["next_actions"]
+                .to_string()
+                .contains("different hook entry"),
+            "{none}"
+        );
+        assert_eq!(
+            fs::read_to_string(settings_file(&home.0, client)).unwrap(),
+            written
+        );
+    }
+}
+
+#[test]
+fn guard_install_keeps_one_of_several_identical_entries() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let file = settings_file(&home.0, client);
+        let installed = report(&mut install(&home.0, client));
+        let entry = &installed["entry"]["hooks"];
+        let doubled = json!({"hooks": {
+            "PostToolUse": [&entry["PostToolUse"][0], &entry["PostToolUse"][0]],
+            "PreToolUse": [&entry["PreToolUse"][0], &entry["PreToolUse"][0], &entry["PreToolUse"][0]],
+        }});
+        fs::write(&file, serde_json::to_vec_pretty(&doubled).unwrap()).unwrap();
+        let again = report(&mut install(&home.0, client));
+        assert_eq!(
+            again["hooks"],
+            json!({"capture": "present", "guard": "present"})
+        );
+        assert_eq!(again["changed"], true);
+        let settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(settings, installed["entry"], "{client}");
     }
 }
 
@@ -3107,17 +3234,28 @@ fn guard_install_refuses_hook_lists_a_client_cannot_take() {
 /// Runs a registered command the way `client` starts it, with `payload` on stdin.
 fn launch(client: &str, command: &str, payload: &[u8], home: &Path) -> Vec<Output> {
     #[cfg(unix)]
-    let shells = {
+    let shells: Vec<_> = {
         let _ = client;
         // Claude Code runs a command with the user's shell, Codex with the login shell.
-        ["/bin/sh", "/bin/bash"].map(|shell| {
-            let mut shell = Command::new(shell);
-            shell.args(["-c", command]);
-            shell
-        })
+        let mut forms = vec![("/bin/sh", "-c"), ("/bin/bash", "-c"), ("/bin/bash", "-lc")];
+        if Path::new("/bin/zsh").exists() {
+            forms.extend([("/bin/zsh", "-c"), ("/bin/zsh", "-lc")]);
+        }
+        forms
+            .into_iter()
+            .map(|(shell, flag)| {
+                let mut shell = Command::new(shell);
+                shell
+                    .args([flag, command])
+                    .env_remove("ZDOTDIR")
+                    .env_remove("BASH_ENV")
+                    .env_remove("ENV");
+                shell
+            })
+            .collect()
     };
     #[cfg(windows)]
-    let shells = [if client == "codex" {
+    let shells = vec![if client == "codex" {
         use std::os::windows::process::CommandExt;
         let mut shell = Command::new(std::env::var_os("COMSPEC").unwrap());
         shell.arg("/C").raw_arg(format!("\"{command}\""));
@@ -3130,6 +3268,7 @@ fn launch(client: &str, command: &str, payload: &[u8], home: &Path) -> Vec<Outpu
         shell
     }];
     shells
+        .into_iter()
         .map(|mut shell| {
             let mut child = isolated(&mut shell, home)
                 .stdin(Stdio::piped())
@@ -3140,13 +3279,15 @@ fn launch(client: &str, command: &str, payload: &[u8], home: &Path) -> Vec<Outpu
             let _ = child.stdin.take().unwrap().write_all(payload);
             child.wait_with_output().unwrap()
         })
-        .into_iter()
         .collect()
 }
 
 #[test]
 fn installed_guard_runs_the_way_each_client_starts_it_and_fails_open() {
     let dir = Temp::new();
+    // Startup files that make a shell exit as soon as a command fails.
+    fs::write(dir.0.join(".zshenv"), "setopt ERR_EXIT\n").unwrap();
+    fs::write(dir.0.join(".bash_profile"), "set -e\n").unwrap();
     let directory = dir.0.join("guard folder's $data; (x)");
     fs::create_dir(&directory).unwrap();
     let state = directory.join("state.json");
@@ -3168,13 +3309,13 @@ fn installed_guard_runs_the_way_each_client_starts_it_and_fails_open() {
             let payload = pre_search(client, true, "third-party", query).to_string();
             launch(client, command, payload.as_bytes(), &dir.0)
         };
-        for output in ask(command, DENIED) {
+        for output in ask(command, INVALID) {
             assert!(
                 output.status.success() && output.stderr.is_empty(),
                 "{output:?}"
             );
             let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert!(denial(Some(answer)).contains("CQL_ARGUMENT_REQUIRED"));
+            assert!(note(Some(answer)).contains("CQL_ARGUMENT_REQUIRED"));
         }
         for output in ask(command, "#type=synthetic | head(5)") {
             assert!(
@@ -3182,8 +3323,9 @@ fn installed_guard_runs_the_way_each_client_starts_it_and_fails_open() {
                 "{output:?}"
             );
         }
-        // A missing program, a program that rejects the arguments, and a prefix the shell
-        // cannot parse all end with exit status 0 and no output, so the search runs.
+        // A missing program, a program that rejects the arguments, a prefix the shell cannot
+        // parse, and a prefix that prints a line before its program fails to start all end
+        // with exit status 0 and no output, so the search runs.
         let path = executable.to_str().unwrap();
         let quoted = if cfg!(windows) && client == "codex" {
             format!("\"{path}\"")
@@ -3193,18 +3335,24 @@ fn installed_guard_runs_the_way_each_client_starts_it_and_fails_open() {
             format!("'{}'", path.replace('\'', r"'\''"))
         };
         let missing = quoted.replace("runner", "missing runner");
-        for program in [
-            missing,
+        let mut programs = vec![
+            missing.clone(),
             format!("{quoted} --no-such-option"),
             format!("{quoted}'"),
-        ] {
+        ];
+        if cfg!(unix) {
+            programs.push(format!(
+                "/bin/sh -c 'echo \"> synthetic@1.0.0 guard\"; exec \"$0\" \"$@\"' {missing}"
+            ));
+        }
+        for program in programs {
             let mut installer = Command::new(&executable);
             isolated(&mut installer, &dir.0)
                 .args(["env", "capture", "--client", client, "--server", SERVER])
                 .args(["--install", "--dry-run", "--program", &program, "--state"])
                 .arg(&state);
             let preview = report(&mut installer);
-            for output in ask(preview["command"].as_str().unwrap(), DENIED) {
+            for output in ask(preview["command"].as_str().unwrap(), INVALID) {
                 assert!(
                     output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
                     "{program}: {output:?}"

@@ -1426,6 +1426,29 @@ mod tests {
             let error = build(server, state).unwrap_err();
             assert!(error.message.contains(what), "{error:?}");
         }
+
+        // An unclosed double quote in a program prefix would carry the rest of the command
+        // line, including the part that turns a failure into exit status 0, into its text.
+        let with_program = |program: &str, shell: Shell| {
+            let args = CaptureArgs {
+                client: Client::Codex,
+                server: "a".into(),
+                state: Some(env::temp_dir().join("plain").join("state.json")),
+                install: true,
+                dry_run: true,
+                program: Some(program.into()),
+                hooks: Vec::new(),
+            };
+            command(&args, "codex", shell)
+        };
+        let unclosed = r#""C:\copy\cqlmatic.exe"#;
+        let error = with_program(unclosed, shell).unwrap_err();
+        assert_eq!(error.code, "CLI_INPUT");
+        assert!(error.message.contains("double quote"), "{error:?}");
+        assert!(with_program(r#""C:\copy\cqlmatic.exe" --flag"#, shell).is_ok());
+        // The other shells receive the command as quoted text.
+        assert!(with_program(unclosed, Shell::Bash).is_ok());
+        assert!(with_program(unclosed, Shell::PowerShell).is_ok());
     }
 
     #[cfg(unix)]
