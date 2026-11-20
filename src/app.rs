@@ -598,10 +598,8 @@ fn finish(
             });
         }
     }
-    // Strict mode keeps reporting what the map lacks through grounding.missing.
-    if !context.require_observed {
-        result.diagnostics.extend(unmapped);
-    }
+    // Strict mode reports what the map lacks through grounding.missing, so ground() returns none.
+    result.diagnostics.extend(unmapped);
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
     }
@@ -2788,16 +2786,48 @@ fn ground(
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
     let mut query_observed = false;
-    // Lenient warnings: selections that overlap no mapped source, and fields that no selected
-    // source lists, keyed by the selected sources' labels.
-    let mapped: Vec<_> = pack
+    // Lenient warnings: selections that no mapped source can match, and fields that no
+    // selected source lists, keyed by the selected sources' labels. Strict mode reports gaps
+    // through grounding.missing, so it builds none of this.
+    let lenient = !context.require_observed;
+    let pack_sources: Vec<_> = pack
+        .filter(|_| lenient)
         .iter()
         .flat_map(|p| &p.data.sources)
         .filter_map(|v| environment::source(v).ok())
+        .collect();
+    let mapped: Vec<_> = pack_sources
+        .iter()
         .filter(|source| source.selectors.is_some())
         .collect();
+    let mut fields_by_source = BTreeMap::<String, Vec<environment::LegacyField>>::new();
+    for field in pack
+        .filter(|_| lenient)
+        .iter()
+        .flat_map(|p| &p.data.fields)
+        .filter_map(|v| environment::field(v).ok())
+    {
+        fields_by_source
+            .entry(field.source_id.clone())
+            .or_default()
+            .push(field);
+    }
+    let recorded = |value: &str, repo: bool| {
+        mapped
+            .iter()
+            .filter_map(|s| s.selectors.as_ref())
+            .any(|s| selector(s, repo) == Some(value))
+    };
+    let unrecorded = |repo: bool| {
+        mapped
+            .iter()
+            .filter_map(|s| s.selectors.as_ref())
+            .any(|s| selector(s, repo).is_none())
+    };
+    let view = primary_target.as_deref();
     let mut unmapped_selections = BTreeSet::new();
     let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut measured_absent = BTreeMap::<(String, Option<String>), BTreeSet<String>>::new();
     for r in requirements(
         pipeline,
         primary_target.clone(),
@@ -2851,6 +2881,30 @@ fn ground(
             }
             continue;
         }
+        // A literal selector is compared even when another selector is unresolved. A query
+        // without #repo or #type can read every source, including one recorded without selectors.
+        let mut selected = Vec::new();
+        if lenient && pack.is_some() && r.origin == Origin::Deployment {
+            selected = pack_sources
+                .iter()
+                .filter(|source| {
+                    r.scope.repo.is_none() && r.scope.type_.is_none()
+                        || source_overlaps_scope(source, &r.scope)
+                })
+                .collect();
+            // The target view's name is never a repository, even beside a source whose
+            // repository is unrecorded.
+            let view_repo = r
+                .scope
+                .repo
+                .as_deref()
+                .is_some_and(|repo| Some(repo) == view && !recorded(repo, true));
+            if view_repo || selected.is_empty() && !mapped.is_empty() {
+                unmapped_selections.insert((r.scope.repo.clone(), r.scope.type_.clone()));
+                // The selection is reported once, not through its fields.
+                selected.clear();
+            }
+        }
         if matches!(r.origin, Origin::External | Origin::Mixed) || r.uncertain_source {
             let basis = if r.uncertain_source {
                 "source or field selection unresolved; unverified"
@@ -2865,13 +2919,6 @@ fn ground(
                     .push(format!("{key}: source fields require separate evidence."));
             }
             continue;
-        }
-        let selected: Vec<_> = mapped
-            .iter()
-            .filter(|source| source_overlaps_scope(source, &r.scope))
-            .collect();
-        if r.origin == Origin::Deployment && !mapped.is_empty() && selected.is_empty() {
-            unmapped_selections.insert((r.scope.repo.clone(), r.scope.type_.clone()));
         }
         if r.conditional && !context.require_observed {
             record_basis(
@@ -3052,23 +3099,27 @@ fn ground(
             if context.require_observed {
                 g.missing.push(key);
             }
-            // An empty selection is reported once as a selection, not through its fields.
-            if matches.is_empty()
-                && r.origin == Origin::Deployment
-                && !r.field.starts_with('@')
-                && !selected.is_empty()
-                && !p
-                    .data
-                    .fields
-                    .iter()
-                    .filter_map(|v| environment::field(v).ok())
-                    .any(|f| {
-                        selected.iter().any(|s| s.id == f.source_id)
-                            && same_mapped_data(&f.path, &r.field)
-                    })
-            {
+        }
+        if !selected.is_empty()
+            && !r.field.starts_with('@')
+            && !matches.iter().any(listed)
+            && !selected.iter().any(|s| records_kind_field(s, &r.field))
+        {
+            let records: Vec<_> = selected
+                .iter()
+                .filter_map(|s| fields_by_source.get(&s.id))
+                .flatten()
+                .filter(|f| same_mapped_data(f, &r.field))
+                .collect();
+            if records.is_empty() {
                 unmapped_fields
                     .entry(labels(selected))
+                    .or_default()
+                    .insert(r.field.clone());
+            } else if !records.iter().any(|f| listed(f)) {
+                let window = records.iter().find_map(|f| f.observation_window.clone());
+                measured_absent
+                    .entry((labels(selected), window))
                     .or_default()
                     .insert(r.field.clone());
             }
@@ -3076,44 +3127,95 @@ fn ground(
     }
     let mut unmapped = Vec::new();
     for (repo, type_) in unmapped_selections {
-        let view = repo
-            .as_ref()
-            .filter(|repo| Some(*repo) == primary_target.as_ref())
-            .map(|view| format!(" {view} is the target view's name, not a mapped repository."))
-            .unwrap_or_default();
-        // Sources that share the #repo or the #type point at the one value to change.
+        // Name each value no mapped selector can match, so the warning points at what to change.
+        let lacking: Vec<_> = [(repo.as_deref(), true), (type_.as_deref(), false)]
+            .into_iter()
+            .filter_map(|(value, is_repo)| {
+                let value = value?;
+                (!recorded(value, is_repo)
+                    && (!unrecorded(is_repo) || is_repo && Some(value) == view))
+                    .then_some((value, is_repo))
+            })
+            .collect();
+        let named = |is_repo: bool| if is_repo { "repo" } else { "type" };
+        let head = if lacking.is_empty() {
+            format!(
+                "{} matches no mapped source.",
+                selector_text(repo.as_deref(), type_.as_deref())
+            )
+        } else {
+            format!(
+                "{} {} no mapped source.",
+                lacking
+                    .iter()
+                    .map(|(value, is_repo)| format!("#{}={value}", named(*is_repo)))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                if lacking.len() == 1 {
+                    "matches"
+                } else {
+                    "match"
+                }
+            )
+        };
+        let views: String = lacking
+            .iter()
+            .filter(|(value, _)| Some(*value) == view)
+            .map(|(value, is_repo)| {
+                format!(
+                    " {value} is the target view's name, not a mapped {}.",
+                    if *is_repo { "repository" } else { "type" }
+                )
+            })
+            .collect();
+        // Sources that share a value the query got right point at the one value to change.
+        let kept = |is_repo: bool| !lacking.iter().any(|(_, lacks)| *lacks == is_repo);
         let sharing: Vec<_> = mapped
             .iter()
+            .copied()
             .filter(|s| {
                 s.selectors.as_ref().is_some_and(|s| {
-                    (repo.is_some() && s.repo == repo) || (type_.is_some() && s.type_ == type_)
+                    (repo.is_some() && kept(true) && s.repo == repo)
+                        || (type_.is_some() && kept(false) && s.type_ == type_)
                 })
             })
             .collect();
-        let listed = if sharing.is_empty() {
-            format!("Mapped selectors: {}", labels(&mapped))
-        } else {
+        let listed = if !sharing.is_empty() {
             format!(
-                "Mapped sources with the same #repo or #type: {}",
+                " Mapped sources with the same #repo or #type: {}.",
                 labels(sharing)
             )
+        } else if !mapped.is_empty() {
+            format!(" Mapped selectors: {}.", labels(mapped.iter().copied()))
+        } else {
+            String::new()
         };
         unmapped.push(Diagnostic::warning(
             "CQL_UNMAPPED_SOURCE",
-            format!(
-                "{} matches no mapped source.{view} {listed}.",
-                selector_text(repo.as_deref(), type_.as_deref())
-            ),
+            format!("{head}{views}{listed}"),
         ));
     }
+    let names = |fields: &BTreeSet<String>| fields.iter().cloned().collect::<Vec<_>>().join(", ");
     for (sources, fields) in unmapped_fields {
         unmapped.push(Diagnostic::warning(
             "CQL_UNMAPPED_FIELD",
             format!(
-                "{} {} neither observed nor documented in the map for {}.",
-                fields.iter().cloned().collect::<Vec<_>>().join(", "),
+                "{} {} not observed, documented or declared in the map for {sources}.",
+                names(&fields),
                 if fields.len() == 1 { "is" } else { "are" },
-                sources
+            ),
+        ));
+    }
+    for ((sources, window), fields) in measured_absent {
+        unmapped.push(Diagnostic::warning(
+            "CQL_UNMAPPED_FIELD",
+            format!(
+                "{} {} measured in the map for {sources} and not observed{}.",
+                names(&fields),
+                if fields.len() == 1 { "was" } else { "were" },
+                window
+                    .map(|window| format!(" during {window}"))
+                    .unwrap_or_default()
             ),
         ));
     }
@@ -3132,6 +3234,36 @@ fn ground(
     g.stale.sort();
     g.stale.dedup();
     (g, unmapped)
+}
+
+/// A map field counts as listed unless the map measured it, did not observe it, and holds no
+/// parser declaration for it.
+fn listed(field: &environment::LegacyField) -> bool {
+    field.evidence_kind != "observed"
+        || field
+            .coverage
+            .as_ref()
+            .is_none_or(|c| c.observed != Some(false) || c.declared == Some(true))
+}
+
+/// A source's recorded datasets and record-kind fields are mapped, as the record-kind notice
+/// that suggests filtering on them shows.
+fn records_kind_field(source: &environment::LegacySource, field: &str) -> bool {
+    source.relationship.as_ref().is_some_and(|relationship| {
+        field == "#event.dataset" && !relationship.datasets.is_empty()
+            || relationship
+                .record_kinds
+                .iter()
+                .any(|kind| kind.field == field)
+    })
+}
+
+fn selector(selectors: &environment::Selectors, repo: bool) -> Option<&str> {
+    if repo {
+        selectors.repo.as_deref()
+    } else {
+        selectors.type_.as_deref()
+    }
 }
 
 fn selector_text(repo: Option<&str>, type_: Option<&str>) -> String {
@@ -3163,9 +3295,11 @@ fn labels<'a>(sources: impl IntoIterator<Item = &'a environment::LegacySource>) 
         .join("; ")
 }
 
-/// A map path covers a query field when, without tag markers and array positions, one names
-/// the other or a member of it: `event.category[0]` covers `event.category[]`.
-fn same_mapped_data(path: &str, field: &str) -> bool {
+/// A map field covers a query field in the same tag or data namespace when, ignoring array
+/// positions, the paths are equal, the map path is a member of the query field, or the query
+/// field is a member of an object or array the map lists: `event.category[0]` covers
+/// `event.category[]`, and `src.ip` does not cover `src.ip.octet` unless `src.ip` is an object.
+fn same_mapped_data(f: &environment::LegacyField, field: &str) -> bool {
     let plain = |name: &str| {
         let mut depth = 0usize;
         name.trim_start_matches('#')
@@ -3183,8 +3317,11 @@ fn same_mapped_data(path: &str, field: &str) -> bool {
             })
             .collect::<String>()
     };
-    let (path, field) = (plain(path), plain(field));
-    path_contains(&path, &field) || path_contains(&field, &path)
+    let tag = f.is_tag == Some(true) || f.path.starts_with('#');
+    let (path, query) = (plain(&f.path), plain(field));
+    tag == field.starts_with('#')
+        && (path_contains(&query, &path)
+            || matches!(f.data_type.as_str(), "object" | "array") && path_contains(&path, &query))
 }
 
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {
