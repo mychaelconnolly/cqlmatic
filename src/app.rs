@@ -3058,11 +3058,7 @@ fn ground(
         let view = repo
             .as_ref()
             .filter(|repo| Some(*repo) == primary_target.as_ref())
-            .map(|view| {
-                format!(
-                    " {view} is the name of the target view; #repo filters on repository names."
-                )
-            })
+            .map(|view| format!(" {view} is the target view's name, not a mapped repository."))
             .unwrap_or_default();
         // Sources that share the #repo or the #type point at the one value to change.
         let sharing: Vec<_> = mapped
