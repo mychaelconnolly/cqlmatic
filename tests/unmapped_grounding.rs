@@ -409,6 +409,27 @@ fn reading_a_field_an_earlier_step_removed_warns_with_or_without_a_map() {
         "#repo=alpha_repo | rename(field=src.ip, as=source_ip) | source_ip=*",
         &mapped,
     );
+    // Filters and other removals between the removal and the read create no field.
+    for query in [
+        "#repo=alpha_repo | drop(src.ip) | user.name=* | src.ip=*",
+        "#repo=alpha_repo | drop(src.ip) | drop(user.name) | src.ip=*",
+        "#repo=alpha_repo | drop(src.ip) | x := src.ip",
+    ] {
+        let message = one_warning(&check(query, Some(&mapped), false), "CQL_DROPPED_FIELD");
+        assert!(message.starts_with("'src.ip' "), "{query}: {message}");
+    }
+    // A parser, an assignment or a function that writes fields in between may recreate it.
+    for query in [
+        r#"#repo=alpha_repo | payload := "{\"ip\":\"192.0.2.1\"}" | drop(src.ip) | parseJson(field=payload,prefix="src.") | src.ip=*"#,
+        "#repo=alpha_repo | drop(src.ip) | parseJson(field=user.name) | src.ip=*",
+        "#repo=alpha_repo | drop(src.ip) | x := 1 | src.ip=*",
+        r#"#repo=alpha_repo | drop(src.ip) | format("%s", field=user.name, as=y) | src.ip=*"#,
+        "#repo=alpha_repo | drop(src.ip) | user.name=/(?<k>x)/ | src.ip=*",
+    ] {
+        let result = check(query, Some(&mapped), false);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}");
+        no_warning(&result, "CQL_DROPPED_FIELD");
+    }
     // A read the projection check already reports is not reported twice.
     let result = check(
         "#repo=alpha_repo | select([src.ip]) | user.name=*",
@@ -426,32 +447,41 @@ fn reading_a_field_an_earlier_step_removed_warns_with_or_without_a_map() {
 }
 
 #[test]
-fn a_single_literal_in_selects_a_source_like_equality() {
-    let result = check(
-        r##"in(field="#repo", values=["alpha_repo"]) | host.name=*"##,
-        Some(&pack()),
-        false,
-    );
-    let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
-    assert!(message.starts_with("host.name "), "{message}");
-    assert!(
-        message.contains(ALPHA) && !message.contains(BETA),
-        "{message}"
-    );
+fn in_selectors_are_not_compared() {
     for query in [
+        r##"in(field="#repo", values=["alpha_repo"]) | host.name=*"##,
         r##"in(field="#repo", values=["synthetic-view"]) | count()"##,
         r#"#repo=~in(values=["synthetic-view"]) | count()"#,
-    ] {
-        let message = one_warning(&check(query, Some(&pack()), false), "CQL_UNMAPPED_SOURCE");
-        assert!(message.contains("target view"), "{query}: {message}");
-    }
-    // Case-insensitive or several values select no single source.
-    for query in [
+        r##"in(field="#repo", values=["gamma_repo"]) | made.up=*"##,
+        r##"made.up=* | in(field="#type", values=["alpha-json"])"##,
         r##"in(field="#repo", values=["gamma_repo"], ignoreCase=true) | count()"##,
         r##"in(field="#repo", values=["gamma_repo", "delta_repo"]) | count()"##,
     ] {
         assert_no_warning(query, &pack());
     }
+}
+
+#[test]
+fn strict_mode_ignores_in_selectors_as_before() {
+    // As in 0.1.10, in() does not narrow the sources strict grounding compares.
+    for query in [
+        r##"src.ip=* | in(field="#repo",values=["beta_repo"]) | count()"##,
+        r##"in(field="#repo",values=["beta_repo"]) | src.ip=* | count()"##,
+    ] {
+        let result = check(query, Some(&pack()), true);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}");
+        assert!(result.diagnostics.is_empty(), "{query}");
+        assert_eq!(
+            result.grounding.basis["*:*:src.ip"],
+            "observed in a bounded sample"
+        );
+    }
+    let result = check(
+        r##"in(field="#repo", values=["alpha_repo"]) | host.name=*"##,
+        Some(&pack()),
+        true,
+    );
+    assert_eq!(result.grounding.missing, ["*:*:host.name"]);
 }
 
 #[test]
@@ -483,8 +513,27 @@ fn tag_and_data_namespaces_and_member_paths_stay_distinct() {
             "#repo=alpha_repo | src.ip.octet=* | count()",
             "src.ip.octet",
         ),
+        // The map lists event.category[0]; this reads element 0 of an `event` array.
+        (
+            "#repo=alpha_repo | event[0].category=* | count()",
+            "event[0].category",
+        ),
+        // Only a documented object or array parent covers an unlisted member.
+        ("#repo=alpha_repo | seen.inner=* | count()", "seen.inner"),
     ] {
-        let message = one_warning(&check(query, Some(&pack()), false), "CQL_UNMAPPED_FIELD");
+        let mut fields = fields();
+        fields.push(json!({
+            "id": "env:field:alpha:seen",
+            "source_id": "env:repo:alpha",
+            "path": "seen",
+            "data_type": "object",
+            "is_tag": false,
+            "evidence_kind": "observed",
+            "coverage": {"observed": true},
+            "provenance_ids": ["prov:synthetic"]
+        }));
+        let pack = pack_from(sources(), fields, "synthetic-view");
+        let message = one_warning(&check(query, Some(&pack), false), "CQL_UNMAPPED_FIELD");
         assert!(message.starts_with(&format!("{field} ")), "{message}");
     }
     let mut fields = fields();
@@ -497,7 +546,17 @@ fn tag_and_data_namespaces_and_member_paths_stay_distinct() {
         "evidence_kind": "documented",
         "provenance_ids": ["prov:synthetic"]
     }));
+    fields.push(field("env:repo:alpha", "items[0].name", true));
     let pack = pack_from(sources(), fields, "synthetic-view");
+    // A read of a whole array is covered by the records of its elements.
+    for query in [
+        "#repo=alpha_repo | items[3].name=* | count()",
+        r#"#repo=alpha_repo | objectArray:exists("items[]",var=x,condition={x.name=*}) | count()"#,
+    ] {
+        let result = check(query, Some(&pack), false);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}");
+        no_warning(&result, "CQL_UNMAPPED_FIELD");
+    }
     let unmeasured = "query-supplied; not measured in selected pack";
     // A member of a listed object, and an array position the sample did not show, stay quiet.
     assert_quiet(
@@ -545,11 +604,25 @@ fn arrays_the_query_creates_are_not_reported() {
         r#"#repo=alpha_repo | splitString(by=".", field=src.ip, as=picked) | concatArray("picked[]")"#,
         r#"#repo=alpha_repo | "picked[0]" := "network" | concatArray("picked[]")"#,
         r#"#repo=alpha_repo | eval("picked[0]"="network") | concatArray("picked[]")"#,
+        r#"#repo=alpha_repo | "picked[0]" := "network" | array:contains(array="picked[]", value="network")"#,
+        r#"#repo=alpha_repo | "picked[0].k" := "network" | array:contains(array="picked[]", value="network")"#,
     ] {
         let result = check(query, Some(&pack()), false);
         assert_eq!(result.outcome, Outcome::Ready, "{query}");
         no_warning(&result, "CQL_UNMAPPED_FIELD");
+        assert!(
+            result.grounding.basis["alpha_repo:*:picked[]"].starts_with("query-produced"),
+            "{query}: {:?}",
+            result.grounding.basis
+        );
     }
+    // Strict mode needs no deployment evidence for an array written by index.
+    let result = check(
+        r#"#repo=alpha_repo | "picked[0]" := "network" | array:contains(array="picked[]", value="network")"#,
+        Some(&pack()),
+        true,
+    );
+    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
     // An array the query only reads is still compared with the map.
     let result = check(
         r#"#repo=alpha_repo | concatArray("picked[]")"#,
@@ -628,20 +701,33 @@ fn a_field_measured_absent_warns_with_its_window_and_a_declared_field_is_quiet()
         "coverage": {"declared": true},
         "provenance_ids": ["prov:synthetic"]
     }));
+    // The exact record wins over a documented parent object.
+    fields.push(measured_absent("obj.zero_only", false));
+    fields.push(json!({
+        "id": "env:field:alpha:obj",
+        "source_id": "env:repo:alpha",
+        "path": "obj",
+        "data_type": "object",
+        "is_tag": false,
+        "evidence_kind": "documented",
+        "provenance_ids": ["prov:synthetic"]
+    }));
     let pack = pack_from(sources(), fields, "synthetic-view");
-    let result = check(
-        "#repo=alpha_repo | zero_only=* | count()",
-        Some(&pack),
-        false,
-    );
-    assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
-    let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
-    assert!(message.starts_with("zero_only "), "{message}");
-    assert!(
-        message.contains(ALPHA) && message.contains(WINDOW),
-        "{message}"
-    );
-    assert_eq!(result.exit_code(true), 1);
+    for field in ["zero_only", "obj.zero_only"] {
+        let result = check(
+            &format!("#repo=alpha_repo | {field}=* | count()"),
+            Some(&pack),
+            false,
+        );
+        assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
+        let message = one_warning(&result, "CQL_UNMAPPED_FIELD");
+        assert!(message.starts_with(&format!("{field} ")), "{message}");
+        assert!(
+            message.contains(ALPHA) && message.contains(WINDOW),
+            "{message}"
+        );
+        assert_eq!(result.exit_code(true), 1);
+    }
     for query in [
         "#repo=alpha_repo | decl.field=1 | count()",
         "#repo=alpha_repo | decl.absent=1 | count()",
