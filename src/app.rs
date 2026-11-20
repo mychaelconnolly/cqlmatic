@@ -1116,13 +1116,19 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         });
         return;
     }
+    // Reading `x[]` reads the elements of an array the query split out or wrote by index.
+    let array = field.ends_with("[]");
+    let elements =
+        |fields: &BTreeSet<String>| fields.iter().any(|f| indexed_member(f, field) == Some(""));
     out.requirements.push(Requirement {
         target: state.field_target.clone(),
         array: false,
         scope: state.scope.clone(),
         field: field.into(),
-        derived: state.produces(field),
-        conditional: state.conditional(field),
+        derived: state.produces(field)
+            || array && (state.array_produces(field) || elements(&state.derived)),
+        conditional: state.conditional(field)
+            || array && (state.array_conditional(field) || elements(&state.conditional)),
         origin: state.origin,
         uncertain_source: state.uncertain_source || state.unverified(field),
         relaxed_type: state.relaxed_type,
@@ -1708,6 +1714,14 @@ fn selectors(filter: &Filter, found: &mut [BTreeSet<String>; 3]) {
             };
             found[index].insert(text.clone());
         }
+        // A single literal, case-sensitive in() selects like equality.
+        Filter::Call(call) => {
+            for (index, field) in ["#repo", "#type"].into_iter().enumerate() {
+                if let Some(value) = positive_kind_call(call, field) {
+                    found[index].insert(value);
+                }
+            }
+        }
         Filter::And(xs) => {
             for x in xs {
                 selectors(x, found);
@@ -2010,6 +2024,13 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                 || !matches!(&p.steps[index - 1], Step::Filter(filter) if pure_filter(filter)))
         {
             constrain(&mut state, &p.steps[index..]);
+        }
+        if let Step::Call(c) = step
+            && ["#repo", "#type"]
+                .into_iter()
+                .any(|field| positive_kind_call(c, field).is_some())
+        {
+            constrain(&mut state, &[Step::Filter(Filter::Call(c.clone()))]);
         }
         match step {
             Step::Filter(f) => {
