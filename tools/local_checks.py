@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The credential-free checks as one command for a workstation and for CI.
 
-Runs the asset, Rust, launcher and tooling gates, lints the Windows
+Runs the asset, changelog, Rust, launcher and tooling gates, lints the Windows
 build from macOS or Linux, then smoke-tests the release executable, its schemas
 and the synthetic MCP replay. Site checks are separate. Cargo runs through
 ./dev except on Windows. Scratch output goes under --out, or a new temporary
@@ -149,6 +149,7 @@ def main():
         python = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         commands = {
             "assets": ([sys.executable, "tools/asset_metadata.py"], None),
+            "changelog": ([sys.executable, "tools/changelog.py"], None),
             "fmt": ([*CARGO, "fmt", "--all", "--check"], None),
             "clippy": ([*CARGO, *CLIPPY], None),
             "clippy-shipped": ([*CARGO, *CLIPPY_SHIPPED], None),
