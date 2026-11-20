@@ -513,7 +513,8 @@ fn finish(
     let report = language::validate::validate(pipeline, query);
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
-    result.grounding = ground(pipeline, context, pack, evidence);
+    let unmapped;
+    (result.grounding, unmapped) = ground(pipeline, context, pack, evidence);
     let capability_evidence = evidence.and_then(|e| e.capabilities).filter(|e| {
         report.status == Acceptance::Accepted
             && evidence.is_some_and(|outer| outer.environment == e.environment)
@@ -551,7 +552,6 @@ fn finish(
     if result.outcome == Outcome::NeedsContext {
         result.diagnostics.push(Diagnostic::error("CQL_CONTEXT_REQUIRED","Resolve the missing, conflicting or stale grounding requirements; grounding.basis explains the evidence. Language acceptance remains separate."));
     }
-    let mut lenient = Vec::new();
     for (key, evidence) in &result.grounding.basis {
         if evidence
             .split(" | ")
@@ -582,20 +582,6 @@ fn finish(
                 ),
             ));
         }
-        if result.outcome == Outcome::Ready
-            && !context.require_observed
-            && !key.ends_with(":@record-kind")
-            && evidence.split(" | ").any(|basis| {
-                !matches!(
-                    basis,
-                    "query-produced" | "language-built-in" | "observed in a bounded sample"
-                ) && !basis.starts_with("observed with accepted partial coverage;")
-                    && !basis.starts_with("caller-attested query observation;")
-                    && !basis.starts_with("captured search observation;")
-            })
-        {
-            lenient.push(key.as_str());
-        }
         if key.ends_with(":@record-kind")
             && (evidence.starts_with("multiple record kinds observed (")
                 || evidence.starts_with("record-kind facet truncated ("))
@@ -612,16 +598,9 @@ fn finish(
             });
         }
     }
-    // One warning for all weakly grounded fields, after the diagnostics about the query itself.
-    if !lenient.is_empty() {
-        result.diagnostics.push(Diagnostic::warning(
-            "CQL_GROUNDING_LENIENT",
-            format!(
-                "Ready relies on lenient grounding because require_observed is false. {} without qualifying deployment evidence: {}. grounding.basis records the evidence for each.",
-                if lenient.len() == 1 { "1 field".to_string() } else { format!("{} fields", lenient.len()) },
-                lenient.join(", ")
-            ),
-        ));
+    // Strict mode keeps reporting what the map lacks through grounding.missing.
+    if !context.require_observed {
+        result.diagnostics.extend(unmapped);
     }
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
@@ -2712,7 +2691,7 @@ fn ground(
     context: &Context,
     pack: Option<&Pack>,
     evidence: Option<GroundingEvidence<'_>>,
-) -> Grounding {
+) -> (Grounding, Vec<Diagnostic>) {
     let mut g = Grounding {
         policy: context.into(),
         ..Grounding::default()
@@ -2728,7 +2707,7 @@ fn ground(
         if p.validate().is_err() {
             g.conflicting
                 .push("Pack integrity or version validation failed.".into());
-            return g;
+            return (g, Vec::new());
         }
         if context
             .environment
@@ -2737,7 +2716,7 @@ fn ground(
         {
             g.conflicting
                 .push("Cloud, tenant or searchable target conflicts with selected pack.".into());
-            return g;
+            return (g, Vec::new());
         }
     }
     let mut kind_packs = pack.into_iter().collect::<Vec<_>>();
@@ -2751,7 +2730,7 @@ fn ground(
         {
             g.conflicting
                 .push("Query evidence conflicts with the selected environment identity.".into());
-            return g;
+            return (g, Vec::new());
         }
         if evidence.query_observations.len() > 1000
             || evidence.captured_observations.len() > 1000
@@ -2766,13 +2745,13 @@ fn ground(
         {
             g.conflicting
                 .push("Query observation integrity, identity or budget validation failed.".into());
-            return g;
+            return (g, Vec::new());
         }
         if let Some(active) = evidence.active_pack {
             if active.validate().is_err() || &active.environment != evidence.environment {
                 g.conflicting
                     .push("Active pack integrity or environment validation failed.".into());
-                return g;
+                return (g, Vec::new());
             }
             if !kind_packs
                 .iter()
@@ -2788,6 +2767,16 @@ fn ground(
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
     let mut query_observed = false;
+    // Lenient warnings: selections that overlap no mapped source, and fields that no selected
+    // source lists, keyed by the selected sources' labels.
+    let mapped: Vec<_> = pack
+        .iter()
+        .flat_map(|p| &p.data.sources)
+        .filter_map(|v| environment::source(v).ok())
+        .filter(|source| source.selectors.is_some())
+        .collect();
+    let mut unmapped_selections = BTreeSet::new();
+    let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
     for r in requirements(
         pipeline,
         primary_target.clone(),
@@ -2855,6 +2844,13 @@ fn ground(
                     .push(format!("{key}: source fields require separate evidence."));
             }
             continue;
+        }
+        let selected: Vec<_> = mapped
+            .iter()
+            .filter(|source| source_overlaps_scope(source, &r.scope))
+            .collect();
+        if r.origin == Origin::Deployment && !mapped.is_empty() && selected.is_empty() {
+            unmapped_selections.insert((r.scope.repo.clone(), r.scope.type_.clone()));
         }
         if r.conditional && !context.require_observed {
             record_basis(
@@ -3035,7 +3031,74 @@ fn ground(
             if context.require_observed {
                 g.missing.push(key);
             }
+            // An empty selection is reported once as a selection, not through its fields.
+            if matches.is_empty()
+                && r.origin == Origin::Deployment
+                && !r.field.starts_with('@')
+                && !selected.is_empty()
+                && !p
+                    .data
+                    .fields
+                    .iter()
+                    .filter_map(|v| environment::field(v).ok())
+                    .any(|f| {
+                        selected.iter().any(|s| s.id == f.source_id)
+                            && same_mapped_data(&f.path, &r.field)
+                    })
+            {
+                unmapped_fields
+                    .entry(labels(selected))
+                    .or_default()
+                    .insert(r.field.clone());
+            }
         }
+    }
+    let mut unmapped = Vec::new();
+    for (repo, type_) in unmapped_selections {
+        let view = repo
+            .as_ref()
+            .filter(|repo| Some(*repo) == primary_target.as_ref())
+            .map(|view| {
+                format!(
+                    " {view} is the name of the target view; #repo filters on repository names."
+                )
+            })
+            .unwrap_or_default();
+        // Sources that share the #repo or the #type point at the one value to change.
+        let sharing: Vec<_> = mapped
+            .iter()
+            .filter(|s| {
+                s.selectors.as_ref().is_some_and(|s| {
+                    (repo.is_some() && s.repo == repo) || (type_.is_some() && s.type_ == type_)
+                })
+            })
+            .collect();
+        let listed = if sharing.is_empty() {
+            format!("Mapped selectors: {}", labels(&mapped))
+        } else {
+            format!(
+                "Mapped sources with the same #repo or #type: {}",
+                labels(sharing)
+            )
+        };
+        unmapped.push(Diagnostic::warning(
+            "CQL_UNMAPPED_SOURCE",
+            format!(
+                "{} matches no mapped source.{view} {listed}.",
+                selector_text(repo.as_deref(), type_.as_deref())
+            ),
+        ));
+    }
+    for (sources, fields) in unmapped_fields {
+        unmapped.push(Diagnostic::warning(
+            "CQL_UNMAPPED_FIELD",
+            format!(
+                "{} {} neither observed nor documented in the map for {}.",
+                fields.iter().cloned().collect::<Vec<_>>().join(", "),
+                if fields.len() == 1 { "is" } else { "are" },
+                sources
+            ),
+        ));
     }
     if pack.is_none() && context.require_observed && !query_observed {
         g.missing.push(
@@ -3051,7 +3114,60 @@ fn ground(
     g.missing.dedup();
     g.stale.sort();
     g.stale.dedup();
-    g
+    (g, unmapped)
+}
+
+fn selector_text(repo: Option<&str>, type_: Option<&str>) -> String {
+    [
+        repo.map(|repo| format!("#repo={repo}")),
+        type_.map(|type_| format!("#type={type_}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// Sorted, distinct selector labels joined for a message, falling back to a source's name.
+fn labels<'a>(sources: impl IntoIterator<Item = &'a environment::LegacySource>) -> String {
+    sources
+        .into_iter()
+        .map(|source| {
+            source
+                .selectors
+                .as_ref()
+                .map(|s| selector_text(s.repo.as_deref(), s.type_.as_deref()))
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| source.name.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A map path covers a query field when, without tag markers and array positions, one names
+/// the other or a member of it: `event.category[0]` covers `event.category[]`.
+fn same_mapped_data(path: &str, field: &str) -> bool {
+    let plain = |name: &str| {
+        let mut depth = 0usize;
+        name.trim_start_matches('#')
+            .chars()
+            .filter(|c| match c {
+                '[' => {
+                    depth += 1;
+                    false
+                }
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    false
+                }
+                _ => depth == 0,
+            })
+            .collect::<String>()
+    };
+    let (path, field) = (plain(path), plain(field));
+    path_contains(&path, &field) || path_contains(&field, &path)
 }
 
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {

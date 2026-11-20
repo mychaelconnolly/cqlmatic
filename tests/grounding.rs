@@ -685,18 +685,22 @@ fn policy_is_stamped_on_ready_and_early_failure_outcomes() {
 }
 
 #[test]
-fn lenient_warning_requires_reliance_on_weak_deployment_evidence() {
+fn lenient_grounding_warns_only_for_what_the_map_lacks() {
     for (query, pack, expected) in [
-        ("count()", None, false),
-        ("#repo=example | @rawstring=/value/", None, false),
-        ("x:=1 | x=1", None, false),
-        ("#repo=example | user=alice", Some(pack(data())), false),
-        ("#repo=example | user=alice", None, true),
-        ("#repo=example | missing=alice", Some(pack(data())), true),
+        ("count()", None, None),
+        ("#repo=example | @rawstring=/value/", None, None),
+        ("x:=1 | x=1", None, None),
+        ("#repo=example | user=alice", Some(pack(data())), None),
+        ("#repo=example | user=alice", None, None),
+        (
+            "#repo=example | missing=alice",
+            Some(pack(data())),
+            Some("CQL_UNMAPPED_FIELD"),
+        ),
         (
             "#repo=example | user=alice",
             Some(pack(partial_data())),
-            true,
+            None,
         ),
     ] {
         let result = app::check(
@@ -714,43 +718,41 @@ fn lenient_warning_requires_reliance_on_weak_deployment_evidence() {
             "{query}: {:?}",
             result.diagnostics
         );
+        let warnings: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .map(|d| d.code.as_str())
+            .collect();
         assert_eq!(
-            result
-                .diagnostics
-                .iter()
-                .any(|d| d.code == "CQL_GROUNDING_LENIENT"),
-            expected,
+            warnings,
+            Vec::from_iter(expected),
             "{query}: {:?}",
             result.diagnostics
         );
     }
+    // Weak evidence for a field the map lists stays in grounding.basis without a warning.
     let mut d = data();
     d.fields[0]["refresh_status"] = json!("not-reobserved");
     let result = analyze(d, false);
-    let lenient: Vec<_> = result
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == "CQL_GROUNDING_LENIENT")
-        .collect();
-    assert_eq!(lenient.len(), 1, "{:?}", result.diagnostics);
-    let weak: Vec<_> = result
-        .grounding
-        .basis
-        .iter()
-        .filter(|(_, evidence)| evidence.contains("historical; not re-observed"))
-        .map(|(key, _)| key.as_str())
-        .collect();
-    assert!(!weak.is_empty(), "{:?}", result.grounding.basis);
-    for key in weak {
-        assert!(lenient[0].message.contains(key), "{:?}", lenient[0]);
-    }
-    assert_eq!(result.exit_code(true), 1);
     assert!(
-        analyze(partial_data(), true)
+        result
+            .grounding
+            .basis
+            .values()
+            .any(|evidence| evidence.contains("historical; not re-observed")),
+        "{:?}",
+        result.grounding.basis
+    );
+    assert!(
+        result
             .diagnostics
             .iter()
-            .all(|d| d.code != "CQL_GROUNDING_LENIENT")
+            .all(|d| d.severity != Severity::Warning),
+        "{:?}",
+        result.diagnostics
     );
+    assert_eq!(result.exit_code(true), 0);
 }
 
 #[test]
@@ -820,22 +822,22 @@ fn jsonl_early_failures_keep_effective_flags_and_recover() {
 }
 
 #[test]
-fn lenient_grounding_is_one_warning_after_the_query_diagnostics() {
+fn unmapped_fields_are_one_warning_after_the_query_diagnostics() {
     let result = app::check(
         CheckRequest {
             schema_version: 1,
             id: None,
-            query: "ComputerName=a | groupBy(UserName) | sort(_count)".into(),
+            query: "#repo=example | ComputerName=a | groupBy(UserName) | sort(_count)".into(),
             context: Context::default(),
         },
-        None,
+        Some(&pack(data())),
     );
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     let positions: Vec<_> = result
         .diagnostics
         .iter()
         .enumerate()
-        .filter(|(_, d)| d.code == "CQL_GROUNDING_LENIENT")
+        .filter(|(_, d)| d.code == "CQL_UNMAPPED_FIELD")
         .map(|(index, _)| index)
         .collect();
     assert_eq!(
@@ -846,12 +848,15 @@ fn lenient_grounding_is_one_warning_after_the_query_diagnostics() {
     );
     let warning = result.diagnostics.last().unwrap();
     assert_eq!(warning.severity, Severity::Warning);
-    assert!(warning.message.contains("2 fields"), "{warning:?}");
-    for key in ["*:*:ComputerName", "*:*:UserName"] {
-        assert!(warning.message.contains(key), "{warning:?}");
+    assert!(
+        warning.message.contains("ComputerName, UserName are"),
+        "{warning:?}"
+    );
+    assert!(warning.message.contains("#repo=example"), "{warning:?}");
+    for key in ["example:*:ComputerName", "example:*:UserName"] {
         assert_eq!(
             result.grounding.basis[key],
-            "query-supplied; deployment unverified"
+            "query-supplied; not measured in selected pack"
         );
     }
     assert!(

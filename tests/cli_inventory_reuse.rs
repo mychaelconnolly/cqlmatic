@@ -703,10 +703,8 @@ fn missing_default_is_a_noop_but_missing_explicit_and_retained_without_active_fa
     assert_eq!(code, 1, "{result}");
     assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
     assert!(!dir.0.join("data").exists());
-    // A result that needs context carries no warning about a ready result.
     let (code, result) = dir.one(&["check", "ComputerName=a", "--json"]);
     assert_eq!(code, 0, "{result}");
-    assert!(diagnostic(&result, "CQL_GROUNDING_LENIENT", "warning"));
     let (code, result) = dir.one(&[
         "check",
         "ComputerName=a",
@@ -717,7 +715,6 @@ fn missing_default_is_a_noop_but_missing_explicit_and_retained_without_active_fa
     assert_eq!(code, 1, "{result}");
     assert_eq!(result["outcome"], "needs-context", "{result}");
     assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
-    assert!(!diagnostic(&result, "CQL_GROUNDING_LENIENT", "warning"));
     let mut state = state(DiscoveryMode::Full);
     attach(&mut state, &dir.0.join("missing/pack.json"), "0".repeat(64));
     state.active_pack = None;

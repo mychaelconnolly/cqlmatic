@@ -829,10 +829,6 @@ fn inventory_result(
                 .grounding
                 .conflicting
                 .push("Selected inventory state or active evidence is unavailable.".into());
-            // The result is no longer ready, so the warning about a ready result does not apply.
-            result
-                .diagnostics
-                .retain(|diagnostic| diagnostic.code != "CQL_GROUNDING_LENIENT");
         }
         result.diagnostics.push(notice);
         return result;

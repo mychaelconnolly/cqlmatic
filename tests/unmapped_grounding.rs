@@ -242,6 +242,17 @@ fn the_target_view_name_used_as_a_repository_is_called_the_view() {
             result.diagnostics
         );
     }
+    // With a mapped #type, the warning names the source that has it, not every source.
+    let result = check(
+        r#"#repo=synthetic-view #type=beta-syslog | host.name=* | count()"#,
+        Some(&pack()),
+        false,
+    );
+    let found = warnings(&result, "CQL_UNMAPPED_SOURCE");
+    assert_eq!(found.len(), 1, "{:?}", result.diagnostics);
+    assert!(found[0].contains("target view"), "{}", found[0]);
+    assert!(found[0].contains(BETA), "{}", found[0]);
+    assert!(!found[0].contains(ALPHA), "{}", found[0]);
 }
 
 #[test]
