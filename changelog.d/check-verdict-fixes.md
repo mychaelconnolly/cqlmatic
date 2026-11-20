@@ -1,0 +1,1 @@
+- Accept assignment aliases in aggregate function lists. Require an output field for `formatTime` inside `eval`.

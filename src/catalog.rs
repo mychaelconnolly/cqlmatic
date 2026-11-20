@@ -1294,8 +1294,10 @@ pub fn aliased_call(field: &str, value: &Value) -> Option<Call> {
     if resolved.arguments.contains_key("as") {
         return None;
     }
-    if !(matches!(resolved.function.name, "rename" | "parseUrl" | "eventSize")
-        || resolved.function.name == "splitString" && !resolved.arguments.contains_key("index"))
+    if !(matches!(
+        resolved.function.name,
+        "rename" | "parseUrl" | "eventSize" | "formatTime"
+    ) || resolved.function.name == "splitString" && !resolved.arguments.contains_key("index"))
     {
         return None;
     }
@@ -1653,7 +1655,7 @@ pub static FUNCTIONS: &[Function] = &[
     function!("selectFromMin", Aggregate, ["field"], ["field","include"], ["field":"f","include":"F"]),
     function!("selectLast", Aggregate, ["fields"], ["fields"], ["fields":"F"]),
     function!("top", Aggregate, ["field"], ["field"], ["field":"F","as":"s","error":"n","limit":"i","max":"f","percent":"b","rest":"s","sum":"f"]),
-    function!("formatTime", Transform, ["format"], ["format"], ["format":"s","as":"s","field":"e","locale":"s","timezone":"s","unit":"s"]),
+    function!("formatTime", Transform, ["format"], ["format","as"], ["format":"s","as":"s","field":"e","locale":"s","timezone":"s","unit":"s"]),
     function!("select", Transform, ["fields"], ["fields"], ["fields":"F"]),
     function!("drop", Transform, ["fields"], ["fields"], ["fields":"F"]),
     function!("rename", Transform, ["field"], ["field"], ["field":"P","as":"s"]),
