@@ -40,9 +40,11 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         enclosed_queries: 0,
         stored_input: true,
         time_interval_seen: false,
-        fixed_time_noted: false,
     };
     checker.pipeline(pipeline, QueryContext::Plain, &mut BTreeSet::new());
+    if leading_fixed_time(pipeline) {
+        checker.info("CQL_ABSOLUTE_TIME_FILTER", "A top-level filter compares @timestamp with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.", None);
+    }
     if checker.definitions > 0 && checker.joins {
         checker.emit(
             "CQL_TABLE_JOIN_CONFLICT",
@@ -307,7 +309,6 @@ struct Checker<'a> {
     enclosed_queries: usize,
     stored_input: bool,
     time_interval_seen: bool,
-    fixed_time_noted: bool,
 }
 impl Checker<'_> {
     fn emit(&mut self, code: &str, message: impl Into<String>, call: Option<&Call>, warning: bool) {
@@ -598,16 +599,6 @@ impl Checker<'_> {
                     };
                     self.info(code, message, call);
                 }
-            }
-            // Only a cutoff on the main query's own stages moves to the request without changing
-            // the answer, and setTimeInterval overrides the request's window.
-            if self.nesting == 1
-                && !self.time_interval_seen
-                && !self.fixed_time_noted
-                && fixed_time_comparison(step)
-            {
-                self.fixed_time_noted = true;
-                self.info("CQL_ABSOLUTE_TIME_FILTER", "A top-level filter compares @timestamp with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.", None);
             }
             match step {
                 Step::Filter(f) => {
@@ -3791,43 +3782,65 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
     None
 }
 
-/// Whether a filter or `test()` stage removes every event outside a fixed time: it compares
-/// @timestamp by order with a number, on its own or joined to the rest of the filter by AND.
-fn fixed_time_comparison(step: &Step) -> bool {
-    fn ordered(op: &str) -> bool {
-        matches!(op, "<" | "<=" | ">" | ">=")
-    }
-    fn timestamp(value: &Value) -> bool {
-        matches!(value, Value::Word(field) if field == "@timestamp")
-    }
-    fn number(value: &Value) -> bool {
-        numeric_literal(value).is_some()
-            || matches!(value, Value::String(text) if text.parse::<serde_json::Number>().is_ok())
-    }
-    fn tested(call: &Call) -> bool {
-        call.name.eq_ignore_ascii_case("test")
-            && call.args.iter().any(|a| {
-                matches!(&a.value, Value::Binary { left, op, right } if ordered(op)
-                    && (timestamp(left) && number(right) || number(left) && timestamp(right)))
-            })
-    }
-    fn filtered(filter: &Filter) -> bool {
+/// Whether the query's leading filter, its filter stages before the first function call or other
+/// stage, compares @timestamp by order with a number, on its own or joined by AND, in a query whose
+/// answer depends on its search window only through its events: it has no subquery, and no
+/// function sets, divides or reads that window. Moving such a bound to the request keeps the answer.
+fn leading_fixed_time(pipeline: &Pipeline) -> bool {
+    fn bounds(filter: &Filter) -> bool {
         match filter {
             Filter::Compare {
                 field,
                 op,
                 value: Pattern::Text(text),
-            } => field == "@timestamp" && ordered(op) && text.parse::<serde_json::Number>().is_ok(),
-            Filter::And(filters) => filters.iter().any(filtered),
-            Filter::Call(call) => tested(call),
+            } => {
+                field == "@timestamp"
+                    && matches!(op.as_str(), "<" | "<=" | ">" | ">=")
+                    && text.parse::<serde_json::Number>().is_ok()
+            }
+            Filter::And(filters) => filters.iter().any(bounds),
             _ => false,
         }
     }
-    match step {
-        Step::Filter(filter) => filtered(filter),
-        Step::Call(call) => tested(call),
-        _ => false,
+    fn windowed(value: &Value) -> bool {
+        match value {
+            Value::Query { .. } => true,
+            Value::Call(call) => called(call),
+            Value::Array(values) => values.iter().any(windowed),
+            Value::Binary { left, right, .. } => windowed(left) || windowed(right),
+            Value::Unary { value, .. } => windowed(value),
+            _ => false,
+        }
     }
+    fn called(call: &Call) -> bool {
+        ["setTimeInterval", "bucket", "timeChart", "start", "end"]
+            .iter()
+            .any(|name| call.name.eq_ignore_ascii_case(name))
+            || call.args.iter().any(|arg| windowed(&arg.value))
+    }
+    fn uses_window(pipeline: &Pipeline) -> bool {
+        pipeline.steps.iter().any(|step| match step {
+            Step::Filter(filter) => {
+                let mut calls = Vec::new();
+                filter_calls(filter, &mut calls);
+                calls.into_iter().any(called)
+            }
+            Step::Call(call) => called(call),
+            Step::Assign { value, .. } => windowed(value),
+            Step::Case(branches) => branches.iter().any(uses_window),
+            Step::Match { arms, .. } => arms.iter().any(|(_, branch)| uses_window(branch)),
+            Step::Link { .. } => false,
+        })
+    }
+    !uses_window(pipeline)
+        && pipeline
+            .steps
+            .iter()
+            .map_while(|step| match step {
+                Step::Filter(filter) if !filter.has_call() => Some(filter),
+                _ => None,
+            })
+            .any(bounds)
 }
 
 fn filter_calls<'a>(filter: &'a Filter, calls: &mut Vec<&'a Call>) {
