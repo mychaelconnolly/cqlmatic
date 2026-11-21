@@ -1,5 +1,5 @@
 use super::ast::{self, Arg, Call, Filter, Pattern, Pipeline, Step, Value};
-use crate::contracts::*;
+use crate::{catalog, contracts::*};
 use std::collections::BTreeSet;
 
 pub type Result<T> = std::result::Result<T, Diagnostic>;
@@ -604,7 +604,8 @@ fn lower_at(plan: &Plan, depth: usize) -> Result<Pipeline> {
     for f in &plan.filters {
         append_filter(&mut q, predicate(f, depth + 1)?)?;
     }
-    for (i, stage) in plan.steps.iter().enumerate() {
+    let mut stages = plan.steps.iter().enumerate().peekable();
+    while let Some((i, stage)) = stages.next() {
         let start = q.steps.len();
         let r: Result<()> = (|| {
             match stage {
@@ -758,6 +759,16 @@ fn lower_at(plan: &Plan, depth: usize) -> Result<Pipeline> {
                     }
                     for f in fields {
                         checked_field(f)?;
+                    }
+                    let mut limit = *limit;
+                    if row_limit_in_range("sort", limit) {
+                        while let Some((_, Stage::Head { limit: head })) = stages.peek() {
+                            if !row_limit_in_range("head", *head) {
+                                break;
+                            }
+                            limit = limit.min(*head);
+                            stages.next();
+                        }
                     }
                     q.steps.push(call(
                         "sort",
@@ -969,6 +980,16 @@ pub fn signed_duration(s: &str) -> Option<i128> {
 }
 pub fn query_label(s: &str) -> bool {
     label(s)
+}
+
+fn row_limit_in_range(function: &str, limit: u32) -> bool {
+    catalog::parameter_rules(function)
+        .iter()
+        .filter(|rule| rule.name == "limit")
+        .all(|rule| {
+            rule.minimum.is_none_or(|min| f64::from(limit) >= min)
+                && rule.maximum.is_none_or(|max| f64::from(limit) <= max)
+        })
 }
 
 fn label(s: &str) -> bool {

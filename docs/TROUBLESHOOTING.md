@@ -174,6 +174,7 @@ Use `--json --brief` on both status and inventory action calls. `--summary` stil
 | `CQL_QUOTE` | Use straight double quotes as string delimiters. Quotes inside strings, regex literals and comments are ordinary content. |
 | `CQL_STRING_ESCAPE_CONTROL` | A control escape followed by an ASCII letter/digit may be a path typo; write `\\` for a literal backslash. |
 | `CQL_NEGATION_NO_EFFECT` | Negation does not affect this transform; it still runs and writes its outputs. Remove the negation. |
+| `CQL_SORT_HEAD` | `head` right after `sort` can select a different set of rows from the first N in the sorted order. Write `sort(..., limit=N)` instead. |
 | `CQL_TAIL_WITHOUT_TIMESTAMP` | `tail` needs `@timestamp`; retain or restore it before calling `tail`. |
 | `CQL_STRING_ESCAPE` | A hexadecimal string escape is malformed; use four digits after `\u` or eight after `\U`. Brace notation is invalid. |
 

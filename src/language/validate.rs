@@ -787,6 +787,15 @@ impl Checker<'_> {
                     }
                     let previous = std::mem::take(&mut self.fields);
                     let preamble = self.nesting == 1 && !has_input && self.definitions == 0;
+                    if spec.name == "head" && index > 0 && head_narrows_sort(&p.steps[index - 1], c)
+                    {
+                        self.emit(
+                            "CQL_SORT_HEAD",
+                            "head after sort can select a different set of rows from the first N in the sorted order. Use sort(..., limit=N) to select the first N rows in that order.",
+                            Some(c),
+                            true,
+                        );
+                    }
                     if spec.name == "tail"
                         && projected
                             .as_ref()
@@ -3208,6 +3217,35 @@ pub(crate) fn single_aggregate(value: &Value) -> bool {
         Value::Array(xs) => !xs.is_empty() && xs.iter().all(single_aggregate),
         _ => false,
     }
+}
+
+fn row_cap(call: &Call, default: Option<u64>) -> Option<u64> {
+    match catalog::resolve(call)?.arguments.get("limit") {
+        None => default,
+        Some(v) if v.text() == Some("max") => Some(u64::MAX),
+        Some(v) => v.unsigned_integer(),
+    }
+}
+
+fn head_narrows_sort(previous: &Step, head: &Call) -> bool {
+    let Step::Call(sort) = previous else {
+        return false;
+    };
+    sort.name.eq_ignore_ascii_case("sort")
+        && !matches!(
+            (row_cap(sort, None), row_cap(head, head_default_limit())),
+            (Some(sort), Some(head)) if sort <= head
+        )
+}
+
+fn head_default_limit() -> Option<u64> {
+    catalog::parameter_rules("head")
+        .iter()
+        .find(|rule| rule.name == "limit")?
+        .default
+        .as_deref()?
+        .parse()
+        .ok()
 }
 
 fn bounded_single(pipeline: &Pipeline, mut single: bool) -> bool {
