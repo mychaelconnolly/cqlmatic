@@ -333,7 +333,6 @@ fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
     );
     assert_eq!(result.outcome, Outcome::NeedsContext);
     assert!(messages(&result, "CQL_UNEXPORTED_FIELD").is_empty());
-    // Without the named warning, the generic one still reports the read.
     assert_eq!(messages(&result, "CQL_DROPPED_FIELD").len(), 1);
     assert!(
         result

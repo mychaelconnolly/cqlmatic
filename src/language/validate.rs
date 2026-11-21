@@ -3658,12 +3658,6 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
     }
 }
 
-/// For a join that keeps its default of one subquery row per key, the first field that a later
-/// filter or `test()` in `steps` compares by order and that holds an included value other than a
-/// join key, directly or through a `:=` or `eval` expression. Any other stage ends the trace. A
-/// subquery that returns one row, or ends in a `groupBy` on the join keys with a one-row function
-/// and then only `select`, has nothing to drop. The groupBy may leave out join keys that its
-/// function carries over with `include`.
 fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<String> {
     fn ordered(op: &str) -> bool {
         matches!(op, "<" | "<=" | ">" | ">=")
@@ -3716,7 +3710,6 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             joined.remove(field);
         }
     }
-    /// The fields a `selectFromMax` or `selectFromMin` in a groupBy function carries over.
     fn included(function: &Value) -> BTreeSet<String> {
         match function {
             Value::Call(call) => catalog::resolve(call)
@@ -3752,7 +3745,6 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
     if args.contains_key("max") || one_row {
         return None;
     }
-    // Every match of a key carries the same key value, so comparing it cannot tell matches apart.
     let mut joined = &catalog::fields(args.get("include")?) - &keys;
     for step in steps {
         let compared = match step {
@@ -3764,7 +3756,6 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
             return Some(field.clone());
         }
         match step {
-            // A named capture overwrites its field.
             Step::Filter(filter) => {
                 for pattern in positive_regexes(filter) {
                     for capture in regex_captures(pattern) {
@@ -3773,7 +3764,6 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
                 }
             }
             Step::Call(call) if call.name.eq_ignore_ascii_case("test") => {}
-            // `x := f(...)` is the function f, so only an expression is followed as a copy.
             Step::Assign { field, value } if !matches!(value, Value::Call(_)) => {
                 assign(field, value, &mut joined)
             }

@@ -628,8 +628,7 @@ struct Requirement {
     relaxed_event: bool,
     unavailable: bool,
     removed: bool,
-    /// For an unavailable field, the correlate or correlate query that does not export it.
-    unexported_by: Option<String>,
+    unexported_by: Option<Exporter>,
 }
 impl Requirement {
     fn is_direct_deployment_input(&self) -> bool {
@@ -646,7 +645,6 @@ struct GroundingScan<'a> {
     first_pipeline: bool,
     skip_next_kind_check: bool,
     in_selector: bool,
-    /// The label of the correlate query being scanned, which its links read their fields from.
     query: Option<String>,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -689,36 +687,34 @@ struct Flow {
     unknown_prefixes: BTreeSet<String>,
     export: Option<Export>,
 }
-/// What a correlate exports, so that a field missing from it can be traced to it.
 #[derive(Clone)]
 enum Export {
-    /// The stream after a correlate, until a projection: its query labels, output fields and the
-    /// `QUERY.FIELD` names its queries removed.
     Correlate {
         labels: BTreeSet<String>,
         outputs: BTreeSet<String>,
         removed: BTreeSet<String>,
     },
-    /// One correlate query's output, which correlate reads include, link and order fields from.
     Query(String),
 }
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Exporter {
+    Query(String),
+    Correlate,
+}
 impl Flow {
-    fn unexported_by(&self, field: &str) -> Option<String> {
+    fn unexported_by(&self, field: &str) -> Option<Exporter> {
         match self.export.as_ref()? {
-            Export::Query(name) => Some(format!("correlate query {name}")),
+            Export::Query(name) => Some(Exporter::Query(name.clone())),
             Export::Correlate {
                 labels,
                 outputs,
                 removed,
             } => {
-                // A field removed after the correlate is not one it failed to export.
                 let missing = removed.contains(field)
                     || !outputs.contains(field) && !self.removed.contains(field);
                 missing.then(|| match field.split_once('.') {
-                    Some((label, _)) if labels.contains(label) => {
-                        format!("correlate query {label}")
-                    }
-                    _ => "correlate, which names the fields of each query QUERY.FIELD".into(),
+                    Some((label, _)) if labels.contains(label) => Exporter::Query(label.into()),
+                    _ => Exporter::Correlate,
                 })
             }
         }
@@ -1466,7 +1462,6 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             .collect();
         let (outputs, unknown_prefixes) =
             crate::catalog::correlation_outputs(&resolved.arguments, &queries, &columns);
-        // A field a query removed stays absent under an include-all export of that query.
         let removed: BTreeSet<String> = contexts
             .iter()
             .flat_map(|(name, flow)| flow.removed.iter().map(move |f| format!("{name}.{f}")))
@@ -2956,7 +2951,7 @@ fn ground(
     };
     let view = primary_target.as_deref();
     let mut dropped = BTreeSet::new();
-    let mut unexported = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut unexported = BTreeMap::<Exporter, BTreeSet<String>>::new();
     let mut unmapped_selections = BTreeSet::new();
     let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
     let mut measured_absent = BTreeMap::<(String, Option<String>), BTreeSet<String>>::new();
@@ -3261,6 +3256,12 @@ fn ground(
     let mut warnings = unexported
         .into_iter()
         .map(|(source, fields)| {
+            let source = match source {
+                Exporter::Query(label) => format!("correlate query {label}"),
+                Exporter::Correlate => {
+                    "correlate, which names the fields of each query QUERY.FIELD".into()
+                }
+            };
             Diagnostic::warning(
                 "CQL_UNEXPORTED_FIELD",
                 format!(
