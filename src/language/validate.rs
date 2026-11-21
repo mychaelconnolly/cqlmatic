@@ -3782,10 +3782,6 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
     None
 }
 
-/// Whether the query's leading filter, its filter stages before the first function call or other
-/// stage, compares @timestamp by order with a number, on its own or joined by AND, in a query whose
-/// answer depends on its search window only through its events: it has no subquery, and no
-/// function sets, divides or reads that window. Moving such a bound to the request keeps the answer.
 fn leading_fixed_time(pipeline: &Pipeline) -> bool {
     fn bounds(filter: &Filter) -> bool {
         match filter {
@@ -3802,31 +3798,33 @@ fn leading_fixed_time(pipeline: &Pipeline) -> bool {
             _ => false,
         }
     }
-    fn windowed(value: &Value) -> bool {
+    fn reads_search_window(value: &Value) -> bool {
         match value {
             Value::Query { .. } => true,
-            Value::Call(call) => called(call),
-            Value::Array(values) => values.iter().any(windowed),
-            Value::Binary { left, right, .. } => windowed(left) || windowed(right),
-            Value::Unary { value, .. } => windowed(value),
+            Value::Call(call) => call_reads_search_window(call),
+            Value::Array(values) => values.iter().any(reads_search_window),
+            Value::Binary { left, right, .. } => {
+                reads_search_window(left) || reads_search_window(right)
+            }
+            Value::Unary { value, .. } => reads_search_window(value),
             _ => false,
         }
     }
-    fn called(call: &Call) -> bool {
+    fn call_reads_search_window(call: &Call) -> bool {
         ["setTimeInterval", "bucket", "timeChart", "start", "end"]
             .iter()
             .any(|name| call.name.eq_ignore_ascii_case(name))
-            || call.args.iter().any(|arg| windowed(&arg.value))
+            || call.args.iter().any(|arg| reads_search_window(&arg.value))
     }
     fn uses_window(pipeline: &Pipeline) -> bool {
         pipeline.steps.iter().any(|step| match step {
             Step::Filter(filter) => {
                 let mut calls = Vec::new();
                 filter_calls(filter, &mut calls);
-                calls.into_iter().any(called)
+                calls.into_iter().any(call_reads_search_window)
             }
-            Step::Call(call) => called(call),
-            Step::Assign { value, .. } => windowed(value),
+            Step::Call(call) => call_reads_search_window(call),
+            Step::Assign { value, .. } => reads_search_window(value),
             Step::Case(branches) => branches.iter().any(uses_window),
             Step::Match { arms, .. } => arms.iter().any(|(_, branch)| uses_window(branch)),
             Step::Link { .. } => false,
