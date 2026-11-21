@@ -2840,7 +2840,6 @@ fn ground(
         .or(context.environment.as_ref())
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
-    // Every requirement reads the same packs, so each is decoded once for the whole check.
     let mut decoded = Vec::<DecodedPack>::new();
     for p in pack.into_iter().chain(evidence.and_then(|e| e.active_pack)) {
         if !decoded.iter().any(|d| std::ptr::eq(d.pack, p)) {
@@ -3045,7 +3044,6 @@ fn ground(
         let matches = decoded_p
             .fields
             .iter()
-            // The name and namespace rule out most fields before the sources are scanned.
             .filter(|f| {
                 field_matches_requirement(f, &r)
                     && sources.iter().any(|s| s.id == f.source_id)
@@ -3451,7 +3449,6 @@ fn field_matches_requirement(field: &environment::LegacyField, r: &Requirement) 
         && field.is_tag == Some(r.field.starts_with('#'))
 }
 
-/// A pack with its sources and fields decoded.
 struct DecodedPack<'a> {
     pack: &'a Pack,
     sources: Vec<environment::LegacySource>,

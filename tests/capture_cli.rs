@@ -2591,7 +2591,6 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
             );
         }
     }
-    // With no inventory the query is checked without a map, and the guard writes nothing.
     assert!(!dir.0.join("workflow").exists());
 }
 
@@ -2625,7 +2624,6 @@ fn guard_never_blocks_and_lists_errors_first() {
             );
         }
     }
-    // An error comes before a warning, wherever each is in the query.
     let context = note(dir.ask(
         "claude-code",
         false,
@@ -2636,7 +2634,6 @@ fn guard_never_blocks_and_lists_errors_first() {
     assert_eq!(lines[0], REJECT_HEADING, "{context}");
     assert!(lines[1].starts_with("- CQL_ARGUMENT_RANGE "), "{context}");
     assert!(lines[2].starts_with("- CQL_TEMPORAL_STREAM "), "{context}");
-    // A part of the query check does not cover gets the ordinary note.
     let context = note(dir.ask(
         "codex",
         true,
@@ -2699,8 +2696,6 @@ fn guard_lets_what_it_cannot_judge_pass_silently() {
     ] {
         assert_eq!(dir.guard("claude-code", &payload), None);
     }
-    // Only Claude Code and Codex answer before a call; for another client the payload goes to
-    // capture, which prints nothing.
     let payload = pre_search("claude-code", true, "third-party", INVALID).to_string();
     assert_eq!(dir.guard("qwen-code", payload.as_bytes()), None);
 }
@@ -2790,7 +2785,6 @@ fn guard_uses_the_map_only_for_its_own_view_and_writes_nothing() {
         .unwrap()
         .remove("repository");
     assert_eq!(dir.guard("codex", unnamed.to_string().as_bytes()), None);
-    // Check saves query leads; the guard does not.
     assert!(note(dir.ask("claude-code", false, "third-party", INVALID)).contains("'field'"));
     assert_eq!(snapshot(&dir.0), before);
 
@@ -2937,7 +2931,6 @@ fn guard_install_switches_each_hook_and_keeps_every_other_byte() {
         assert_eq!(repeat["changed"], false);
         assert_eq!(fs::read_to_string(&file).unwrap(), installed);
 
-        // Switching the guard off removes its entry and nothing else.
         let capture = run("capture", false);
         assert_eq!(
             capture["hooks"],
@@ -2950,7 +2943,6 @@ fn guard_install_switches_each_hook_and_keeps_every_other_byte() {
             .pop();
         let switched = fs::read_to_string(&file).unwrap();
         assert_eq!(serde_json::from_str::<Value>(&switched).unwrap(), expected);
-        // Removing both returns the file to its exact bytes.
         let none = run("none", false);
         assert_eq!(
             none["hooks"],
@@ -2967,7 +2959,6 @@ fn guard_install_switches_each_hook_and_keeps_every_other_byte() {
             (&again["installed"], &again["changed"]),
             (&json!(true), &json!(false))
         );
-        // The guard alone.
         let guard = run("guard", false);
         assert_eq!(
             guard["hooks"],
@@ -3120,7 +3111,6 @@ fn guard_install_finds_another_copy_by_its_complete_server_and_state() {
             json!({"capture": "added", "guard": "added"})
         );
         let written = fs::read_to_string(&file).unwrap();
-        // Another copy cannot remove the first copy's entries, and says where they are.
         let mut second = install_copy(&home.0, client, SERVER, "/second/copy/cqlmatic", &state);
         let none = report(second.args(["--hooks", "none"]));
         assert_eq!(
@@ -3221,7 +3211,6 @@ fn guard_install_refuses_hook_lists_a_client_cannot_take() {
         assert!(output.stdout.is_empty());
     }
     assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
-    // Copilot's capture entry can be removed like the others.
     report(&mut install(&home.0, "copilot-cli"));
     let removed = report(install(&home.0, "copilot-cli").args(["--hooks", "none"]));
     assert_eq!(removed["hooks"], json!({"capture": "removed"}));

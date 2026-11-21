@@ -995,9 +995,6 @@ fn check_evidence<'a>(
     }
 }
 
-/// The search guard's check. It saves nothing, and the inventory's map applies only when its
-/// target view is the searched repository; otherwise, or when the inventory cannot be used,
-/// the query is checked without a map.
 pub(crate) fn guard_check(query: String, state: Option<&Path>, repository: &str) -> Analysis {
     let mut request = CheckRequest {
         schema_version: 1,

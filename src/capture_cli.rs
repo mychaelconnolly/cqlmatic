@@ -135,7 +135,6 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
     Ok(0)
 }
 
-/// The hook event that runs before a tool call.
 const GUARD_EVENT: &str = "PreToolUse";
 
 /// Clients whose hook runs before a search and can add a note the agent reads.
@@ -143,9 +142,6 @@ fn guards(client: Client) -> bool {
     matches!(client, Client::ClaudeCode | Client::Codex)
 }
 
-/// Check's verdict on a search before it runs, as the client's answer. `None` lets the search
-/// run with nothing said, which is also the answer to anything that is not a search. No answer
-/// makes a permission decision, so the search always goes ahead as the client would run it.
 fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
     let call = call(hook, &args.server, args.client)?;
     let arguments = search_arguments(&call)?;
@@ -157,9 +153,10 @@ fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
     note(&crate::guard_check(query, state.as_deref(), repository)).map(answer)
 }
 
-/// Check's errors and then its warnings, under a heading that says whether check expects the
-/// platform to reject the query; nothing when there are none or check could not run.
 fn note(analysis: &Analysis) -> Option<String> {
+    if analysis.outcome == Outcome::Error {
+        return None;
+    }
     let lines: Vec<_> = [Severity::Error, Severity::Warning]
         .iter()
         .flat_map(|severity| {
@@ -179,7 +176,7 @@ fn note(analysis: &Analysis) -> Option<String> {
             }
         })
         .collect();
-    if analysis.outcome == Outcome::Error || lines.is_empty() {
+    if lines.is_empty() {
         return None;
     }
     let heading = if analysis.outcome == Outcome::Invalid {
@@ -190,8 +187,6 @@ fn note(analysis: &Analysis) -> Option<String> {
     Some(fit(heading, lines, (200, 8_000)))
 }
 
-/// The client's answer as one line of JSON. Non-ASCII characters are escaped, so a shell that
-/// re-encodes the hook's output cannot change it.
 fn answer(context: String) -> String {
     let output = json!({"hookEventName": GUARD_EVENT, "additionalContext": context});
     let mut text = String::new();
@@ -207,8 +202,6 @@ fn answer(context: String) -> String {
     text
 }
 
-/// The heading and as many lines as fit within `(lines, characters)`, counting a closing line
-/// that says how many were left out. Lines are left out from the end.
 fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize, usize)) -> String {
     let total = lines.len();
     let mut kept = lines;
@@ -760,7 +753,6 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
     })
 }
 
-/// The search tool's arguments, when the call is a search.
 fn search_arguments(call: &Call) -> Option<&Value> {
     match call.tool.as_str() {
         SEARCH_TOOL => Some(&call.arguments),

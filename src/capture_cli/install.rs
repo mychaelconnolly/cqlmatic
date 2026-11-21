@@ -23,17 +23,14 @@ const COPILOT_EVENT: &str = "postToolUse";
 /// Long enough for a check against a large map; after it the client runs the search unchecked.
 const GUARD_TIMEOUT_SECONDS: u64 = 5;
 
-/// A hook entry this installation writes, removes or reports.
 struct Managed {
     name: &'static str,
     event: &'static str,
     entry: Value,
-    /// The entry an earlier release wrote for the same program, client, server and state.
     legacy: Option<Value>,
     wanted: bool,
 }
 
-/// What a run did, or would do, to one hook.
 #[derive(Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Status {
@@ -41,7 +38,6 @@ enum Status {
     Added,
     Removed,
     Absent,
-    /// The wanted state needs a change by hand.
     Manual,
 }
 
@@ -61,8 +57,6 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         config_path(client)?
     {
         let copilot = is_copilot(client);
-        // How a command that any copy of CQLmatic wrote for this client, server and state ends,
-        // whatever program it runs.
         let mut endings = Vec::new();
         let (command, managed) = if copilot {
             // The Copilot clients read the same file and send the same payload, so they share
@@ -88,9 +82,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         } else {
             let shell = Shell::for_client(client);
             let direct = command(args, name.get_name(), shell)?;
-            // Both events run the same command.
             let command = shell.fail_open(&direct);
-            // An earlier release ran the command as it is; this one wraps it.
             let ending = arguments(args, name.get_name(), shell)?;
             endings.push(format!(
                 "{}{}",
@@ -100,16 +92,17 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             endings.push(ending);
             let server = super::codex_server(client, &args.server);
             let matcher = matcher("mcp__", &server, "__.*");
+            let mut guard_entry = json!({"matcher": matcher, "hooks": [{
+                "type": "command", "command": command, "timeout": GUARD_TIMEOUT_SECONDS,
+            }]});
+            if client == Client::ClaudeCode {
+                guard_entry["hooks"][0]["onFailure"] = json!("continue");
+            }
             let mut entries = [
                 matcher_hook(&matcher, &command, true),
                 matcher_hook(&matcher, &direct, true),
-                json!({"matcher": matcher, "hooks": [{
-                    "type": "command", "command": command, "timeout": GUARD_TIMEOUT_SECONDS,
-                }]}),
+                guard_entry,
             ];
-            if client == Client::ClaudeCode {
-                entries[2]["hooks"][0]["onFailure"] = json!("continue");
-            }
             // Claude Code on Windows would otherwise pick Git Bash whenever it is installed.
             if cfg!(windows) && client == Client::ClaudeCode {
                 for entry in &mut entries {
@@ -545,7 +538,6 @@ impl Shell {
         format!("{before}{}{after}", self.escape(command))
     }
 
-    /// What `fail_open` writes before and after the escaped command.
     fn fail_open_parts(self) -> (String, &'static str) {
         match self {
             // The command reaches a second parser as data, so text it cannot parse fails there
@@ -615,8 +607,6 @@ fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Dia
     Ok(program + &arguments(args, client, shell)?)
 }
 
-/// What follows the program in a hook command, from ` env capture` to the end. Every copy of
-/// CQLmatic writes the same text for the same client, server and state.
 fn arguments(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Diagnostic> {
     // One spelling per server, so installing under either leaves one entry.
     let server = super::codex_server(args.client, &args.server);
@@ -978,17 +968,12 @@ enum Edit {
     Manual(String),
 }
 
-/// An edit of the settings, each managed hook's status after it, and the other entries that
-/// run CQLmatic for this server and state, which the user changes by hand.
 struct Plan {
     edit: Edit,
     statuses: Vec<Status>,
     others: Vec<String>,
 }
 
-/// Plans the edit that leaves each managed hook as wanted, or gives the reason the settings
-/// need a manual edit. An entry counts as this installation's only when it equals the whole
-/// generated entry, so an entry someone changed is reported and never removed.
 fn edit(
     bytes: &[u8],
     managed: &[Managed],
@@ -1025,7 +1010,6 @@ fn edit(
                 commands(entry).join(" | ")
             ));
         }
-        // Adding the entry beside one that runs the same command would run it twice.
         let blocked = unmanaged
             .iter()
             .any(|entry| commands(entry).iter().any(|command| own.contains(command)));
@@ -1047,7 +1031,6 @@ fn edit(
             Status::Absent
         };
         statuses.push(status);
-        // A wanted entry keeps its first copy; a copy after it would run the command again.
         let mut keep_one = hook.wanted;
         output = remove(&output, hook.event, |entry| {
             if *entry == hook.entry {
@@ -1071,7 +1054,6 @@ fn edit(
     })
 }
 
-/// The settings as JSON, when every container a managed hook needs has the expected type.
 fn settings_value(bytes: &[u8], managed: &[Managed]) -> Result<Value, String> {
     let invalid = || String::from("Settings must contain strict JSON with unique keys");
     // Require a single JSON value. The shared parser additionally checks for duplicate keys.
@@ -1107,7 +1089,6 @@ fn settings_value(bytes: &[u8], managed: &[Managed]) -> Result<Value, String> {
     Ok(value)
 }
 
-/// The commands an entry runs, in either entry form.
 fn commands(entry: &Value) -> Vec<&str> {
     entry["hooks"]
         .as_array()
@@ -1119,7 +1100,6 @@ fn commands(entry: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// The member at `path` of the JSON object in `bytes`, borrowed from `bytes`.
 fn raw_member<'a>(bytes: &'a [u8], path: &[&str]) -> Option<&'a RawValue> {
     let mut raw: &RawValue = serde_json::from_slice(bytes).ok()?;
     for key in path {
@@ -1129,14 +1109,10 @@ fn raw_member<'a>(bytes: &'a [u8], path: &[&str]) -> Option<&'a RawValue> {
     Some(raw)
 }
 
-/// Where `raw`, which borrows from `bytes`, starts in it.
 fn offset(bytes: &[u8], raw: &RawValue) -> usize {
     raw.get().as_ptr().addr() - bytes.as_ptr().addr()
 }
 
-/// Deletes the entries of `hooks.EVENT` that `doomed` picks, in order, each with one adjoining
-/// comma and the white space beside it, and keeps the rest. An array left without entries keeps
-/// its brackets.
 fn remove(bytes: &[u8], event: &str, mut doomed: impl FnMut(&Value) -> bool) -> Vec<u8> {
     let Some(array) = raw_member(bytes, &["hooks", event]) else {
         return bytes.to_vec();
@@ -1162,7 +1138,6 @@ fn remove(bytes: &[u8], event: &str, mut doomed: impl FnMut(&Value) -> bool) -> 
             while gone.get(last + 1) == Some(&true) {
                 last += 1;
             }
-            // A run at the start takes the comma after it; any other run, the comma before it.
             ranges.push(if first == 0 {
                 start(items[0])..start(items[last + 1])
             } else {
@@ -1178,8 +1153,6 @@ fn remove(bytes: &[u8], event: &str, mut doomed: impl FnMut(&Value) -> bool) -> 
     output
 }
 
-/// Appends `entry` to `hooks.EVENT`, adding the containers that are missing, and keeps every
-/// other byte.
 fn insert(bytes: &[u8], event: &str, entry: &Value) -> Vec<u8> {
     let raw: &RawValue = serde_json::from_slice(bytes).expect("Checked settings");
     let root: BTreeMap<String, &RawValue> =
