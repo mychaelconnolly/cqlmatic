@@ -1153,11 +1153,14 @@ fn powershell() -> Command {
 
 /// The built executable under a name and folder that need quoting.
 fn runner_in(directory: &Path) -> PathBuf {
+    let source = env!("CARGO_BIN_EXE_cqlmatic");
     let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
-    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
-        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
+    // Changing the link count on macOS can kill concurrent launches of the Cargo executable.
+    if cfg!(target_os = "macos") || fs::hard_link(source, &executable).is_err() {
+        fs::copy(source, &executable).unwrap();
         // Another test's child process, started during the copy, can hold the new file open
         // for writing for a moment, and Linux will not run a file in that state.
+        #[cfg(not(target_os = "macos"))]
         while let Err(error) = Command::new(&executable).arg("--version").output() {
             assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3285,6 +3288,11 @@ fn installed_guard_runs_the_way_each_client_starts_it_and_fails_open() {
     fs::create_dir(&directory).unwrap();
     let state = directory.join("state.json");
     let executable = runner_in(&directory);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&executable).unwrap().nlink(), 1);
+    }
     for client in ["claude-code", "codex"] {
         let mut installer = Command::new(&executable);
         isolated(&mut installer, &dir.0)
