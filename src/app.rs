@@ -408,7 +408,8 @@ fn inventory_requirements(query: &str) -> Result<Vec<Requirement>, Diagnostic> {
         &Context::default(),
         &[],
         &mut Grounding::default(),
-    ))
+    )
+    .0)
 }
 
 pub fn unverified_leads(query: &str) -> Result<Vec<UnverifiedFieldLead>, Diagnostic> {
@@ -513,7 +514,8 @@ fn finish(
     let report = language::validate::validate(pipeline, query);
     result.validation.status = report.status.clone();
     result.diagnostics = report.diagnostics;
-    result.grounding = ground(pipeline, context, pack, evidence);
+    let (dropped, unmapped);
+    (result.grounding, dropped, unmapped) = ground(pipeline, context, pack, evidence);
     let capability_evidence = evidence.and_then(|e| e.capabilities).filter(|e| {
         report.status == Acceptance::Accepted
             && evidence.is_some_and(|outer| outer.environment == e.environment)
@@ -551,7 +553,6 @@ fn finish(
     if result.outcome == Outcome::NeedsContext {
         result.diagnostics.push(Diagnostic::error("CQL_CONTEXT_REQUIRED","Resolve the missing, conflicting or stale grounding requirements; grounding.basis explains the evidence. Language acceptance remains separate."));
     }
-    let mut lenient = Vec::new();
     for (key, evidence) in &result.grounding.basis {
         if evidence
             .split(" | ")
@@ -582,20 +583,6 @@ fn finish(
                 ),
             ));
         }
-        if result.outcome == Outcome::Ready
-            && !context.require_observed
-            && !key.ends_with(":@record-kind")
-            && evidence.split(" | ").any(|basis| {
-                !matches!(
-                    basis,
-                    "query-produced" | "language-built-in" | "observed in a bounded sample"
-                ) && !basis.starts_with("observed with accepted partial coverage;")
-                    && !basis.starts_with("caller-attested query observation;")
-                    && !basis.starts_with("captured search observation;")
-            })
-        {
-            lenient.push(key.as_str());
-        }
         if key.ends_with(":@record-kind")
             && (evidence.starts_with("multiple record kinds observed (")
                 || evidence.starts_with("record-kind facet truncated ("))
@@ -612,17 +599,15 @@ fn finish(
             });
         }
     }
-    // One warning for all weakly grounded fields, after the diagnostics about the query itself.
-    if !lenient.is_empty() {
-        result.diagnostics.push(Diagnostic::warning(
-            "CQL_GROUNDING_LENIENT",
-            format!(
-                "Ready relies on lenient grounding because require_observed is false. {} without qualifying deployment evidence: {}. grounding.basis records the evidence for each.",
-                if lenient.len() == 1 { "1 field".to_string() } else { format!("{} fields", lenient.len()) },
-                lenient.join(", ")
-            ),
-        ));
+    for field in dropped {
+        if !report.dropped.contains(&field) {
+            result.diagnostics.push(Diagnostic::warning(
+                "CQL_DROPPED_FIELD",
+                format!("'{field}' is not available here; an earlier step removed it."),
+            ));
+        }
     }
+    result.diagnostics.extend(unmapped);
     if result.outcome == Outcome::Ready && emit_query {
         result.query = Some(query.into());
     }
@@ -642,6 +627,7 @@ struct Requirement {
     relaxed_type: bool,
     relaxed_event: bool,
     unavailable: bool,
+    removed: bool,
 }
 impl Requirement {
     fn is_direct_deployment_input(&self) -> bool {
@@ -657,6 +643,7 @@ struct GroundingScan<'a> {
     record_kind_context: Option<(&'a Context, Vec<&'a Pack>, &'a mut Grounding)>,
     first_pipeline: bool,
     skip_next_kind_check: bool,
+    in_selector: bool,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Origin {
@@ -690,6 +677,8 @@ struct Flow {
     locals: BTreeMap<String, ElementBinding>,
     available: Option<BTreeSet<String>>,
     removed: BTreeSet<String>,
+    unwritten_removals: BTreeSet<String>,
+    removing: BTreeSet<String>,
     split_unknown: BTreeSet<(String, bool)>,
     unverified_fields: BTreeSet<String>,
     unknown_enrichment: bool,
@@ -734,10 +723,17 @@ impl Flow {
             }))
             && !self.produces(field)
     }
-    fn absent(&self, field: &str) -> bool {
-        self.removed.iter().any(|removed| {
+    fn remove(&mut self, field: String) {
+        self.removing.insert(field.clone());
+        self.removed.insert(field);
+    }
+    fn removed_in(&self, removed: &BTreeSet<String>, field: &str) -> bool {
+        removed.iter().any(|removed| {
             removed == field || removed.contains("[]") && array_element(field, removed)
         }) && !self.produces(field)
+    }
+    fn absent(&self, field: &str) -> bool {
+        self.removed_in(&self.removed, field)
             || !self.unverified(field)
                 && self.available.as_ref().is_some_and(|fields| {
                     !fields.contains(field)
@@ -1016,7 +1012,7 @@ fn apply_split(state: &mut Flow, args: &BTreeMap<String, &Value>) {
         state.derived.remove(field);
         state.conditional.remove(field);
         state.definite.remove(field);
-        state.removed.insert(field.clone());
+        state.remove(field.clone());
         if let Some(fields) = &mut state.available {
             fields.remove(field);
         }
@@ -1058,12 +1054,13 @@ fn requirements(
     context: &Context,
     packs: &[&Pack],
     grounding: &mut Grounding,
-) -> Vec<Requirement> {
+) -> (Vec<Requirement>, bool) {
     let mut out = GroundingScan {
         requirements: Vec::new(),
         record_kind_context: (!packs.is_empty()).then(|| (context, packs.to_vec(), grounding)),
         first_pipeline: true,
         skip_next_kind_check: false,
+        in_selector: false,
     };
     scan_pipeline(
         p,
@@ -1074,7 +1071,7 @@ fn requirements(
         },
         &mut out,
     );
-    out.requirements
+    (out.requirements, out.in_selector)
 }
 fn array_element(field: &str, array: &str) -> bool {
     indexed_member(field, array).is_some_and(|tail| array.ends_with("[]") || tail.is_empty())
@@ -1134,22 +1131,33 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
             relaxed_type: state.relaxed_type,
             relaxed_event: state.relaxed_event,
             unavailable,
+            removed: false,
         });
         return;
     }
+    let array = field.ends_with("[]");
     out.requirements.push(Requirement {
         target: state.field_target.clone(),
         array: false,
         scope: state.scope.clone(),
         field: field.into(),
-        derived: state.produces(field),
-        conditional: state.conditional(field),
+        derived: state.produces(field)
+            || array && state.array_produces(field)
+            || element_written(&state.derived, field),
+        conditional: state.conditional(field)
+            || array && state.array_conditional(field)
+            || element_written(&state.conditional, field),
         origin: state.origin,
         uncertain_source: state.uncertain_source || state.unverified(field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: state.absent(field),
+        removed: state.removed_in(&state.removed, field)
+            && state.removed_in(&state.unwritten_removals, field),
     });
+}
+fn element_written(fields: &BTreeSet<String>, array: &str) -> bool {
+    array.ends_with("[]") && fields.iter().any(|field| array_element(field, array))
 }
 fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
     let field = local_field(state, array);
@@ -1157,13 +1165,14 @@ fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
         target: state.field_target.clone(),
         array: true,
         scope: state.scope.clone(),
-        derived: state.array_produces(&field),
-        conditional: state.array_conditional(&field),
+        derived: state.array_produces(&field) || element_written(&state.derived, &field),
+        conditional: state.array_conditional(&field) || element_written(&state.conditional, &field),
         origin: state.origin,
         uncertain_source: state.uncertain_source || state.unverified(&field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: state.array_absent(&field),
+        removed: false,
         field,
     });
 }
@@ -1181,6 +1190,7 @@ fn add_unknown(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
         unavailable: false,
+        removed: false,
     });
 }
 fn expression_fields(v: &Value, state: &Flow, out: &mut GroundingScan<'_>) {
@@ -1246,6 +1256,7 @@ fn correlation_inputs(
         record_kind_context: None,
         first_pipeline: false,
         skip_next_kind_check: true,
+        in_selector: false,
     };
     let mut start = 0;
     let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
@@ -1310,6 +1321,12 @@ fn correlation_inputs(
 
 fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool) -> Option<Flow> {
     let resolved = crate::catalog::resolve(c)?;
+    out.in_selector |= resolved.function.name == "in"
+        && resolved.arguments.get("field").is_some_and(|value| {
+            fields_of(value)
+                .iter()
+                .any(|field| matches!(field.as_str(), "#repo" | "#type"))
+        });
     if !resolved.diagnostics.is_empty() {
         return None;
     }
@@ -2032,6 +2049,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
         {
             constrain(&mut state, &p.steps[index..]);
         }
+        let removed = state.removed.clone();
         match step {
             Step::Filter(f) => {
                 scan_filter(f, &state, out, false);
@@ -2270,7 +2288,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                     state.definite.remove(old);
                                     state.derived.remove(old);
                                     state.conditional.remove(old);
-                                    state.removed.insert(old.into());
+                                    state.remove(old.into());
                                     if let Some(available) = &mut state.available {
                                         available.remove(old);
                                     }
@@ -2320,7 +2338,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                     continue;
                                 }
                                 let prefix = array.trim_end_matches("[]");
-                                state.removed.insert(array.into());
+                                state.remove(array.into());
                                 state.derived.retain(|field| !path_contains(prefix, field));
                                 state
                                     .conditional
@@ -2346,7 +2364,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                                     state.definite.remove(&field);
                                     state.derived.remove(&field);
                                     state.conditional.remove(&field);
-                                    state.removed.insert(field.clone());
+                                    state.remove(field.clone());
                                     if let Some(available) = &mut state.available {
                                         available.remove(&field);
                                     }
@@ -2402,8 +2420,43 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                 }
             }
         }
+        if !adds_no_fields(step) {
+            state.unwritten_removals.clear();
+        }
+        let removing = std::mem::take(&mut state.removing);
+        state
+            .unwritten_removals
+            .extend(state.removed.difference(&removed).cloned().chain(removing));
     }
     state
+}
+
+fn adds_no_fields(step: &Step) -> bool {
+    match step {
+        Step::Filter(filter) => filter_adds_no_fields(filter),
+        Step::Call(call) => {
+            transparent_kind_call(call)
+                || crate::catalog::resolve(call)
+                    .is_some_and(|r| r.diagnostics.is_empty() && r.function.name == "drop")
+        }
+        _ => false,
+    }
+}
+
+fn filter_adds_no_fields(filter: &Filter) -> bool {
+    match filter {
+        Filter::Compare {
+            value: Pattern::Regex { pattern, .. },
+            ..
+        }
+        | Filter::Text(Pattern::Regex { pattern, .. }) => {
+            language::validate::regex_captures(pattern).is_empty()
+        }
+        Filter::Compare { .. } | Filter::Text(_) | Filter::Bool(_) => true,
+        Filter::Call(call) => transparent_kind_call(call),
+        Filter::And(filters) | Filter::Or(filters) => filters.iter().all(filter_adds_no_fields),
+        Filter::Not(filter) => filter_adds_no_fields(filter),
+    }
 }
 
 fn record_basis(grounding: &mut Grounding, key: String, evidence: String) {
@@ -2712,7 +2765,7 @@ fn ground(
     context: &Context,
     pack: Option<&Pack>,
     evidence: Option<GroundingEvidence<'_>>,
-) -> Grounding {
+) -> (Grounding, BTreeSet<String>, Vec<Diagnostic>) {
     let mut g = Grounding {
         policy: context.into(),
         ..Grounding::default()
@@ -2728,7 +2781,7 @@ fn ground(
         if p.validate().is_err() {
             g.conflicting
                 .push("Pack integrity or version validation failed.".into());
-            return g;
+            return (g, BTreeSet::new(), Vec::new());
         }
         if context
             .environment
@@ -2737,7 +2790,7 @@ fn ground(
         {
             g.conflicting
                 .push("Cloud, tenant or searchable target conflicts with selected pack.".into());
-            return g;
+            return (g, BTreeSet::new(), Vec::new());
         }
     }
     let mut kind_packs = pack.into_iter().collect::<Vec<_>>();
@@ -2751,7 +2804,7 @@ fn ground(
         {
             g.conflicting
                 .push("Query evidence conflicts with the selected environment identity.".into());
-            return g;
+            return (g, BTreeSet::new(), Vec::new());
         }
         if evidence.query_observations.len() > 1000
             || evidence.captured_observations.len() > 1000
@@ -2766,13 +2819,13 @@ fn ground(
         {
             g.conflicting
                 .push("Query observation integrity, identity or budget validation failed.".into());
-            return g;
+            return (g, BTreeSet::new(), Vec::new());
         }
         if let Some(active) = evidence.active_pack {
             if active.validate().is_err() || &active.environment != evidence.environment {
                 g.conflicting
                     .push("Active pack integrity or environment validation failed.".into());
-                return g;
+                return (g, BTreeSet::new(), Vec::new());
             }
             if !kind_packs
                 .iter()
@@ -2788,13 +2841,56 @@ fn ground(
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
     let mut query_observed = false;
-    for r in requirements(
+    let (reads, in_selector) = requirements(
         pipeline,
         primary_target.clone(),
         context,
         &kind_packs,
         &mut g,
-    ) {
+    );
+    let lenient = !context.require_observed;
+    let compare = lenient && !in_selector;
+    let pack_sources: Vec<_> = pack
+        .filter(|_| lenient)
+        .iter()
+        .flat_map(|p| &p.data.sources)
+        .filter_map(|v| environment::source(v).ok())
+        .collect();
+    let mapped: Vec<_> = pack_sources
+        .iter()
+        .filter(|source| source.selectors.is_some())
+        .collect();
+    let mut records = BTreeMap::<String, Vec<(String, environment::LegacyField)>>::new();
+    for field in pack
+        .filter(|_| compare)
+        .iter()
+        .flat_map(|p| &p.data.fields)
+        .filter_map(|v| environment::field(v).ok())
+    {
+        let tag = field.is_tag == Some(true) || field.path.starts_with('#');
+        records
+            .entry(field.source_id.clone())
+            .or_default()
+            .push((map_path(&field.path, tag), field));
+    }
+    let recorded = |value: &str, repo: bool| {
+        mapped
+            .iter()
+            .filter_map(|s| s.selectors.as_ref())
+            .any(|s| selector(s, repo) == Some(value))
+    };
+    let unrecorded = |repo: bool| {
+        mapped
+            .iter()
+            .filter_map(|s| s.selectors.as_ref())
+            .any(|s| selector(s, repo).is_none())
+    };
+    let view = primary_target.as_deref();
+    let mut dropped = BTreeSet::new();
+    let mut unmapped_selections = BTreeSet::new();
+    let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut measured_absent = BTreeMap::<(String, Option<String>), BTreeSet<String>>::new();
+    for r in reads {
         let key = format!(
             "{}{}:{}:{}",
             r.target
@@ -2815,6 +2911,8 @@ fn ground(
             if context.require_observed {
                 g.missing
                     .push(format!("{key}: not exported by preceding query."));
+            } else if r.removed {
+                dropped.insert(r.field.clone());
             }
             continue;
         }
@@ -2840,6 +2938,25 @@ fn ground(
                 ));
             }
             continue;
+        }
+        let mut selected = Vec::new();
+        if lenient && pack.is_some() && r.origin == Origin::Deployment {
+            selected = pack_sources
+                .iter()
+                .filter(|source| {
+                    r.scope.repo.is_none() && r.scope.type_.is_none()
+                        || source_overlaps_scope(source, &r.scope)
+                })
+                .collect();
+            let view_repo = r
+                .scope
+                .repo
+                .as_deref()
+                .is_some_and(|repo| Some(repo) == view && !recorded(repo, true));
+            if view_repo || selected.is_empty() && !mapped.is_empty() {
+                unmapped_selections.insert((r.scope.repo.clone(), r.scope.type_.clone()));
+                selected.clear();
+            }
         }
         if matches!(r.origin, Origin::External | Origin::Mixed) || r.uncertain_source {
             let basis = if r.uncertain_source {
@@ -3036,6 +3153,129 @@ fn ground(
                 g.missing.push(key);
             }
         }
+        if compare
+            && !selected.is_empty()
+            && !r.field.starts_with('@')
+            && !selected.iter().any(|s| records_kind_field(s, &r.field))
+        {
+            let read = map_path(&r.field, r.field.starts_with('#'));
+            let mut unlisted = Vec::new();
+            let mut absent = BTreeMap::<Option<String>, Vec<_>>::new();
+            let has_field = selected.iter().any(|s| {
+                match map_gap(records.get(&s.id).into_iter().flatten(), &read) {
+                    Some(MapGap::Unlisted) => unlisted.push(*s),
+                    Some(MapGap::NotObserved(window)) => absent.entry(window).or_default().push(*s),
+                    None => return true,
+                }
+                false
+            });
+            if !has_field {
+                if !unlisted.is_empty() {
+                    unmapped_fields
+                        .entry(labels(unlisted))
+                        .or_default()
+                        .insert(r.field.clone());
+                }
+                for (window, sources) in absent {
+                    measured_absent
+                        .entry((labels(sources), window))
+                        .or_default()
+                        .insert(r.field.clone());
+                }
+            }
+        }
+    }
+    let mut unmapped = Vec::new();
+    for (repo, type_) in unmapped_selections {
+        let lacking: Vec<_> = [(repo.as_deref(), true), (type_.as_deref(), false)]
+            .into_iter()
+            .filter_map(|(value, is_repo)| {
+                let value = value?;
+                (!recorded(value, is_repo)
+                    && (!unrecorded(is_repo) || is_repo && Some(value) == view))
+                    .then_some((value, is_repo))
+            })
+            .collect();
+        let named = |is_repo: bool| if is_repo { "repo" } else { "type" };
+        let head = if lacking.is_empty() {
+            format!(
+                "{} matches no mapped source.",
+                selector_text(repo.as_deref(), type_.as_deref())
+            )
+        } else {
+            format!(
+                "{} {} no mapped source.",
+                lacking
+                    .iter()
+                    .map(|(value, is_repo)| format!("#{}={value}", named(*is_repo)))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                if lacking.len() == 1 {
+                    "matches"
+                } else {
+                    "match"
+                }
+            )
+        };
+        let views: String = lacking
+            .iter()
+            .filter(|(value, _)| Some(*value) == view)
+            .map(|(value, is_repo)| {
+                format!(
+                    " {value} is the target view's name, not a mapped {}.",
+                    if *is_repo { "repository" } else { "type" }
+                )
+            })
+            .collect();
+        let kept = |is_repo: bool| !lacking.iter().any(|(_, lacks)| *lacks == is_repo);
+        let sharing: Vec<_> = mapped
+            .iter()
+            .copied()
+            .filter(|s| {
+                s.selectors.as_ref().is_some_and(|s| {
+                    (repo.is_some() && kept(true) && s.repo == repo)
+                        || (type_.is_some() && kept(false) && s.type_ == type_)
+                })
+            })
+            .collect();
+        let listed = if !sharing.is_empty() {
+            format!(
+                " Mapped sources with the same #repo or #type: {}.",
+                labels(sharing)
+            )
+        } else if !mapped.is_empty() {
+            format!(" Mapped selectors: {}.", labels(mapped.iter().copied()))
+        } else {
+            String::new()
+        };
+        unmapped.push(Diagnostic::warning(
+            "CQL_UNMAPPED_SOURCE",
+            format!("{head}{views}{listed}"),
+        ));
+    }
+    let names = |fields: &BTreeSet<String>| fields.iter().cloned().collect::<Vec<_>>().join(", ");
+    for (sources, fields) in unmapped_fields {
+        unmapped.push(Diagnostic::warning(
+            "CQL_UNMAPPED_FIELD",
+            format!(
+                "{} {} not observed, documented or declared in the map for {sources}.",
+                names(&fields),
+                if fields.len() == 1 { "is" } else { "are" },
+            ),
+        ));
+    }
+    for ((sources, window), fields) in measured_absent {
+        unmapped.push(Diagnostic::warning(
+            "CQL_UNMAPPED_FIELD",
+            format!(
+                "{} {} measured in the map for {sources} and not observed{}.",
+                names(&fields),
+                if fields.len() == 1 { "was" } else { "were" },
+                window
+                    .map(|window| format!(" during {window}"))
+                    .unwrap_or_default()
+            ),
+        ));
     }
     if pack.is_none() && context.require_observed && !query_observed {
         g.missing.push(
@@ -3051,7 +3291,109 @@ fn ground(
     g.missing.dedup();
     g.stale.sort();
     g.stale.dedup();
-    g
+    (g, dropped, unmapped)
+}
+
+fn listed(field: &environment::LegacyField) -> bool {
+    field.evidence_kind != "observed"
+        || field
+            .coverage
+            .as_ref()
+            .is_none_or(|c| c.observed != Some(false) || c.declared == Some(true))
+}
+
+fn records_kind_field(source: &environment::LegacySource, field: &str) -> bool {
+    source.relationship.as_ref().is_some_and(|relationship| {
+        field == "#event.dataset" && !relationship.datasets.is_empty()
+            || relationship
+                .record_kinds
+                .iter()
+                .any(|kind| kind.field == field)
+    })
+}
+
+fn selector(selectors: &environment::Selectors, repo: bool) -> Option<&str> {
+    if repo {
+        selectors.repo.as_deref()
+    } else {
+        selectors.type_.as_deref()
+    }
+}
+
+fn selector_text(repo: Option<&str>, type_: Option<&str>) -> String {
+    [
+        repo.map(|repo| format!("#repo={repo}")),
+        type_.map(|type_| format!("#type={type_}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+fn labels<'a>(sources: impl IntoIterator<Item = &'a environment::LegacySource>) -> String {
+    sources
+        .into_iter()
+        .map(|source| {
+            source
+                .selectors
+                .as_ref()
+                .map(|s| selector_text(s.repo.as_deref(), s.type_.as_deref()))
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| source.name.clone())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn map_path(path: &str, tag: bool) -> String {
+    let mut out = String::from(if tag { "#" } else { "" });
+    let mut rest = path.trim_start_matches('#');
+    while let Some((head, tail)) = rest.split_once('[') {
+        out.push_str(head);
+        out.push('[');
+        rest = match tail.split_once(']') {
+            Some((index, after)) if index.bytes().all(|b| b.is_ascii_digit()) => {
+                out.push(']');
+                after
+            }
+            _ => tail,
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+enum MapGap {
+    Unlisted,
+    NotObserved(Option<String>),
+}
+
+fn map_gap<'a>(
+    records: impl Iterator<Item = &'a (String, environment::LegacyField)> + Clone,
+    read: &str,
+) -> Option<MapGap> {
+    let exact: Vec<_> = records
+        .clone()
+        .filter(|(path, _)| path == read || read.ends_with("[]") && path_contains(read, path))
+        .map(|(_, field)| field)
+        .collect();
+    if exact.iter().any(|field| listed(field)) {
+        None
+    } else if !exact.is_empty() {
+        let window = exact.iter().find_map(|f| f.observation_window.clone());
+        Some(MapGap::NotObserved(window))
+    } else if records.into_iter().any(|(path, field)| {
+        field.evidence_kind == "documented"
+            && matches!(field.data_type.as_str(), "object" | "array")
+            && path_contains(path, read)
+    }) {
+        None
+    } else {
+        Some(MapGap::Unlisted)
+    }
 }
 
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {

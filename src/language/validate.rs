@@ -13,6 +13,7 @@ pub struct Report {
     pub status: Acceptance,
     pub diagnostics: Vec<Diagnostic>,
     pub fields: BTreeSet<String>,
+    pub dropped: BTreeSet<String>,
 }
 
 pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
@@ -21,6 +22,7 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         diagnostics: super::parser::lexical_diagnostics(query),
         fields: BTreeSet::new(),
         reads: BTreeSet::new(),
+        dropped: BTreeSet::new(),
         projected_input: None,
         nodes: 0,
         bindings: vec![],
@@ -75,6 +77,7 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         status,
         diagnostics: checker.diagnostics,
         fields: checker.fields,
+        dropped: checker.dropped,
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,6 +288,7 @@ struct Checker<'a> {
     diagnostics: Vec<Diagnostic>,
     fields: BTreeSet<String>,
     reads: BTreeSet<String>,
+    dropped: BTreeSet<String>,
     projected_input: Option<BTreeSet<String>>,
     nodes: usize,
     bindings: Vec<(String, bool)>,
@@ -385,6 +389,7 @@ impl Checker<'_> {
         let reads = std::mem::take(&mut self.reads);
         if let Some(available) = available {
             for field in reads.iter().filter(|field| !available.contains(*field)) {
+                self.dropped.insert(field.clone());
                 self.emit(
                     "CQL_DROPPED_FIELD",
                     format!("'{field}' is not among the known projected/aggregate outputs."),
