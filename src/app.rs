@@ -599,14 +599,8 @@ fn finish(
             });
         }
     }
-    // Strict mode reports both through grounding.missing, so ground() returns them empty there.
     for field in dropped {
-        // The projection check names a read of a field a projection or aggregate left out.
-        if !result
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "CQL_DROPPED_FIELD" && d.message.starts_with(&format!("'{field}' ")))
-        {
+        if !report.dropped.contains(&field) {
             result.diagnostics.push(Diagnostic::warning(
                 "CQL_DROPPED_FIELD",
                 format!("'{field}' is not available here; an earlier step removed it."),
@@ -633,8 +627,6 @@ struct Requirement {
     relaxed_type: bool,
     relaxed_event: bool,
     unavailable: bool,
-    // A drop, rename or split removed the field and no later step can have recreated it;
-    // projections are the validator's.
     removed: bool,
 }
 impl Requirement {
@@ -651,7 +643,6 @@ struct GroundingScan<'a> {
     record_kind_context: Option<(&'a Context, Vec<&'a Pack>, &'a mut Grounding)>,
     first_pipeline: bool,
     skip_next_kind_check: bool,
-    // An in() on #repo or #type selects sources the map comparison does not resolve.
     in_selector: bool,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -686,9 +677,7 @@ struct Flow {
     locals: BTreeMap<String, ElementBinding>,
     available: Option<BTreeSet<String>>,
     removed: BTreeSet<String>,
-    // Removals no later step could have undone by creating fields.
     unwritten_removals: BTreeSet<String>,
-    // What the current step removes, including names an earlier step already removed.
     removing: BTreeSet<String>,
     split_unknown: BTreeSet<(String, bool)>,
     unverified_fields: BTreeSet<String>,
@@ -1167,7 +1156,6 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
             && state.removed_in(&state.unwritten_removals, field),
     });
 }
-/// Reading `x[]` reads what an earlier write to an element (`x[0]`, `x[1].y`) produced.
 fn element_written(fields: &BTreeSet<String>, array: &str) -> bool {
     array.ends_with("[]") && fields.iter().any(|field| array_element(field, array))
 }
@@ -2455,7 +2443,6 @@ fn adds_no_fields(step: &Step) -> bool {
     }
 }
 
-/// Only a regex with named captures, or a call that writes fields, creates fields in a filter.
 fn filter_adds_no_fields(filter: &Filter) -> bool {
     match filter {
         Filter::Compare {
@@ -2861,10 +2848,6 @@ fn ground(
         &kind_packs,
         &mut g,
     );
-    // Lenient warnings: reads of removed fields, selections that no mapped source can match,
-    // and fields that no selected source lists, keyed by the selected sources' labels. Strict
-    // mode reports gaps through grounding.missing, so it builds none of this. An in() selector
-    // leaves the selected sources unresolved, so fields are not compared; literal selectors are.
     let lenient = !context.require_observed;
     let compare = lenient && !in_selector;
     let pack_sources: Vec<_> = pack
@@ -2956,8 +2939,6 @@ fn ground(
             }
             continue;
         }
-        // A literal selector is compared even when another selector is unresolved. A query
-        // without #repo or #type can read every source, including one recorded without selectors.
         let mut selected = Vec::new();
         if lenient && pack.is_some() && r.origin == Origin::Deployment {
             selected = pack_sources
@@ -2967,8 +2948,6 @@ fn ground(
                         || source_overlaps_scope(source, &r.scope)
                 })
                 .collect();
-            // The target view's name is never a repository, even beside a source whose
-            // repository is unrecorded.
             let view_repo = r
                 .scope
                 .repo
@@ -2976,7 +2955,6 @@ fn ground(
                 .is_some_and(|repo| Some(repo) == view && !recorded(repo, true));
             if view_repo || selected.is_empty() && !mapped.is_empty() {
                 unmapped_selections.insert((r.scope.repo.clone(), r.scope.type_.clone()));
-                // The selection is reported once, not through its fields.
                 selected.clear();
             }
         }
@@ -3180,7 +3158,6 @@ fn ground(
             && !r.field.starts_with('@')
             && !selected.iter().any(|s| records_kind_field(s, &r.field))
         {
-            // Each source is judged by its own records; a field one source has stays quiet.
             let read = map_path(&r.field, r.field.starts_with('#'));
             let mut unlisted = Vec::new();
             let mut absent = BTreeMap::<Option<String>, Vec<_>>::new();
@@ -3210,7 +3187,6 @@ fn ground(
     }
     let mut unmapped = Vec::new();
     for (repo, type_) in unmapped_selections {
-        // Name each value no mapped selector can match, so the warning points at what to change.
         let lacking: Vec<_> = [(repo.as_deref(), true), (type_.as_deref(), false)]
             .into_iter()
             .filter_map(|(value, is_repo)| {
@@ -3251,7 +3227,6 @@ fn ground(
                 )
             })
             .collect();
-        // Sources that share a value the query got right point at the one value to change.
         let kept = |is_repo: bool| !lacking.iter().any(|(_, lacks)| *lacks == is_repo);
         let sharing: Vec<_> = mapped
             .iter()
@@ -3319,8 +3294,6 @@ fn ground(
     (g, dropped, unmapped)
 }
 
-/// A map field counts as listed unless the map measured it, did not observe it, and holds no
-/// parser declaration for it.
 fn listed(field: &environment::LegacyField) -> bool {
     field.evidence_kind != "observed"
         || field
@@ -3329,8 +3302,6 @@ fn listed(field: &environment::LegacyField) -> bool {
             .is_none_or(|c| c.observed != Some(false) || c.declared == Some(true))
 }
 
-/// A source's recorded datasets and record-kind fields are mapped, as the record-kind notice
-/// that suggests filtering on them shows.
 fn records_kind_field(source: &environment::LegacySource, field: &str) -> bool {
     source.relationship.as_ref().is_some_and(|relationship| {
         field == "#event.dataset" && !relationship.datasets.is_empty()
@@ -3360,7 +3331,6 @@ fn selector_text(repo: Option<&str>, type_: Option<&str>) -> String {
     .join(" ")
 }
 
-/// Sorted, distinct selector labels joined for a message, falling back to a source's name.
 fn labels<'a>(sources: impl IntoIterator<Item = &'a environment::LegacySource>) -> String {
     sources
         .into_iter()
@@ -3378,8 +3348,6 @@ fn labels<'a>(sources: impl IntoIterator<Item = &'a environment::LegacySource>) 
         .join("; ")
 }
 
-/// A field path keyed by namespace, `#` for a tag, with each numeric array index written as
-/// `[]`: `event.category[0]` and `event.category[9]` compare equal, `event[0].category` does not.
 fn map_path(path: &str, tag: bool) -> String {
     let mut out = String::from(if tag { "#" } else { "" });
     let mut rest = path.trim_start_matches('#');
@@ -3403,10 +3371,6 @@ enum MapGap {
     NotObserved(Option<String>),
 }
 
-/// The map rule for a field read in one selected source, given its records keyed by
-/// `map_path`. An exact record decides: a listed one is quiet, and one measured and not
-/// observed warns with its window. Without one, a documented object or array parent is
-/// quiet. A read of a whole array `x[]` is exact for a record of any of its elements.
 fn map_gap<'a>(
     records: impl Iterator<Item = &'a (String, environment::LegacyField)> + Clone,
     read: &str,

@@ -172,11 +172,9 @@ fn a_field_no_mapped_source_has_names_every_source_when_the_query_selects_none()
         "{}",
         found[0]
     );
-    // A field one mapped source documents is quiet when the query selects no source.
     assert_no_warning(r#"process.name="x" | count()"#, &pack());
 }
 
-/// Ready, with the expected evidence for the field and neither map warning.
 fn assert_quiet(query: &str, pack: &Pack, key: &str, basis: &str) {
     let result = check(query, Some(pack), false);
     assert_eq!(
@@ -270,7 +268,6 @@ fn a_repository_no_mapped_source_has_warns_and_names_the_mapped_selectors() {
         found[0]
     );
     assert!(!found[0].contains("view"), "{}", found[0]);
-    // The selection is reported once; its fields are not reported again.
     assert!(
         warnings(&result, "CQL_UNMAPPED_FIELD").is_empty(),
         "{:?}",
@@ -314,7 +311,6 @@ fn the_target_view_name_used_as_a_repository_is_called_the_view() {
             result.diagnostics
         );
     }
-    // With a mapped #type, the warning names the source that has it, not every source.
     let result = check(
         r#"#repo=synthetic-view #type=beta-syslog | host.name=* | count()"#,
         Some(&pack()),
@@ -360,7 +356,6 @@ fn strict_mode_output_is_unchanged() {
 
 #[test]
 fn without_a_map_check_adds_no_grounding_warning() {
-    // An informational grouping ceiling alone leaves --fail-on-warning at exit 0.
     let result = check("groupBy([user], function=count(), limit=max)", None, false);
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.diagnostics);
     let codes: Vec<_> = result
@@ -436,7 +431,6 @@ fn reading_a_field_an_earlier_step_removed_warns_with_or_without_a_map() {
         assert_eq!(result.outcome, Outcome::Ready, "{query}");
         no_warning(&result, "CQL_DROPPED_FIELD");
     }
-    // A read the projection check already reports is not reported twice.
     let result = check(
         "#repo=alpha_repo | select([src.ip]) | user.name=*",
         Some(&mapped),
@@ -470,7 +464,6 @@ fn in_selectors_are_not_compared() {
 
 #[test]
 fn strict_mode_ignores_in_selectors_as_before() {
-    // As in 0.1.10, in() does not narrow the sources strict grounding compares.
     for query in [
         r##"src.ip=* | in(field="#repo",values=["beta_repo"]) | count()"##,
         r##"in(field="#repo",values=["beta_repo"]) | src.ip=* | count()"##,
@@ -636,14 +629,12 @@ fn arrays_the_query_creates_are_not_reported() {
             result.grounding.basis
         );
     }
-    // Strict mode needs no deployment evidence for an array written by index.
     let result = check(
         r#"#repo=alpha_repo | "picked[0]" := "network" | array:contains(array="picked[]", value="network")"#,
         Some(&pack()),
         true,
     );
     assert_eq!(result.outcome, Outcome::Ready, "{:?}", result.grounding);
-    // An array the query only reads is still compared with the map.
     let result = check(
         r#"#repo=alpha_repo | concatArray("picked[]")"#,
         Some(&pack()),
@@ -792,7 +783,6 @@ fn each_selected_source_is_judged_by_its_own_records() {
     // Beta documents the parent object, so alpha's measurement does not warn for both.
     let result = check("obj.zero_only=* | count()", Some(&pack), false);
     no_warning(&result, "CQL_UNMAPPED_FIELD");
-    // Each warning names only the sources it describes.
     let result = check("zero_only=* | count()", Some(&pack), false);
     let found = warnings(&result, "CQL_UNMAPPED_FIELD");
     assert_eq!(found.len(), 2, "{:?}", result.diagnostics);

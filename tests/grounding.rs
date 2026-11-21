@@ -731,7 +731,6 @@ fn lenient_grounding_warns_only_for_what_the_map_lacks() {
             result.diagnostics
         );
     }
-    // Weak evidence for a field the map lists stays in grounding.basis without a warning.
     let mut d = data();
     d.fields[0]["refresh_status"] = json!("not-reobserved");
     let result = analyze(d, false);
