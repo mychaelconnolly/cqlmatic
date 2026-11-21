@@ -317,7 +317,7 @@ impl Parser<'_> {
                 let negated = self.eat("!");
                 self.space();
                 let call_start = self.pos;
-                let n = self.identifier()?;
+                let n = self.unquoted_identifier()?;
                 let mut c = self.call(n, call_start)?;
                 c.args.push(Arg {
                     name: Some("field".into()),
@@ -363,9 +363,12 @@ impl Parser<'_> {
                 }
                 return Ok(Step::Match { field: name, arms });
             }
-            if !name.eq_ignore_ascii_case("not") && self.eat("(") {
+            if !name.eq_ignore_ascii_case("not")
+                && !self.input[start..].starts_with('"')
+                && self.eat("(")
+            {
                 self.pos = start;
-                let name = self.identifier()?;
+                let name = self.unquoted_identifier()?;
                 let call = self.call(name, start)?;
                 let end = self.pos;
                 let composition =
@@ -385,7 +388,7 @@ impl Parser<'_> {
             let mut args = Vec::new();
             if !self.eat("]") {
                 loop {
-                    args.push(self.expression(0)?);
+                    args.push(self.aggregate_list_item()?);
                     if self.eat("]") {
                         break;
                     }
@@ -509,7 +512,7 @@ impl Parser<'_> {
             let start = p.pos;
             if let Ok(name) = p.identifier() {
                 p.space();
-                if p.rest().starts_with('(') {
+                if !p.input[start..].starts_with('"') && p.rest().starts_with('(') {
                     return Ok(Filter::Call(p.call(name, start)?));
                 }
                 for op in ["!=", ">=", "<=", "=", ">", "<"] {
@@ -714,7 +717,7 @@ impl Parser<'_> {
                             .or_else(|| spec.positional.get(positional).copied())
                             .is_some_and(|arg| spec.argument_kind(arg) == Some("g"))
                     });
-                    let value = if name.eq_ignore_ascii_case("defineTable")
+                    let mut value = if name.eq_ignore_ascii_case("defineTable")
                         && argname.as_deref() == Some("include")
                         && p.eat("*")
                     {
@@ -730,6 +733,18 @@ impl Parser<'_> {
                     } else {
                         p.expression_with_aggregate_aliases(0, aggregate_argument)?
                     };
+                    if name.eq_ignore_ascii_case("sample")
+                        && matches!(argname.as_deref(), None | Some("percentage"))
+                    {
+                        coerce_quoted_number(&mut value);
+                    } else if name.eq_ignore_ascii_case("percentile")
+                        && argname.as_deref() == Some("percentiles")
+                        && let Value::Array(values) = &mut value
+                    {
+                        for value in values {
+                            coerce_quoted_number(value);
+                        }
+                    }
                     positional += usize::from(argname.is_none());
                     args.push(Arg {
                         name: argname,
@@ -740,6 +755,12 @@ impl Parser<'_> {
                     }
                     p.expect(",")?;
                 }
+            }
+            if name.eq_ignore_ascii_case("select") && args.len() > 1 && positional == args.len() {
+                args = vec![Arg {
+                    name: None,
+                    value: Value::Array(args.into_iter().map(|arg| arg.value).collect()),
+                }];
             }
             Ok(Call {
                 name,
@@ -1022,6 +1043,14 @@ impl Parser<'_> {
             }
             Ok(left)
         })
+    }
+}
+
+fn coerce_quoted_number(value: &mut Value) {
+    if let Value::String(text) = value
+        && text.trim().parse::<f64>().is_ok_and(f64::is_finite)
+    {
+        *value = Value::Number(text.trim().into());
     }
 }
 

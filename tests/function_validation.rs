@@ -42,6 +42,168 @@ fn unsupported(query: &str, code: &str) {
 }
 
 #[test]
+fn check_accepts_valid_shapes() {
+    let mut failures = Vec::new();
+    for query in [
+        r#"select(category, "quantity", status) | groupBy([category, quantity, status])"#,
+        "/[]z]/",
+        "/^[^]]+$/",
+        r#"sample(percentage="75")"#,
+        r#"sample("0.01")"#,
+        r#"percentile(quantity, percentiles=["50", 75]) | table([_50, _75])"#,
+        "xml:prettyPrint()",
+        "time:dayOfWeek()",
+        r##"default(field=["#category", quantity], value="unknown") | groupBy(["#category", quantity])"##,
+        r##"default(field="#category", value="unknown", replaceEmpty=false)"##,
+        "top(category, limit=1, rest=remainder)",
+        r#"top(category, limit=1, rest="remaining values")"#,
+        "top(category, rest=0)",
+        "[smallest := min(quantity), largest := max(quantity)] | select(smallest, largest)",
+    ] {
+        let result = check(query);
+        if result.outcome != Outcome::Ready
+            || result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_DROPPED_FIELD")
+        {
+            failures.push(format!(
+                "{query}: {:?}",
+                result
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == Severity::Error || d.code == "CQL_DROPPED_FIELD")
+                    .map(|d| d.code.as_str())
+                    .collect::<Vec<_>>()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for query in [
+        "select(category, quantity) | groupBy(typo)",
+        r#"percentile(quantity, percentiles=["50"]) | table([_typo])"#,
+        "[smallest := min(quantity), largest := max(quantity)] | select(smallest, typo)",
+    ] {
+        let result = check(query);
+        assert_eq!(result.outcome, Outcome::Ready, "{query}: {result:?}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_DROPPED_FIELD"),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn check_rejects_near_misses_of_valid_shapes() {
+    for (query, code) in [
+        ("select()", "CQL_ARGUMENT_REQUIRED"),
+        ("select(fields=category,quantity)", "CQL_DUPLICATE_ARGUMENT"),
+        (
+            "select(fields=category,fields=quantity)",
+            "CQL_DUPLICATE_ARGUMENT",
+        ),
+        ("/[]/", "CQL_REGEX_SYNTAX"),
+        ("/[^]/", "CQL_REGEX_SYNTAX"),
+        ("/[z-a]/", "CQL_REGEX_SYNTAX"),
+        (r#"sample(percentage="many")"#, "CQL_ARGUMENT_TYPE"),
+        (
+            r#"percentile(quantity, percentiles=["NaN"])"#,
+            "CQL_ARGUMENT_TYPE",
+        ),
+        ("[smallest := quantity]", "CQL_SYNTAX"),
+        ("[smallest := lower(quantity)]", "CQL_AGGREGATE_REQUIRED"),
+        ("top(rest=remainder)", "CQL_ARGUMENT_REQUIRED"),
+        ("setField(value=1)", "CQL_ARGUMENT_REQUIRED"),
+        (
+            r#"objectArray:eval("items[]", function={out:=1})"#,
+            "CQL_ARGUMENT_REQUIRED",
+        ),
+        (
+            r##"default(field="#category", value="unknown", replaceEmpty=true)"##,
+            "CQL_OUTPUT_FIELD",
+        ),
+    ] {
+        invalid(query, code);
+    }
+}
+
+#[test]
+fn sample_and_percentile_apply_the_same_bounds_to_quoted_and_bare_numbers() {
+    for (argument, out_of_range, in_range) in [
+        (
+            "sample(percentage=NUMBER)",
+            ["-1", "0", "0.009", "100.01"],
+            ["0.01", "100"],
+        ),
+        (
+            "percentile(quantity, percentiles=[NUMBER])",
+            ["-1", "-0.01", "100.01", "101"],
+            ["0", "100"],
+        ),
+    ] {
+        for value in out_of_range {
+            invalid(&argument.replace("NUMBER", value), "CQL_ARGUMENT_RANGE");
+            invalid(
+                &argument.replace("NUMBER", &format!("\"{value}\"")),
+                "CQL_ARGUMENT_RANGE",
+            );
+        }
+        for value in in_range {
+            ready(&argument.replace("NUMBER", value));
+            ready(&argument.replace("NUMBER", &format!("\"{value}\"")));
+        }
+    }
+}
+
+#[test]
+fn quoted_names_do_not_dispatch_as_function_calls() {
+    for query in [
+        r#""top"(category, rest=others)"#,
+        r#""xml:prettyPrint"()"#,
+        r#""time:dayOfWeek"()"#,
+        r#"text OR "regex"("x", field=message)"#,
+    ] {
+        invalid(query, "CQL_SYNTAX");
+    }
+    unsupported(r#"message =~ "regex"("x")"#, "CQL_UNSUPPORTED_SYNTAX");
+    invalid(
+        r#"text OR regex("x", field=message)"#,
+        "CQL_FUNCTION_FILTER_COMPOSITION",
+    );
+    for query in [
+        r#""top""#,
+        r#""top" (category=example)"#,
+        r#""top" := category"#,
+        r#""top"=example"#,
+        r#"message =~ regex("x")"#,
+    ] {
+        ready(query);
+    }
+}
+
+#[test]
+fn required_arguments_do_not_have_usable_documented_defaults() {
+    let mut conflicts = Vec::new();
+    for function in catalog::FUNCTIONS {
+        for rule in catalog::parameter_rules(function.name) {
+            if rule.default.is_some() && function.required.contains(&rule.name.as_str()) {
+                conflicts.push((function.name, rule.name.as_str()));
+            }
+        }
+    }
+    conflicts.sort_unstable();
+    // Both reference tables mark these parameters required. Omitting either is rejected.
+    assert_eq!(
+        conflicts,
+        [("objectArray:eval", "asArray"), ("setField", "target")]
+    );
+}
+
+#[test]
 fn function_arguments_require_calls_including_inside_arrays() {
     for query in [
         "x=1 | stats(count)",
@@ -421,7 +583,6 @@ fn numeric_parameters_keep_finite_types_and_documented_bounds() {
         invalid(query, "CQL_ARGUMENT_RANGE");
     }
     for query in [
-        "sample(percentage=0)",
         "sample(percentage=100)",
         "sample(percentage=1e1)",
         "top(user,error=2.5)",
@@ -429,9 +590,7 @@ fn numeric_parameters_keep_finite_types_and_documented_bounds() {
     ] {
         ready(query);
     }
-    for query in ["sample(percentage=true)", r#"sample(percentage="1")"#] {
-        invalid(query, "CQL_ARGUMENT_TYPE");
-    }
+    invalid("sample(percentage=true)", "CQL_ARGUMENT_TYPE");
 }
 
 #[test]
@@ -661,30 +820,6 @@ fn time_intervals_reject_provably_reversed_endpoints() {
 }
 
 #[test]
-fn top_rest_rejects_arbitrary_labels_in_raw_and_typed_calls() {
-    invalid(r#"top(user,rest="others")"#, "CQL_ARGUMENT_VALUE");
-    let request = serde_json::from_value(serde_json::json!({
-        "schema_version": 1,
-        "input": {"mode": "plan", "plan": {"source": {}, "steps": [{
-            "op": "call", "function": "top", "args": [
-                {"name": "field", "value": {"kind": "field", "name": "user"}},
-                {"name": "rest", "value": {"kind": "literal", "value": "others"}}
-            ]
-        }]}}
-    }))
-    .unwrap();
-    let result = app::generate(request, None);
-    assert_eq!(result.outcome, Outcome::Invalid, "{result:?}");
-    assert!(result.query.is_none());
-    assert!(
-        result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "CQL_ARGUMENT_VALUE")
-    );
-}
-
-#[test]
 fn interval_end_rejects_malformed_values() {
     unsupported(
         r#"setTimeInterval(start="7d",end="garbage")"#,
@@ -706,34 +841,13 @@ fn interval_endpoints_keep_relative_absolute_and_epoch_forms() {
 }
 
 #[test]
-fn top_rest_accepts_boolean_spellings_of_its_string_choices() {
+fn top_rest_accepts_boolean_spellings() {
     for value in ["true", "false", r#""true""#, r#""false""#] {
         ready(&format!("top(user,rest={value})"));
     }
-    for query in [
-        r#"top(user,rest="yes")"#,
-        "top(user,rest=yes)",
-        r#"top(user,rest="others")"#,
-    ] {
-        invalid(query, "CQL_ARGUMENT_VALUE");
-    }
-    invalid("top(user,rest=1)", "CQL_ARGUMENT_VALUE");
+    invalid("top(user,rest=[label])", "CQL_ARGUMENT_TYPE");
     invalid("lower(user,as=true)", "CQL_ARGUMENT_TYPE");
     invalid("sort(user,order=true)", "CQL_ARGUMENT_TYPE");
-
-    let boolean_strings = catalog::FUNCTIONS
-        .iter()
-        .flat_map(|function| {
-            catalog::parameter_rules(function.name)
-                .iter()
-                .filter(|rule| {
-                    function.argument_kind(&rule.name) == Some("s")
-                        && rule.choices == ["false", "true"]
-                })
-                .map(move |rule| (function.name, rule.name.as_str()))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(boolean_strings, [("top", "rest")]);
 }
 
 #[test]
@@ -771,12 +885,13 @@ fn named_remote_tables_and_documented_positional_forms_keep_their_bindings() {
 }
 
 #[test]
-fn typed_top_rest_preserves_boolean_and_string_choices() {
+fn typed_top_rest_preserves_booleans_and_labels() {
     for value in [
         serde_json::json!(true),
         serde_json::json!(false),
         serde_json::json!("true"),
         serde_json::json!("false"),
+        serde_json::json!("remaining values"),
     ] {
         let request = serde_json::from_value(serde_json::json!({
             "schema_version": 1,

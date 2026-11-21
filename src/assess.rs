@@ -80,6 +80,12 @@ enum RowBound {
 }
 
 #[derive(Clone)]
+enum TopRemainder {
+    Unlabeled,
+    Named(String),
+}
+
+#[derive(Clone)]
 struct LimitingStage {
     start: usize,
     info: CapInfo,
@@ -88,7 +94,7 @@ struct LimitingStage {
     setting: Option<&'static str>,
     final_stage: bool,
     series: bool,
-    rest_row: bool,
+    rest: Option<TopRemainder>,
     unit: CapUnit,
     row_bound: RowBound,
     value_fields: BTreeSet<String>,
@@ -350,6 +356,25 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
         );
     }
     for cap in caps {
+        let rest_row = match &cap.rest {
+            None => false,
+            Some(TopRemainder::Unlabeled) => true,
+            Some(TopRemainder::Named(_))
+                if !cap.values_observable || cap.value_fields.is_empty() =>
+            {
+                true
+            }
+            Some(TopRemainder::Named(label)) => normalized.rows.iter().any(|row| {
+                cap.value_fields.iter().any(|field| {
+                    row.get(field).is_some_and(|value| {
+                        value.as_str() == Some(label)
+                            || value
+                                .as_number()
+                                .is_some_and(|number| number.to_string() == *label)
+                    })
+                })
+            }),
+        };
         if cap.kind == CapKind::Unverified {
             result.add(
                 AssessOutcome::Inconclusive,
@@ -403,12 +428,12 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
                 );
                 continue;
             };
-            if count > cap.info.cap.saturating_add(usize::from(cap.rest_row)) {
+            if count > cap.info.cap.saturating_add(usize::from(rest_row)) {
                 result.add(
                     AssessOutcome::Inconclusive,
                     Diagnostic::warning(
                         "RESULT_CAP_EXCEEDED",
-                        exceeded_message(cap, count, unit, ""),
+                        exceeded_message(cap, count, unit, rest_row, ""),
                     ),
                 );
                 continue;
@@ -431,7 +456,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
                 );
             }
         } else {
-            let over = result.rows > cap.info.cap.saturating_add(usize::from(cap.rest_row));
+            let over = result.rows > cap.info.cap.saturating_add(usize::from(rest_row));
             if over && cap.row_bound == RowBound::Holds {
                 result.add(
                     AssessOutcome::Inconclusive,
@@ -441,6 +466,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
                             cap,
                             result.rows,
                             "rows",
+                            rest_row,
                             ", and later stages cannot add rows",
                         ),
                     ),
@@ -457,7 +483,7 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
                             result.rows,
                             cap.info.stage,
                             cap.info.cap,
-                            if cap.rest_row { " plus its rest row" } else { "" }
+                            if rest_row { " plus its rest row" } else { "" }
                         ),
                     ),
                 );
@@ -1148,7 +1174,7 @@ fn inspect_call(
                     setting: None,
                     final_stage: false,
                     series: false,
-                    rest_row: false,
+                    rest: None,
                     unit: CapUnit::Rows,
                     row_bound: RowBound::None,
                     value_fields: BTreeSet::new(),
@@ -1813,7 +1839,8 @@ fn inspect_filter(
 fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Vec<LimitingStage>) {
     let resolved = catalog::resolve(call);
     if let Some(spec) = resolved.as_ref().and_then(|r| cap_spec(r.function.name)) {
-        let limit = resolved.as_ref().unwrap().arguments.get("limit");
+        let args = &resolved.as_ref().unwrap().arguments;
+        let limit = args.get("limit");
         let (cap, kind, setting) = match limit.map(|value| value.text()) {
             None => (spec.default, CapKind::Silent, None),
             Some(Some("max")) => (0, CapKind::Unverified, spec.max_setting),
@@ -1824,6 +1851,25 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
                 .map_or((0, CapKind::Unverified, None), |cap| {
                     (cap, spec.numeric, None)
                 }),
+        };
+        let rest = if spec.name == "top" {
+            args.get("rest").and_then(|value| match value.boolean() {
+                Some(false) => None,
+                Some(true) => Some(TopRemainder::Unlabeled),
+                None => Some(match value {
+                    Value::Parameter(_) => TopRemainder::Unlabeled,
+                    value => value
+                        .string_value()
+                        .map_or(TopRemainder::Unlabeled, TopRemainder::Named),
+                }),
+            })
+        } else {
+            None
+        };
+        let tracked_value = match (spec.name, &rest) {
+            ("collect", _) => args.get("fields"),
+            ("top", Some(TopRemainder::Named(_))) => args.get("field"),
+            _ => None,
         };
         caps.push(LimitingStage {
             start: call.start,
@@ -1836,29 +1882,14 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
             setting,
             final_stage,
             series: spec.series,
-            rest_row: spec.name == "top"
-                && resolved
-                    .as_ref()
-                    .unwrap()
-                    .arguments
-                    .get("rest")
-                    .is_some_and(|v| v.boolean() != Some(false)),
+            rest,
             unit: if spec.name == "groupBy" {
-                group_unit(&resolved.as_ref().unwrap().arguments)
+                group_unit(args)
             } else {
                 CapUnit::Rows
             },
             row_bound: RowBound::None,
-            value_fields: if spec.name == "collect" {
-                resolved
-                    .as_ref()
-                    .unwrap()
-                    .arguments
-                    .get("fields")
-                    .map_or_else(BTreeSet::new, |value| catalog::fields(value))
-            } else {
-                BTreeSet::new()
-            },
+            value_fields: tracked_value.map_or_else(BTreeSet::new, |value| catalog::fields(value)),
             values_observable: !nested
                 && resolved.as_ref().is_none_or(|r| {
                     r.arguments
@@ -1903,7 +1934,7 @@ fn collect_call_caps(call: &Call, final_stage: bool, nested: bool, caps: &mut Ve
                 setting: None,
                 final_stage,
                 series: false,
-                rest_row: false,
+                rest: None,
                 unit: CapUnit::Rows,
                 row_bound: RowBound::None,
                 value_fields: BTreeSet::new(),
@@ -2180,7 +2211,13 @@ fn distinct_groups(
     Some(groups.len())
 }
 
-fn exceeded_message(cap: &LimitingStage, count: usize, unit: &str, later: &str) -> String {
+fn exceeded_message(
+    cap: &LimitingStage,
+    count: usize,
+    unit: &str,
+    rest_row: bool,
+    later: &str,
+) -> String {
     format!(
         "{count} {unit} exceed the {} {} limit of {}{}{later}; the saved result is inconsistent with the supplied query, so it cannot be assessed against it. Confirm the exact executed query and the complete unedited response.",
         if cap.info.defaulted {
@@ -2190,11 +2227,7 @@ fn exceeded_message(cap: &LimitingStage, count: usize, unit: &str, later: &str) 
         },
         cap.info.stage,
         cap.info.cap,
-        if cap.rest_row {
-            " plus its rest row"
-        } else {
-            ""
-        }
+        if rest_row { " plus its rest row" } else { "" }
     )
 }
 

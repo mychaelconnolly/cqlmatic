@@ -365,7 +365,11 @@ fn bounded_writes_and_local_file_reads_preserve_known_export_destinations() {
         );
     }
     assert_eq!(
-        check(r##"default(field="#repo",value="changed")"##, false).outcome,
+        check(
+            r##"default(field="#repo",value="changed",replaceEmpty=true)"##,
+            false
+        )
+        .outcome,
         Outcome::Invalid
     );
 }
