@@ -787,14 +787,7 @@ impl Checker<'_> {
                     }
                     let previous = std::mem::take(&mut self.fields);
                     let preamble = self.nesting == 1 && !has_input && self.definitions == 0;
-                    if spec.name == "head"
-                        && index > 0
-                        && matches!(&p.steps[index - 1], Step::Call(sort)
-                        if sort.name.eq_ignore_ascii_case("sort")
-                            && !matches!(
-                                (row_cap(sort, None), row_cap(c, head_default_limit())),
-                                (Some(sort), Some(head)) if sort <= head
-                            ))
+                    if spec.name == "head" && index > 0 && head_narrows_sort(&p.steps[index - 1], c)
                     {
                         self.emit(
                             "CQL_SORT_HEAD",
@@ -3232,6 +3225,17 @@ fn row_cap(call: &Call, default: Option<u64>) -> Option<u64> {
         Some(v) if v.text() == Some("max") => Some(u64::MAX),
         Some(v) => v.unsigned_integer(),
     }
+}
+
+fn head_narrows_sort(previous: &Step, head: &Call) -> bool {
+    let Step::Call(sort) = previous else {
+        return false;
+    };
+    sort.name.eq_ignore_ascii_case("sort")
+        && !matches!(
+            (row_cap(sort, None), row_cap(head, head_default_limit())),
+            (Some(sort), Some(head)) if sort <= head
+        )
 }
 
 fn head_default_limit() -> Option<u64> {
