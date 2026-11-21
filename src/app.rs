@@ -2840,6 +2840,23 @@ fn ground(
         .or(context.environment.as_ref())
         .or(evidence.map(|evidence| evidence.environment))
         .map(|e| e.view.clone());
+    let mut decoded = Vec::<DecodedPack>::new();
+    for p in pack.into_iter().chain(evidence.and_then(|e| e.active_pack)) {
+        if !decoded.iter().any(|d| std::ptr::eq(d.pack, p)) {
+            decoded.push(DecodedPack::new(p));
+        }
+    }
+    let decoded_of = |p: &Pack| {
+        decoded
+            .iter()
+            .find(|d| std::ptr::eq(d.pack, p))
+            .expect("every pack is decoded")
+    };
+    let evidence_packs: Vec<_> = pack
+        .into_iter()
+        .chain(evidence.and_then(|e| e.active_pack))
+        .map(decoded_of)
+        .collect();
     let mut query_observed = false;
     let (reads, in_selector) = requirements(
         pipeline,
@@ -2986,7 +3003,7 @@ fn ground(
             continue;
         }
         if let Some(evidence) = evidence {
-            match query_observation_basis(&r, pack, evidence) {
+            match query_observation_basis(&r, &evidence_packs, evidence) {
                 Ok(Some(basis)) => {
                     query_observed = true;
                     record_basis(&mut g, key, basis);
@@ -3018,21 +3035,18 @@ fn ground(
             }
             continue;
         };
-        let sources = p
-            .data
+        let decoded_p = decoded_of(p);
+        let sources = decoded_p
             .sources
             .iter()
-            .filter_map(|v| environment::source(v).ok())
             .filter(|source| source_matches_requirement(source, &r))
             .collect::<Vec<_>>();
-        let matches = p
-            .data
+        let matches = decoded_p
             .fields
             .iter()
-            .filter_map(|v| environment::field(v).ok())
             .filter(|f| {
-                sources.iter().any(|s| s.id == f.source_id)
-                    && field_matches_requirement(f, &r)
+                field_matches_requirement(f, &r)
+                    && sources.iter().any(|s| s.id == f.source_id)
                     && (!r.array || f.is_array == Some(true) || f.data_type == "array")
             })
             .collect::<Vec<_>>();
@@ -3435,30 +3449,53 @@ fn field_matches_requirement(field: &environment::LegacyField, r: &Requirement) 
         && field.is_tag == Some(r.field.starts_with('#'))
 }
 
+struct DecodedPack<'a> {
+    pack: &'a Pack,
+    sources: Vec<environment::LegacySource>,
+    fields: Vec<environment::LegacyField>,
+}
+
+impl<'a> DecodedPack<'a> {
+    fn new(pack: &'a Pack) -> Self {
+        Self {
+            pack,
+            sources: pack
+                .data
+                .sources
+                .iter()
+                .filter_map(|value| environment::source(value).ok())
+                .collect(),
+            fields: pack
+                .data
+                .fields
+                .iter()
+                .filter_map(|value| environment::field(value).ok())
+                .collect(),
+        }
+    }
+}
+
 fn query_observation_basis(
     r: &Requirement,
-    pack: Option<&Pack>,
+    packs: &[&DecodedPack<'_>],
     evidence: GroundingEvidence<'_>,
 ) -> Result<Option<String>, String> {
     let mut namespaces = BTreeSet::new();
     let mut contradictions = Vec::new();
     let mut active_contradiction = false;
-    for pack in pack.into_iter().chain(evidence.active_pack) {
-        let sources = pack
-            .data
+    for decoded in packs {
+        let pack = decoded.pack;
+        let sources = decoded
             .sources
             .iter()
-            .filter_map(|value| environment::source(value).ok())
             .filter(|source| source_overlaps_scope(source, &r.scope))
             .collect::<Vec<_>>();
-        let fields = pack
-            .data
+        let fields = decoded
             .fields
             .iter()
-            .filter_map(|value| environment::field(value).ok())
             .filter(|field| {
-                sources.iter().any(|source| source.id == field.source_id)
-                    && field_matches_requirement(field, r)
+                field_matches_requirement(field, r)
+                    && sources.iter().any(|source| source.id == field.source_id)
             })
             .collect::<Vec<_>>();
         let mut provenance_ids = BTreeSet::new();

@@ -1,3 +1,9 @@
+use cqlmatic::{
+    contracts::{EnvironmentId, Scope},
+    environment::{Pack, PackData},
+    inventory::{InventoryState, MAX_STATE_BYTES, PackReference},
+    storage::Writer,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -291,7 +297,14 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         assert_eq!(fresh["changed"], true);
         assert_eq!(fresh["installed"], true);
         assert_eq!(fresh["dry_run"], false);
-        for field in ["path", "event", "command", "entry", "next_actions"] {
+        for field in [
+            "path",
+            "events",
+            "command",
+            "entry",
+            "hooks",
+            "next_actions",
+        ] {
             assert_eq!(fresh[field], preview[field], "{client}, {field}");
         }
         // The Copilot clients share one entry.
@@ -300,11 +313,22 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         } else {
             client
         };
+        // Claude Code and Codex run the command through a wrapper that ends every failure with
+        // exit status 0 and no output; the command inside it is quoted once more for that.
         // Codex starts hooks with cmd.exe on Windows, which quotes with double quotes.
-        let quote = if cfg!(windows) && client == "codex" {
-            '"'
-        } else {
-            '\''
+        let (before, quote, after) = match (client, cfg!(windows)) {
+            ("claude-code" | "codex", false) => (
+                r#"/bin/sh -c 'if out=$(/bin/sh -c "$1") && [ -n "$out" ]; then printf '\''%s\n'\'' "$out"; fi; exit 0' sh '"#,
+                r"'\''",
+                "' 2>/dev/null; exit 0",
+            ),
+            ("claude-code", true) => (
+                "try { Invoke-Expression '",
+                "''",
+                "' 2>$null } catch {}; exit 0",
+            ),
+            ("codex", true) => ("", "\"", " 2>nul & exit 0"),
+            _ => ("", "'", ""),
         };
         // Codex writes a server's hyphens as underscores, and the entry uses that spelling.
         let server = if client == "codex" {
@@ -314,12 +338,14 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
         };
         let check_command = |value: &Value| {
             let value = value.as_str().unwrap();
-            assert!(value.starts_with(&format!("launcher --label capture env capture --client {registered} --server {quote}{server}{quote} --state ")));
+            assert!(value.starts_with(&format!("{before}launcher --label capture env capture --client {registered} --server {quote}{server}{quote} --state ")), "{value}");
+            assert!(value.ends_with(after), "{value}");
             assert!(value.contains("inventory"), "{value}");
             assert!(value.contains("state.json"), "{value}");
         };
         let expected = if client.starts_with("copilot-") {
-            assert_eq!(fresh["event"], "postToolUse");
+            assert_eq!(fresh["events"], json!(["postToolUse"]));
+            assert_eq!(fresh["hooks"], json!({"capture": "added"}));
             check_command(&fresh["command"]["bash"]);
             check_command(&fresh["command"]["powershell"]);
             json!({"version": 1, "hooks": {"postToolUse": [{
@@ -327,17 +353,27 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
                 "powershell": fresh["command"]["powershell"],
             }]}})
         } else {
-            assert_eq!(fresh["event"], "PostToolUse");
+            assert_eq!(fresh["events"], json!(["PostToolUse", "PreToolUse"]));
+            assert_eq!(
+                fresh["hooks"],
+                json!({"capture": "added", "guard": "added"})
+            );
             check_command(&fresh["command"]);
-            let mut handler =
+            let mut capture =
                 json!({"type": "command", "command": fresh["command"], "async": true});
-            if cfg!(windows) && client == "claude-code" {
-                handler["shell"] = json!("powershell");
+            let mut guard = json!({"type": "command", "command": fresh["command"], "timeout": 5});
+            if client == "claude-code" {
+                guard["onFailure"] = json!("continue");
             }
-            json!({"hooks": {"PostToolUse": [{
-                "matcher": format!("mcp__{server}__.*"),
-                "hooks": [handler],
-            }]}})
+            if cfg!(windows) && client == "claude-code" {
+                capture["shell"] = json!("powershell");
+                guard["shell"] = json!("powershell");
+            }
+            let matcher = format!("mcp__{server}__.*");
+            json!({"hooks": {
+                "PostToolUse": [{"matcher": matcher, "hooks": [capture]}],
+                "PreToolUse": [{"matcher": matcher, "hooks": [guard]}],
+            }})
         };
         if client == "codex" {
             assert!(
@@ -405,6 +441,7 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
             fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
         }
         let mut command = install(&home.0, client);
+        command.args(["--hooks", "capture"]);
         let fresh = report(&mut command);
         let after = fs::read_to_string(&file).unwrap();
         let inserted_at = original.find(old_hook).unwrap() + old_hook.len();
@@ -425,14 +462,24 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
             );
         }
 
-        let hook = &mut expected["hooks"][event][1];
-        hook["extra-setting"] = json!(true);
         let exact = serde_json::to_vec(&expected).unwrap();
         fs::write(&file, &exact).unwrap();
         let repeat = report(&mut command);
         assert_eq!(repeat["installed"], true, "{client}");
         assert_eq!(repeat["changed"], false, "{client}");
+        assert_eq!(repeat["hooks"]["capture"], "present", "{client}");
         assert_eq!(fs::read(&file).unwrap(), exact, "{client}");
+
+        // Only the whole entry is this installation's. One someone changed is reported, and
+        // nothing that would run the command a second time is added beside it.
+        let hook = &mut expected["hooks"][event][1];
+        hook["extra-setting"] = json!(true);
+        let changed = serde_json::to_vec(&expected).unwrap();
+        fs::write(&file, &changed).unwrap();
+        let repeat = report(&mut command);
+        assert_manual(&repeat, "different hook entry");
+        assert_eq!(repeat["hooks"]["capture"], "manual", "{client}");
+        assert_eq!(fs::read(&file).unwrap(), changed, "{client}");
 
         let hook = &expected["hooks"][event][1];
         let mut customized = vec![hook.clone()];
@@ -450,6 +497,7 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
             fs::write(&file, &wanted).unwrap();
             for dry_run in [false, true] {
                 let mut command = install(&home.0, client);
+                command.args(["--hooks", "capture"]);
                 if dry_run {
                     command.arg("--dry-run");
                 }
@@ -986,7 +1034,11 @@ fn capture_install_prints_documented_manual_entries() {
         assert_eq!(output["installed"], false);
         assert_eq!(output["changed"], false);
         assert_eq!(output["path"], json!(path));
-        assert_eq!(output["event"], json!(event));
+        assert_eq!(
+            output["events"],
+            json!(event.into_iter().collect::<Vec<_>>())
+        );
+        assert_eq!(output["hooks"], json!({"capture": "manual"}));
         // The command names the state this installation resolved.
         let command = output["command"].as_str().unwrap();
         let (invocation, state) = command.split_once(" --state ").unwrap();
@@ -1101,11 +1153,14 @@ fn powershell() -> Command {
 
 /// The built executable under a name and folder that need quoting.
 fn runner_in(directory: &Path) -> PathBuf {
+    let source = env!("CARGO_BIN_EXE_cqlmatic");
     let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
-    if fs::hard_link(env!("CARGO_BIN_EXE_cqlmatic"), &executable).is_err() {
-        fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
+    // Changing the link count on macOS can kill concurrent launches of the Cargo executable.
+    if cfg!(target_os = "macos") || fs::hard_link(source, &executable).is_err() {
+        fs::copy(source, &executable).unwrap();
         // Another test's child process, started during the copy, can hold the new file open
         // for writing for a moment, and Linux will not run a file in that state.
+        #[cfg(not(target_os = "macos"))]
         while let Err(error) = Command::new(&executable).arg("--version").output() {
             assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2074,8 +2129,10 @@ fn capture_install_registers_an_absolute_state_path() {
         .unwrap()
         .join("relative")
         .join("state.json");
+    // The path is the word after --state, in the quotes of the wrapper and of the command.
     let (_, state) = registered.split_once(" --state ").unwrap();
-    let state = Path::new(state.trim_matches(|c| c == '\'' || c == '"'));
+    let state = state.split_whitespace().next().unwrap();
+    let state = Path::new(state.trim_matches(|c| matches!(c, '\'' | '"' | '\\')));
     assert!(state.is_absolute(), "{registered}");
     assert_eq!(state.file_name(), expected.file_name(), "{registered}");
     assert!(
@@ -2152,6 +2209,7 @@ fn concurrent_capture_install_processes_keep_every_reported_hook() {
     let start = Barrier::new(3);
     let run = |server| {
         let mut command = install_for(&home.0, "codex", server);
+        command.args(["--hooks", "capture"]);
         start.wait();
         command.output().unwrap()
     };
@@ -2206,7 +2264,7 @@ fn concurrent_capture_install_processes_keep_every_reported_hook() {
     assert!(saved.ends_with(&original[insertion..]));
     for server in refused {
         assert_eq!(
-            report(&mut install_for(&home.0, "codex", server))["installed"],
+            report(install_for(&home.0, "codex", server).args(["--hooks", "capture"]))["installed"],
             true
         );
     }
@@ -2426,4 +2484,881 @@ fn capture_answers_the_probe_of_a_resumed_earlier_run() {
     let after = reserve(&[]);
     assert_eq!(after["state"], "complete", "{after}");
     assert_eq!(home.tally()["probe-answered"], 1);
+}
+
+const INVALID: &str = "#type=synthetic | join(query={#type=other | head(1)}, key=user_id)";
+const REJECT_HEADING: &str = "CQLmatic check expects the search platform to reject this query, but did not block the search. Wait for the tool result. If the search failed, fix the errors below.";
+const NOTE_HEADING: &str = "CQLmatic check found the issues below and did not block this search. Wait for the tool result.";
+
+/// A search as Claude Code or Codex reports it before the call, to the search tool directly or
+/// through the hosted server's gateway tool.
+fn pre_search(client: &str, gateway: bool, repository: &str, query: &str) -> Value {
+    let server = if client == "codex" {
+        SERVER.replace('-', "_")
+    } else {
+        SERVER.into()
+    };
+    let arguments = json!({
+        "repository": repository, "query_string": query, "start": hours_ago(2), "end": hours_ago(1),
+    });
+    let (tool, input) = if gateway {
+        (
+            "execute_tool",
+            json!({"name": "falcon_search_ngsiem", "arguments": arguments}),
+        )
+    } else {
+        ("falcon_search_ngsiem", arguments)
+    };
+    let mut payload = json!({
+        "session_id": "00000000-0000-0000-0000-000000000000", "transcript_path": null,
+        "cwd": "/", "permission_mode": "default", "hook_event_name": "PreToolUse",
+        "tool_name": format!("mcp__{server}__{tool}"), "tool_input": input,
+        "tool_use_id": "synthetic-call",
+    });
+    if client == "codex" {
+        payload["turn_id"] = json!("synthetic-turn");
+        payload["model"] = json!("synthetic-model");
+    } else {
+        payload["mcp_server"] = json!({"name": SERVER, "source": "dynamic"});
+    }
+    payload
+}
+
+impl Temp {
+    /// Runs the hook command on one payload and returns its answer, or `None` when it printed
+    /// nothing. Whatever happens, it exits 0 and writes nothing to stderr.
+    fn guard(&self, client: &str, payload: &[u8]) -> Option<Value> {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
+        let mut child = isolated(&mut command, &self.0)
+            .args([
+                "env", "capture", "--client", client, "--server", SERVER, "--state",
+            ])
+            .arg(self.state())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // The hook may stop reading a payload it will not use.
+        let _ = child.stdin.take().unwrap().write_all(payload);
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert!(output.stdout.is_ascii(), "{output:?}");
+        (!output.stdout.is_empty()).then(|| serde_json::from_slice(&output.stdout).unwrap())
+    }
+    fn ask(&self, client: &str, gateway: bool, repository: &str, query: &str) -> Option<Value> {
+        let payload = pre_search(client, gateway, repository, query);
+        self.guard(client, payload.to_string().as_bytes())
+    }
+}
+
+/// The context a note adds, after checking that it makes no permission decision.
+fn note(answer: Option<Value>) -> String {
+    let answer = answer.expect("a note");
+    let output = answer["hookSpecificOutput"].as_object().unwrap();
+    assert_eq!(
+        output.keys().collect::<Vec<_>>(),
+        ["additionalContext", "hookEventName"],
+        "{answer}"
+    );
+    assert_eq!(output["hookEventName"], "PreToolUse");
+    output["additionalContext"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn guard_answers_each_client_and_call_shape_before_the_search() {
+    let dir = Temp::new();
+    for client in ["claude-code", "codex"] {
+        for gateway in [false, true] {
+            assert_eq!(
+                note(dir.ask(client, gateway, "third-party", INVALID)),
+                format!(
+                    "{REJECT_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'.\n- CQL_JOIN_COST at line 1, column 19: join scans both sides and caps subquery rows and matches. Verify the requested cardinality and completion."
+                )
+            );
+            assert_eq!(
+                note(dir.ask(
+                    client,
+                    gateway,
+                    "third-party",
+                    "#type=synthetic | groupBy([alpha_field])"
+                )),
+                format!(
+                    "{NOTE_HEADING}\n- CQL_GROUPBY_LIMIT at line 1, column 19: groupBy can discard groups before a later sort or row cap. Consider limit=max and verify execution completeness."
+                )
+            );
+            assert_eq!(
+                dir.ask(client, gateway, "third-party", "#type=synthetic | head(5)"),
+                None
+            );
+        }
+    }
+    assert!(!dir.0.join("workflow").exists());
+}
+
+#[test]
+fn guard_never_blocks_and_lists_errors_first() {
+    let dir = Temp::new();
+    // Check expects the platform to reject these queries; each still runs, with check's errors.
+    for (code, query) in [
+        ("CQL_ARGUMENT_RANGE", "#type=synthetic | head(limit=0)"),
+        ("CQL_ARGUMENT_REQUIRED", INVALID),
+        ("CQL_ARGUMENT_TYPE", "#type=synthetic | head(limit=abc)"),
+        ("CQL_ARGUMENT_UNKNOWN", "#type=synthetic | head(bogus=1)"),
+        ("CQL_ASSIGN_ALIAS", "#type=synthetic | x := count(as=y)"),
+        (
+            "CQL_DUPLICATE_ARGUMENT",
+            "#type=synthetic | head(limit=1, limit=2)",
+        ),
+        (
+            "CQL_FUNCTION_FILTER_COMPOSITION",
+            "#type=synthetic | user=a or regex(\"a\")",
+        ),
+        ("CQL_QUOTE", "#type=synthetic | user=\u{2018}abc\u{2019}"),
+        ("CQL_RESERVED_WORD", "#type=synthetic | AND"),
+        ("CQL_SYNTAX", "#type=synthetic | head(5"),
+    ] {
+        for client in ["claude-code", "codex"] {
+            let context = note(dir.ask(client, true, "third-party", query));
+            assert!(
+                context.starts_with(&format!("{REJECT_HEADING}\n- {code}")),
+                "{context}"
+            );
+        }
+    }
+    let context = note(dir.ask(
+        "claude-code",
+        false,
+        "third-party",
+        "#type=synthetic | x := \"v\" | series(x, memlimit=\"1kb\") | count()",
+    ));
+    let lines: Vec<_> = context.lines().collect();
+    assert_eq!(lines[0], REJECT_HEADING, "{context}");
+    assert!(lines[1].starts_with("- CQL_ARGUMENT_RANGE "), "{context}");
+    assert!(lines[2].starts_with("- CQL_TEMPORAL_STREAM "), "{context}");
+    let context = note(dir.ask(
+        "codex",
+        true,
+        "third-party",
+        "#type=synthetic | count() = 5",
+    ));
+    assert!(
+        context.starts_with(&format!("{NOTE_HEADING}\n- CQL_UNSUPPORTED_SYNTAX ")),
+        "{context}"
+    );
+    // Queries the platform runs pass silently or with a note.
+    for (query, code) in [
+        ("#type=synthetic | xml:prettyPrint()", None),
+        ("#type=synthetic | time:dayOfWeek()", None),
+        (
+            "#type=synthetic | default(field=[\"#event.dataset\", alpha_field, beta_field], value=\"<missing>\") | groupBy([alpha_field, beta_field])",
+            Some("CQL_GROUPBY_LIMIT"),
+        ),
+    ] {
+        let answer = dir.ask("claude-code", false, "third-party", query);
+        match code {
+            None => assert_eq!(answer, None, "{query}"),
+            Some(code) => {
+                let context = note(answer);
+                assert!(
+                    context.starts_with(&format!("{NOTE_HEADING}\n- {code} ")),
+                    "{context}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn guard_lets_what_it_cannot_judge_pass_silently() {
+    let dir = Temp::new();
+    let edited = |change: fn(&mut Value)| {
+        let mut payload = pre_search("claude-code", true, "third-party", INVALID);
+        change(&mut payload);
+        payload.to_string().into_bytes()
+    };
+    let mut oversized = pre_search("claude-code", true, "third-party", INVALID);
+    oversized["padding"] = json!("x".repeat(17 * 1024 * 1024));
+    for payload in [
+        b"invalid JSON".to_vec(),
+        Vec::new(),
+        oversized.to_string().into_bytes(),
+        // Another server, another tool, and a gateway call to another tool.
+        edited(|p| p["tool_name"] = json!("mcp__other-server__execute_tool")),
+        edited(|p| p["tool_name"] = json!(format!("mcp__{SERVER}__list_repositories"))),
+        edited(|p| p["tool_input"]["name"] = json!("list_repositories")),
+        // A search without a query, or with a query that is not text.
+        edited(|p| {
+            p["tool_input"]["arguments"]
+                .as_object_mut()
+                .unwrap()
+                .remove("query_string");
+        }),
+        edited(|p| p["tool_input"]["arguments"]["query_string"] = json!(5)),
+    ] {
+        assert_eq!(dir.guard("claude-code", &payload), None);
+    }
+    let payload = pre_search("claude-code", true, "third-party", INVALID).to_string();
+    assert_eq!(dir.guard("qwen-code", payload.as_bytes()), None);
+}
+
+/// Gives the confirmed target a map with one source, `#type=synthetic`, that lists `user`.
+fn map_at(state: &Path) {
+    let environment: EnvironmentId = serde_json::from_value(environment()).unwrap();
+    let source_id = cqlmatic::discovery::source_id(&Scope {
+        type_: Some("synthetic".into()),
+        ..Scope::default()
+    });
+    let pack = Pack::new(
+        environment,
+        "2026-01-01T00:00:00Z".into(),
+        PackData {
+            sources: vec![
+                json!({"id": source_id, "kind": "source", "name": "synthetic",
+                "inventory_status": "observed-only", "selectors": {"type": "synthetic"},
+                "evidence": {"observed": true}, "provenance_ids": ["prov:synthetic"]}),
+            ],
+            fields: vec![
+                json!({"id": "env:field:synthetic:user", "source_id": source_id,
+                "path": "user", "data_type": "string", "is_tag": false,
+                "evidence_kind": "observed", "coverage": {"observed": true},
+                "provenance_ids": ["prov:synthetic"]}),
+            ],
+            provenance: vec![json!({"id": "prov:synthetic", "source_type": "ngsiem-api",
+                "canonical_source": "Synthetic measurement",
+                "retrieved_at": "2026-01-01T00:00:00Z", "redaction_status": "none",
+                "coverage_status": "complete"})],
+            ..PackData::default()
+        },
+    )
+    .unwrap();
+    let path = state.with_file_name("pack.json");
+    Writer::acquire(&path).unwrap().commit(&pack).unwrap();
+    let mut inventory: InventoryState = serde_json::from_slice(&fs::read(state).unwrap()).unwrap();
+    let active = PackReference {
+        path: path.to_string_lossy().into_owned(),
+        content_digest: pack.content_digest.clone(),
+        imported_at: "2026-01-02T00:00:00Z".into(),
+        discovery_run: None,
+    };
+    inventory.packs.push(active.clone());
+    inventory.active_pack = Some(active);
+    inventory.validate().unwrap();
+    Writer::acquire(state)
+        .unwrap()
+        .commit_bytes(&serde_json::to_vec(&inventory).unwrap(), MAX_STATE_BYTES)
+        .unwrap();
+}
+
+/// Every path under a folder with its bytes, so a test can tell that nothing was written.
+fn snapshot(directory: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut found = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path.clone());
+                found.push((path, Vec::new()));
+            } else {
+                found.push((path.clone(), fs::read(path).unwrap()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+#[test]
+fn guard_uses_the_map_only_for_its_own_view_and_writes_nothing() {
+    let dir = Temp::new();
+    dir.confirm();
+    map_at(&dir.state());
+    let before = snapshot(&dir.0);
+    let unmapped = "#type=unmapped_type | count()";
+    let context = note(dir.ask("claude-code", false, "third-party", unmapped));
+    assert!(context.contains("- CQL_UNMAPPED_SOURCE: "), "{context}");
+    // The map belongs to the view third-party; a search of another view, or of search-all when
+    // the call names no repository, is checked without it.
+    assert_eq!(dir.ask("codex", false, "other-view", unmapped), None);
+    let mut unnamed = pre_search("codex", false, "", unmapped);
+    unnamed["tool_input"]
+        .as_object_mut()
+        .unwrap()
+        .remove("repository");
+    assert_eq!(dir.guard("codex", unnamed.to_string().as_bytes()), None);
+    assert!(note(dir.ask("claude-code", false, "third-party", INVALID)).contains("'field'"));
+    assert_eq!(snapshot(&dir.0), before);
+
+    // An inventory the guard cannot read leaves the check of the language.
+    fs::write(dir.state(), b"{").unwrap();
+    assert!(note(dir.ask("claude-code", false, "third-party", INVALID)).contains("'field'"));
+    assert_eq!(dir.ask("claude-code", false, "third-party", unmapped), None);
+}
+
+#[test]
+fn guard_answers_in_ascii_within_the_client_limits() {
+    let dir = Temp::new();
+    // The note quotes a curly quote, which goes out escaped.
+    let context = note(dir.ask(
+        "claude-code",
+        false,
+        "third-party",
+        "#type=synthetic | user=\u{2018}abc\u{2019}",
+    ));
+    assert!(
+        context.contains("'\u{2018}' is not a string delimiter"),
+        "{context}"
+    );
+
+    // Past 200 lines or 8,000 characters the guard says how many lines it left out. Warnings
+    // are left out first, so the error at the end of the query is still shown.
+    let steps = (0..100)
+        .map(|n| format!("groupBy([alpha_{n}])"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let context = note(dir.ask(
+        "codex",
+        false,
+        "third-party",
+        &format!("#type=synthetic | {steps} | head(limit=0)"),
+    ));
+    let lines: Vec<_> = context.lines().collect();
+    assert!(lines.len() <= 200, "{context}");
+    assert!(context.encode_utf16().count() <= 8_000, "{context}");
+    assert_eq!(lines[0], REJECT_HEADING);
+    assert!(lines[1].starts_with("- CQL_ARGUMENT_RANGE "), "{context}");
+    let shown = lines.len() - 2;
+    assert!(
+        lines[2..=shown].iter().all(|line| {
+            line.starts_with("- CQL_GROUPBY_LIMIT ") || line.starts_with("- CQL_DROPPED_FIELD ")
+        }),
+        "{context}"
+    );
+    let left_out = lines[shown + 1]
+        .strip_prefix("- and ")
+        .and_then(|rest| rest.strip_suffix(" more. Run cqlmatic check on the query to see all."))
+        .unwrap();
+    assert!(left_out.parse::<usize>().unwrap() > 0, "{context}");
+}
+
+fn settings_file(home: &Path, client: &str) -> PathBuf {
+    match client {
+        "claude-code" => home.join(".claude/settings.json"),
+        _ => home.join(".codex/hooks.json"),
+    }
+}
+
+#[test]
+fn guard_install_registers_both_events_with_one_fail_open_command() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let output = report(&mut install(&home.0, client));
+        assert_eq!(output["events"], json!(["PostToolUse", "PreToolUse"]));
+        let settings: Value =
+            serde_json::from_slice(&fs::read(settings_file(&home.0, client)).unwrap()).unwrap();
+        let command = output["command"].as_str().unwrap();
+        let [capture, guard] = ["PostToolUse", "PreToolUse"].map(|event| {
+            let entries = settings["hooks"][event].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{settings}");
+            entries[0].clone()
+        });
+        assert_eq!(capture["hooks"][0]["command"], command);
+        assert_eq!(guard["matcher"], capture["matcher"]);
+        // Before the call the client waits for the answer, up to the timeout, and a guard that
+        // fails lets the call run.
+        let mut handler = json!({"type": "command", "command": command, "timeout": 5});
+        if client == "claude-code" {
+            handler["onFailure"] = json!("continue");
+        }
+        if cfg!(windows) && client == "claude-code" {
+            handler["shell"] = json!("powershell");
+        }
+        assert_eq!(guard["hooks"], json!([handler]));
+        // The command passes only arguments that earlier releases accept, so an older copy at
+        // the same path runs capture and prints nothing.
+        let flags: Vec<_> = command
+            .split_whitespace()
+            .filter(|word| word.starts_with("--"))
+            .collect();
+        assert_eq!(flags, ["--client", "--server", "--state"], "{command}");
+    }
+}
+
+#[test]
+fn guard_install_switches_each_hook_and_keeps_every_other_byte() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let file = settings_file(&home.0, client);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let original = "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo before\"}]}\n    ],\n    \"PostToolUse\": [\n      {\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo after\"}]}\n    ]\n  },\n  \"theme\": \"synthetic\"\n}\n";
+        fs::write(&file, original).unwrap();
+        let run = |hooks: &str, dry_run: bool| {
+            let mut command = install(&home.0, client);
+            if !hooks.is_empty() {
+                command.args(["--hooks", hooks]);
+            }
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            report(&mut command)
+        };
+        let preview = run("", true);
+        assert_eq!(
+            preview["hooks"],
+            json!({"capture": "added", "guard": "added"})
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+
+        let both = run("", false);
+        assert_eq!(both["hooks"], preview["hooks"]);
+        assert_eq!(
+            (&both["installed"], &both["changed"]),
+            (&json!(true), &json!(true))
+        );
+        let installed = fs::read_to_string(&file).unwrap();
+        let mut expected: Value = serde_json::from_str(original).unwrap();
+        for event in ["PostToolUse", "PreToolUse"] {
+            expected["hooks"][event]
+                .as_array_mut()
+                .unwrap()
+                .push(both["entry"]["hooks"][event][0].clone());
+        }
+        assert_eq!(serde_json::from_str::<Value>(&installed).unwrap(), expected);
+        let repeat = run("capture,guard", false);
+        assert_eq!(
+            repeat["hooks"],
+            json!({"capture": "present", "guard": "present"})
+        );
+        assert_eq!(repeat["changed"], false);
+        assert_eq!(fs::read_to_string(&file).unwrap(), installed);
+
+        let capture = run("capture", false);
+        assert_eq!(
+            capture["hooks"],
+            json!({"capture": "present", "guard": "removed"})
+        );
+        assert_eq!(capture["events"], json!(["PostToolUse"]));
+        expected["hooks"]["PreToolUse"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        let switched = fs::read_to_string(&file).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&switched).unwrap(), expected);
+        let none = run("none", false);
+        assert_eq!(
+            none["hooks"],
+            json!({"capture": "removed", "guard": "absent"})
+        );
+        assert_eq!(none["events"], json!([]));
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+        let again = run("none", false);
+        assert_eq!(
+            again["hooks"],
+            json!({"capture": "absent", "guard": "absent"})
+        );
+        assert_eq!(
+            (&again["installed"], &again["changed"]),
+            (&json!(true), &json!(false))
+        );
+        let guard = run("guard", false);
+        assert_eq!(
+            guard["hooks"],
+            json!({"capture": "absent", "guard": "added"})
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&file).unwrap()).unwrap()["hooks"]
+                ["PostToolUse"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+/// The capture entry 0.1.10 wrote for `launcher` and the state, on this platform.
+fn earlier_capture(client: &str, state: &Path) -> Value {
+    let state = state.to_str().unwrap();
+    let mut handler = json!({"type": "command", "async": true});
+    handler["command"] = json!(match (client, cfg!(windows)) {
+        ("codex", true) => format!(
+            "launcher env capture --client codex --server \"synthetic_server\" --state \"{state}\""
+        ),
+        ("codex", false) => format!(
+            "launcher env capture --client codex --server 'synthetic_server' --state '{state}'"
+        ),
+        _ => format!(
+            "launcher env capture --client claude-code --server '{SERVER}' --state '{state}'"
+        ),
+    });
+    if cfg!(windows) && client == "claude-code" {
+        handler["shell"] = json!("powershell");
+    }
+    let server = if client == "codex" {
+        SERVER.replace('-', "_")
+    } else {
+        SERVER.into()
+    };
+    json!({"matcher": format!("mcp__{server}__.*"), "hooks": [handler]})
+}
+
+#[test]
+fn guard_install_replaces_the_earlier_capture_entry_and_reports_entries_it_did_not_write() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let file = settings_file(&home.0, client);
+        let state = home.0.join("state.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let install = || {
+            let mut command = install(&home.0, client);
+            command
+                .args(["--program", "launcher", "--state"])
+                .arg(&state);
+            command
+        };
+        let earlier = earlier_capture(client, &state);
+        fs::write(
+            &file,
+            json!({"hooks": {"PostToolUse": [&earlier]}}).to_string(),
+        )
+        .unwrap();
+        let upgraded = report(&mut install());
+        assert_eq!(
+            upgraded["hooks"],
+            json!({"capture": "added", "guard": "added"})
+        );
+        let settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(settings, upgraded["entry"], "{client}");
+        assert!(
+            !upgraded["next_actions"]
+                .to_string()
+                .contains("different hook entry")
+        );
+
+        // An entry someone changed, and one an older copy elsewhere wrote, are reported with
+        // their commands and left in place.
+        let mut changed = upgraded["entry"]["hooks"]["PreToolUse"][0].clone();
+        changed["note"] = json!("kept by its owner");
+        let older = upgraded["command"]
+            .as_str()
+            .unwrap()
+            .replace("launcher", "/older/copy/cqlmatic");
+        let mut copy = changed.clone();
+        copy.as_object_mut().unwrap().remove("note");
+        copy["hooks"][0]["command"] = json!(older);
+        let written = json!({"hooks": {
+            "PostToolUse": upgraded["entry"]["hooks"]["PostToolUse"],
+            "PreToolUse": [&changed, &copy],
+        }})
+        .to_string();
+        fs::write(&file, &written).unwrap();
+        let mut command = install();
+        let kept = report(command.args(["--hooks", "capture"]));
+        assert_eq!(
+            kept["hooks"],
+            json!({"capture": "present", "guard": "manual"})
+        );
+        assert_eq!(kept["installed"], false);
+        assert_eq!(kept["changed"], false);
+        let actions = kept["next_actions"].to_string();
+        assert!(
+            actions.contains("hooks.PreToolUse holds a different hook entry"),
+            "{actions}"
+        );
+        assert!(actions.contains("/older/copy/cqlmatic"), "{actions}");
+        // Each names the settings file as the report spells it on this platform.
+        let path = kept["path"].as_str().unwrap();
+        let different: Vec<_> = kept["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|action| action.contains("different hook entry"))
+            .collect();
+        assert_eq!(different.len(), 2, "{actions}");
+        assert!(
+            different
+                .iter()
+                .all(|action| action.ends_with(&format!(" ({path})."))),
+            "{actions}"
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), written);
+    }
+}
+
+/// An installation that registers `program` for `server` and `state`.
+fn install_copy(home: &Path, client: &str, server: &str, program: &str, state: &Path) -> Command {
+    let mut command = install_for(home, client, server);
+    command.args(["--program", program, "--state"]).arg(state);
+    command
+}
+
+#[test]
+fn guard_install_finds_another_copy_by_its_complete_server_and_state() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let file = settings_file(&home.0, client);
+        // An apostrophe in the state path is written escaped in the command.
+        let state = home.0.join("O'Brien").join("state.json");
+        let first = report(&mut install_copy(
+            &home.0,
+            client,
+            SERVER,
+            "/first/copy/cqlmatic",
+            &state,
+        ));
+        assert_eq!(
+            first["hooks"],
+            json!({"capture": "added", "guard": "added"})
+        );
+        let written = fs::read_to_string(&file).unwrap();
+        let mut second = install_copy(&home.0, client, SERVER, "/second/copy/cqlmatic", &state);
+        let none = report(second.args(["--hooks", "none"]));
+        assert_eq!(
+            none["hooks"],
+            json!({"capture": "manual", "guard": "manual"}),
+            "{none}"
+        );
+        assert_eq!(none["installed"], false);
+        let actions = none["next_actions"].to_string();
+        assert_eq!(
+            actions.matches("holds a different hook entry").count(),
+            2,
+            "{actions}"
+        );
+        assert!(actions.contains("/first/copy/cqlmatic"), "{actions}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), written);
+
+        // A server whose name starts with another's is a different server.
+        let home = Temp::new();
+        report(&mut install_copy(
+            &home.0,
+            client,
+            "falcon-dev",
+            "/first/copy/cqlmatic",
+            &state,
+        ));
+        let written = fs::read_to_string(settings_file(&home.0, client)).unwrap();
+        let mut other = install_copy(&home.0, client, "falcon", "/second/copy/cqlmatic", &state);
+        let none = report(other.args(["--hooks", "none"]));
+        assert_eq!(
+            none["hooks"],
+            json!({"capture": "absent", "guard": "absent"}),
+            "{none}"
+        );
+        assert!(
+            !none["next_actions"]
+                .to_string()
+                .contains("different hook entry"),
+            "{none}"
+        );
+        assert_eq!(
+            fs::read_to_string(settings_file(&home.0, client)).unwrap(),
+            written
+        );
+    }
+}
+
+#[test]
+fn guard_install_keeps_one_of_several_identical_entries() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let file = settings_file(&home.0, client);
+        let installed = report(&mut install(&home.0, client));
+        let entry = &installed["entry"]["hooks"];
+        let doubled = json!({"hooks": {
+            "PostToolUse": [&entry["PostToolUse"][0], &entry["PostToolUse"][0]],
+            "PreToolUse": [&entry["PreToolUse"][0], &entry["PreToolUse"][0], &entry["PreToolUse"][0]],
+        }});
+        fs::write(&file, serde_json::to_vec_pretty(&doubled).unwrap()).unwrap();
+        let again = report(&mut install(&home.0, client));
+        assert_eq!(
+            again["hooks"],
+            json!({"capture": "present", "guard": "present"})
+        );
+        assert_eq!(again["changed"], true);
+        let settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(settings, installed["entry"], "{client}");
+    }
+}
+
+#[test]
+fn guard_install_refuses_hook_lists_a_client_cannot_take() {
+    let home = Temp::new();
+    for (client, hooks, message) in [
+        (
+            "copilot-cli",
+            "guard",
+            "Only claude-code and codex have the guard hook.",
+        ),
+        (
+            "codex",
+            "none,capture",
+            "--hooks none cannot be combined with another hook.",
+        ),
+        (
+            "cursor",
+            "none",
+            "This client's hook is added by hand, so --hooks must include capture.",
+        ),
+    ] {
+        let output = install(&home.0, client)
+            .args(["--hooks", hooks])
+            .output()
+            .unwrap();
+        let refused = install_error(&output);
+        assert_eq!(refused["code"], "CLI_INPUT");
+        assert_eq!(refused["message"], message);
+        assert!(output.stdout.is_empty());
+    }
+    assert_eq!(fs::read_dir(&home.0).unwrap().count(), 0);
+    report(&mut install(&home.0, "copilot-cli"));
+    let removed = report(install(&home.0, "copilot-cli").args(["--hooks", "none"]));
+    assert_eq!(removed["hooks"], json!({"capture": "removed"}));
+    let settings: Value = serde_json::from_slice(
+        &fs::read(home.0.join(".copilot/hooks/cqlmatic-capture.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings,
+        json!({"version": 1, "hooks": {"postToolUse": []}})
+    );
+}
+
+/// Runs a registered command the way `client` starts it, with `payload` on stdin.
+fn launch(client: &str, command: &str, payload: &[u8], home: &Path) -> Vec<Output> {
+    #[cfg(unix)]
+    let shells: Vec<_> = {
+        let _ = client;
+        // Claude Code runs a command with the user's shell, Codex with the login shell.
+        let mut forms = vec![("/bin/sh", "-c"), ("/bin/bash", "-c"), ("/bin/bash", "-lc")];
+        if Path::new("/bin/zsh").exists() {
+            forms.extend([("/bin/zsh", "-c"), ("/bin/zsh", "-lc")]);
+        }
+        forms
+            .into_iter()
+            .map(|(shell, flag)| {
+                let mut shell = Command::new(shell);
+                shell
+                    .args([flag, command])
+                    .env_remove("ZDOTDIR")
+                    .env_remove("BASH_ENV")
+                    .env_remove("ENV");
+                shell
+            })
+            .collect()
+    };
+    #[cfg(windows)]
+    let shells = vec![if client == "codex" {
+        use std::os::windows::process::CommandExt;
+        let mut shell = Command::new(std::env::var_os("COMSPEC").unwrap());
+        shell.arg("/C").raw_arg(format!("\"{command}\""));
+        shell
+    } else {
+        let mut shell = powershell();
+        shell
+            .arg("& ([ScriptBlock]::Create($env:CQLMATIC_TEST_HOOK))")
+            .env("CQLMATIC_TEST_HOOK", command);
+        shell
+    }];
+    shells
+        .into_iter()
+        .map(|mut shell| {
+            let mut child = isolated(&mut shell, home)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let _ = child.stdin.take().unwrap().write_all(payload);
+            child.wait_with_output().unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn installed_guard_runs_the_way_each_client_starts_it_and_fails_open() {
+    let dir = Temp::new();
+    // Startup files that make a shell exit as soon as a command fails.
+    fs::write(dir.0.join(".zshenv"), "setopt ERR_EXIT\n").unwrap();
+    fs::write(dir.0.join(".bash_profile"), "set -e\n").unwrap();
+    let directory = dir.0.join("guard folder's $data; (x)");
+    fs::create_dir(&directory).unwrap();
+    let state = directory.join("state.json");
+    let executable = runner_in(&directory);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&executable).unwrap().nlink(), 1);
+    }
+    for client in ["claude-code", "codex"] {
+        let mut installer = Command::new(&executable);
+        isolated(&mut installer, &dir.0)
+            .args(["env", "capture", "--client", client, "--server", SERVER])
+            .args(["--install", "--hooks", "guard", "--state"])
+            .arg(&state);
+        let installed = report(&mut installer);
+        let settings: Value =
+            serde_json::from_slice(&fs::read(settings_file(&dir.0, client)).unwrap()).unwrap();
+        let command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(installed["command"], command);
+        let ask = |command: &str, query: &str| {
+            let payload = pre_search(client, true, "third-party", query).to_string();
+            launch(client, command, payload.as_bytes(), &dir.0)
+        };
+        for output in ask(command, INVALID) {
+            assert!(
+                output.status.success() && output.stderr.is_empty(),
+                "{output:?}"
+            );
+            let answer: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(note(Some(answer)).contains("CQL_ARGUMENT_REQUIRED"));
+        }
+        for output in ask(command, "#type=synthetic | head(5)") {
+            assert!(
+                output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+                "{output:?}"
+            );
+        }
+        // A missing program, a program that rejects the arguments, a prefix the shell cannot
+        // parse, and a prefix that prints a line before its program fails to start all end
+        // with exit status 0 and no output, so the search runs.
+        let path = executable.to_str().unwrap();
+        let quoted = if cfg!(windows) && client == "codex" {
+            format!("\"{path}\"")
+        } else if cfg!(windows) {
+            format!("& '{}'", path.replace('\'', "''"))
+        } else {
+            format!("'{}'", path.replace('\'', r"'\''"))
+        };
+        let missing = quoted.replace("runner", "missing runner");
+        let mut programs = vec![
+            missing.clone(),
+            format!("{quoted} --no-such-option"),
+            format!("{quoted}'"),
+        ];
+        if cfg!(unix) {
+            programs.push(format!(
+                "/bin/sh -c 'echo \"> synthetic@1.0.0 guard\"; exec \"$0\" \"$@\"' {missing}"
+            ));
+        }
+        for program in programs {
+            let mut installer = Command::new(&executable);
+            isolated(&mut installer, &dir.0)
+                .args(["env", "capture", "--client", client, "--server", SERVER])
+                .args(["--install", "--dry-run", "--program", &program, "--state"])
+                .arg(&state);
+            let preview = report(&mut installer);
+            for output in ask(preview["command"].as_str().unwrap(), INVALID) {
+                assert!(
+                    output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+                    "{program}: {output:?}"
+                );
+            }
+        }
+    }
 }

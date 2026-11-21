@@ -1,22 +1,24 @@
-//! Records inventory evidence from a client's post-tool hook payload.
+//! Records inventory evidence from a client's post-tool hook payload, and checks a search
+//! before it runs when the payload is Claude Code's or Codex's pre-tool event.
 //!
 //! A hook's output and exit status can reach the model, so the recorder prints nothing and
 //! always exits 0. Each search it sees is counted by outcome in `tally.json`, in the
-//! `<state file>.captures` folder beside the state.
+//! `<state file>.captures` folder beside the state. The guard also exits 0; it answers with
+//! one line of JSON, or with nothing to let the search run unremarked.
 mod install;
 
 use crate::{inventory_cli, setup_cli};
 use clap::{Args, ValueEnum};
 use cqlmatic::{
     app,
-    contracts::{Diagnostic, EnvironmentId},
+    contracts::{Analysis, Diagnostic, EnvironmentId, Outcome, Severity},
     discovery,
     inventory::{InventoryAction, InventoryState, QueryObservation, QueryResultAssertion},
     mcp,
     setup::SEARCH_TOOL,
     storage,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -36,11 +38,7 @@ const UNREFERENCED_AFTER: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Args)]
 pub struct CaptureArgs {
-    #[arg(
-        long,
-        value_enum,
-        help = "Client whose post-tool hook payload arrives on stdin"
-    )]
+    #[arg(long, value_enum, help = "Client whose hook payload arrives on stdin")]
     client: Client,
     #[arg(
         long,
@@ -54,12 +52,12 @@ pub struct CaptureArgs {
         help = "Workflow state; defaults to local cqlmatic/inventory/state.json"
     )]
     state: Option<PathBuf>,
-    #[arg(long, help = "Install or print the hook for the selected client")]
+    #[arg(long, help = "Install or print the hooks for the selected client")]
     install: bool,
     #[arg(
         long,
         requires = "install",
-        help = "Report the hook without writing files"
+        help = "Report the hooks without writing files"
     )]
     dry_run: bool,
     #[arg(
@@ -69,6 +67,22 @@ pub struct CaptureArgs {
         help = "Use this command prefix verbatim instead of the running executable"
     )]
     program: Option<String>,
+    #[arg(
+        long,
+        requires = "install",
+        value_enum,
+        value_delimiter = ',',
+        value_name = "LIST",
+        help = "Hooks to keep installed, comma-separated: capture, guard, or none to remove both; claude-code and codex default to capture,guard, other clients to capture"
+    )]
+    hooks: Vec<HookName>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
+enum HookName {
+    Capture,
+    Guard,
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, ValueEnum)]
@@ -108,14 +122,110 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
         .read_to_end(&mut payload)
         .is_ok()
         && payload.len() as u64 <= MAX_PAYLOAD_BYTES
+        && let Ok(hook) = serde_json::from_slice::<Value>(&payload)
     {
-        let _ = capture(&args, &payload);
+        if hook["hook_event_name"] == GUARD_EVENT && guards(args.client) {
+            if let Some(answer) = guard(&args, &hook) {
+                let _ = crate::line(&answer);
+            }
+        } else {
+            let _ = capture(&args, &hook);
+        }
     }
     Ok(0)
 }
 
-fn capture(args: &CaptureArgs, payload: &[u8]) -> Result<(), Diagnostic> {
-    match call(payload, &args.server, args.client) {
+const GUARD_EVENT: &str = "PreToolUse";
+
+/// Clients whose hook runs before a search and can add a note the agent reads.
+fn guards(client: Client) -> bool {
+    matches!(client, Client::ClaudeCode | Client::Codex)
+}
+
+fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
+    let call = call(hook, &args.server, args.client)?;
+    let arguments = search_arguments(&call)?;
+    let query = arguments["query_string"].as_str()?.to_owned();
+    let repository = arguments["repository"]
+        .as_str()
+        .unwrap_or(DEFAULT_REPOSITORY);
+    let state = inventory_cli::state_path(args.state.clone()).ok();
+    note(&crate::guard_check(query, state.as_deref(), repository)).map(answer)
+}
+
+fn note(analysis: &Analysis) -> Option<String> {
+    if analysis.outcome == Outcome::Error {
+        return None;
+    }
+    let lines: Vec<_> = [Severity::Error, Severity::Warning]
+        .iter()
+        .flat_map(|severity| {
+            analysis
+                .diagnostics
+                .iter()
+                .filter(move |d| d.severity == *severity)
+        })
+        .map(|d| {
+            let message = d.message.replace(['\r', '\n'], " ");
+            match &d.span {
+                Some(span) => format!(
+                    "- {} at line {}, column {}: {message}",
+                    d.code, span.line, span.column
+                ),
+                None => format!("- {}: {message}", d.code),
+            }
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let heading = if analysis.outcome == Outcome::Invalid {
+        "CQLmatic check expects the search platform to reject this query, but did not block the search. Wait for the tool result. If the search failed, fix the errors below."
+    } else {
+        "CQLmatic check found the issues below and did not block this search. Wait for the tool result."
+    };
+    Some(fit(heading, lines, (200, 8_000)))
+}
+
+fn answer(context: String) -> String {
+    let output = json!({"hookEventName": GUARD_EVENT, "additionalContext": context});
+    let mut text = String::new();
+    for c in json!({ "hookSpecificOutput": output }).to_string().chars() {
+        if c.is_ascii() {
+            text.push(c);
+        } else {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                text.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    text
+}
+
+fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize, usize)) -> String {
+    let total = lines.len();
+    let mut kept = lines;
+    loop {
+        let mut text = vec![heading.to_owned()];
+        text.extend(kept.iter().cloned());
+        if kept.len() < total {
+            text.push(format!(
+                "- and {} more. Run cqlmatic check on the query to see all.",
+                total - kept.len()
+            ));
+        }
+        let joined = text.join("\n");
+        if kept.is_empty()
+            || text.len() <= most_lines && joined.encode_utf16().count() <= most_characters
+        {
+            return joined;
+        }
+        kept.pop();
+    }
+}
+
+fn capture(args: &CaptureArgs, hook: &Value) -> Result<(), Diagnostic> {
+    match call(hook, &args.server, args.client) {
         Some(call) => record(args.state.clone(), call),
         None => Ok(()),
     }
@@ -526,10 +636,9 @@ fn codex_server(client: Client, server: &str) -> String {
     }
 }
 
-fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
+fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
     let server = codex_server(client, server);
     let server = server.as_str();
-    let hook: Value = serde_json::from_slice(payload).ok()?;
     let text = |name: &str| hook[name].as_str();
     // Some clients hand over arguments or results as JSON text.
     let parsed = |value: &Value| match value {
@@ -644,13 +753,19 @@ fn call(payload: &[u8], server: &str, client: Client) -> Option<Call> {
     })
 }
 
-fn search(call: Call) -> Option<Search> {
-    let arguments = match call.tool.as_str() {
-        SEARCH_TOOL => &call.arguments,
+fn search_arguments(call: &Call) -> Option<&Value> {
+    match call.tool.as_str() {
+        SEARCH_TOOL => Some(&call.arguments),
         // The hosted server runs its tools through one gateway tool.
-        "execute_tool" if call.arguments["name"] == SEARCH_TOOL => &call.arguments["arguments"],
-        _ => return None,
-    };
+        "execute_tool" if call.arguments["name"] == SEARCH_TOOL => {
+            Some(&call.arguments["arguments"])
+        }
+        _ => None,
+    }
+}
+
+fn search(call: Call) -> Option<Search> {
+    let arguments = search_arguments(&call)?;
     let text = |name: &str| arguments[name].as_str().map(str::to_owned);
     Some(Search {
         repository: text("repository").unwrap_or_else(|| DEFAULT_REPOSITORY.into()),
