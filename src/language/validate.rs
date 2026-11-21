@@ -42,6 +42,9 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         time_interval_seen: false,
     };
     checker.pipeline(pipeline, QueryContext::Plain, &mut BTreeSet::new());
+    if leading_fixed_time(pipeline) {
+        checker.info("CQL_ABSOLUTE_TIME_FILTER", "A top-level filter compares @timestamp with a fixed time, which ties the query to one window. Set the time window with the search request's start and end instead.", None);
+    }
     if checker.definitions > 0 && checker.joins {
         checker.emit(
             "CQL_TABLE_JOIN_CONFLICT",
@@ -3777,6 +3780,65 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
         }
     }
     None
+}
+
+fn leading_fixed_time(pipeline: &Pipeline) -> bool {
+    fn bounds(filter: &Filter) -> bool {
+        match filter {
+            Filter::Compare {
+                field,
+                op,
+                value: Pattern::Text(text),
+            } => {
+                field == "@timestamp"
+                    && matches!(op.as_str(), "<" | "<=" | ">" | ">=")
+                    && text.parse::<serde_json::Number>().is_ok()
+            }
+            Filter::And(filters) => filters.iter().any(bounds),
+            _ => false,
+        }
+    }
+    fn reads_search_window(value: &Value) -> bool {
+        match value {
+            Value::Query { .. } => true,
+            Value::Call(call) => call_reads_search_window(call),
+            Value::Array(values) => values.iter().any(reads_search_window),
+            Value::Binary { left, right, .. } => {
+                reads_search_window(left) || reads_search_window(right)
+            }
+            Value::Unary { value, .. } => reads_search_window(value),
+            _ => false,
+        }
+    }
+    fn call_reads_search_window(call: &Call) -> bool {
+        ["setTimeInterval", "bucket", "timeChart", "start", "end"]
+            .iter()
+            .any(|name| call.name.eq_ignore_ascii_case(name))
+            || call.args.iter().any(|arg| reads_search_window(&arg.value))
+    }
+    fn uses_window(pipeline: &Pipeline) -> bool {
+        pipeline.steps.iter().any(|step| match step {
+            Step::Filter(filter) => {
+                let mut calls = Vec::new();
+                filter_calls(filter, &mut calls);
+                calls.into_iter().any(call_reads_search_window)
+            }
+            Step::Call(call) => call_reads_search_window(call),
+            Step::Assign { value, .. } => reads_search_window(value),
+            Step::Case(branches) => branches.iter().any(uses_window),
+            Step::Match { arms, .. } => arms.iter().any(|(_, branch)| uses_window(branch)),
+            Step::Link { .. } => false,
+        })
+    }
+    !uses_window(pipeline)
+        && pipeline
+            .steps
+            .iter()
+            .map_while(|step| match step {
+                Step::Filter(filter) if !filter.has_call() => Some(filter),
+                _ => None,
+            })
+            .any(bounds)
 }
 
 fn filter_calls<'a>(filter: &'a Filter, calls: &mut Vec<&'a Call>) {
