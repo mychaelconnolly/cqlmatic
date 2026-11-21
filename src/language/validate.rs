@@ -641,9 +641,11 @@ impl Checker<'_> {
                             if let Some(writes) = catalog::output_writes(&call) {
                                 fields.extend(writes.fields);
                             }
-                            for (old, new) in catalog::rename_bindings(&args) {
-                                fields.remove(old);
-                                fields.insert(new.into());
+                            if call.name.eq_ignore_ascii_case("rename") {
+                                for (old, new) in catalog::rename_bindings(&args) {
+                                    fields.remove(old);
+                                    fields.insert(new.into());
+                                }
                             }
                         }
                     } else if let Some(call) = catalog::assigned_aggregate(value) {
@@ -1810,9 +1812,6 @@ impl Checker<'_> {
                 self.emit("CQL_ARGUMENT_RANGE", "series memlimit must be between 1 byte and 1KiB using a qualified B/KB/KiB spelling.", Some(c), false);
             }
         }
-        if spec.name == "formatTime" && !scalar && !args.contains_key("as") {
-            self.emit("CQL_ARGUMENT_REQUIRED", "Standalone formatTime requires as; an assignment supplies its scalar output context.", Some(c), false);
-        }
         if matches!(spec.name, "math:mod" | "math:pow") {
             let name = if spec.name == "math:mod" {
                 "divisor"
@@ -1980,7 +1979,8 @@ impl Checker<'_> {
                 let complex = matches!(
                     value,
                     Value::Call(_) | Value::Binary { .. } | Value::Unary { .. }
-                );
+                ) && !(kind == "f"
+                    && matches!(value, Value::Call(call) if call.name.eq_ignore_ascii_case("formatTime")));
                 let emit = if complex {
                     Self::unsupported
                 } else {

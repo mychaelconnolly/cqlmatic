@@ -206,6 +206,9 @@ impl Parser<'_> {
         if self.rest().starts_with('"') {
             return self.string();
         }
+        self.unquoted_identifier()
+    }
+    fn unquoted_identifier(&mut self) -> Result<String> {
         let start = self.pos;
         while let Some(c) = self.rest().chars().next() {
             if c.is_alphanumeric() || "_@#.".contains(c) {
@@ -239,6 +242,16 @@ impl Parser<'_> {
         } else {
             Ok(self.input[start..self.pos].into())
         }
+    }
+    fn check_assignment_target(&mut self, start: usize, field: &str) -> Result<()> {
+        if !self.input[start..].starts_with('"') && reserved_field_prefix(field) {
+            self.pos = start;
+            return self.fail(
+                "Quote assignment field names whose initial segment is NOT, AND or OR.",
+                true,
+            );
+        }
+        Ok(())
     }
     fn pipeline(&mut self) -> Result<Pipeline> {
         self.nested(|p| {
@@ -294,13 +307,7 @@ impl Parser<'_> {
         self.pos = start;
         if let Ok(name) = self.identifier() {
             if self.eat(":=") {
-                if !self.input[start..].starts_with('"') && reserved_field_prefix(&name) {
-                    self.pos = start;
-                    return self.fail(
-                        "Quote assignment field names whose initial segment is NOT, AND or OR.",
-                        true,
-                    );
-                }
+                self.check_assignment_target(start, &name)?;
                 return Ok(Step::Assign {
                     field: name,
                     value: self.expression(0)?,
@@ -682,7 +689,9 @@ impl Parser<'_> {
         self.nested(|p| {
             p.expect("(")?;
             let mut args = Vec::new();
+            let mut positional = 0;
             if !p.eat(")") {
+                let spec = crate::catalog::function(&name);
                 loop {
                     let before = p.pos;
                     let mut argname = None;
@@ -699,6 +708,12 @@ impl Parser<'_> {
                     } else {
                         p.pos = before;
                     }
+                    let aggregate_argument = spec.is_some_and(|spec| {
+                        argname
+                            .as_deref()
+                            .or_else(|| spec.positional.get(positional).copied())
+                            .is_some_and(|arg| spec.argument_kind(arg) == Some("g"))
+                    });
                     let value = if name.eq_ignore_ascii_case("defineTable")
                         && argname.as_deref() == Some("include")
                         && p.eat("*")
@@ -713,8 +728,9 @@ impl Parser<'_> {
                             p.expression(0)?
                         }
                     } else {
-                        p.expression(0)?
+                        p.expression_with_aggregate_aliases(0, aggregate_argument)?
                     };
+                    positional += usize::from(argname.is_none());
                     args.push(Arg {
                         name: argname,
                         value,
@@ -842,7 +858,42 @@ impl Parser<'_> {
         }
         Ok(attributes)
     }
+    fn aggregate_list_item(&mut self) -> Result<Value> {
+        self.space();
+        let start = self.pos;
+        if let Ok(alias) = self.identifier()
+            && self.eat(":=")
+        {
+            self.check_assignment_target(start, &alias)?;
+            self.saved_call()?;
+            let name = self.unquoted_identifier();
+            self.space();
+            if let Ok(name) = name
+                && self.rest().starts_with('(')
+            {
+                let mut call = self.call(name, start)?;
+                call.args.push(Arg {
+                    name: Some("as".into()),
+                    value: Value::String(alias),
+                });
+                return Ok(Value::Call(call));
+            }
+            return self.fail(
+                "Expected a function call after ':=' in the aggregate list.",
+                false,
+            );
+        }
+        self.pos = start;
+        self.expression(0)
+    }
     fn expression(&mut self, min: u8) -> Result<Value> {
+        self.expression_with_aggregate_aliases(min, false)
+    }
+    fn expression_with_aggregate_aliases(
+        &mut self,
+        min: u8,
+        aggregate_argument: bool,
+    ) -> Result<Value> {
         self.nested(|p| {
             p.saved_call()?;
             if p.pos == p.input.len() || p.rest().starts_with([',', ')', ']', '}', ';', '|']) {
@@ -871,7 +922,11 @@ impl Parser<'_> {
                 let mut xs = Vec::new();
                 if !p.eat("]") {
                     loop {
-                        xs.push(p.expression(0)?);
+                        xs.push(if aggregate_argument {
+                            p.aggregate_list_item()?
+                        } else {
+                            p.expression(0)?
+                        });
                         if p.eat("]") {
                             break;
                         }
@@ -904,8 +959,10 @@ impl Parser<'_> {
             } else {
                 p.space();
                 let before = p.pos;
-                let word = p.identifier()?;
-                if p.eat(":") {
+                let word = p.unquoted_identifier()?;
+                if aggregate_argument && p.eat(":=") {
+                    return p.fail("Use ':=' aliases inside an aggregate function list.", false);
+                } else if p.eat(":") {
                     p.expect("{")?;
                     let q = p.pipeline()?;
                     p.expect("}")?;
