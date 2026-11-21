@@ -885,6 +885,9 @@ impl Checker<'_> {
                                     true,
                                 );
                             }
+                            if let Some(field) = joined_comparison(&args, &p.steps[index + 1..]) {
+                                self.emit("CQL_JOIN_MAX", format!("join keeps one matching subquery row per key unless max is set, so the later comparison of {field} may test only one of several matches."), Some(c), true);
+                            }
                             projected = None;
                         }
                         "parsejson" | "kvparse" => {
@@ -3653,6 +3656,127 @@ fn compared_fields<'a>(filter: &'a Filter, fields: &mut Vec<&'a str>) -> bool {
         Filter::Not(filter) => compared_fields(filter, fields),
         _ => false,
     }
+}
+
+fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<String> {
+    fn ordered(op: &str) -> bool {
+        matches!(op, "<" | "<=" | ">" | ">=")
+    }
+    fn joined_word<'a>(value: &'a Value, joined: &BTreeSet<String>) -> Option<&'a String> {
+        match value {
+            Value::Word(field) => joined.contains(field).then_some(field),
+            Value::Binary { left, right, .. } => {
+                joined_word(left, joined).or_else(|| joined_word(right, joined))
+            }
+            Value::Unary { value, .. } => joined_word(value, joined),
+            Value::Call(call) => call.args.iter().find_map(|a| joined_word(&a.value, joined)),
+            Value::Array(values) => values.iter().find_map(|v| joined_word(v, joined)),
+            _ => None,
+        }
+    }
+    fn compared<'a>(value: &'a Value, joined: &BTreeSet<String>) -> Option<&'a String> {
+        match value {
+            Value::Binary { op, .. } if ordered(op) => joined_word(value, joined),
+            Value::Binary { left, right, .. } => {
+                compared(left, joined).or_else(|| compared(right, joined))
+            }
+            Value::Unary { value, .. } => compared(value, joined),
+            _ => None,
+        }
+    }
+    fn tested<'a>(call: &'a Call, joined: &BTreeSet<String>) -> Option<&'a String> {
+        call.name
+            .eq_ignore_ascii_case("test")
+            .then(|| call.args.iter().find_map(|a| compared(&a.value, joined)))
+            .flatten()
+    }
+    fn filtered<'a>(filter: &'a Filter, joined: &BTreeSet<String>) -> Option<&'a String> {
+        match filter {
+            Filter::Compare { field, op, .. } => {
+                (ordered(op) && joined.contains(field)).then_some(field)
+            }
+            Filter::And(filters) | Filter::Or(filters) => {
+                filters.iter().find_map(|f| filtered(f, joined))
+            }
+            Filter::Not(filter) => filtered(filter, joined),
+            Filter::Call(call) => tested(call, joined),
+            _ => None,
+        }
+    }
+    fn assign(field: &str, value: &Value, joined: &mut BTreeSet<String>) {
+        if joined_word(value, joined).is_some() {
+            joined.insert(field.into());
+        } else {
+            joined.remove(field);
+        }
+    }
+    fn included(function: &Value) -> BTreeSet<String> {
+        match function {
+            Value::Call(call) => catalog::resolve(call)
+                .filter(|r| matches!(r.function.name, "selectFromMax" | "selectFromMin"))
+                .and_then(|r| r.arguments.get("include").map(|v| catalog::fields(v)))
+                .unwrap_or_default(),
+            Value::Array(functions) => functions.iter().flat_map(included).collect(),
+            _ => BTreeSet::new(),
+        }
+    }
+    let keys = catalog::fields(args.get("key").or(args.get("field"))?);
+    let one_row = match args.get("query") {
+        Some(Value::Query { pipeline, .. }) => {
+            let last = pipeline.steps.iter().rev().find(
+                |step| !matches!(step, Step::Call(call) if call.name.eq_ignore_ascii_case("select")),
+            );
+            bounded_single(pipeline, false)
+                || matches!(last, Some(Step::Call(call)) if catalog::resolve(call).is_some_and(|resolved| {
+                    let groups = resolved.arguments.get("field").map(|f| catalog::fields(f));
+                    resolved.function.name == "groupBy"
+                        && groups.as_ref().is_some_and(|groups| {
+                            let rest = &keys - groups;
+                            groups.is_subset(&keys)
+                                && match resolved.arguments.get("function") {
+                                    None => rest.is_empty(),
+                                    Some(f) => single_aggregate(f) && rest.is_subset(&included(f)),
+                                }
+                        })
+                }))
+        }
+        _ => false,
+    };
+    if args.contains_key("max") || one_row {
+        return None;
+    }
+    let mut joined = &catalog::fields(args.get("include")?) - &keys;
+    for step in steps {
+        let compared = match step {
+            Step::Filter(filter) => filtered(filter, &joined),
+            Step::Call(call) => tested(call, &joined),
+            _ => None,
+        };
+        if let Some(field) = compared {
+            return Some(field.clone());
+        }
+        match step {
+            Step::Filter(filter) => {
+                for pattern in positive_regexes(filter) {
+                    for capture in regex_captures(pattern) {
+                        joined.remove(&capture);
+                    }
+                }
+            }
+            Step::Call(call) if call.name.eq_ignore_ascii_case("test") => {}
+            Step::Assign { field, value } if !matches!(value, Value::Call(_)) => {
+                assign(field, value, &mut joined)
+            }
+            Step::Call(call) => {
+                let eval = catalog::resolve(call).filter(|r| r.function.name == "eval")?;
+                for (field, value) in &eval.ordered {
+                    assign(field, value, &mut joined);
+                }
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn filter_calls<'a>(filter: &'a Filter, calls: &mut Vec<&'a Call>) {

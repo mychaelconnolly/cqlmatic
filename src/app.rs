@@ -628,6 +628,7 @@ struct Requirement {
     relaxed_event: bool,
     unavailable: bool,
     removed: bool,
+    unexported_by: Option<Exporter>,
 }
 impl Requirement {
     fn is_direct_deployment_input(&self) -> bool {
@@ -644,6 +645,7 @@ struct GroundingScan<'a> {
     first_pipeline: bool,
     skip_next_kind_check: bool,
     in_selector: bool,
+    query: Option<String>,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Origin {
@@ -683,8 +685,40 @@ struct Flow {
     unverified_fields: BTreeSet<String>,
     unknown_enrichment: bool,
     unknown_prefixes: BTreeSet<String>,
+    export: Option<Export>,
+}
+#[derive(Clone)]
+enum Export {
+    Correlate {
+        labels: BTreeSet<String>,
+        outputs: BTreeSet<String>,
+        removed: BTreeSet<String>,
+    },
+    Query(String),
+}
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Exporter {
+    Query(String),
+    Correlate,
 }
 impl Flow {
+    fn unexported_by(&self, field: &str) -> Option<Exporter> {
+        match self.export.as_ref()? {
+            Export::Query(name) => Some(Exporter::Query(name.clone())),
+            Export::Correlate {
+                labels,
+                outputs,
+                removed,
+            } => {
+                let missing = removed.contains(field)
+                    || !outputs.contains(field) && !self.removed.contains(field);
+                missing.then(|| match field.split_once('.') {
+                    Some((label, _)) if labels.contains(label) => Exporter::Query(label.into()),
+                    _ => Exporter::Correlate,
+                })
+            }
+        }
+    }
     fn known_columns(&self) -> Option<&BTreeSet<String>> {
         (self.arrays.is_empty()
             && self.conditional_arrays.is_empty()
@@ -949,6 +983,7 @@ fn project(state: &mut Flow, fields: BTreeSet<String>) {
     state.conditional_arrays.clear();
     state.definite.retain(|field| fields.contains(field));
     state.available = Some(fields);
+    state.export = None;
     state.split_unknown.clear();
     state.unknown_enrichment = false;
     state.unknown_prefixes.clear();
@@ -1061,6 +1096,7 @@ fn requirements(
         first_pipeline: true,
         skip_next_kind_check: false,
         in_selector: false,
+        query: None,
     };
     scan_pipeline(
         p,
@@ -1132,10 +1168,12 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
             relaxed_event: state.relaxed_event,
             unavailable,
             removed: false,
+            unexported_by: unavailable.then(|| state.unexported_by(&mapped)).flatten(),
         });
         return;
     }
     let array = field.ends_with("[]");
+    let unavailable = state.absent(field);
     out.requirements.push(Requirement {
         target: state.field_target.clone(),
         array: false,
@@ -1151,7 +1189,8 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         uncertain_source: state.uncertain_source || state.unverified(field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
-        unavailable: state.absent(field),
+        unavailable,
+        unexported_by: unavailable.then(|| state.unexported_by(field)).flatten(),
         removed: state.removed_in(&state.removed, field)
             && state.removed_in(&state.unwritten_removals, field),
     });
@@ -1161,6 +1200,7 @@ fn element_written(fields: &BTreeSet<String>, array: &str) -> bool {
 }
 fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
     let field = local_field(state, array);
+    let unavailable = state.array_absent(&field);
     out.requirements.push(Requirement {
         target: state.field_target.clone(),
         array: true,
@@ -1171,8 +1211,9 @@ fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
         uncertain_source: state.uncertain_source || state.unverified(&field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
-        unavailable: state.array_absent(&field),
+        unavailable,
         removed: false,
+        unexported_by: unavailable.then(|| state.unexported_by(&field)).flatten(),
         field,
     });
 }
@@ -1191,6 +1232,7 @@ fn add_unknown(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         relaxed_event: state.relaxed_event,
         unavailable: false,
         removed: false,
+        unexported_by: None,
     });
 }
 fn expression_fields(v: &Value, state: &Flow, out: &mut GroundingScan<'_>) {
@@ -1257,6 +1299,7 @@ fn correlation_inputs(
         first_pipeline: false,
         skip_next_kind_check: true,
         in_selector: false,
+        query: None,
     };
     let mut start = 0;
     let semantic_steps: Vec<_> = pipeline.steps.iter().map(Step::semantic).collect();
@@ -1275,6 +1318,7 @@ fn correlation_inputs(
         );
         trace.requirements.clear();
         if step_aggregates(step) {
+            state.export = out.query.clone().map(Export::Query);
             correlation_input_fields(&state, args, out);
             return None;
         }
@@ -1358,24 +1402,30 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             {
                 // Correlation aggregation queries are scanned in pieces for field flow.
                 check_record_kinds(pipeline, state, out, true);
+                out.query = Some(name.clone());
+                let export = Some(Export::Query(name.clone()));
                 if *aggregation {
-                    if let Some(input) =
+                    if let Some(mut input) =
                         correlation_inputs(pipeline, state.clone(), &resolved.arguments, out)
                     {
+                        input.export = export.clone();
                         correlation_input_fields(&input, &resolved.arguments, out);
                     }
                 } else {
                     out.skip_next_kind_check = true;
-                    let input = scan_pipeline(pipeline, state.clone(), out);
+                    let mut input = scan_pipeline(pipeline, state.clone(), out);
+                    input.export = export;
                     correlation_input_fields(&input, &resolved.arguments, out);
                     contexts.insert(name.clone(), input);
                     continue;
                 }
                 out.skip_next_kind_check = true;
-                let local = scan_pipeline(pipeline, state.clone(), out);
+                let mut local = scan_pipeline(pipeline, state.clone(), out);
+                local.export = export;
                 contexts.insert(name.clone(), local);
             }
         }
+        out.query = None;
         for (value, aggregation) in &queries {
             let Value::Query {
                 label: Some(name),
@@ -1412,13 +1462,23 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             .collect();
         let (outputs, unknown_prefixes) =
             crate::catalog::correlation_outputs(&resolved.arguments, &queries, &columns);
+        let removed: BTreeSet<String> = contexts
+            .iter()
+            .flat_map(|(name, flow)| flow.removed.iter().map(move |f| format!("{name}.{f}")))
+            .collect();
         return Some(Flow {
             target: state.target.clone(),
             field_target: state.target.clone(),
             derived: outputs.clone(),
-            available: Some(outputs),
+            available: Some(outputs.clone()),
+            removed: removed.clone(),
             unknown_prefixes,
             tables: state.tables.clone(),
+            export: Some(Export::Correlate {
+                labels: contexts.into_keys().collect(),
+                outputs,
+                removed,
+            }),
             ..Flow::default()
         });
     }
@@ -2119,7 +2179,11 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                     .collect();
                 state = merge_branches(&state, results);
             }
-            Step::Link { field, .. } => add(&state, field, out),
+            Step::Link { field, .. } => {
+                let mut linked = state.clone();
+                linked.export = out.query.clone().map(Export::Query);
+                add(&linked, field, out);
+            }
             Step::Call(c) => {
                 let exported = scan_call(c, &state, out, false);
                 if let Some(resolved) = crate::catalog::resolve(c) {
@@ -2904,6 +2968,7 @@ fn ground(
     };
     let view = primary_target.as_deref();
     let mut dropped = BTreeSet::new();
+    let mut unexported = BTreeMap::<Exporter, BTreeSet<String>>::new();
     let mut unmapped_selections = BTreeSet::new();
     let mut unmapped_fields = BTreeMap::<String, BTreeSet<String>>::new();
     let mut measured_absent = BTreeMap::<(String, Option<String>), BTreeSet<String>>::new();
@@ -2930,6 +2995,9 @@ fn ground(
                     .push(format!("{key}: not exported by preceding query."));
             } else if r.removed {
                 dropped.insert(r.field.clone());
+            }
+            if lenient && let Some(source) = r.unexported_by {
+                unexported.entry(source).or_default().insert(r.field);
             }
             continue;
         }
@@ -3199,6 +3267,25 @@ fn ground(
             }
         }
     }
+    let mut warnings = unexported
+        .into_iter()
+        .map(|(source, fields)| {
+            let source = match source {
+                Exporter::Query(label) => format!("correlate query {label}"),
+                Exporter::Correlate => {
+                    "correlate, which names the fields of each query QUERY.FIELD".into()
+                }
+            };
+            Diagnostic::warning(
+                "CQL_UNEXPORTED_FIELD",
+                format!(
+                    "{} {} not exported by {source}.",
+                    fields.iter().cloned().collect::<Vec<_>>().join(", "),
+                    if fields.len() == 1 { "is" } else { "are" },
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
     let mut unmapped = Vec::new();
     for (repo, type_) in unmapped_selections {
         let lacking: Vec<_> = [(repo.as_deref(), true), (type_.as_deref(), false)]
@@ -3305,7 +3392,8 @@ fn ground(
     g.missing.dedup();
     g.stale.sort();
     g.stale.dedup();
-    (g, dropped, unmapped)
+    warnings.extend(unmapped);
+    (g, dropped, warnings)
 }
 
 fn listed(field: &environment::LegacyField) -> bool {
