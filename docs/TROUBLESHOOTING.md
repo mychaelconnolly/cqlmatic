@@ -39,7 +39,7 @@ Keep state, packs, parser definitions, raw results, receipts and credentials pro
 | `CQL_NULL_TEXT` | Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence. |
 | `CQL_EMPTY_STRING_NEGATION` | `field != ""` and `not field = ""` pass events missing `field`. Add `field=*` (or `field=/.+/`) to require the field to be present; `test(field != "")` is not reported. |
 | `CQL_OR_FREE_TEXT` | Bare text in an `or` expression beside a field comparison searches the whole event. Repeat the field name or use `in(field, values=[...])`. |
-| `CQL_REGEX_PATH_ESCAPE` | A single backslash in a Windows-path regex (such as `/C:\Windows\System32/`) is read as a regex escape. Write `\\` in a regex literal (or `\\\\` inside a quoted regex string). |
+| `CQL_REGEX_PATH_ESCAPE` | A single backslash in a Windows-path regex (such as `/[A-Z]:\Windows\System32/`) is read as a regex escape. Write `\\` in a regex literal (or `\\\\` inside a quoted regex string). |
 | `CQL_FILTER_PAREN_SPLIT` | An unquoted `(` ends a filter comparison value and parses the rest as a separate filter or free text. Quote the value in double quotes. |
 | `CQL_FREE_TEXT_AFTER_AGGREGATE` | Move [free-text filters](https://library.humio.com/crowdstrike-query-language/syntax-filters.html) and [wildcard calls without a field](https://library.humio.com/crowdstrike-query-language/functions-wildcard.html) before the first aggregate, or filter an explicit output field. The match-all term `*` remains valid after aggregation. |
 | `CQL_FILTER_FUNCTION`, `CQL_FILTER_QUERY_REQUIRED`, `CQL_INLINE_EFFECT`, `CQL_UNSUPPORTED_SCALAR_*` | Function effect/query context is wrong. Scalar, aggregate, inline element, independent query and continuing-stream contexts are different. |
