@@ -37,7 +37,7 @@ Keep state, packs, parser definitions, raw results, receipts and credentials pro
 | `CQL_OPERATOR_TEXT` | Bare `&&` is searched as text. Use `and` or a space between terms. |
 | `CQL_OR_PRECEDENCE` | Information: `or` binds tighter than explicit or implied `and`. Add parentheses to make intent explicit. See [operators](https://library.humio.com/crowdstrike-query-language/syntax-operators.html). |
 | `CQL_NULL_TEXT` | Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence. |
-| `CQL_EMPTY_STRING_NEGATION` | `field != ""` and `not field = ""` pass events missing `field`. Add `field=*` (or `field=/.+/`) to require the field to be present, or use `test(field != "")`. |
+| `CQL_EMPTY_STRING_NEGATION` | `field != ""` and `not field = ""` pass events missing `field`. Add `field=*` (or `field=/.+/`) to require the field to be present; `test(field != "")` is not reported. |
 | `CQL_OR_FREE_TEXT` | Bare text in an `or` expression beside a field comparison searches the whole event. Repeat the field name or use `in(field, values=[...])`. |
 | `CQL_REGEX_PATH_ESCAPE` | A single backslash in a Windows-path regex (such as `/C:\Windows\System32/`) is read as a regex escape. Write `\\` in a regex literal (or `\\\\` inside a quoted regex string). |
 | `CQL_FILTER_PAREN_SPLIT` | An unquoted `(` ends a filter comparison value and parses the rest as a separate filter or free text. Quote the value in double quotes. |

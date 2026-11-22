@@ -562,6 +562,12 @@ fn empty_string_negation_warns_without_presence_check() {
         "a = \"x\" or a != \"\"",
         "case { a != \"\" | c := 1; * }",
         "x := b | x != \"\"",
+        "wildcard(\"bad*\", field=[message, backup]) | message != \"\"",
+        "wildcard(\"*\", field=message, includeEverythingOnAsterisk=true) | message != \"\"",
+        "cidr(ip, subnet=\"10.0.0.0/8\", negate=true) | ip != \"\"",
+        "eval(z=a, a=1) | z != \"\"",
+        "user=* | appendAggregation(count()) | user != \"\"",
+        "status match { * => status != \"\" }",
     ] {
         let result = check(query);
         assert_eq!(
@@ -591,6 +597,11 @@ fn empty_string_negation_warns_without_presence_check() {
         "in(a, values=[\"x\", \"\"]) | a != \"\"",
         "not (a != \"\")",
         "groupBy([a], function=count()) | a != \"\"",
+        "eval(z=1, a=z) | a != \"\"",
+        "a=* | eval(a=missing) | a != \"\"",
+        "count(as=n) | n != \"\"",
+        "n := count() | n != \"\"",
+        "status match { ok => status != \"\"; * => false }",
     ] {
         let result = check(quiet);
         assert_eq!(
@@ -616,6 +627,7 @@ fn or_with_bare_text_warns_before_aggregate() {
         "a = 1 or 2",
         "\"2\" or a = \"1\"",
         "a = \"1\" or \"2\" or \"3\"",
+        "a = 1 or (\"2\" or \"3\")",
         "case { a = \"1\" or \"2\" | c := 1; * }",
     ] {
         let result = check(query);
@@ -675,6 +687,9 @@ fn regex_windows_path_single_backslash_warns() {
     for query in [
         r#"p=/C:\Windows\System32/"#,
         r#"p=/^C:\Windows\System32/i"#,
+        r#"p=/\bC:\Windows/"#,
+        r#"p=/[A-Z]:\Windows\System32/"#,
+        r#"p=/C:\scripts\run\.bat/"#,
         r#"p=/C:\\Windows\System32/"#,
         r#"p=/\\System32\net\.exe/"#,
         r#"p=/C:\temp\new\.exe/"#,
@@ -703,6 +718,7 @@ fn regex_windows_path_single_backslash_warns() {
         r#"p=/\bWindows\b/"#,
         r#"p=/\d+\.\d+/"#,
         r#"p=/http:\sfoo/"#,
+        r#"p=/^Q:\sWho$/"#,
         r#"p=/error:\s+timeout/"#,
         r#"p=/[A-Za-z]:\\Windows/"#,
     ] {
@@ -729,6 +745,7 @@ fn unquoted_open_paren_in_filter_value_warns() {
         "a=x(y)",
         r#"p=C:\Program(x86)\app.exe"#,
         "a=foo(bar) | count()",
+        "a=?{v=x}suffix(y)",
     ] {
         let result = check(query);
         assert_eq!(

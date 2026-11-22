@@ -376,6 +376,7 @@ fn correlate_sequence_by_equated_key_warns() {
         "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=[@timestamp, @timestamp.nanos], within=5m)",
         "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=ordinal, within=5m)",
         "correlate(first: { kind=a } include: [src], second: { kind=b | dst <=> first.src }, sequence=true, sequenceBy=src, within=5m)",
+        "correlate(first: { kind=a }, aggregation=[agg: { kind=b | count() }], globalConstraints=[user], sequence=true, sequenceBy=user, within=5m)",
     ] {
         assert!(
             messages(&ready(quiet), "CQL_CORRELATION_SEQUENCE_BY").is_empty(),
@@ -385,7 +386,7 @@ fn correlate_sequence_by_equated_key_warns() {
 }
 
 #[test]
-fn correlate_query_argument_syntax_matches_platform() {
+fn correlate_query_argument_forms() {
     for accepted in [
         "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
         "correlate(query=[first: { kind=a } include: [user], second: { kind=b | user <=> first.user }], sequence=true, within=5m)",
@@ -501,10 +502,23 @@ fn match_against_unaggregated_define_table_warns_before_ordered_comparison() {
         assert!(warns[0].contains(compared), "{query}: {}", warns[0]);
         assert!(warns[0].contains(cap_hint), "{query}: {}", warns[0]);
     }
+    for non_exact_grouped in [
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], ignoreCase=true) | last_ts > 0",
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], mode=glob) | last_ts > 0",
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], mode=cidr) | last_ts > 0",
+    ] {
+        let result = ready(non_exact_grouped);
+        assert_eq!(
+            messages(&result, "CQL_MATCH_NROWS").len(),
+            1,
+            "{non_exact_grouped}"
+        );
+    }
     for quiet in [
         "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts]) | test(last_ts >= @timestamp)",
         "defineTable(name=\"events_b\", query={kind=b | groupBy([k1, k2], function=[min(@timestamp, as=first_ts)], limit=max)}, include=[k1, k2, first_ts]) | kind=a | match(file=\"events_b\", field=[k1, k2], include=[first_ts], strict=false) | first_ts > 0",
-        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | head(1)}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[seen_at]) | seen_at > 0",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | head(1)}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[seen_at], ignoreCase=true) | seen_at > 0",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | head(2)}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=2) | seen_at > 0",
         "kind=a | match(file=\"users.csv\", field=user, column=user, include=[risk_score]) | risk_score >= 80",
         "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp}, include=[key, seen_at]) | kind=a | !match(table=\"events_b\", field=key, column=key) | seen_at > 0",
         "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[key, seen_at], nrows=max) | key > 10",

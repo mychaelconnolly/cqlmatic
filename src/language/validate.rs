@@ -425,7 +425,7 @@ impl Checker<'_> {
     }
     fn branches(
         &mut self,
-        branches: Vec<&Pipeline>,
+        branches: Vec<(&Pipeline, Option<&str>)>,
         context: QueryContext,
         tables: &BTreeSet<String>,
         incoming: PipelineState,
@@ -436,7 +436,7 @@ impl Checker<'_> {
             context
         };
         let mut outcomes = Vec::new();
-        for pipeline in branches {
+        for (pipeline, guaranteed_field) in branches {
             for original_step in &pipeline.steps {
                 let semantic_step = original_step.semantic();
                 let step = semantic_step.as_ref();
@@ -451,6 +451,9 @@ impl Checker<'_> {
                 }
             }
             let mut branch = incoming.clone();
+            if let Some(field) = guaranteed_field {
+                branch.present.insert(field.into());
+            }
             self.pipeline_state(pipeline, context, &mut tables.clone(), &mut branch);
             outcomes.push(branch);
         }
@@ -609,8 +612,11 @@ impl Checker<'_> {
                 Step::Filter(f) => {
                     let previous = std::mem::take(&mut self.fields);
                     self.filter(f, tables, false);
+                    if !after_aggregate {
+                        self.check_or_free_text(f);
+                    }
                     self.check_empty_negations(f, &present);
-                    present.extend(positive_present_fields(f));
+                    present.extend(fields_proven_present(f));
                     narrowed |= narrowing_filter(f);
                     if let Some(available) = &mut projected {
                         for pattern in positive_regexes(f) {
@@ -664,20 +670,16 @@ impl Checker<'_> {
                             }
                         }
                         if call.name.eq_ignore_ascii_case("rename") {
-                            for (old, new) in catalog::rename_bindings(&args) {
-                                if present.remove(old) {
-                                    present.insert(new.into());
-                                }
-                            }
-                        } else {
-                            present.remove(field);
+                            rename_present(&args, &mut present);
                         }
                     } else if let Some(call) = catalog::assigned_aggregate(value) {
                         self.function(call, tables, false, false, false);
                         self.projected_reads(previous, projected.as_ref(), Some(call));
                         projected = Some(BTreeSet::from([field.clone()]));
                         present.clear();
-                        present.insert(field.clone());
+                        if call.name.eq_ignore_ascii_case("count") {
+                            present.insert(field.clone());
+                        }
                         aggregated = true;
                         ordered = false;
                         has_input = true;
@@ -692,12 +694,8 @@ impl Checker<'_> {
                                 None
                             },
                         );
-                        if matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
-                            || matches!(value, Value::Word(src) if present.contains(src))
-                        {
+                        if present_after_assign(value, &present) {
                             present.insert(field.clone());
-                        } else {
-                            present.remove(field);
                         }
                     }
                     if catalog::aliased_call(field, value).is_none()
@@ -708,7 +706,7 @@ impl Checker<'_> {
                 }
                 Step::Case(branches) => {
                     let merged = self.branches(
-                        branches.iter().collect(),
+                        branches.iter().map(|p| (p, None)).collect(),
                         context,
                         tables,
                         PipelineState {
@@ -748,7 +746,14 @@ impl Checker<'_> {
                     }
                     self.projected_reads(previous, projected.as_ref(), None);
                     let merged = self.branches(
-                        arms.iter().map(|(_, p)| p).collect(),
+                        arms.iter()
+                            .map(|(pattern, p)| {
+                                (
+                                    p,
+                                    (!matches!(pattern, Pattern::Any)).then_some(field.as_str()),
+                                )
+                            })
+                            .collect(),
                         context,
                         tables,
                         PipelineState {
@@ -881,7 +886,7 @@ impl Checker<'_> {
                         present.clear();
                     } else {
                         narrowed |= narrowing_call(c);
-                        present.extend(call_present_fields(c));
+                        present.extend(call_fields_proven_present(c));
                     }
                     if effect == Effect::Correlation && (aggregated || replaced) {
                         self.emit(
@@ -911,11 +916,7 @@ impl Checker<'_> {
                             }
                         }
                         "rename" => {
-                            for (old, new) in catalog::rename_bindings(&args) {
-                                if present.remove(old) {
-                                    present.insert(new.into());
-                                }
-                            }
+                            rename_present(&args, &mut present);
                             if let Some(available) = &mut projected {
                                 for (old, new) in catalog::rename_bindings(&args) {
                                     available.remove(old);
@@ -984,25 +985,7 @@ impl Checker<'_> {
                                     table_query,
                                     &p.steps[index + 1..],
                                 )?;
-                                match args.get("nrows") {
-                                    None => Some(format!(
-                                        "match keeps at most 1 row per key from defineTable '{table}' (default nrows=1; maximum 500 with nrows=max), so the later comparison of {field} may miss matches when a key has multiple rows. Aggregate the table to one row per key or use correlate() for time-bounded event matching."
-                                    )),
-                                    Some(v) if has_parameter(v) => Some(format!(
-                                        "match caps matched rows per event (up to 500) from defineTable '{table}', so the later comparison of {field} can miss matches when a key exceeds nrows. Aggregate the table to one row per key or use correlate() for time-bounded event matching."
-                                    )),
-                                    Some(v) if v.text() == Some("max") => Some(format!(
-                                        "match with nrows=max keeps at most 500 rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than 500 rows. Aggregate the table to one row per key or use correlate() for time-bounded event matching."
-                                    )),
-                                    Some(v) => v
-                                        .unsigned_integer()
-                                        .filter(|&n| (1..=500).contains(&n))
-                                        .map(|n| {
-                                            format!(
-                                                "match with nrows={n} keeps at most {n} rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {n} rows. Aggregate the table to one row per key or use correlate() for time-bounded event matching."
-                                            )
-                                        }),
-                                }
+                                match_nrows_warning(table, &field, &args)
                             });
                             if let Some(msg) = match_warning {
                                 self.emit("CQL_MATCH_NROWS", msg, Some(c), true);
@@ -1019,15 +1002,11 @@ impl Checker<'_> {
                         }
                         "splitstring" if !args.contains_key("index") => projected = None,
                         "eval" => {
-                            for (field, value) in &args {
-                                if matches!(
-                                    value,
-                                    Value::String(_) | Value::Number(_) | Value::Bool(_)
-                                ) || matches!(value, Value::Word(src) if present.contains(src))
-                                {
-                                    present.insert(field.clone());
-                                } else {
-                                    present.remove(field);
+                            if let Some(resolved) = catalog::resolve(c) {
+                                for (field, value) in &resolved.ordered {
+                                    if present_after_assign(value, &present) {
+                                        present.insert(field.clone());
+                                    }
                                 }
                             }
                             if let Some(available) = &mut projected {
@@ -1092,9 +1071,11 @@ impl Checker<'_> {
                         }
                     }
                     if let Some((outputs, retains)) = catalog::aggregate_outputs(c) {
-                        if !retains {
+                        if !(retains && matches!(name.as_str(), "head" | "tail" | "sort")) {
                             present.clear();
-                            if name == "groupby"
+                            if name == "count" {
+                                present.extend(outputs.iter().cloned());
+                            } else if name == "groupby"
                                 && let Some(group_fields) =
                                     args.get("field").map(|v| catalog::fields(v))
                                 && group_fields.len() == 1
@@ -1167,45 +1148,44 @@ impl Checker<'_> {
         };
     }
     fn check_empty_negations(&mut self, f: &Filter, present: &BTreeSet<String>) {
-        match f {
+        let target = match f {
             Filter::Compare {
                 field,
                 op,
                 value: Pattern::Text(text),
-            } if op == "!=" && text.is_empty() && !present.contains(field) => {
+            } if op == "!=" && text.is_empty() => {
+                Some((field.as_str(), format!("{field} != \"\"")))
+            }
+            Filter::Not(inner) => match inner.as_ref() {
+                Filter::Compare {
+                    field,
+                    op,
+                    value: Pattern::Text(text),
+                } if op == "=" && text.is_empty() => {
+                    Some((field.as_str(), format!("not {field} = \"\"")))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((field, expr)) = target {
+            if !present.contains(field) {
                 self.emit(
                     "CQL_EMPTY_STRING_NEGATION",
                     format!(
-                        "{field} != \"\" also matches events where {field} is missing; add {field}=* (or match {field}=/.+/) to require the field to be present."
+                        "{expr} also matches events where {field} is missing; add {field}=* (or match {field}=/.+/) to require the field to be present."
                     ),
                     None,
                     true,
                 );
             }
-            Filter::Not(inner) => {
-                if let Filter::Compare {
-                    field,
-                    op,
-                    value: Pattern::Text(text),
-                } = inner.as_ref()
-                    && op == "="
-                    && text.is_empty()
-                    && !present.contains(field)
-                {
-                    self.emit(
-                        "CQL_EMPTY_STRING_NEGATION",
-                        format!(
-                            "not {field} = \"\" also matches events where {field} is missing; add {field}=* (or match {field}=/.+/) to require the field to be present."
-                        ),
-                        None,
-                        true,
-                    );
-                }
-            }
+            return;
+        }
+        match f {
             Filter::And(xs) => {
                 let mut local = present.clone();
                 for x in xs {
-                    local.extend(positive_present_fields(x));
+                    local.extend(fields_proven_present(x));
                 }
                 for x in xs {
                     self.check_empty_negations(x, &local);
@@ -1216,6 +1196,50 @@ impl Checker<'_> {
                     self.check_empty_negations(x, present);
                 }
             }
+            _ => {}
+        }
+    }
+    fn check_or_free_text(&mut self, f: &Filter) {
+        fn collect<'a>(xs: &'a [Filter], out: &mut Vec<&'a Filter>) {
+            for x in xs {
+                match x {
+                    Filter::Or(nested) => collect(nested, out),
+                    other => out.push(other),
+                }
+            }
+        }
+        match f {
+            Filter::Or(xs) => {
+                let mut alternatives = Vec::new();
+                collect(xs, &mut alternatives);
+                if let Some(field) = alternatives.iter().find_map(|x| match x {
+                    Filter::Compare { field, .. } => Some(field.as_str()),
+                    _ => None,
+                }) && let Some(text) = alternatives.iter().find_map(|x| match x {
+                    Filter::Text(Pattern::Text(text)) if text != "&&" => Some(text.as_str()),
+                    _ => None,
+                }) {
+                    self.emit(
+                        "CQL_OR_FREE_TEXT",
+                        format!(
+                            "In an or expression, bare text \"{text}\" searches the whole event instead of comparing {field}. Repeat the field name ({field}=\"{text}\") or use in({field}, values=[...])."
+                        ),
+                        None,
+                        true,
+                    );
+                }
+                for alt in alternatives {
+                    if !matches!(alt, Filter::Compare { .. } | Filter::Text(_)) {
+                        self.check_or_free_text(alt);
+                    }
+                }
+            }
+            Filter::And(xs) => {
+                for x in xs {
+                    self.check_or_free_text(x);
+                }
+            }
+            Filter::Not(inner) => self.check_or_free_text(inner),
             _ => {}
         }
     }
@@ -1262,26 +1286,6 @@ impl Checker<'_> {
                         "AND and OR cannot combine function calls; use a pipe for conjunctions or case for alternatives.",
                         None,
                         false,
-                    );
-                }
-                if matches!(f, Filter::Or(_))
-                    && !self.after_aggregate
-                    && let Some(field) = xs.iter().find_map(|x| match x {
-                        Filter::Compare { field, .. } => Some(field.as_str()),
-                        _ => None,
-                    })
-                    && let Some(text) = xs.iter().find_map(|x| match x {
-                        Filter::Text(Pattern::Text(text)) if text != "&&" => Some(text.as_str()),
-                        _ => None,
-                    })
-                {
-                    self.emit(
-                        "CQL_OR_FREE_TEXT",
-                        format!(
-                            "In an or expression, bare text \"{text}\" searches the whole event instead of comparing {field}. Repeat the field name ({field}=\"{text}\") or use in({field}, values=[...])."
-                        ),
-                        None,
-                        true,
                     );
                 }
                 for x in xs {
@@ -2929,7 +2933,8 @@ impl Checker<'_> {
         let (outputs, unknown) = catalog::correlation_outputs(args, &queries, &projections);
         self.correlation_columns
             .insert(call.start, unknown.is_empty().then_some(outputs));
-        if (sequence || unresolved_sequence)
+        if mandatory.len() > 1
+            && (sequence || unresolved_sequence)
             && let Some(seq_by) = args.get("sequenceBy").filter(|v| !has_parameter(v))
         {
             let conflicts: Vec<String> = catalog::fields(seq_by)
@@ -4026,26 +4031,177 @@ fn joined_comparison(args: &BTreeMap<String, &Value>, steps: &[Step]) -> Option<
     ordered_comparison_after(joined, steps)
 }
 
+const MAX_MATCH_NROWS: u64 = 500;
+const REGEX_ESCAPE_LETTERS: &str = "wWsSdDbBtnrfv";
+
+enum MatchRowCap {
+    Default,
+    Max,
+    Limit(u64),
+    Parameter,
+    Invalid,
+}
+
+fn match_row_cap(args: &BTreeMap<String, &Value>) -> MatchRowCap {
+    match args.get("nrows") {
+        None => MatchRowCap::Default,
+        Some(v) if has_parameter(v) => MatchRowCap::Parameter,
+        Some(v) if v.text() == Some("max") => MatchRowCap::Max,
+        Some(v) => match v.unsigned_integer() {
+            Some(n) if (1..=MAX_MATCH_NROWS).contains(&n) => MatchRowCap::Limit(n),
+            _ => MatchRowCap::Invalid,
+        },
+    }
+}
+
+fn match_nrows_warning(
+    table: &str,
+    field: &str,
+    args: &BTreeMap<String, &Value>,
+) -> Option<String> {
+    let suffix = "Aggregate the table to one row per key or use correlate() for time-bounded event matching.";
+    match match_row_cap(args) {
+        MatchRowCap::Default => Some(format!(
+            "match keeps at most 1 row per key from defineTable '{table}' (default nrows=1; maximum {MAX_MATCH_NROWS} with nrows=max), so the later comparison of {field} may miss matches when a key has multiple rows. {suffix}"
+        )),
+        MatchRowCap::Parameter => Some(format!(
+            "match caps matched rows per event (up to {MAX_MATCH_NROWS}) from defineTable '{table}', so the later comparison of {field} can miss matches when a key exceeds nrows. {suffix}"
+        )),
+        MatchRowCap::Max => Some(format!(
+            "match with nrows=max keeps at most {MAX_MATCH_NROWS} rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {MAX_MATCH_NROWS} rows. {suffix}"
+        )),
+        MatchRowCap::Limit(n) => Some(format!(
+            "match with nrows={n} keeps at most {n} rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {n} rows. {suffix}"
+        )),
+        MatchRowCap::Invalid => None,
+    }
+}
+
+fn table_row_bound(pipeline: &Pipeline) -> Option<u64> {
+    if bounded_single(pipeline, false) {
+        return Some(1);
+    }
+    let mut bound: Option<u64> = None;
+    for original_step in &pipeline.steps {
+        let semantic_step = original_step.semantic();
+        match semantic_step.as_ref() {
+            Step::Call(call) => {
+                let resolved = catalog::resolve(call)?;
+                let args = &resolved.arguments;
+                match resolved.function.name {
+                    "count" | "sum" | "avg" | "min" | "max" | "selectFromMax" | "selectFromMin"
+                    | "selectLast" | "array:union" | "array:intersection" | "callFunction"
+                    | "counterAsRate" | "linReg" | "percentage" | "percentile" | "range"
+                    | "stdDev" => bound = Some(1),
+                    "collect" => {
+                        bound = (args.get("multival").and_then(|v| v.boolean()) != Some(false))
+                            .then_some(1);
+                    }
+                    "stats" | "array:reduceAll" => {
+                        bound = args
+                            .get("function")
+                            .is_none_or(|v| single_aggregate(v))
+                            .then_some(1);
+                    }
+                    "head" | "tail" | "sort" | "table" => {
+                        if let Some(n) = args.get("limit").and_then(|v| v.unsigned_integer())
+                            && n > 0
+                        {
+                            bound = Some(bound.map_or(n, |prev| prev.min(n)));
+                        }
+                    }
+                    "join" => {
+                        if !args
+                            .get("max")
+                            .is_none_or(|v| v.unsigned_integer() == Some(1))
+                        {
+                            bound = None;
+                        }
+                    }
+                    "match" => {
+                        if !args
+                            .get("nrows")
+                            .is_none_or(|v| v.unsigned_integer() == Some(1))
+                        {
+                            bound = None;
+                        }
+                    }
+                    "split" => bound = None,
+                    "regex" if args.get("repeat").and_then(|v| v.boolean()) == Some(true) => {
+                        bound = None;
+                    }
+                    _ if matches!(
+                        resolved.function.resolved_effect(args),
+                        Effect::Aggregate | Effect::Source | Effect::Correlation
+                    ) =>
+                    {
+                        bound = None;
+                    }
+                    _ => {}
+                }
+            }
+            Step::Assign { value, .. } if catalog::assigned_aggregate(value).is_some() => {
+                bound = single_aggregate(value).then_some(1);
+            }
+            Step::Case(_) | Step::Match { .. } => bound = None,
+            _ => {}
+        }
+    }
+    bound
+}
+
 fn matched_comparison(
     args: &BTreeMap<String, &Value>,
     table_columns: Option<&BTreeSet<String>>,
     table_query: &Pipeline,
     steps: &[Step],
 ) -> Option<String> {
+    let cap = match_row_cap(args);
+    let effective_limit = match cap {
+        MatchRowCap::Invalid => return None,
+        MatchRowCap::Default => Some(1),
+        MatchRowCap::Max => Some(MAX_MATCH_NROWS),
+        MatchRowCap::Limit(n) => Some(n),
+        MatchRowCap::Parameter => None,
+    };
+    if let Some(bound) = table_row_bound(table_query)
+        && (bound <= 1 || effective_limit.is_some_and(|limit| bound <= limit))
+    {
+        return None;
+    }
     let keys = catalog::fields(args.get("column").or_else(|| args.get("field"))?);
-    if subquery_one_row_per_key(table_query, &keys) {
+    let exact_match = args.get("ignoreCase").and_then(|v| v.boolean()) != Some(true)
+        && args.get("glob").and_then(|v| v.boolean()) != Some(true)
+        && args
+            .get("mode")
+            .and_then(|v| v.text())
+            .is_none_or(|m| m.eq_ignore_ascii_case("string"));
+    if exact_match && subquery_one_row_per_key(table_query, &keys) {
         return None;
     }
     let imported = &catalog::imported_fields("match", args, table_columns)? - &keys;
     ordered_comparison_after(imported, steps)
 }
 
-fn positive_present_fields(filter: &Filter) -> BTreeSet<String> {
+fn present_after_assign(value: &Value, present: &BTreeSet<String>) -> bool {
+    matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+        || matches!(value, Value::Word(src) if present.contains(src))
+}
+
+fn rename_present(args: &BTreeMap<String, &Value>, present: &mut BTreeSet<String>) {
+    for (old, new) in catalog::rename_bindings(args) {
+        if present.remove(old) {
+            present.insert(new.into());
+        }
+    }
+}
+
+fn fields_proven_present(filter: &Filter) -> BTreeSet<String> {
     match filter {
         Filter::Compare { field, op, .. } if op != "!=" => BTreeSet::from([field.clone()]),
-        Filter::And(xs) => xs.iter().flat_map(positive_present_fields).collect(),
+        Filter::And(xs) => xs.iter().flat_map(fields_proven_present).collect(),
         Filter::Or(xs) => {
-            let mut iter = xs.iter().map(positive_present_fields);
+            let mut iter = xs.iter().map(fields_proven_present);
             let Some(mut common) = iter.next() else {
                 return BTreeSet::new();
             };
@@ -4054,37 +4210,91 @@ fn positive_present_fields(filter: &Filter) -> BTreeSet<String> {
             }
             common
         }
-        Filter::Call(c) => call_present_fields(c),
+        Filter::Call(c) => call_fields_proven_present(c),
         _ => BTreeSet::new(),
     }
 }
 
-fn call_present_fields(call: &Call) -> BTreeSet<String> {
+fn call_fields_proven_present(call: &Call) -> BTreeSet<String> {
     let Some(resolved) = catalog::resolve(call) else {
         return BTreeSet::new();
     };
-    if !matches!(resolved.function.name, "in" | "wildcard" | "regex" | "cidr") {
-        return BTreeSet::new();
+    match resolved.function.name {
+        "in" => {}
+        "regex" if resolved.arguments.get("strict").and_then(|v| v.boolean()) == Some(false) => {
+            return BTreeSet::new();
+        }
+        "regex" => {}
+        "wildcard"
+            if resolved
+                .arguments
+                .get("includeEverythingOnAsterisk")
+                .and_then(|v| v.boolean())
+                == Some(true) =>
+        {
+            return BTreeSet::new();
+        }
+        "wildcard" => {}
+        "cidr" if resolved.arguments.get("negate").and_then(|v| v.boolean()) == Some(true) => {
+            return BTreeSet::new();
+        }
+        "cidr" => {}
+        _ => return BTreeSet::new(),
     }
-    if resolved.arguments.get("strict").and_then(|v| v.boolean()) == Some(false) {
-        return BTreeSet::new();
-    }
-    resolved
+    let fields = resolved
         .arguments
         .get("field")
         .map(|v| catalog::fields(v))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if fields.len() == 1 {
+        fields
+    } else {
+        BTreeSet::new()
+    }
 }
 
-fn is_windows_path_prefix(chars: &[char], slash_idx: usize) -> bool {
-    if slash_idx >= 2
-        && chars[slash_idx - 1] == ':'
-        && chars[slash_idx - 2].is_ascii_alphabetic()
-        && (slash_idx == 2
-            || !(chars[slash_idx - 3].is_ascii_alphanumeric() || chars[slash_idx - 3] == '_'))
-    {
-        return true;
+fn is_drive_prefix(chars: &[char], slash_idx: usize) -> bool {
+    if slash_idx < 2 || chars[slash_idx - 1] != ':' {
+        return false;
     }
+    let before_colon = slash_idx - 2;
+    if chars[before_colon].is_ascii_alphabetic() {
+        if before_colon == 0 {
+            return true;
+        }
+        let prev = chars[before_colon - 1];
+        if !(prev.is_ascii_alphanumeric() || prev == '_') {
+            return true;
+        }
+        if before_colon >= 2 && matches!(prev, 'b' | 'B' | 'A' | 'z' | 'Z') {
+            let mut slashes = 0;
+            while before_colon - 1 > slashes && chars[before_colon - 2 - slashes] == '\\' {
+                slashes += 1;
+            }
+            return slashes % 2 == 1;
+        }
+        return false;
+    }
+    if chars[before_colon] == ']' {
+        let mut j = before_colon;
+        let mut has_letter = false;
+        while j > 0 {
+            j -= 1;
+            let c = chars[j];
+            if c == '[' {
+                return has_letter;
+            }
+            if c.is_ascii_alphabetic() {
+                has_letter = true;
+            } else if c != '-' {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+fn is_path_segment_prefix(chars: &[char], slash_idx: usize) -> bool {
     let mut j = slash_idx;
     let mut has_alnum = false;
     while j > 0 {
@@ -4108,6 +4318,13 @@ fn is_windows_path_prefix(chars: &[char], slash_idx: usize) -> bool {
     slashes >= 2 && slashes % 2 == 0
 }
 
+fn has_other_backslash(chars: &[char], skip_idx: usize) -> bool {
+    chars
+        .iter()
+        .enumerate()
+        .any(|(idx, &c)| idx != skip_idx && c == '\\')
+}
+
 fn regex_path_escape(pattern: &str) -> Option<char> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -4116,11 +4333,16 @@ fn regex_path_escape(pattern: &str) -> Option<char> {
         if chars[i] == '\\' {
             if class_start.is_none()
                 && let Some(&next) = chars.get(i + 1)
-                && "wWsSdDbBtnrfv".contains(next)
+                && REGEX_ESCAPE_LETTERS.contains(next)
                 && chars.get(i + 2).is_some_and(char::is_ascii_alphabetic)
-                && is_windows_path_prefix(&chars, i)
             {
-                return Some(next);
+                let path_segment = is_path_segment_prefix(&chars, i);
+                let drive = !path_segment
+                    && is_drive_prefix(&chars, i)
+                    && (next != 's' || has_other_backslash(&chars, i));
+                if path_segment || drive {
+                    return Some(next);
+                }
             }
             i += 2;
             continue;
