@@ -1,1 +1,0 @@
-- Use independent executable copies in macOS hook launch tests.

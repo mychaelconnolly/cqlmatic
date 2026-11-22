@@ -15,7 +15,7 @@ use std::{
 #[path = "support/inventory_release.rs"]
 mod released;
 
-const PREVIOUS_PRODUCER: &str = "0.1.9";
+const PREVIOUS_PRODUCER: &str = "0.1.10";
 
 struct Temp(PathBuf);
 impl Temp {
@@ -605,6 +605,37 @@ fn genuine_version_019_timed_out_attempt_allows_unrelated_scout() {
     let retained = fs::read(&path).unwrap();
     let saved: Value = serde_json::from_slice(&retained).unwrap();
     assert_eq!(saved["producer_version"], "0.1.9");
+    assert_eq!(saved["session"]["attempts"][0]["outcome"], "timed-out");
+
+    call(reader, &dir.0, scout());
+    assert_eq!(fs::read(path).unwrap(), retained);
+    reject(
+        reader,
+        &dir.0,
+        json!({"kind":"resume-discovery","run_index":0}),
+        "MCP_STATE_PRODUCER",
+    );
+}
+
+#[test]
+#[ignore = "Set CQLMATIC_V0110_BINARY to the unmodified release executable and run with CQLmatic 0.1.11 or later"]
+fn genuine_version_0110_timed_out_attempt_allows_unrelated_scout() {
+    let writer = PathBuf::from(
+        std::env::var_os("CQLMATIC_V0110_BINARY")
+            .expect("Set CQLMATIC_V0110_BINARY to the unmodified CQLmatic 0.1.10 executable"),
+    );
+    verify_binary(&writer, "0.1.10");
+    let reader = current_binary();
+    let dir = Temp::new();
+    setup_with(&writer, &dir.0);
+    let prepared = prepare(&writer, &dir.0, 4);
+    let response = serde_json::from_str(include_str!("fixtures/mcp/hosted-timeout.json")).unwrap();
+    let paused = answer(&writer, &dir.0, &prepared, response);
+    assert_eq!(paused["action"]["relay"]["status"], "paused");
+    let path = checkpoint(&dir.0, 0);
+    let retained = fs::read(&path).unwrap();
+    let saved: Value = serde_json::from_slice(&retained).unwrap();
+    assert_eq!(saved["producer_version"], "0.1.10");
     assert_eq!(saved["session"]["attempts"][0]["outcome"], "timed-out");
 
     call(reader, &dir.0, scout());
