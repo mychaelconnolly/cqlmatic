@@ -60,19 +60,65 @@ pub fn resolve(call: &Call) -> Option<ResolvedCall<'_>> {
     };
     let mut position = 0;
     let mut named_query = false;
+    let mut unnamed_query = false;
+    let mut array_query = false;
     for arg in &call.args {
-        if function.name == "correlate"
-            && (arg.name.is_none() || arg.name.as_deref() == Some("query"))
-            && matches!(arg.value, Value::Query { label: Some(_), .. })
-        {
-            if arg.name.is_some() && std::mem::replace(&mut named_query, true) {
-                resolved.diagnostics.push(Diagnostic::error(
-                    "CQL_DUPLICATE_ARGUMENT",
-                    "Duplicate named query parameter; use the native unnamed query list.",
-                ));
+        if function.name == "correlate" {
+            let is_labeled_query = matches!(arg.value, Value::Query { label: Some(_), .. });
+            let query_array = match &arg.value {
+                Value::Array(xs)
+                    if !xs.is_empty()
+                        && xs
+                            .iter()
+                            .all(|v| matches!(v, Value::Query { label: Some(_), .. })) =>
+                {
+                    Some(xs.as_slice())
+                }
+                _ => None,
+            };
+            if arg.name.is_none() && is_labeled_query {
+                if named_query || array_query {
+                    resolved.diagnostics.push(Diagnostic::error(
+                        "CQL_DUPLICATE_ARGUMENT",
+                        "Cannot mix named query= or a query list with unnamed query arguments; pass unnamed queries or query=[...].",
+                    ));
+                }
+                unnamed_query = true;
+                resolved.queries.push(&arg.value);
+                continue;
             }
-            resolved.queries.push(&arg.value);
-            continue;
+            if arg.name.is_none()
+                && let Some(xs) = query_array
+            {
+                if named_query || unnamed_query || std::mem::replace(&mut array_query, true) {
+                    resolved.diagnostics.push(Diagnostic::error(
+                        "CQL_DUPLICATE_ARGUMENT",
+                        "Duplicate query list; pass unnamed queries or a single query=[...] list.",
+                    ));
+                }
+                resolved.queries.extend(xs.iter());
+                continue;
+            }
+            if arg.name.as_deref() == Some("query") && (is_labeled_query || query_array.is_some()) {
+                if std::mem::replace(&mut named_query, true) {
+                    resolved.diagnostics.push(Diagnostic::error(
+                        "CQL_DUPLICATE_ARGUMENT",
+                        "Duplicate named query parameter; use unnamed queries or query=[...].",
+                    ));
+                } else if unnamed_query || array_query {
+                    resolved.diagnostics.push(Diagnostic::error(
+                        "CQL_DUPLICATE_ARGUMENT",
+                        "Cannot mix named query= with unnamed query arguments; pass unnamed queries or query=[...].",
+                    ));
+                }
+                if let Some(xs) = query_array {
+                    array_query = true;
+                    resolved.queries.extend(xs.iter());
+                } else {
+                    resolved.queries.push(&arg.value);
+                }
+                continue;
+            }
         }
         let name = if let Some(name) = &arg.name {
             name.as_str()

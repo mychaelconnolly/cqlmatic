@@ -558,8 +558,17 @@ impl Parser<'_> {
     }
     fn comparison_pattern(&mut self, field: &str) -> Result<Pattern> {
         self.space();
-        let bare = !self.rest().starts_with(['"', '?']);
+        let bare = !self.rest().starts_with(['"', '?', '/']);
         let pattern = self.pattern()?;
+        if bare && matches!(&pattern, Pattern::Text(_)) && self.rest().starts_with('(') {
+            self.advise(
+                "CQL_FILTER_PAREN_SPLIT",
+                format!(
+                    "Unquoted '(' ends the filter value on {field}; what follows is parsed as a separate parenthesized filter or free-text search. Put the value in double quotes to match it literally."
+                ),
+                false,
+            );
+        }
         if bare && matches!(&pattern, Pattern::Text(word) if word.eq_ignore_ascii_case("null")) {
             self.advise("CQL_NULL_TEXT", format!("The value is the text \"null\"; use {}=* for has the field and not {}=* for does not have the field.", field, field), false);
         }
