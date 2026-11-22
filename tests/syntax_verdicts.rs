@@ -551,3 +551,238 @@ fn quote_boundaries_follow_expression_context() {
         );
     }
 }
+
+#[test]
+fn empty_string_negation_warns_without_presence_check() {
+    for query in [
+        "a != \"\"",
+        "not a = \"\"",
+        "!a = \"\"",
+        "b = 1 | a != \"\"",
+        "a = \"x\" or a != \"\"",
+        "case { a != \"\" | c := 1; * }",
+        "x := b | x != \"\"",
+        "wildcard(\"bad*\", field=[message, backup]) | message != \"\"",
+        "wildcard(\"*\", field=message, includeEverythingOnAsterisk=true) | message != \"\"",
+        "cidr(ip, subnet=\"10.0.0.0/8\", negate=true) | ip != \"\"",
+        "eval(z=a, a=1) | z != \"\"",
+        "user=* | appendAggregation(count()) | user != \"\"",
+        "status match { * => status != \"\" }",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_EMPTY_STRING_NEGATION" && d.severity == Severity::Warning),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    for quiet in [
+        "a = * a != \"\"",
+        "a != \"\" a = *",
+        "a = \"*\" | a != \"\"",
+        "a = * | b = 1 | a != \"\"",
+        "a = \"foo*\" | a != \"\"",
+        "test(a != \"\")",
+        "a != \"SYSTEM\"",
+        "default(field=a, value=\"\") | a != \"\"",
+        "a := \"seed\" | a != \"\"",
+        "in(a, values=[\"x\", \"\"]) | a != \"\"",
+        "not (a != \"\")",
+        "groupBy([a], function=count()) | a != \"\"",
+        "eval(z=1, a=z) | a != \"\"",
+        "a=* | eval(a=missing) | a != \"\"",
+        "count(as=n) | n != \"\"",
+        "n := count() | n != \"\"",
+        "status match { ok => status != \"\"; * => false }",
+    ] {
+        let result = check(quiet);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{quiet}: {result:?}"
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_EMPTY_STRING_NEGATION"),
+            "{quiet}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn or_with_bare_text_warns_before_aggregate() {
+    for query in [
+        "a = \"1\" or \"2\"",
+        "a = 1 or 2",
+        "\"2\" or a = \"1\"",
+        "a = \"1\" or \"2\" or \"3\"",
+        "a = 1 or (\"2\" or \"3\")",
+        "case { a = \"1\" or \"2\" | c := 1; * }",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_OR_FREE_TEXT" && d.severity == Severity::Warning),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    for quiet in [
+        "a = \"1\" or a = \"2\"",
+        "\"1\" or \"2\"",
+        "a = \"1\" or *",
+        "a = \"1\" or /foo/",
+        "in(a, values=[\"1\", \"2\"])",
+    ] {
+        let result = check(quiet);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{quiet}: {result:?}"
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_OR_FREE_TEXT"),
+            "{quiet}: {:?}",
+            result.diagnostics
+        );
+    }
+    let post = check("count() | a = \"1\" or \"2\"");
+    assert_eq!(post.validation.status, Acceptance::Rejected);
+    assert!(
+        post.diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_FREE_TEXT_AFTER_AGGREGATE")
+    );
+    assert!(
+        !post
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_OR_FREE_TEXT")
+    );
+}
+
+#[test]
+fn regex_windows_path_single_backslash_warns() {
+    for query in [
+        r#"p=/C:\Windows\System32/"#,
+        r#"p=/^C:\Windows\System32/i"#,
+        r#"p=/\bC:\Windows/"#,
+        r#"p=/[A-Z]:\Windows\System32/"#,
+        r#"p=/C:\scripts\run\.bat/"#,
+        r#"p=/C:\\Windows\System32/"#,
+        r#"p=/\\System32\net\.exe/"#,
+        r#"p=/C:\temp\new\.exe/"#,
+        r#"regex(field=p, regex="C:\\Windows\\System32")"#,
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_REGEX_PATH_ESCAPE" && d.severity == Severity::Warning),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    for quiet in [
+        r#"p=/C:\\Windows\\System32/"#,
+        r#"p=/C:\\Windows\\System32\\net\.exe/"#,
+        r#"regex(field=p, regex="C:\\\\Windows\\\\System32")"#,
+        r#"p=/\w+/"#,
+        r#"p=/\bWindows\b/"#,
+        r#"p=/\d+\.\d+/"#,
+        r#"p=/http:\sfoo/"#,
+        r#"p=/^Q:\sWho$/"#,
+        r#"p=/error:\s+timeout/"#,
+        r#"p=/[A-Za-z]:\\Windows/"#,
+    ] {
+        let result = check(quiet);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{quiet}: {result:?}"
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_REGEX_PATH_ESCAPE"),
+            "{quiet}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn unquoted_open_paren_in_filter_value_warns() {
+    for query in [
+        "a=x(y)",
+        r#"p=C:\Program(x86)\app.exe"#,
+        "a=foo(bar) | count()",
+        "a=?{v=x}suffix(y)",
+    ] {
+        let result = check(query);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{query}: {result:?}"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_FILTER_PAREN_SPLIT" && d.severity == Severity::Warning),
+            "{query}: {:?}",
+            result.diagnostics
+        );
+    }
+    for quiet in [
+        "a=\"x(y)\"",
+        r#"p="C:\Program(x86)\app.exe""#,
+        "a=/x\\(y\\)/",
+        "a=1 (b=2 or c=3)",
+        "(a=1)",
+        "a=1 | count()",
+    ] {
+        let result = check(quiet);
+        assert_eq!(
+            result.validation.status,
+            Acceptance::Accepted,
+            "{quiet}: {result:?}"
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_FILTER_PAREN_SPLIT"),
+            "{quiet}: {:?}",
+            result.diagnostics
+        );
+    }
+}

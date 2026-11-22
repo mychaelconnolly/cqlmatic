@@ -343,3 +343,190 @@ fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
         result.grounding.missing
     );
 }
+
+#[test]
+fn correlate_sequence_by_equated_key_warns() {
+    for (query, expected) in [
+        (
+            "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=user, within=5m)",
+            "user",
+        ),
+        (
+            "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=[user, kind], within=5m)",
+            "user",
+        ),
+        (
+            "correlate(first: { kind=a } include: [user], second: { kind=b }, globalConstraints=[user], sequence=true, sequenceBy=[user], within=5m)",
+            "user",
+        ),
+        (
+            "correlate(first: { kind=a | user <=> second.user } include: [user], second: { kind=b }, sequence=true, sequenceBy=user, within=5m)",
+            "user",
+        ),
+    ] {
+        let result = ready(query);
+        let warns = messages(&result, "CQL_CORRELATION_SEQUENCE_BY");
+        assert_eq!(warns.len(), 1, "{query}: {warns:?}");
+        assert!(warns[0].contains(expected), "{query}: {}", warns[0]);
+        assert!(warns[0].contains("@id"), "{query}: {}", warns[0]);
+    }
+    for quiet in [
+        "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
+        "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=@timestamp, within=5m)",
+        "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=[@timestamp, @timestamp.nanos], within=5m)",
+        "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, sequenceBy=ordinal, within=5m)",
+        "correlate(first: { kind=a } include: [src], second: { kind=b | dst <=> first.src }, sequence=true, sequenceBy=src, within=5m)",
+        "correlate(first: { kind=a }, aggregation=[agg: { kind=b | count() }], globalConstraints=[user], sequence=true, sequenceBy=user, within=5m)",
+    ] {
+        assert!(
+            messages(&ready(quiet), "CQL_CORRELATION_SEQUENCE_BY").is_empty(),
+            "{quiet}"
+        );
+    }
+}
+
+#[test]
+fn correlate_query_argument_forms() {
+    for accepted in [
+        "correlate(first: { kind=a } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
+        "correlate(query=[first: { kind=a } include: [user], second: { kind=b | user <=> first.user }], sequence=true, within=5m)",
+        "correlate([first: { kind=a } include: [user], second: { kind=b | user <=> first.user }], sequence=true, within=5m)",
+        "correlate(query=first: { kind=a } include: [user], aggregation=[agg: { kind=b | user <=> first.user | count() }], within=5m)",
+        "correlate(query=[first: { kind=a } include: [user]], aggregation=[agg: { kind=b | user <=> first.user | count() }], within=5m)",
+    ] {
+        let result = ready(accepted);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|d| d.severity != Severity::Error),
+            "{accepted}: {:?}",
+            result.diagnostics
+        );
+    }
+    for rejected in [
+        "correlate(query=first: { kind=a }, second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
+        "correlate(first: { kind=a }, query=second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
+        "correlate(query=[first: { kind=a }], second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
+        "correlate([first: { kind=a }], second: { kind=b | user <=> first.user }, sequence=true, within=5m)",
+    ] {
+        let result = check(rejected);
+        assert_eq!(result.outcome, Outcome::Invalid, "{rejected}: {result:?}");
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "CQL_DUPLICATE_ARGUMENT" && d.severity == Severity::Error),
+            "{rejected}: {:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn bucket_and_timechart_warn_when_series_limit_is_omitted() {
+    for (query, fn_name) in [
+        (
+            "kind=conn | bucket(span=1h, field=[src], function=[count(as=n), sum(pts, as=score)]) | score >= 20",
+            "bucket",
+        ),
+        (
+            "kind=conn | bucket(span=1h, field=src, function=count())",
+            "bucket",
+        ),
+        (
+            "kind=conn | timeChart(series=src, span=1h, function=count())",
+            "timeChart",
+        ),
+        (
+            "kind=conn | timeChart(src, span=1h, function=count())",
+            "timeChart",
+        ),
+    ] {
+        let result = ready(query);
+        let warns = messages(&result, "CQL_TIME_BUCKET_SERIES_LIMIT");
+        assert_eq!(warns.len(), 1, "{query}: {warns:?}");
+        assert!(warns[0].contains(fn_name), "{query}: {}", warns[0]);
+        assert!(warns[0].contains("10"), "{query}: {}", warns[0]);
+        assert!(warns[0].contains("500"), "{query}: {}", warns[0]);
+    }
+    for quiet in [
+        "kind=conn | bucket(span=1h, function=count())",
+        "kind=conn | bucket(span=1h, field=[], function=count())",
+        "kind=conn | bucket(span=1h, field=[src], limit=500, function=count())",
+        "kind=conn | bucket(span=1h, field=[src], limit=50, function=count())",
+        "kind=conn | timeChart(span=1h, function=count())",
+        "kind=conn | timeChart(series=src, span=1h, limit=500, function=count())",
+    ] {
+        assert!(
+            messages(&ready(quiet), "CQL_TIME_BUCKET_SERIES_LIMIT").is_empty(),
+            "{quiet}"
+        );
+    }
+}
+
+#[test]
+fn match_against_unaggregated_define_table_warns_before_ordered_comparison() {
+    let raw_table = "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | event_id := @id}, include=[key, seen_at, event_id]) | kind=a";
+    for (rest, compared, cap_hint) in [
+        (
+            " | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=max) | delta := seen_at - @timestamp | delta >= 0 | delta <= 60000",
+            "delta",
+            "500",
+        ),
+        (
+            " | match(file=\"events_b\", field=key, column=key, include=[seen_at], nrows=max) | test(seen_at >= @timestamp)",
+            "seen_at",
+            "500",
+        ),
+        (
+            " | match(table=\"events_b\", field=key, column=key, nrows=max) | delta := seen_at - @timestamp | test(delta >= 0)",
+            "delta",
+            "500",
+        ),
+        (
+            " | match(table=\"events_b\", field=key, column=key, include=[seen_at]) | test(seen_at >= @timestamp)",
+            "seen_at",
+            "1",
+        ),
+        (
+            " | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=25) | seen_at > 100",
+            "seen_at",
+            "25",
+        ),
+    ] {
+        let query = format!("{raw_table}{rest}");
+        let result = ready(&query);
+        let warns = messages(&result, "CQL_MATCH_NROWS");
+        assert_eq!(warns.len(), 1, "{query}: {warns:?}");
+        assert!(warns[0].contains(compared), "{query}: {}", warns[0]);
+        assert!(warns[0].contains(cap_hint), "{query}: {}", warns[0]);
+    }
+    for non_exact_grouped in [
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], ignoreCase=true) | last_ts > 0",
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], mode=glob) | last_ts > 0",
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], mode=cidr) | last_ts > 0",
+    ] {
+        let result = ready(non_exact_grouped);
+        assert_eq!(
+            messages(&result, "CQL_MATCH_NROWS").len(),
+            1,
+            "{non_exact_grouped}"
+        );
+    }
+    for quiet in [
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts]) | test(last_ts >= @timestamp)",
+        "defineTable(name=\"events_b\", query={kind=b | groupBy([k1, k2], function=[min(@timestamp, as=first_ts)], limit=max)}, include=[k1, k2, first_ts]) | kind=a | match(file=\"events_b\", field=[k1, k2], include=[first_ts], strict=false) | first_ts > 0",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | head(1)}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[seen_at], ignoreCase=true) | seen_at > 0",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | head(2)}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=2) | seen_at > 0",
+        "kind=a | match(file=\"users.csv\", field=user, column=user, include=[risk_score]) | risk_score >= 80",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp}, include=[key, seen_at]) | kind=a | !match(table=\"events_b\", field=key, column=key) | seen_at > 0",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[key, seen_at], nrows=max) | key > 10",
+        "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp}, include=[key, seen_at]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=max) | seen_at = \"100\"",
+    ] {
+        assert!(
+            messages(&ready(quiet), "CQL_MATCH_NROWS").is_empty(),
+            "{quiet}"
+        );
+    }
+}
