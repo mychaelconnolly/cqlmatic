@@ -2,7 +2,7 @@
 
 Run from the repository root with a built `cqlmatic` on PATH. These contain invented repository/field names and no environment pack. They verify generation and offline checking; they execute no query and establish no deployment observations. See the [full reference](../../docs/QUERY-REFERENCE.md) for contracts and [coverage](../../docs/COVERAGE.md) for assurance boundaries.
 
-Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file is the actual canonical renderer output. Default generation and checking return `outcome: ready`, `validation.status: accepted`, `validation.execution: not-run`, and exit **0** for every row below. With no pack and no saved inventory these rows carry no grounding warning; `grounding.basis` records the evidence for each field. The array-map and temporal-correlation rows each carry a warning, so those two exit **1** with `--fail-on-warning`; the other four carry informational diagnostics only and exit **0**.
+Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file is the actual canonical renderer output. Default generation and checking return `outcome: ready`, `validation.status: accepted`, `validation.execution: not-run`, and exit **0** for every row below. With no pack and no saved inventory these rows carry no grounding warning; `grounding.basis` records the evidence for each field. In that setting the array-map and temporal-correlation rows each carry a warning, so those two exit **1** with `--fail-on-warning`; the other four carry informational diagnostics only and exit **0**.
 
 | Request / rendered query | Purpose | Expected diagnostics |
 | --- | --- | --- |
