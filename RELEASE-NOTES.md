@@ -33,6 +33,7 @@ The skill opens with the query loop: find the map, take the search target from i
 - After upgrading, run `cqlmatic env capture --client CLIENT --server SERVER --install` again. It replaces the capture entry that 0.1.10 wrote for the same program, server, and state, and adds the guard.
 - Before going back to an earlier release, remove both hooks with this release's `--hooks none`, then install with the earlier release.
 - `--fail-on-warning` results can change in both directions. A query that 0.1.10 failed only because of `CQL_GROUNDING_LENIENT` or one of the eleven now-informational notes passes. A query with a map or one of the new query-logic traps can now fail.
+- A few queries that 0.1.10 reported as ready are now invalid: out-of-range percentile values and quoted function names.
 - An installed hook entry counts as installed only when it matches the entry the installer writes. An entry with an added key is reported as `manual`. In the install report, `event` is replaced by the list `events`, and a new `hooks` object gives each hook's result.
 - Arrays that a query builds with `splitString` or writes by index are no longer saved as source field leads.
 - CQLmatic 0.1.11 can inspect 0.1.10 discovery checkpoints in formats 2 and 3. Keep the 0.1.10 executable to resume or settle its unfinished runs. See [installation](docs/SETUP.md) for the package for your platform.

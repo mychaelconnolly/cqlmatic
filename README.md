@@ -18,7 +18,7 @@ CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crow
 
 **Try CQLmatic v0.1.11 and share feedback.** Use sanitized examples to describe gaps in setup, discovery, or query writing.
 
-Version `0.1.11` warns when a query names a source or field your environment map lacks, and a search guard tells your assistant what `check` found before each search runs. Query checks accept more valid queries, catch more join, sorting, correlation, match, and filter traps, and move eleven general notes from warnings to informational output. See the [release notes](https://docs.cqlmatic.dev/release-notes/) for upgrade details.
+Version `0.1.11` warns when a query names a source or field your environment map lacks, and a search guard for Claude Code and Codex tells your assistant what `check` found before each search runs. Query checks accept more valid queries, catch more join, sorting, correlation, match, and filter traps, and move eleven general notes from warnings to informational output. See the [release notes](https://docs.cqlmatic.dev/release-notes/) for upgrade details.
 
 **[Try v0.1.11](#try-v0111)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
 
