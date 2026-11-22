@@ -2,16 +2,16 @@
 
 Run from the repository root with a built `cqlmatic` on PATH. These contain invented repository/field names and no environment pack. They verify generation and offline checking; they execute no query and establish no deployment observations. See the [full reference](../../docs/QUERY-REFERENCE.md) for contracts and [coverage](../../docs/COVERAGE.md) for assurance boundaries.
 
-Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file is the actual canonical renderer output. Default generation and checking return `outcome: ready`, `validation.status: accepted`, `validation.execution: not-run`, and exit **0** for every row below. Without a pack these rows carry no grounding warning; `grounding.basis` records the evidence for each field. Every row carries at least one warning, so all six exit **1** with `--fail-on-warning`; informational diagnostics alone would not change the exit code.
+Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file is the actual canonical renderer output. Default generation and checking return `outcome: ready`, `validation.status: accepted`, `validation.execution: not-run`, and exit **0** for every row below. With no pack and no saved inventory these rows carry no grounding warning; `grounding.basis` records the evidence for each field. In that setting the array-map and temporal-correlation rows each carry a warning, so those two exit **1** with `--fail-on-warning`; the other four carry informational diagnostics only and exit **0**.
 
 | Request / rendered query | Purpose | Expected diagnostics |
 | --- | --- | --- |
-| [aggregation-rate.request.json](aggregation-rate.request.json) / [CQL](aggregation-rate.cql) | Per-host event/failure counts, arithmetic rate, threshold and numeric ranking | `CQL_GROUPBY_LIMIT` **info**; `CQL_TARGET_REQUIREMENT` warning |
-| [array-map.request.json](array-map.request.json) / [CQL](array-map.cql) | Flat-element binding, explicit squared output, physical-index projection | `CQL_ARRAY_OUTPUT_REUSE`, `CQL_TARGET_REQUIREMENT` warnings |
-| [mixed-join.request.json](mixed-join.request.json) / [CQL](mixed-join.cql) | Independent repository source, two ordered key pairs, left join, explicit exports/caps | `CQL_JOIN_COST` warning |
-| [mixed-table.request.json](mixed-table.request.json) / [CQL](mixed-table.cql) | Declaration preamble, independent repository, explicit table exports, retaining lookup | `CQL_LOOKUP_COMPLETENESS` warning; 2 `CQL_TARGET_REQUIREMENT` warnings |
-| [temporal-bucket.request.json](temporal-bucket.request.json) / [CQL](temporal-bucket.cql) | UTC fixed buckets, explicit numeric order and preceding neighbor | `CQL_TIME_BUCKET_LIMIT`, `CQL_TARGET_REQUIREMENT` warnings |
-| [temporal-correlation.request.json](temporal-correlation.request.json) / [CQL](temporal-correlation.cql) | Named mandatory queries, include fields/all, equality links and bounded count with signed anchors | `CQL_TIME_WINDOW_RUNTIME`, `CQL_CORRELATION_CAPABILITY`, `CQL_TARGET_REQUIREMENT` warnings |
+| [aggregation-rate.request.json](aggregation-rate.request.json) / [CQL](aggregation-rate.cql) | Per-host event/failure counts, arithmetic rate, threshold and numeric ranking | `CQL_GROUPBY_LIMIT`, `CQL_TARGET_REQUIREMENT` **info** |
+| [array-map.request.json](array-map.request.json) / [CQL](array-map.cql) | Flat-element binding, explicit squared output, physical-index projection | `CQL_ARRAY_OUTPUT_REUSE` warning; `CQL_TARGET_REQUIREMENT` **info** |
+| [mixed-join.request.json](mixed-join.request.json) / [CQL](mixed-join.cql) | Independent repository source, two ordered key pairs, left join, explicit exports/caps | `CQL_JOIN_COST` **info** |
+| [mixed-table.request.json](mixed-table.request.json) / [CQL](mixed-table.cql) | Declaration preamble, independent repository, explicit table exports, retaining lookup | `CQL_LOOKUP_COMPLETENESS` and 2 `CQL_TARGET_REQUIREMENT` **info** |
+| [temporal-bucket.request.json](temporal-bucket.request.json) / [CQL](temporal-bucket.cql) | UTC fixed buckets, explicit numeric order and preceding neighbor | `CQL_TIME_BUCKET_LIMIT`, `CQL_TARGET_REQUIREMENT` **info** |
+| [temporal-correlation.request.json](temporal-correlation.request.json) / [CQL](temporal-correlation.cql) | Named mandatory queries, include fields/all, equality links and bounded count with signed anchors | `CQL_TIME_WINDOW_RUNTIME` warning; `CQL_CORRELATION_CAPABILITY`, `CQL_TARGET_REQUIREMENT` **info** |
 
 ```sh
 cqlmatic generate --request examples/query-reference/aggregation-rate.request.json --json
@@ -19,7 +19,7 @@ cqlmatic check --file examples/query-reference/aggregation-rate.cql --json
 cqlmatic generate --request examples/query-reference/array-map.request.json --fail-on-warning --json
 ```
 
-The last command exits 1 because of its advisory warnings. No query is withheld for them. For all cases, the following focused offline check verifies exact renderer output, ready/accepted status, diagnostic codes/severities, and both warning policies. It uses only the Python standard library and the existing binary:
+The last command exits 1 because of its advisory warning. No query is withheld for it. For all cases, the following focused offline check verifies exact renderer output, ready/accepted status, diagnostic codes/severities, and both warning policies. It uses only the Python standard library and the existing binary:
 
 ```sh
 python3 - <<'PY'
@@ -27,18 +27,18 @@ import json, pathlib, subprocess
 folder = pathlib.Path('examples/query-reference')
 expected = {
     'aggregation-rate': [('CQL_GROUPBY_LIMIT', 'info'),
-                         ('CQL_TARGET_REQUIREMENT', 'warning')],
+                         ('CQL_TARGET_REQUIREMENT', 'info')],
     'array-map': [('CQL_ARRAY_OUTPUT_REUSE', 'warning'),
-                  ('CQL_TARGET_REQUIREMENT', 'warning')],
-    'mixed-join': [('CQL_JOIN_COST', 'warning')],
-    'mixed-table': [('CQL_LOOKUP_COMPLETENESS', 'warning'),
-                    ('CQL_TARGET_REQUIREMENT', 'warning'),
-                    ('CQL_TARGET_REQUIREMENT', 'warning')],
-    'temporal-bucket': [('CQL_TIME_BUCKET_LIMIT', 'warning'),
-                        ('CQL_TARGET_REQUIREMENT', 'warning')],
+                  ('CQL_TARGET_REQUIREMENT', 'info')],
+    'mixed-join': [('CQL_JOIN_COST', 'info')],
+    'mixed-table': [('CQL_LOOKUP_COMPLETENESS', 'info'),
+                    ('CQL_TARGET_REQUIREMENT', 'info'),
+                    ('CQL_TARGET_REQUIREMENT', 'info')],
+    'temporal-bucket': [('CQL_TIME_BUCKET_LIMIT', 'info'),
+                        ('CQL_TARGET_REQUIREMENT', 'info')],
     'temporal-correlation': [('CQL_TIME_WINDOW_RUNTIME', 'warning'),
-                             ('CQL_CORRELATION_CAPABILITY', 'warning'),
-                             ('CQL_TARGET_REQUIREMENT', 'warning')],
+                             ('CQL_CORRELATION_CAPABILITY', 'info'),
+                             ('CQL_TARGET_REQUIREMENT', 'info')],
 }
 for name, diagnostics in expected.items():
     canonical = (folder / (name + '.cql')).read_text().rstrip('\n')
@@ -79,7 +79,7 @@ Both are ready with exit 0; classification is an ordered case with explicit fall
 cqlmatic generate --jsonl < examples/query-reference/recipes.jsonl
 ```
 
-Each ID is `recipe-` followed by the recipe name. Grouped recipes and exact distinct retain informational grouping ceilings; join-pivot and sequence add their join/correlation warnings. `--fail-on-warning` therefore makes the stream exit 1 while retaining ready result rows. The requests are synthetic, with no pack or deployment observations. See [recipe parameters and lowering](../../docs/QUERY-REFERENCE.md#all-nine-recipes).
+Each ID is `recipe-` followed by the recipe name. Grouped recipes and exact distinct retain informational grouping ceilings; join-pivot and sequence add informational join and correlation notes. With no saved inventory, no recipe carries a warning, so `--fail-on-warning` also leaves the stream at exit 0; a saved inventory adds its own warnings about these invented sources. The requests are synthetic, with no pack or deployment observations. See [recipe parameters and lowering](../../docs/QUERY-REFERENCE.md#all-nine-recipes).
 
 ## Negative boundaries
 
@@ -98,4 +98,4 @@ Expected outcomes respectively: needs-context (`CQL_INTENT_UNRESOLVED`), needs-c
 
 `cqlmatic check 'sort(user,limit=max)' --json` returns ready under the default warning policy. The `max` alias uses the target's `StateRowLimit`; it does not mean unlimited results. Saved-result assessment reports the effective ceiling as unverified when the target value is unknown.
 
-Inspect warnings before adapting examples. In particular, all grouping limits remain finite in practice; arrays can have gaps/stale indices; joins/lookups can retain nullable outputs; declared tables cannot coexist with join/selfJoinFilter; temporal windows/order/capability depend on the selected execution target. The bucket example's neighbor follows the resulting sorted rows and is not an implicit per-host previous-bucket calculation.
+Inspect the diagnostics, informational notes included, before adapting examples. In particular, all grouping limits remain finite in practice; arrays can have gaps/stale indices; joins/lookups can retain nullable outputs; declared tables cannot coexist with join/selfJoinFilter; temporal windows/order/capability depend on the selected execution target. The bucket example's neighbor follows the resulting sorted rows and is not an implicit per-host previous-bucket calculation.

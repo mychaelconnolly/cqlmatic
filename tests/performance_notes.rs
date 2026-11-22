@@ -171,13 +171,13 @@ fn case_insensitive_wildcards_and_unfielded_regexes_are_noted() {
         assert!(notes(query).is_empty(), "{query}");
     }
     assert!(notes(r#"#repo=example | "powershell""#).is_empty());
-    // Without an earlier narrowing filter the scan warning speaks instead.
+    // Without an earlier narrowing filter the scan note speaks instead.
     let unnarrowed = check("/powershell/i");
     assert!(
         unnarrowed
             .diagnostics
             .iter()
-            .any(|d| d.code == "CQL_RAW_SCAN_COST" && d.severity == Severity::Warning)
+            .any(|d| d.code == "CQL_RAW_SCAN_COST" && d.severity == Severity::Info)
     );
     assert!(
         unnarrowed

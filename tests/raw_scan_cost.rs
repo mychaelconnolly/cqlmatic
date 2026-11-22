@@ -6,7 +6,7 @@ use cqlmatic::{
 use serde_json::json;
 use std::process::Command;
 
-fn raw_scan_warnings(query: &str) -> usize {
+fn raw_scan_notes(query: &str) -> usize {
     let pipeline = parser::parse(query).unwrap();
     let report = validate::validate(&pipeline, query);
     assert_eq!(
@@ -23,7 +23,7 @@ fn raw_scan_warnings(query: &str) -> usize {
 }
 
 #[test]
-fn raw_regex_and_wildcard_forms_warn_without_changing_acceptance() {
+fn raw_regex_and_wildcard_forms_are_noted_without_changing_acceptance() {
     for query in [
         "/needle/",
         "@rawstring=/needle/",
@@ -38,7 +38,7 @@ fn raw_regex_and_wildcard_forms_warn_without_changing_acceptance() {
         "x:=if(regex(\"needle\"),then=true,else=false)",
         "@rawstring match { /needle/ => x:=1; * => x:=2 }",
     ] {
-        assert_eq!(raw_scan_warnings(query), 1, "{query}");
+        assert_eq!(raw_scan_notes(query), 1, "{query}");
         let result = app::check(
             CheckRequest {
                 schema_version: 1,
@@ -58,7 +58,7 @@ fn raw_regex_and_wildcard_forms_warn_without_changing_acceptance() {
             result
                 .diagnostics
                 .iter()
-                .any(|d| d.code == "CQL_RAW_SCAN_COST" && d.severity == Severity::Warning)
+                .any(|d| d.code == "CQL_RAW_SCAN_COST" && d.severity == Severity::Info)
         );
     }
 }
@@ -79,7 +79,7 @@ fn only_guaranteed_prior_narrowing_suppresses_the_advisory() {
         "#repo=example | objectArray:exists(\"items[]\",var=x,condition={regex(\"needle\")})",
         "#repo=example | array:eval(\"items[]\",asArray=\"out[]\",var=x,function={out:=if(regex(\"needle\"),then=true,else=false)})",
     ] {
-        assert_eq!(raw_scan_warnings(query), 0, "{query}");
+        assert_eq!(raw_scan_notes(query), 0, "{query}");
     }
     for query in [
         "regex(\"needle\") | #repo=example",
@@ -94,7 +94,7 @@ fn only_guaranteed_prior_narrowing_suppresses_the_advisory() {
         "#repo=example | join(query={regex(\"needle\")},field=id,include=[value],max=1)",
         "join(query={#repo=example},field=id,include=[value],max=1) | regex(\"needle\")",
     ] {
-        assert_eq!(raw_scan_warnings(query), 1, "{query}");
+        assert_eq!(raw_scan_notes(query), 1, "{query}");
     }
 }
 
@@ -123,7 +123,7 @@ fn typed_generation_uses_the_same_advisory_and_keeps_the_query() {
 }
 
 #[test]
-fn fail_on_warning_changes_exit_status_without_rewriting_or_rejecting_query() {
+fn fail_on_warning_does_not_fail_the_scan_note() {
     for fail_on_warning in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
         command.args(["check", "regex(\"needle\")", "--json"]);
@@ -131,7 +131,7 @@ fn fail_on_warning_changes_exit_status_without_rewriting_or_rejecting_query() {
             command.arg("--fail-on-warning");
         }
         let output = command.output().unwrap();
-        assert_eq!(output.status.code(), Some(i32::from(fail_on_warning)));
+        assert_eq!(output.status.code(), Some(0));
         let result: cqlmatic::contracts::Analysis = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result.outcome, Outcome::Ready);
         assert!(

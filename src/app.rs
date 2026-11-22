@@ -168,16 +168,19 @@ fn target_requirements(
         qualified: BTreeMap<CaseId, Option<capability::QualifiedCapability>>,
         diagnostics: BTreeMap<String, Diagnostic>,
     }
-    fn observed(message: String) -> Diagnostic {
-        let mut diagnostic = Diagnostic::warning("CQL_TARGET_OBSERVED", message);
+    fn note(code: &str, message: String) -> Diagnostic {
+        let mut diagnostic = Diagnostic::warning(code, message);
         diagnostic.severity = Severity::Info;
         diagnostic
+    }
+    fn observed(message: String) -> Diagnostic {
+        note("CQL_TARGET_OBSERVED", message)
     }
     impl Notices<'_> {
         fn notice(&mut self, key: String, diagnostic: Diagnostic) {
             // One observed form cannot waive an unqualified sibling's prerequisite.
             if self.diagnostics.get(&key).is_none_or(|previous| {
-                previous.severity == Severity::Info && diagnostic.severity == Severity::Warning
+                previous.code == "CQL_TARGET_OBSERVED" && diagnostic.code != "CQL_TARGET_OBSERVED"
             }) {
                 self.diagnostics.insert(key, diagnostic);
             }
@@ -233,7 +236,7 @@ fn target_requirements(
                     } else {
                         "Run the optional capability check for this form or verify the prerequisite."
                     };
-                    Diagnostic::warning(
+                    note(
                         "CQL_TARGET_REQUIREMENT",
                         format!(
                             "{} requires this prerequisite: {} Availability has not been confirmed for the selected target. {remediation}",
@@ -281,7 +284,7 @@ fn target_requirements(
                                 spec.name, qualified.observed_at, qualified.expires_at
                             ))
                         } else {
-                            Diagnostic::warning(
+                            note(
                                 "CQL_TARGET_REQUIREMENT",
                                 format!(
                                     "{} requires target support documented from version {value}. Availability has not been confirmed for the selected target.",
@@ -301,7 +304,7 @@ fn target_requirements(
                             ),
                         )
                     } else {
-                        Diagnostic::warning(
+                        note(
                             "CQL_TARGET_REQUIREMENT",
                             format!(
                                 "{} requires {value}; verify the existing resource and access on the selected target.",
