@@ -84,6 +84,12 @@ fn notes_about_how_a_function_behaves_are_informational() {
 
 #[test]
 fn fail_on_warning_ignores_notes_and_still_fails_on_a_warning() {
+    // A saved inventory adds its own warnings about these invented fields.
+    let data = std::env::temp_dir().join(format!(
+        "cqlmatic-informational-notes-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&data).unwrap();
     for (query, flag, expected) in [
         ("kind=a | join({kind=b}, field=k, key=k)", true, 0),
         (
@@ -98,7 +104,10 @@ fn fail_on_warning_ignores_notes_and_still_fails_on_a_warning() {
         ),
     ] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
-        command.args(["check", query, "--json"]);
+        command
+            .env("LOCALAPPDATA", &data)
+            .env("XDG_DATA_HOME", &data)
+            .args(["check", query, "--json"]);
         if flag {
             command.arg("--fail-on-warning");
         }
@@ -112,4 +121,5 @@ fn fail_on_warning_ignores_notes_and_still_fails_on_a_warning() {
             result.diagnostics
         );
     }
+    std::fs::remove_dir_all(&data).unwrap();
 }

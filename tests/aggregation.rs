@@ -129,10 +129,19 @@ fn max_row_limits_are_supported_for_ordered_row_selectors() {
 
 #[test]
 fn group_by_limit_is_informational_for_every_limit() {
-    for query in [
-        "groupBy([user], function=count(), limit=max)",
-        "groupBy([user], function=count())",
-        "groupBy([user], function=count(), limit=100)",
+    for (query, message) in [
+        (
+            "groupBy([user], function=count(), limit=max)",
+            "limit=max still has group and memory ceilings",
+        ),
+        (
+            "groupBy([user], function=count())",
+            "groupBy can discard groups",
+        ),
+        (
+            "groupBy([user], function=count(), limit=100)",
+            "groupBy can discard groups",
+        ),
     ] {
         let result = check(query, false);
         assert_eq!(
@@ -147,6 +156,11 @@ fn group_by_limit_is_informational_for_every_limit() {
             .find(|d| d.code == "CQL_GROUPBY_LIMIT")
             .unwrap_or_else(|| panic!("{query}: missing CQL_GROUPBY_LIMIT"));
         assert_eq!(diagnostic.severity, Severity::Info, "{query}");
+        assert!(
+            diagnostic.message.starts_with(message),
+            "{query}: {}",
+            diagnostic.message
+        );
         assert_eq!(result.exit_code(true), 0, "{query}");
     }
 }

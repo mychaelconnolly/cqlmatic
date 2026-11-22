@@ -2,7 +2,7 @@
 
 Run from the repository root with a built `cqlmatic` on PATH. These contain invented repository/field names and no environment pack. They verify generation and offline checking; they execute no query and establish no deployment observations. See the [full reference](../../docs/QUERY-REFERENCE.md) for contracts and [coverage](../../docs/COVERAGE.md) for assurance boundaries.
 
-Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file is the actual canonical renderer output. Default generation and checking return `outcome: ready`, `validation.status: accepted`, `validation.execution: not-run`, and exit **0** for every row below. Without a pack these rows carry no grounding warning; `grounding.basis` records the evidence for each field. The array-map and temporal-correlation rows each carry a warning, so those two exit **1** with `--fail-on-warning`; the other four carry informational diagnostics only and exit **0**.
+Each request is a complete schema-v1 `GenerateRequest`. Its matching `.cql` file is the actual canonical renderer output. Default generation and checking return `outcome: ready`, `validation.status: accepted`, `validation.execution: not-run`, and exit **0** for every row below. With no pack and no saved inventory these rows carry no grounding warning; `grounding.basis` records the evidence for each field. The array-map and temporal-correlation rows each carry a warning, so those two exit **1** with `--fail-on-warning`; the other four carry informational diagnostics only and exit **0**.
 
 | Request / rendered query | Purpose | Expected diagnostics |
 | --- | --- | --- |
@@ -79,7 +79,7 @@ Both are ready with exit 0; classification is an ordered case with explicit fall
 cqlmatic generate --jsonl < examples/query-reference/recipes.jsonl
 ```
 
-Each ID is `recipe-` followed by the recipe name. Grouped recipes and exact distinct retain informational grouping ceilings; join-pivot and sequence add informational join and correlation notes. No recipe carries a warning, so `--fail-on-warning` also leaves the stream at exit 0. The requests are synthetic, with no pack or deployment observations. See [recipe parameters and lowering](../../docs/QUERY-REFERENCE.md#all-nine-recipes).
+Each ID is `recipe-` followed by the recipe name. Grouped recipes and exact distinct retain informational grouping ceilings; join-pivot and sequence add informational join and correlation notes. With no saved inventory, no recipe carries a warning, so `--fail-on-warning` also leaves the stream at exit 0; a saved inventory adds its own warnings about these invented sources. The requests are synthetic, with no pack or deployment observations. See [recipe parameters and lowering](../../docs/QUERY-REFERENCE.md#all-nine-recipes).
 
 ## Negative boundaries
 
@@ -98,4 +98,4 @@ Expected outcomes respectively: needs-context (`CQL_INTENT_UNRESOLVED`), needs-c
 
 `cqlmatic check 'sort(user,limit=max)' --json` returns ready under the default warning policy. The `max` alias uses the target's `StateRowLimit`; it does not mean unlimited results. Saved-result assessment reports the effective ceiling as unverified when the target value is unknown.
 
-Inspect warnings before adapting examples. In particular, all grouping limits remain finite in practice; arrays can have gaps/stale indices; joins/lookups can retain nullable outputs; declared tables cannot coexist with join/selfJoinFilter; temporal windows/order/capability depend on the selected execution target. The bucket example's neighbor follows the resulting sorted rows and is not an implicit per-host previous-bucket calculation.
+Inspect the diagnostics, informational notes included, before adapting examples. In particular, all grouping limits remain finite in practice; arrays can have gaps/stale indices; joins/lookups can retain nullable outputs; declared tables cannot coexist with join/selfJoinFilter; temporal windows/order/capability depend on the selected execution target. The bucket example's neighbor follows the resulting sorted rows and is not an implicit per-host previous-bucket calculation.

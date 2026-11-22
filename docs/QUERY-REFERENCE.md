@@ -139,7 +139,7 @@ Accepted starts, with aliases and lowering:
 | `list [latest\|earliest] events` | Alias of show |
 | `count events [by FIELD[, FIELD...]]` | Global count or grouped count |
 | `count distinct FIELD exactly` | Explicit exact standalone distinct count |
-| `count distinct FIELD approximately` | Estimated count and warning |
+| `count distinct FIELD approximately` | Estimated count and informational `CQL_APPROXIMATE_DISTINCT` |
 | `top N FIELD[, FIELD...]` | Grouped count followed by descending numeric sort with limit N |
 
 `latest`/`earliest` choose tail/head; they do not add sorting or prove timestamp ordering. `N` and `limit` must parse as positive `u32`. After the start, clauses are read in their written order, with the constraints below; they are not a natural-language reorderer:
