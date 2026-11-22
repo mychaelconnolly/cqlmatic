@@ -1055,30 +1055,30 @@ fn prerequisite_advice_keeps_the_selected_view_when_capability_evidence_is_unava
                 if observed {
                     continue;
                 }
-                let warning = checked
+                let advice = checked
                     .diagnostics
                     .iter()
                     .find(|d| {
                         d.code == "CQL_TARGET_REQUIREMENT" && d.message.contains("ArrayFunctions")
                     })
                     .unwrap();
-                assert_eq!(warning.severity, cqlmatic::contracts::Severity::Warning);
+                assert_eq!(advice.severity, cqlmatic::contracts::Severity::Info);
                 assert_eq!(
-                    warning
+                    advice
                         .message
                         .contains("Run the optional capability check for this form"),
                     view == selected.view,
-                    "{evidence_state}/{target_argument}={view}: {warning:?}"
+                    "{evidence_state}/{target_argument}={view}: {advice:?}"
                 );
                 assert_eq!(
-                    warning
+                    advice
                         .message
                         .contains("capability evidence from a matching selected target"),
                     view != selected.view,
-                    "{evidence_state}/{target_argument}={view}: {warning:?}"
+                    "{evidence_state}/{target_argument}={view}: {advice:?}"
                 );
                 assert!(
-                    !warning
+                    !advice
                         .message
                         .contains("no automated capability case covers this form")
                 );
@@ -1108,24 +1108,24 @@ fn prerequisite_advice_offers_automated_checks_only_for_covered_call_forms() {
             None,
         );
         assert_eq!(checked.outcome, Outcome::Ready, "{:?}", checked.diagnostics);
-        let warning = checked
+        let advice = checked
             .diagnostics
             .iter()
             .find(|d| d.code == "CQL_TARGET_REQUIREMENT")
             .unwrap();
         assert_eq!(
-            warning
+            advice
                 .message
                 .contains("Run the optional capability check for this form"),
             covered
         );
         assert_eq!(
-            warning
+            advice
                 .message
                 .contains("no automated capability case covers this form"),
             !covered
         );
-        assert_eq!(warning.severity, cqlmatic::contracts::Severity::Warning);
+        assert_eq!(advice.severity, cqlmatic::contracts::Severity::Info);
     }
 }
 

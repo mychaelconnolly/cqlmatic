@@ -2574,7 +2574,7 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
             assert_eq!(
                 note(dir.ask(client, gateway, "third-party", INVALID)),
                 format!(
-                    "{REJECT_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'.\n- CQL_JOIN_COST at line 1, column 19: join scans both sides and caps subquery rows and matches. Verify the requested cardinality and completion."
+                    "{REJECT_HEADING}\n- CQL_ARGUMENT_REQUIRED at line 1, column 19: 'join' requires argument 'field'."
                 )
             );
             assert_eq!(
@@ -2582,16 +2582,22 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
                     client,
                     gateway,
                     "third-party",
-                    "#type=synthetic | groupBy([alpha_field])"
+                    "#type=synthetic | groupBy([alpha_field], limit=max) | sort(_count) | head(3)"
                 )),
                 format!(
-                    "{NOTE_HEADING}\n- CQL_GROUPBY_LIMIT at line 1, column 19: groupBy can discard groups before a later sort or row cap. Consider limit=max and verify execution completeness."
+                    "{NOTE_HEADING}\n- CQL_SORT_HEAD at line 1, column 70: head after sort can select a different set of rows from the first N in the sorted order. Use sort(..., limit=N) to select the first N rows in that order."
                 )
             );
-            assert_eq!(
-                dir.ask(client, gateway, "third-party", "#type=synthetic | head(5)"),
-                None
-            );
+            for informational_only in [
+                "#type=synthetic | head(5)",
+                "#type=synthetic | groupBy([alpha_field])",
+            ] {
+                assert_eq!(
+                    dir.ask(client, gateway, "third-party", informational_only),
+                    None,
+                    "{informational_only}"
+                );
+            }
         }
     }
     assert!(!dir.0.join("workflow").exists());
@@ -2653,7 +2659,11 @@ fn guard_never_blocks_and_lists_errors_first() {
         ("#type=synthetic | time:dayOfWeek()", None),
         (
             "#type=synthetic | default(field=[\"#event.dataset\", alpha_field, beta_field], value=\"<missing>\") | groupBy([alpha_field, beta_field])",
-            Some("CQL_GROUPBY_LIMIT"),
+            None,
+        ),
+        (
+            "#type=synthetic | groupBy([alpha_field], limit=max) | sort(_count) | head(3)",
+            Some("CQL_SORT_HEAD"),
         ),
     ] {
         let answer = dir.ask("claude-code", false, "third-party", query);
@@ -2831,9 +2841,9 @@ fn guard_answers_in_ascii_within_the_client_limits() {
     assert!(lines[1].starts_with("- CQL_ARGUMENT_RANGE "), "{context}");
     let shown = lines.len() - 2;
     assert!(
-        lines[2..=shown].iter().all(|line| {
-            line.starts_with("- CQL_GROUPBY_LIMIT ") || line.starts_with("- CQL_DROPPED_FIELD ")
-        }),
+        lines[2..=shown]
+            .iter()
+            .all(|line| line.starts_with("- CQL_DROPPED_FIELD ")),
         "{context}"
     );
     let left_out = lines[shown + 1]

@@ -331,12 +331,11 @@ impl Checker<'_> {
         self.emit(code, message, call, true);
         self.diagnostics.last_mut().expect("just emitted").severity = Severity::Info;
     }
-    fn raw_scan_warning(&mut self, call: Option<&Call>) {
-        self.emit(
+    fn raw_scan_note(&mut self, call: Option<&Call>) {
+        self.info(
             "CQL_RAW_SCAN_COST",
             "Regex or wildcard scans raw event text without a guaranteed preceding source/tag or field filter. Narrow earlier when possible and review execution cost; the query is unchanged.",
             call,
-            true,
         );
     }
     fn free_text(&mut self, call: Option<&Call>) {
@@ -739,7 +738,7 @@ impl Checker<'_> {
                         && field == "@rawstring"
                         && arms.iter().any(|(pattern, _)| costly_raw_pattern(pattern))
                     {
-                        self.raw_scan_warning(None);
+                        self.raw_scan_note(None);
                     }
                     for (pattern, _) in arms {
                         self.pattern(pattern);
@@ -925,13 +924,12 @@ impl Checker<'_> {
                             }
                         }
                         "join" => {
-                            self.emit("CQL_JOIN_COST","join scans both sides and caps subquery rows and matches. Verify the requested cardinality and completion.",Some(c),true);
+                            self.info("CQL_JOIN_COST","join scans both sides and caps subquery rows and matches. Verify the requested cardinality and completion.",Some(c));
                             if aggregated {
-                                self.emit(
+                                self.info(
                                     "CQL_JOIN_AFTER_AGGREGATE",
                                     "Check that join keys survived the preceding aggregation.",
                                     Some(c),
-                                    true,
                                 );
                             }
                             if let Some(field) = joined_comparison(&args, &p.steps[index + 1..]) {
@@ -1253,7 +1251,7 @@ impl Checker<'_> {
                 _ => false,
             }
         {
-            self.raw_scan_warning(None);
+            self.raw_scan_note(None);
         }
         match f {
             Filter::Compare { field, op, value } => {
@@ -1793,7 +1791,7 @@ impl Checker<'_> {
             && matches!(spec.name, "regex" | "wildcard")
             && raw_scan_field(spec.name, &args)
         {
-            self.raw_scan_warning(Some(c));
+            self.raw_scan_note(Some(c));
         }
         let mut query_projection = None;
         if matches!(spec.name, "defineTable" | "remoteTable") {
@@ -1893,7 +1891,7 @@ impl Checker<'_> {
                     false,
                 );
             }
-            self.emit("CQL_LOOKUP_COMPLETENESS", "Verify lookup/table availability, matching mode, row caps and duplicate cardinality; omitted include imports all non-key columns.", Some(c), true);
+            self.info("CQL_LOOKUP_COMPLETENESS", "Verify lookup/table availability, matching mode, row caps and duplicate cardinality; omitted include imports all non-key columns.", Some(c));
         }
         if let Some((outputs, members)) = spec.named_outputs(&known_args) {
             for output in outputs {
@@ -2002,7 +2000,7 @@ impl Checker<'_> {
                     true,
                 );
             }
-            self.emit("CQL_TIME_BUCKET_LIMIT", "Bucket boundaries depend on the query window and timezone; trailing data can add a bucket. Series and memory caps can discard groups. Inspect complete execution results.", Some(c), true);
+            self.info("CQL_TIME_BUCKET_LIMIT", "Bucket boundaries depend on the query window and timezone; trailing data can add a bucket. Series and memory caps can discard groups. Inspect complete execution results.", Some(c));
         }
         if spec.name == "findTimestamp" {
             self.emit("CQL_TIMESTAMP_DETECTION", "Timestamp detection is bounded and nullable; missing date/year can use the current date/year and timezone/DST can change interpretation. Use fully dated fixtures and verify the resulting epoch value.", Some(c), true);
@@ -2082,7 +2080,7 @@ impl Checker<'_> {
                     false,
                 );
             }
-            self.emit("CQL_APPROXIMATE_DISTINCT", "count(distinct=true) estimates cardinality. Use explicit exact grouping when exactness is required, and check execution caps.", Some(c), true);
+            self.info("CQL_APPROXIMATE_DISTINCT", "count(distinct=true) estimates cardinality. Use explicit exact grouping when exactness is required, and check execution caps.", Some(c));
         }
         if spec.name == "groupBy" {
             let empty = matches!(args.get("field"),Some(Value::Array(xs)) if xs.is_empty());
@@ -2096,7 +2094,7 @@ impl Checker<'_> {
             } else if args.get("limit").and_then(|v| v.text()) == Some("max") {
                 self.info("CQL_GROUPBY_LIMIT", "limit=max still has group and memory ceilings; check the executed result for a cap hit and verify completeness.", Some(c));
             } else {
-                self.emit("CQL_GROUPBY_LIMIT", "groupBy can discard groups before a later sort or row cap. Consider limit=max and verify execution completeness.", Some(c), true);
+                self.info("CQL_GROUPBY_LIMIT", "groupBy can discard groups before a later sort or row cap. Consider limit=max and verify execution completeness.", Some(c));
             }
         }
         if spec.name == "formatTime"
@@ -2116,9 +2114,9 @@ impl Checker<'_> {
         }
         match spec.name {
             "select" if args.get("fields").is_some_and(|v|catalog::fields(v).iter().any(|field|field.ends_with("[]"))) => self.emit("CQL_ARRAY_PROJECTION_LITERAL", "The profile requires explicit indexed projection fields; a trailing [] does not establish whole-array selection.", Some(c), true),
-            "split" => self.emit("CQL_SPLIT_SHAPE", "split defaults to _events, expands indexed fields, adds _index and can rewrite @id. Verify strip/prefix mappings and memory growth; unresolved member shapes are not deployment evidence.", Some(c), true),
+            "split" => self.info("CQL_SPLIT_SHAPE", "split defaults to _events, expands indexed fields, adds _index and can rewrite @id. Verify strip/prefix mappings and memory growth; unresolved member shapes are not deployment evidence.", Some(c)),
             "top" => self.emit("CQL_APPROXIMATE_TOP", "top uses an approximate sketch; verify precision, caps and completeness. It is not an exact-ranking substitute.", Some(c), true),
-            "collect" => self.emit("CQL_COLLECT_LIMIT", "collect has distinct-value and memory caps, undefined value order, and can return partial results; inspect execution warnings.", Some(c), true),
+            "collect" => self.info("CQL_COLLECT_LIMIT", "collect has distinct-value and memory caps, undefined value order, and can return partial results; inspect execution warnings.", Some(c)),
             "selectFromMax" | "selectFromMin" => self.emit("CQL_SELECTOR_TIES", "Ties select an unspecified event; output contains only include fields.", Some(c), true),
             "selectLast" => self.emit("CQL_LAST_EVENT_ORDER", "Last-seen values depend on event time and ties; verify the required ordering on the selected target.", Some(c), true),
             _ => {}
@@ -2962,7 +2960,7 @@ impl Checker<'_> {
         {
             self.emit("CQL_CORRELATION_UNLINKED","No equality links were supplied; review the intended Cartesian constellation pattern.",Some(call),true);
         }
-        self.emit("CQL_CORRELATION_CAPABILITY","Correlation needs target capability, actual source timestamps and representative execution. Local acceptance does not establish temporal row behavior.",Some(call),true);
+        self.info("CQL_CORRELATION_CAPABILITY","Correlation needs target capability, actual source timestamps and representative execution. Local acceptance does not establish temporal row behavior.",Some(call));
     }
 
     fn filter_query(&mut self, pipeline: &Pipeline, call: &Call, tables: &BTreeSet<String>) {
