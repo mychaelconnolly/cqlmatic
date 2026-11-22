@@ -434,8 +434,10 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
     let mut pending = 0;
     let mut completed_probes = BTreeSet::new();
     let mut last_dispatch = environment::parse_time(&state.created_at)?;
-    let historical_ended_attempts = matches!(state.producer_version.as_str(), "0.1.8" | "0.1.9")
-        && state.producer_version != producer;
+    let historical_ended_attempts = matches!(
+        state.producer_version.as_str(),
+        "0.1.8" | "0.1.9" | "0.1.10"
+    ) && state.producer_version != producer;
     for (index, attempt) in session.attempts.iter().enumerate() {
         let id = discovery::probe_id(&state.request.environment.view, &attempt.probe);
         if !matches!(
