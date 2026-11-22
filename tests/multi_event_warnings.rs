@@ -31,19 +31,27 @@ fn ready(query: &str) -> Analysis {
     result
 }
 
-fn messages<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
+fn messages_with_severity<'a>(
+    result: &'a Analysis,
+    code: &str,
+    severity: Severity,
+) -> Vec<&'a str> {
     result
         .diagnostics
         .iter()
         .filter(|d| d.code == code)
-        .inspect(|d| assert_eq!(d.severity, Severity::Warning, "{d:?}"))
+        .inspect(|d| assert_eq!(d.severity, severity, "{d:?}"))
         .map(|d| d.message.as_str())
         .collect()
 }
 
+fn messages<'a>(result: &'a Analysis, code: &str) -> Vec<&'a str> {
+    messages_with_severity(result, code, Severity::Warning)
+}
+
 fn join_warning(compared: &str) -> String {
     format!(
-        "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} may test only one of several matches."
+        "join keeps one matching subquery row per key unless max is set, so the later comparison of {compared} may test only one of several matches. Set max=<N> on join(...) to retain multiple matches per key, or, when one summary value per key suffices, aggregate the join subquery to one row per key with groupBy(...)."
     )
 }
 
@@ -181,25 +189,25 @@ fn correlate_names_a_field_it_does_not_export_and_its_query() {
     let cases = [
         (
             format!("{SEQUENCE} | groupBy([first.host], limit=max)"),
-            "first.host is not exported by correlate query first.",
+            "first.host is not exported by correlate query first. Add missing fields to first's include: [...] clause after the closing brace (for example, first: { ... } include: [host]), or keep them in first's pipeline.",
         ),
         (
             format!("{SEQUENCE} | groupBy([host, user], limit=max)"),
-            "host, user are not exported by correlate, which names the fields of each query QUERY.FIELD.",
+            "host, user are not exported by correlate, which names the fields of each query QUERY.FIELD. Prefix each field with the query label (QUERY.FIELD) and, for a mandatory query, list non-metadata fields in its include: [...] clause after the closing brace.",
         ),
         (
             // The aggregation query's columns are unknown, but an unprefixed name is still not one.
             "correlate(query=first: { kind=a }, aggregation=[later: { kind=b | user <=> first.user | head(1) }], within=5m, root=\"first\") | groupBy([host], limit=max)".into(),
-            "host is not exported by correlate, which names the fields of each query QUERY.FIELD.",
+            "host is not exported by correlate, which names the fields of each query QUERY.FIELD. Prefix it with the query label (QUERY.FIELD) and, for a mandatory query, list non-metadata fields in its include: [...] clause after the closing brace.",
         ),
         (
             // Sequence order reads @timestamp from each query.
             "correlate(first: { kind=a | select([user]) } include: [user], second: { kind=b | user <=> first.user }, sequence=true, within=5m) | groupBy([first.user], limit=max)".into(),
-            "@timestamp is not exported by correlate query first.",
+            "@timestamp is not exported by correlate query first. Keep or compute it inside first's pipeline.",
         ),
         (
             "correlate(first: { kind=a | select([user, @timestamp]) } include: [user], second: { kind=b | user <=> first.account }, sequence=true, within=5m) | groupBy([first.user], limit=max)".into(),
-            "account is not exported by correlate query first.",
+            "account is not exported by correlate query first. Keep or compute it inside first's pipeline.",
         ),
     ];
     for (query, message) in cases {
@@ -216,14 +224,14 @@ fn a_read_both_warnings_describe_gets_both() {
     for (query, unexported, dropped) in [
         (
             format!("{SEQUENCE} | groupBy([first.host], limit=max)"),
-            "first.host is not exported by correlate query first.",
-            "'first.host' is not among the known projected/aggregate outputs.",
+            "first.host is not exported by correlate query first. Add missing fields to first's include: [...] clause after the closing brace (for example, first: { ... } include: [host]), or keep them in first's pipeline.",
+            "'first.host' is not among the known correlate outputs. Export it as QUERY.FIELD from the correlate query (or keep it in that query's pipeline), or recompute it before reading it.",
         ),
         (
             // A removes user and reads it; B, separately, does not export it.
             "correlate(A: { select([other, @timestamp]) | user=* }, B: { select(@timestamp) | user <=> A.other })".into(),
-            "user is not exported by correlate query B.",
-            "'user' is not among the known projected/aggregate outputs.",
+            "user is not exported by correlate query B. Keep or compute it inside B's pipeline.",
+            "'user' is not among the known projected/aggregate outputs. Keep it in the earlier select([...]), groupBy([...]), or bucket(field=[...]) stage, or recompute it before reading it.",
         ),
     ] {
         let result = ready(&query);
@@ -241,19 +249,19 @@ fn correlate_names_a_field_its_query_removed_before_correlate_reads_it() {
     for (query, message) in [
         (
             "correlate(first: { kind=a }, second: { kind=b | select([@timestamp]) | user <=> first.user }, within=5m)",
-            "user is not exported by correlate query second.",
+            "user is not exported by correlate query second. Keep or compute it inside second's pipeline.",
         ),
         (
             "correlate(query=first: { kind=a }, aggregation=[later: { kind=b | select([user]) | user <=> first.user | count() }], within=5m, root=\"first\")",
-            "@timestamp is not exported by correlate query later.",
+            "@timestamp is not exported by correlate query later. Keep or compute it inside later's pipeline.",
         ),
         (
             "correlate(first: { kind=a | drop([host]) } include: *, second: { kind=b | user <=> first.user }, within=5m) | first.host = *",
-            "first.host is not exported by correlate query first.",
+            "first.host is not exported by correlate query first. Keep or compute it inside first's pipeline.",
         ),
         (
             "correlate(first: { kind=a | rename(host, as=hostname) } include: *, second: { kind=b | user <=> first.user }, within=5m) | first.host = *",
-            "first.host is not exported by correlate query first.",
+            "first.host is not exported by correlate query first. Keep or compute it inside first's pipeline.",
         ),
     ] {
         assert_eq!(
@@ -295,7 +303,9 @@ fn generate_reports_a_field_correlate_does_not_export() {
     );
     assert_eq!(
         messages(&linked, "CQL_UNEXPORTED_FIELD"),
-        ["user is not exported by correlate query second."]
+        [
+            "user is not exported by correlate query second. Keep or compute it inside second's pipeline."
+        ]
     );
     let read = generate(serde_json::json!({"source": {}, "steps": [
         {"op": "call", "function": "correlate", "args": [{"value": {"kind": "named-query", "name": "first",
@@ -305,11 +315,15 @@ fn generate_reports_a_field_correlate_does_not_export() {
     ]}));
     assert_eq!(
         messages(&read, "CQL_UNEXPORTED_FIELD"),
-        ["first.host is not exported by correlate query first."]
+        [
+            "first.host is not exported by correlate query first. Add missing fields to first's include: [...] clause after the closing brace (for example, first: { ... } include: [host]), or keep them in first's pipeline."
+        ]
     );
     assert_eq!(
         messages(&read, "CQL_DROPPED_FIELD"),
-        ["'first.host' is not among the known projected/aggregate outputs."]
+        [
+            "'first.host' is not among the known correlate outputs. Export it as QUERY.FIELD from the correlate query (or keep it in that query's pipeline), or recompute it before reading it."
+        ]
     );
 }
 
@@ -317,7 +331,7 @@ fn generate_reports_a_field_correlate_does_not_export() {
 fn exported_fields_other_drops_and_strict_mode_add_no_unexported_warning() {
     for query in [
         format!("{SEQUENCE} | groupBy([first.user, second.user], limit=max)"),
-        format!("{SEQUENCE} | groupBy([first.user], function=count(@id), limit=max)"),
+        format!("{SEQUENCE} | groupBy([first.user], function=count(first.@id), limit=max)"),
         "kind=a | groupBy([user], function=count(), limit=max) | test(host > 0)".into(),
     ] {
         let result = ready(&query);
@@ -468,39 +482,44 @@ fn bucket_and_timechart_warn_when_series_limit_is_omitted() {
 #[test]
 fn match_against_unaggregated_define_table_warns_before_ordered_comparison() {
     let raw_table = "defineTable(name=\"events_b\", query={kind=b | seen_at := @timestamp | event_id := @id}, include=[key, seen_at, event_id]) | kind=a";
-    for (rest, compared, cap_hint) in [
+    for (rest, compared, cap_hint, expected_severity) in [
         (
             " | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=max) | delta := seen_at - @timestamp | delta >= 0 | delta <= 60000",
             "delta",
             "500",
+            Severity::Info,
         ),
         (
             " | match(file=\"events_b\", field=key, column=key, include=[seen_at], nrows=max) | test(seen_at >= @timestamp)",
             "seen_at",
             "500",
+            Severity::Info,
         ),
         (
             " | match(table=\"events_b\", field=key, column=key, nrows=max) | delta := seen_at - @timestamp | test(delta >= 0)",
             "delta",
             "500",
+            Severity::Info,
         ),
         (
             " | match(table=\"events_b\", field=key, column=key, include=[seen_at]) | test(seen_at >= @timestamp)",
             "seen_at",
             "1",
+            Severity::Warning,
         ),
         (
             " | match(table=\"events_b\", field=key, column=key, include=[seen_at], nrows=25) | seen_at > 100",
             "seen_at",
             "25",
+            Severity::Info,
         ),
     ] {
         let query = format!("{raw_table}{rest}");
         let result = ready(&query);
-        let warns = messages(&result, "CQL_MATCH_NROWS");
-        assert_eq!(warns.len(), 1, "{query}: {warns:?}");
-        assert!(warns[0].contains(compared), "{query}: {}", warns[0]);
-        assert!(warns[0].contains(cap_hint), "{query}: {}", warns[0]);
+        let diags = messages_with_severity(&result, "CQL_MATCH_NROWS", expected_severity);
+        assert_eq!(diags.len(), 1, "{query}: {diags:?}");
+        assert!(diags[0].contains(compared), "{query}: {}", diags[0]);
+        assert!(diags[0].contains(cap_hint), "{query}: {}", diags[0]);
     }
     for non_exact_grouped in [
         "defineTable(name=\"events_b\", query={kind=b | groupBy([key], function=[max(@timestamp, as=last_ts)], limit=max)}, include=[key, last_ts]) | kind=a | match(table=\"events_b\", field=key, column=key, include=[last_ts], ignoreCase=true) | last_ts > 0",
