@@ -730,7 +730,7 @@ impl Flow {
                 removed_after,
             } => {
                 let removed_post = removed_matches(removed_after, field);
-                let removed_in_branch = removed_matches(removed, field);
+                let removed_in_branch = !outputs.contains(field) && removed_matches(removed, field);
                 let missing = !removed_post && (removed_in_branch || !outputs.contains(field));
                 missing.then(|| match field.split_once('.') {
                     Some((label, sub)) if labels.contains(label) => {
@@ -1503,10 +1503,14 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             .flat_map(|(name, flow)| flow.removed.iter().map(move |f| format!("{name}.{f}")))
             .collect();
         outputs.retain(|f| {
-            !removed_matches(&removed, f)
-                && f.split_once('.').is_none_or(|(name, sub)| {
-                    contexts.get(name).is_none_or(|flow| !flow.absent(sub))
-                })
+            f.split_once('.').map_or_else(
+                || !removed_matches(&removed, f),
+                |(name, sub)| {
+                    contexts
+                        .get(name)
+                        .map_or_else(|| !removed_matches(&removed, f), |flow| !flow.absent(sub))
+                },
+            )
         });
         let mandatory_labels: BTreeSet<String> = queries
             .iter()

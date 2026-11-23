@@ -407,4 +407,85 @@ fn correlate_export_hint_edge_cases() {
             .1
             .contains("when one summary value per key suffices")
     );
+
+    // 10. Rebuilt array element after array:drop inside a correlate branch stays exported,
+    // while an unrebuilt element of the dropped array stays unavailable.
+    let rebuilt_query = r#"correlate(A: { #repo=example | splitString(user, by=",", as=answers) | array:drop("answers[]") | "answers[0]" := "x" } include: ["answers[0]"]) | "A.answers[0]" = *"#;
+    let rebuilt = check(rebuilt_query);
+    assert!(
+        diags_by_code(&rebuilt, "CQL_UNEXPORTED_FIELD").is_empty(),
+        "rebuilt array element should stay exported: {:?}",
+        rebuilt.diagnostics
+    );
+    assert!(
+        diags_by_code(&rebuilt, "CQL_DROPPED_FIELD").is_empty(),
+        "rebuilt array element should not be flagged dropped: {:?}",
+        rebuilt.diagnostics
+    );
+    let rebuilt_strict = app::check(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: rebuilt_query.into(),
+            context: Context {
+                require_observed: true,
+                ..Context::default()
+            },
+        },
+        Some(&pack),
+    );
+    assert_eq!(
+        rebuilt_strict.outcome,
+        Outcome::Ready,
+        "{:?}",
+        rebuilt_strict.grounding
+    );
+    assert_eq!(
+        rebuilt_strict
+            .grounding
+            .basis
+            .get("*:*:A.answers[0]")
+            .map(String::as_str),
+        Some("query-produced"),
+        "{:?}",
+        rebuilt_strict.grounding.basis
+    );
+
+    let unrebuilt_query = r#"correlate(A: { #repo=example | splitString(user, by=",", as=answers) | array:drop("answers[]") | "answers[0]" := "x" } include: ["answers[0]", "answers[1]"]) | "A.answers[1]" = *"#;
+    let unrebuilt = check(unrebuilt_query);
+    let unrebuilt_diags = diags_by_code(&unrebuilt, "CQL_UNEXPORTED_FIELD");
+    assert_eq!(unrebuilt_diags.len(), 1, "{:?}", unrebuilt.diagnostics);
+    assert!(
+        unrebuilt_diags[0].1.contains("inside A's pipeline"),
+        "expected pipeline guidance for unrebuilt dropped element, got: {}",
+        unrebuilt_diags[0].1
+    );
+    let unrebuilt_strict = app::check(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: unrebuilt_query.into(),
+            context: Context {
+                require_observed: true,
+                ..Context::default()
+            },
+        },
+        Some(&pack),
+    );
+    assert_eq!(
+        unrebuilt_strict.outcome,
+        Outcome::NeedsContext,
+        "{:?}",
+        unrebuilt_strict.grounding
+    );
+    assert_eq!(
+        unrebuilt_strict
+            .grounding
+            .basis
+            .get("*:*:A.answers[1]")
+            .map(String::as_str),
+        Some("not exported by preceding query"),
+        "{:?}",
+        unrebuilt_strict.grounding.basis
+    );
 }
