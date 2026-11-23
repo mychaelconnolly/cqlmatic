@@ -1,0 +1,309 @@
+{
+  "source": {},
+  "filters": [],
+  "steps": [
+    {
+      "op": "call",
+      "function": "defineTable",
+      "args": [
+        {
+          "name": "query",
+          "value": {
+            "kind": "query",
+            "plan": {
+              "source": {
+                "repo": "linux-syslog"
+              },
+              "filters": [
+                {
+                  "op": "call",
+                  "function": "in",
+                  "args": [
+                    {
+                      "name": "field",
+                      "value": {
+                        "kind": "field",
+                        "name": "process.name"
+                      }
+                    },
+                    {
+                      "name": "ignoreCase",
+                      "value": {
+                        "kind": "literal",
+                        "value": true
+                      }
+                    },
+                    {
+                      "name": "values",
+                      "value": {
+                        "kind": "array",
+                        "items": [
+                          {
+                            "kind": "literal",
+                            "value": "node"
+                          },
+                          {
+                            "kind": "literal",
+                            "value": "bun"
+                          },
+                          {
+                            "kind": "literal",
+                            "value": "envoy"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "op": "regex",
+                  "field": "message",
+                  "pattern": "SIGSEGV|coredump|Decompression failed",
+                  "flags": "i"
+                }
+              ],
+              "steps": [
+                {
+                  "op": "group",
+                  "keys": [
+                    "host.name",
+                    "process.name"
+                  ],
+                  "aggregates": [
+                    {
+                      "function": "count",
+                      "as": "crashes"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "name",
+          "value": {
+            "kind": "literal",
+            "value": "runtime_crashes"
+          }
+        },
+        {
+          "name": "include",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "host.name"
+              },
+              {
+                "kind": "literal",
+                "value": "process.name"
+              },
+              {
+                "kind": "literal",
+                "value": "crashes"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "op": "filter",
+      "predicate": {
+        "op": "eq",
+        "field": "#repo",
+        "value": "web-edge"
+      }
+    },
+    {
+      "op": "filter",
+      "predicate": {
+        "op": "eq",
+        "field": "http.request.headers.content_encoding",
+        "value": "br"
+      }
+    },
+    {
+      "op": "assign",
+      "field": "is_fault",
+      "expression": {
+        "kind": "call",
+        "function": "if",
+        "args": [
+          {
+            "name": "condition",
+            "value": {
+              "kind": "compare",
+              "left": {
+                "kind": "field",
+                "name": "http.response.status_code"
+              },
+              "operator": "ge",
+              "right": {
+                "kind": "literal",
+                "value": 500
+              }
+            }
+          },
+          {
+            "name": "then",
+            "value": {
+              "kind": "literal",
+              "value": 1
+            }
+          },
+          {
+            "name": "else",
+            "value": {
+              "kind": "literal",
+              "value": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "op": "group",
+      "keys": [
+        "host.name",
+        "source.ip",
+        "url.path"
+      ],
+      "aggregates": [
+        {
+          "function": "count",
+          "as": "br_requests"
+        },
+        {
+          "function": "sum",
+          "field": "is_fault",
+          "as": "faults"
+        },
+        {
+          "function": "max",
+          "field": "http.request.body.bytes",
+          "as": "max_bytes"
+        }
+      ]
+    },
+    {
+      "op": "call",
+      "function": "test",
+      "args": [
+        {
+          "value": {
+            "kind": "compare",
+            "left": {
+              "kind": "field",
+              "name": "faults"
+            },
+            "operator": "ge",
+            "right": {
+              "kind": "literal",
+              "value": 3
+            }
+          }
+        }
+      ]
+    },
+    {
+      "op": "assign",
+      "field": "fault_rate",
+      "expression": {
+        "kind": "binary",
+        "left": {
+          "kind": "field",
+          "name": "faults"
+        },
+        "operator": "divide",
+        "right": {
+          "kind": "field",
+          "name": "br_requests"
+        }
+      }
+    },
+    {
+      "op": "call",
+      "function": "match",
+      "args": [
+        {
+          "name": "table",
+          "value": {
+            "kind": "literal",
+            "value": "runtime_crashes"
+          }
+        },
+        {
+          "name": "field",
+          "value": {
+            "kind": "literal",
+            "value": "host.name"
+          }
+        },
+        {
+          "name": "column",
+          "value": {
+            "kind": "literal",
+            "value": "host.name"
+          }
+        },
+        {
+          "name": "include",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "process.name"
+              },
+              {
+                "kind": "literal",
+                "value": "crashes"
+              }
+            ]
+          }
+        },
+        {
+          "name": "strict",
+          "value": {
+            "kind": "literal",
+            "value": true
+          }
+        },
+        {
+          "name": "nrows",
+          "value": {
+            "kind": "literal",
+            "value": 1
+          }
+        }
+      ]
+    },
+    {
+      "op": "sort",
+      "fields": [
+        "crashes",
+        "faults"
+      ],
+      "order": "desc",
+      "type": "number",
+      "limit": 20
+    },
+    {
+      "op": "select",
+      "fields": [
+        "host.name",
+        "process.name",
+        "source.ip",
+        "url.path",
+        "br_requests",
+        "faults",
+        "fault_rate",
+        "crashes",
+        "max_bytes"
+      ]
+    }
+  ]
+}

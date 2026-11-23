@@ -142,9 +142,19 @@ test('opening award credit identifies the agent and keeps documentation discover
     assert.match(document, /November 2, 2026 hackathon winners announcement/);
     assert.doesNotMatch(document, /## Project background|cqlmatic-windows-x86_64\.exe/);
   }
+  assert.ok(html.indexOf('class="quick-start"') < html.indexOf('class="hero-benchmark"'));
+  assert.ok(html.indexOf('class="hero-benchmark"') < html.indexOf('class="recognition"'));
   assert.ok(html.indexOf('class="recognition"') < html.indexOf('class="code-example"'));
+  assert.match(html, /src="\/assets\/cqlmatic-benchmark-dark\.png"/);
+  assert.match(html, /src="\/assets\/cqlmatic-benchmark-light\.png"/);
   assert.match(html, /href="https:\/\/docs\.cqlmatic\.dev\/"/);
   assert.match(readme, /^# CQLmatic\n/);
+  const titlePosition = readme.indexOf('# CQLmatic');
+  const chartPosition = readme.indexOf('src="site/public/assets/cqlmatic-benchmark-dark.png"');
+  const subtitlePosition = readme.indexOf('## Map your environment. Write CQL that fits your data.');
+  assert.ok(titlePosition >= 0 && titlePosition < chartPosition && chartPosition < subtitlePosition);
+  assert.match(readme, /srcset="site\/public\/assets\/cqlmatic-benchmark-dark\.png"/);
+  assert.match(readme, /srcset="site\/public\/assets\/cqlmatic-benchmark-light\.png"/);
   const backgroundPosition = readme.indexOf("CQLmatic's query mechanics");
   const badgePosition = readme.indexOf('src="site/public/assets/agentworks-expert-builder-2026.png"');
   const enginePosition = readme.indexOf('The same engine powers');

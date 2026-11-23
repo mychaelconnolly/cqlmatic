@@ -1,5 +1,13 @@
 # CQLmatic
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="site/public/assets/cqlmatic-benchmark-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="site/public/assets/cqlmatic-benchmark-light.png">
+    <img src="site/public/assets/cqlmatic-benchmark-dark.png" width="960" height="614" alt="CQLmatic benchmark: 95% fewer rejected live searches, 59% fewer wrong queries, and 36% fewer live searches per task across 2,333 live CrowdStrike queries in 480 runs. Correct queries without rejected searches improve from 52% to 98% on Opus 5.5 (medium), 56% to 92% on GPT-6.2 Sol (low), 67% to 90% on Sonnet 5.5 (medium), 56% to 83% on Haiku 5.5 (medium), and 17% to 67% on GPT-5.6 Luna (medium).">
+  </picture>
+</p>
+
 ## Map your environment. Write CQL that fits your data.
 
 CQLmatic helps your AI assistant write CrowdStrike Query Language using the sources, parsers, and fields in your own Next-Gen SIEM environment. Your assistant interprets the question. The local Rust CLI constructs and checks the query against a reusable environment map.
@@ -16,16 +24,16 @@ The same engine powers the **"THIS IS CQL"** agent, where those mechanics were u
 
 CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crowdstrike.com/en-us/blog/five-lessons-from-agentworks-hackathon/) recognized the agent as a notable runner-up in the AgentWorks Hackathon. Judges at [CrowdStrike and NVIDIA](https://www.crowdstrike.com/en-us/platform/charlotte-ai/agentworks-hackathon/) highlighted its reproducible tests and willingness to return inconclusive verdicts.
 
-**Try CQLmatic v0.1.11 and share feedback.** Use sanitized examples to describe gaps in setup, discovery, or query writing.
+**Try CQLmatic and share feedback.** Use sanitized examples to describe gaps in setup, discovery, or query writing.
 
 Version `0.1.11` warns when a query names a source or field your environment map lacks, and a search guard for Claude Code and Codex tells your assistant what `check` found before each search runs. Query checks accept more valid queries, catch more join, sorting, correlation, match, and filter traps, and move eleven general notes from warnings to informational output. See the [release notes](https://docs.cqlmatic.dev/release-notes/) for upgrade details.
 
-**[Try v0.1.11](#try-v0111)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-the-first-release) · [Technical details](#technical-details)
+**[Try v0.1.11](#try-v0111)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-cqlmatic) · [Technical details](#technical-details)
 
 **Quick start:**
 
 ```sh
-npx cqlmatic@0.1.11 setup
+npx cqlmatic@latest setup
 ```
 
 Use an assistant with local command access and an authorized CrowdStrike connection. Basic `generate` and `check` work without discovery. Quick inventory scopes a short, authorized scout to a chosen view or `search-all`; full discovery can take substantial time and assistant tokens.
@@ -58,7 +66,7 @@ Your assistant turns the request into explicit source, field, matching, and aggr
 
 [View example input (JSON)](examples/powershell-network.plan.json) · [Read the query reference](docs/QUERY-REFERENCE.md)
 
-## Help test the first release
+## Help test CQLmatic
 
 Feedback is welcome on setup friction, missing or confusing discovery/status steps, and queries that the current coverage cannot express or check. Include your OS, assistant/client, workflow step, a synthetic reproduction, and expected versus actual behavior.
 
