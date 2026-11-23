@@ -606,7 +606,9 @@ fn finish(
         if !report.dropped.contains(&field) {
             result.diagnostics.push(Diagnostic::warning(
                 "CQL_DROPPED_FIELD",
-                format!("'{field}' is not available here; an earlier step removed it."),
+                format!(
+                    "'{field}' is not available here; an earlier step removed it. Keep it before that step, use the new name after rename, or recompute it before reading it."
+                ),
             ));
         }
     }
@@ -694,29 +696,57 @@ struct Flow {
 enum Export {
     Correlate {
         labels: BTreeSet<String>,
+        mandatory_labels: BTreeSet<String>,
+        include_all_labels: BTreeSet<String>,
+        branch_available: BTreeMap<String, BTreeSet<String>>,
         outputs: BTreeSet<String>,
         removed: BTreeSet<String>,
+        removed_after: BTreeSet<String>,
     },
     Query(String),
 }
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Exporter {
-    Query(String),
+    QueryExport(String),
+    QueryPipeline(String),
     Correlate,
+}
+fn removed_matches(removed: &BTreeSet<String>, field: &str) -> bool {
+    removed
+        .iter()
+        .any(|removed| removed == field || removed.contains("[]") && array_element(field, removed))
 }
 impl Flow {
     fn unexported_by(&self, field: &str) -> Option<Exporter> {
         match self.export.as_ref()? {
-            Export::Query(name) => Some(Exporter::Query(name.clone())),
+            Export::Query(name) => Some(Exporter::QueryPipeline(name.clone())),
             Export::Correlate {
                 labels,
+                mandatory_labels,
+                include_all_labels,
+                branch_available,
                 outputs,
                 removed,
+                removed_after,
             } => {
-                let missing = removed.contains(field)
-                    || !outputs.contains(field) && !self.removed.contains(field);
+                let removed_post = removed_matches(removed_after, field);
+                let removed_in_branch = !outputs.contains(field) && removed_matches(removed, field);
+                let missing = !removed_post && (removed_in_branch || !outputs.contains(field));
                 missing.then(|| match field.split_once('.') {
-                    Some((label, _)) if labels.contains(label) => Exporter::Query(label.into()),
+                    Some((label, sub)) if labels.contains(label) => {
+                        let excluded_in_branch = removed_in_branch
+                            || !mandatory_labels.contains(label)
+                            || include_all_labels.contains(label)
+                            || crate::catalog::CORRELATE_BUILTINS.contains(&sub)
+                            || branch_available
+                                .get(label)
+                                .is_some_and(|cols| !cols.contains(sub));
+                        if excluded_in_branch {
+                            Exporter::QueryPipeline(label.into())
+                        } else {
+                            Exporter::QueryExport(label.into())
+                        }
+                    }
                     _ => Exporter::Correlate,
                 })
             }
@@ -762,6 +792,9 @@ impl Flow {
     }
     fn remove(&mut self, field: String) {
         self.removing.insert(field.clone());
+        if let Some(Export::Correlate { removed_after, .. }) = &mut self.export {
+            removed_after.insert(field.clone());
+        }
         self.removed.insert(field);
     }
     fn removed_in(&self, removed: &BTreeSet<String>, field: &str) -> bool {
@@ -1463,11 +1496,57 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             .iter()
             .map(|(name, flow)| (name.clone(), flow.known_columns().cloned()))
             .collect();
-        let (outputs, unknown_prefixes) =
+        let (mut outputs, unknown_prefixes) =
             crate::catalog::correlation_outputs(&resolved.arguments, &queries, &columns);
         let removed: BTreeSet<String> = contexts
             .iter()
             .flat_map(|(name, flow)| flow.removed.iter().map(move |f| format!("{name}.{f}")))
+            .collect();
+        outputs.retain(|f| {
+            f.split_once('.').map_or_else(
+                || !removed_matches(&removed, f),
+                |(name, sub)| {
+                    contexts
+                        .get(name)
+                        .map_or_else(|| !removed_matches(&removed, f), |flow| !flow.absent(sub))
+                },
+            )
+        });
+        let mandatory_labels: BTreeSet<String> = queries
+            .iter()
+            .filter(|(_, aggregation)| !*aggregation)
+            .filter_map(|(value, _)| match value {
+                Value::Query {
+                    label: Some(name), ..
+                } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        let include_all_labels: BTreeSet<String> = queries
+            .iter()
+            .filter(|(_, aggregation)| !*aggregation)
+            .filter_map(|(value, _)| match value {
+                Value::Query {
+                    label: Some(name),
+                    attributes,
+                    ..
+                } if attributes.iter().any(|a| {
+                    a.name.as_deref() == Some("include")
+                        && crate::catalog::query_all_fields(&a.value)
+                }) =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let branch_available: BTreeMap<String, BTreeSet<String>> = contexts
+            .iter()
+            .filter_map(|(name, flow)| {
+                flow.available
+                    .as_ref()
+                    .map(|cols| (name.clone(), cols.clone()))
+            })
             .collect();
         return Some(Flow {
             target: state.target.clone(),
@@ -1479,8 +1558,12 @@ fn scan_call(c: &Call, state: &Flow, out: &mut GroundingScan<'_>, negated: bool)
             tables: state.tables.clone(),
             export: Some(Export::Correlate {
                 labels: contexts.into_keys().collect(),
+                mandatory_labels,
+                include_all_labels,
+                branch_available,
                 outputs,
                 removed,
+                removed_after: BTreeSet::new(),
             }),
             ..Flow::default()
         });
@@ -1952,15 +2035,14 @@ fn merge_branches(incoming: &Flow, branches: Vec<Flow>) -> Flow {
         .flat_map(|b| b.split_unknown.iter().cloned())
         .collect();
     merged.available = branches_available(&branches);
-    merged.removed = branches
-        .first()
-        .map(|branch| branch.removed.clone())
-        .unwrap_or_default();
-    for branch in &branches {
-        merged
-            .removed
-            .retain(|field| branch.removed.contains(field));
-    }
+    let candidate_removed: BTreeSet<_> = branches
+        .iter()
+        .flat_map(|branch| branch.removed.iter().cloned())
+        .collect();
+    merged.removed = candidate_removed
+        .into_iter()
+        .filter(|field| branches.iter().all(|branch| branch.absent(field)))
+        .collect();
     merged
 }
 fn branches_available(branches: &[Flow]) -> Option<BTreeSet<String>> {
@@ -3273,20 +3355,30 @@ fn ground(
     let mut warnings = unexported
         .into_iter()
         .map(|(source, fields)| {
-            let source = match source {
-                Exporter::Query(label) => format!("correlate query {label}"),
-                Exporter::Correlate => {
-                    "correlate, which names the fields of each query QUERY.FIELD".into()
+            let listed = fields.iter().cloned().collect::<Vec<_>>().join(", ");
+            let verb = if fields.len() == 1 { "is" } else { "are" };
+            let message = match source {
+                Exporter::QueryExport(label) => {
+                    let prefix = format!("{label}.");
+                    let example = fields
+                        .iter()
+                        .map(|f| f.strip_prefix(&prefix).unwrap_or(f.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "{listed} {verb} not exported by correlate query {label}. Add missing fields to {label}'s include: [...] clause after the closing brace (for example, {label}: {{ ... }} include: [{example}]), or keep them in {label}'s pipeline."
+                    )
                 }
-            };
-            Diagnostic::warning(
-                "CQL_UNEXPORTED_FIELD",
-                format!(
-                    "{} {} not exported by {source}.",
-                    fields.iter().cloned().collect::<Vec<_>>().join(", "),
-                    if fields.len() == 1 { "is" } else { "are" },
+                Exporter::QueryPipeline(label) => format!(
+                    "{listed} {verb} not exported by correlate query {label}. Keep or compute {} inside {label}'s pipeline.",
+                    if fields.len() == 1 { "it" } else { "them" },
                 ),
-            )
+                Exporter::Correlate => format!(
+                    "{listed} {verb} not exported by correlate, which names the fields of each query QUERY.FIELD. Prefix {} with the query label (QUERY.FIELD) and, for a mandatory query, list non-metadata fields in its include: [...] clause after the closing brace.",
+                    if fields.len() == 1 { "it" } else { "each field" },
+                ),
+            };
+            Diagnostic::warning("CQL_UNEXPORTED_FIELD", message)
         })
         .collect::<Vec<_>>();
     let mut unmapped = Vec::new();

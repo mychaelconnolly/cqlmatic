@@ -24,6 +24,8 @@ pub fn validate(pipeline: &Pipeline, query: &str) -> Report {
         reads: BTreeSet::new(),
         dropped: BTreeSet::new(),
         projected_input: None,
+        projected_origin_input: ProjectionOrigin::Projected,
+        removed_input: BTreeSet::new(),
         nodes: 0,
         bindings: vec![],
         nesting: 0,
@@ -251,6 +253,14 @@ const WILDCARD_IGNORE_CASE: (&str, &str) = (
     "A case-insensitive wildcard search can take up to twice as long. Set ignoreCase=true only when the case varies.",
 );
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ProjectionOrigin {
+    #[default]
+    Projected,
+    Correlate,
+    ReadFile,
+}
+
 #[derive(Clone, Default)]
 struct PipelineState {
     has_input: bool,
@@ -262,6 +272,8 @@ struct PipelineState {
     ordered: bool,
     narrowed: bool,
     projected: Option<BTreeSet<String>>,
+    projected_origin: ProjectionOrigin,
+    removed: BTreeSet<String>,
     present: BTreeSet<String>,
 }
 impl PipelineState {
@@ -278,6 +290,14 @@ impl PipelineState {
         merged.extracted = branches.iter().all(|b| b.extracted);
         merged.ordered = branches.iter().all(|b| b.ordered);
         merged.narrowed = branches.iter().all(|b| b.narrowed);
+        merged.projected_origin = if branches
+            .iter()
+            .all(|b| b.projected_origin == first.projected_origin)
+        {
+            first.projected_origin
+        } else {
+            ProjectionOrigin::Projected
+        };
         for branch in branches {
             if let (Some(left), Some(right)) = (&mut merged.projected, &branch.projected) {
                 left.extend(right.iter().cloned());
@@ -286,6 +306,21 @@ impl PipelineState {
             }
             merged.present.retain(|f| branch.present.contains(f));
         }
+        let candidate_removed: BTreeSet<_> = branches
+            .iter()
+            .flat_map(|b| b.removed.iter().cloned())
+            .collect();
+        merged.removed = candidate_removed
+            .into_iter()
+            .filter(|field| {
+                branches.iter().all(|b| {
+                    b.removed.contains(field)
+                        || b.projected
+                            .as_ref()
+                            .is_some_and(|cols| !cols.contains(field))
+                })
+            })
+            .collect();
         merged
     }
 }
@@ -296,6 +331,8 @@ struct Checker<'a> {
     reads: BTreeSet<String>,
     dropped: BTreeSet<String>,
     projected_input: Option<BTreeSet<String>>,
+    projected_origin_input: ProjectionOrigin,
+    removed_input: BTreeSet<String>,
     nodes: usize,
     bindings: Vec<(String, bool)>,
     nesting: usize,
@@ -388,6 +425,8 @@ impl Checker<'_> {
         &mut self,
         previous: BTreeSet<String>,
         available: Option<&BTreeSet<String>>,
+        origin: ProjectionOrigin,
+        removed: &BTreeSet<String>,
         call: Option<&Call>,
     ) {
         let fields = std::mem::replace(&mut self.fields, previous);
@@ -396,12 +435,24 @@ impl Checker<'_> {
         if let Some(available) = available {
             for field in reads.iter().filter(|field| !available.contains(*field)) {
                 self.dropped.insert(field.clone());
-                self.emit(
-                    "CQL_DROPPED_FIELD",
-                    format!("'{field}' is not among the known projected/aggregate outputs."),
-                    call,
-                    true,
-                );
+                let message = if removed.contains(field) {
+                    format!(
+                        "'{field}' is not available here; an earlier step removed it. Keep it before that step, use the new name after rename, or recompute it before reading it."
+                    )
+                } else {
+                    match origin {
+                        ProjectionOrigin::Correlate => format!(
+                            "'{field}' is not among the known correlate outputs. Export it as QUERY.FIELD from the correlate query (or keep it in that query's pipeline), or recompute it before reading it."
+                        ),
+                        ProjectionOrigin::ReadFile => format!(
+                            "'{field}' is not among the known readFile outputs. Include it in readFile(..., include=[...]) or the defining table, or recompute it before reading it."
+                        ),
+                        ProjectionOrigin::Projected => format!(
+                            "'{field}' is not among the known projected/aggregate outputs. Keep it in the earlier select([...]), groupBy([...]), or bucket(field=[...]) stage, or recompute it before reading it."
+                        ),
+                    }
+                };
+                self.emit("CQL_DROPPED_FIELD", message, call, true);
             }
         }
     }
@@ -417,6 +468,16 @@ impl Checker<'_> {
                     self.projected_input.clone()
                 } else {
                     None
+                },
+                projected_origin: if context == QueryContext::Continuing {
+                    self.projected_origin_input
+                } else {
+                    ProjectionOrigin::Projected
+                },
+                removed: if context == QueryContext::Continuing {
+                    self.removed_input.clone()
+                } else {
+                    BTreeSet::new()
                 },
                 ..PipelineState::default()
             },
@@ -492,6 +553,8 @@ impl Checker<'_> {
         let enclosing_after_aggregate = self.after_aggregate;
         let enclosing_reads = std::mem::take(&mut self.reads);
         let enclosing_projection = self.projected_input.take();
+        let enclosing_origin = self.projected_origin_input;
+        let enclosing_removed = std::mem::take(&mut self.removed_input);
         let PipelineState {
             mut has_input,
             mut aggregated,
@@ -502,6 +565,8 @@ impl Checker<'_> {
             mut ordered,
             mut narrowed,
             mut projected,
+            mut projected_origin,
+            mut removed,
             mut present,
         } = state.clone();
         let mut mandatory_link = false;
@@ -543,6 +608,8 @@ impl Checker<'_> {
             };
             self.reads.clear();
             self.projected_input = projected.clone();
+            self.projected_origin_input = projected_origin;
+            self.removed_input = removed.clone();
             self.narrowed = narrowed;
             self.aggregate_input = aggregated;
             self.after_aggregate = after_aggregate;
@@ -617,15 +684,25 @@ impl Checker<'_> {
                     self.check_empty_negations(f, &present);
                     present.extend(fields_proven_present(f));
                     narrowed |= narrowing_filter(f);
-                    if let Some(available) = &mut projected {
-                        for pattern in positive_regexes(f) {
-                            available.extend(regex_captures(pattern));
+                    for pattern in positive_regexes(f) {
+                        let captures = regex_captures(pattern);
+                        for cap in &captures {
+                            removed.remove(cap);
+                        }
+                        if let Some(available) = &mut projected {
+                            available.extend(captures);
                         }
                     }
                     if synthetic && !extracted && has_non_raw_comparison(f) {
                         self.emit("CQL_SYNTHETIC_FIELD_BEFORE_PARSE","createEvents emits raw strings. Parse before filtering extracted fields.",None,true);
                     }
-                    self.projected_reads(previous, projected.as_ref(), None);
+                    self.projected_reads(
+                        previous,
+                        projected.as_ref(),
+                        projected_origin,
+                        &removed,
+                        None,
+                    );
                 }
                 Step::Assign { field, value } => {
                     self.fields.insert(field.clone());
@@ -656,25 +733,46 @@ impl Checker<'_> {
                     }
                     if let Some(call) = catalog::aliased_call(field, value) {
                         let args = self.function(&call, tables, false, false, false);
-                        self.projected_reads(previous, projected.as_ref(), Some(&call));
-                        if let Some(fields) = &mut projected {
-                            if let Some(writes) = catalog::output_writes(&call) {
+                        self.projected_reads(
+                            previous,
+                            projected.as_ref(),
+                            projected_origin,
+                            &removed,
+                            Some(&call),
+                        );
+                        if let Some(writes) = catalog::output_writes(&call) {
+                            for written in &writes.fields {
+                                removed.remove(written);
+                            }
+                            if let Some(fields) = &mut projected {
                                 fields.extend(writes.fields);
                             }
-                            if call.name.eq_ignore_ascii_case("rename") {
-                                for (old, new) in catalog::rename_bindings(&args) {
+                        }
+                        if call.name.eq_ignore_ascii_case("rename") {
+                            for (old, new) in catalog::rename_bindings(&args) {
+                                if old != new {
+                                    removed.insert(old.into());
+                                    removed.remove(new);
+                                }
+                                if let Some(fields) = &mut projected {
                                     fields.remove(old);
                                     fields.insert(new.into());
                                 }
                             }
-                        }
-                        if call.name.eq_ignore_ascii_case("rename") {
                             rename_present(&args, &mut present);
                         }
                     } else if let Some(call) = catalog::assigned_aggregate(value) {
                         self.function(call, tables, false, false, false);
-                        self.projected_reads(previous, projected.as_ref(), Some(call));
+                        self.projected_reads(
+                            previous,
+                            projected.as_ref(),
+                            projected_origin,
+                            &removed,
+                            Some(call),
+                        );
                         projected = Some(BTreeSet::from([field.clone()]));
+                        projected_origin = ProjectionOrigin::Projected;
+                        removed.clear();
                         present.clear();
                         if call.name.eq_ignore_ascii_case("count") {
                             present.insert(field.clone());
@@ -687,6 +785,8 @@ impl Checker<'_> {
                         self.projected_reads(
                             previous,
                             projected.as_ref(),
+                            projected_origin,
+                            &removed,
                             if let Value::Call(call) = value {
                                 Some(call)
                             } else {
@@ -697,10 +797,11 @@ impl Checker<'_> {
                             present.insert(field.clone());
                         }
                     }
-                    if catalog::aliased_call(field, value).is_none()
-                        && let Some(xs) = &mut projected
-                    {
-                        xs.insert(field.clone());
+                    if catalog::aliased_call(field, value).is_none() {
+                        removed.remove(field);
+                        if let Some(xs) = &mut projected {
+                            xs.insert(field.clone());
+                        }
                     }
                 }
                 Step::Case(branches) => {
@@ -718,6 +819,8 @@ impl Checker<'_> {
                             ordered,
                             narrowed,
                             projected: projected.clone(),
+                            projected_origin,
+                            removed: removed.clone(),
                             present: present.clone(),
                         },
                     );
@@ -729,6 +832,8 @@ impl Checker<'_> {
                     ordered = merged.ordered;
                     narrowed = merged.narrowed;
                     projected = merged.projected;
+                    projected_origin = merged.projected_origin;
+                    removed = merged.removed;
                     present = merged.present;
                 }
                 Step::Match { field, arms } => {
@@ -743,7 +848,13 @@ impl Checker<'_> {
                     for (pattern, _) in arms {
                         self.pattern(pattern);
                     }
-                    self.projected_reads(previous, projected.as_ref(), None);
+                    self.projected_reads(
+                        previous,
+                        projected.as_ref(),
+                        projected_origin,
+                        &removed,
+                        None,
+                    );
                     let merged = self.branches(
                         arms.iter()
                             .map(|(pattern, p)| {
@@ -765,6 +876,8 @@ impl Checker<'_> {
                             ordered,
                             narrowed,
                             projected: projected.clone(),
+                            projected_origin,
+                            removed: removed.clone(),
                             present: present.clone(),
                         },
                     );
@@ -776,6 +889,8 @@ impl Checker<'_> {
                     ordered = merged.ordered;
                     narrowed = merged.narrowed;
                     projected = merged.projected;
+                    projected_origin = merged.projected_origin;
+                    removed = merged.removed;
                     present = merged.present;
                 }
                 Step::Link { field, target } => {
@@ -840,7 +955,13 @@ impl Checker<'_> {
                         self.emit("CQL_TAIL_WITHOUT_TIMESTAMP", "tail requires @timestamp; the preceding steps removed it, so tail returns no events.", Some(c), true);
                     }
                     let args = self.function(c, tables, false, false, preamble);
-                    self.projected_reads(previous, projected.as_ref(), Some(c));
+                    self.projected_reads(
+                        previous,
+                        projected.as_ref(),
+                        projected_origin,
+                        &removed,
+                        Some(c),
+                    );
                     let effect = spec.resolved_effect(&args);
                     if spec.name == "correlate" {
                         let resolved = catalog::resolve(c).expect("known function");
@@ -859,6 +980,8 @@ impl Checker<'_> {
                                 ordered,
                                 narrowed,
                                 projected: projected.clone(),
+                                projected_origin,
+                                removed: removed.clone(),
                                 present: present.clone(),
                             },
                         );
@@ -882,6 +1005,8 @@ impl Checker<'_> {
                         ordered = false;
                         narrowed = false;
                         projected = None;
+                        projected_origin = ProjectionOrigin::Projected;
+                        removed.clear();
                         present.clear();
                     } else {
                         narrowed |= narrowing_call(c);
@@ -902,11 +1027,14 @@ impl Checker<'_> {
                             let selected = arg_fields(args.get("fields").copied());
                             present.retain(|f| selected.contains(f));
                             projected = Some(selected);
+                            projected_origin = ProjectionOrigin::Projected;
+                            removed.clear();
                         }
                         "drop" => {
                             let dropped = arg_fields(args.get("fields").copied());
                             for f in &dropped {
                                 present.remove(f);
+                                removed.insert(f.clone());
                             }
                             if let Some(xs) = &mut projected {
                                 for f in dropped {
@@ -916,8 +1044,12 @@ impl Checker<'_> {
                         }
                         "rename" => {
                             rename_present(&args, &mut present);
-                            if let Some(available) = &mut projected {
-                                for (old, new) in catalog::rename_bindings(&args) {
+                            for (old, new) in catalog::rename_bindings(&args) {
+                                if old != new {
+                                    removed.insert(old.into());
+                                    removed.remove(new);
+                                }
+                                if let Some(available) = &mut projected {
                                     available.remove(old);
                                     available.insert(new.into());
                                 }
@@ -933,13 +1065,24 @@ impl Checker<'_> {
                                 );
                             }
                             if let Some(field) = joined_comparison(&args, &p.steps[index + 1..]) {
-                                self.emit("CQL_JOIN_MAX", format!("join keeps one matching subquery row per key unless max is set, so the later comparison of {field} may test only one of several matches."), Some(c), true);
+                                self.emit(
+                                    "CQL_JOIN_MAX",
+                                    format!(
+                                        "join keeps one matching subquery row per key unless max is set, so the later comparison of {field} may test only one of several matches. Set max=<N> on join(...) to retain multiple matches per key, or, when one summary value per key suffices, aggregate the join subquery to one row per key with groupBy(...)."
+                                    ),
+                                    Some(c),
+                                    true,
+                                );
                             }
                             projected = None;
+                            projected_origin = ProjectionOrigin::Projected;
+                            removed.clear();
                         }
                         "parsejson" | "kvparse" => {
                             extracted = true;
                             projected = None;
+                            projected_origin = ProjectionOrigin::Projected;
+                            removed.clear();
                         }
                         "neighbor" => {
                             if !aggregated {
@@ -985,20 +1128,37 @@ impl Checker<'_> {
                                 )?;
                                 match_nrows_warning(table, &field, &args)
                             });
-                            if let Some(msg) = match_warning {
-                                self.emit("CQL_MATCH_NROWS", msg, Some(c), true);
+                            if let Some((msg, warning)) = match_warning {
+                                if warning {
+                                    self.emit("CQL_MATCH_NROWS", msg, Some(c), true);
+                                } else {
+                                    self.info("CQL_MATCH_NROWS", msg, Some(c));
+                                }
                             }
-                            if let (Some(available), Some(includes)) = (&mut projected, includes) {
-                                available.extend(includes);
+                            if let Some(includes) = includes {
+                                for f in &includes {
+                                    removed.remove(f);
+                                }
+                                if let Some(available) = &mut projected {
+                                    available.extend(includes);
+                                }
                             } else {
                                 projected = None;
+                                projected_origin = ProjectionOrigin::Projected;
+                                removed.clear();
                             }
                         }
                         "asn" | "iplocation" | "ioc:lookup" | "findtimestamp" => {}
                         "correlate" => {
-                            projected = self.correlation_columns.get(&c.start).cloned().flatten()
+                            projected = self.correlation_columns.get(&c.start).cloned().flatten();
+                            projected_origin = ProjectionOrigin::Correlate;
+                            removed.clear();
                         }
-                        "splitstring" if !args.contains_key("index") => projected = None,
+                        "splitstring" if !args.contains_key("index") => {
+                            projected = None;
+                            projected_origin = ProjectionOrigin::Projected;
+                            removed.clear();
+                        }
                         "eval" => {
                             if let Some(resolved) = catalog::resolve(c) {
                                 for (field, value) in &resolved.ordered {
@@ -1006,6 +1166,9 @@ impl Checker<'_> {
                                         present.insert(field.clone());
                                     }
                                 }
+                            }
+                            for key in args.keys() {
+                                removed.remove(key);
                             }
                             if let Some(available) = &mut projected {
                                 available.extend(args.keys().cloned());
@@ -1015,6 +1178,9 @@ impl Checker<'_> {
                             if let Some(fields) = args.get("field") {
                                 let defaulted = catalog::fields(fields);
                                 present.extend(defaulted.iter().cloned());
+                                for f in &defaulted {
+                                    removed.remove(f);
+                                }
                                 if let Some(available) = &mut projected {
                                     available.extend(defaulted);
                                 }
@@ -1041,31 +1207,47 @@ impl Checker<'_> {
                                     });
                                 projected = known.then_some(columns);
                             }
+                            projected_origin = ProjectionOrigin::ReadFile;
+                            removed.clear();
                         }
                         "regex" => {
-                            if let Some(pattern) = args.get("regex").and_then(|v| v.text())
-                                && let Some(available) = &mut projected
-                            {
-                                available.extend(regex_captures(pattern));
+                            if let Some(pattern) = args.get("regex").and_then(|v| v.text()) {
+                                let captures = regex_captures(pattern);
+                                for cap in &captures {
+                                    removed.remove(cap);
+                                }
+                                if let Some(available) = &mut projected {
+                                    available.extend(captures);
+                                }
                             }
                         }
                         _ => {
                             if let Some(output) = spec.default_output(&args).or_else(|| {
                                 args.get("as").and_then(|v| v.text()).map(str::to_string)
                             }) {
+                                removed.remove(&output);
                                 if let Some(xs) = &mut projected {
                                     xs.insert(output);
                                 }
                             } else if effect == Effect::Transform {
                                 projected = None;
+                                projected_origin = ProjectionOrigin::Projected;
+                                removed.clear();
                             }
                         }
                     }
                     if let Some((outputs, members)) = spec.named_outputs(&args) {
                         if !members.is_empty() {
                             projected = None;
-                        } else if let Some(available) = &mut projected {
-                            available.extend(outputs);
+                            projected_origin = ProjectionOrigin::Projected;
+                            removed.clear();
+                        } else {
+                            for o in &outputs {
+                                removed.remove(o);
+                            }
+                            if let Some(available) = &mut projected {
+                                available.extend(outputs);
+                            }
                         }
                     }
                     if let Some((outputs, retains)) = catalog::aggregate_outputs(c) {
@@ -1082,11 +1264,16 @@ impl Checker<'_> {
                             }
                         }
                         projected = if retains {
+                            for o in &outputs {
+                                removed.remove(o);
+                            }
                             incoming_projection.map(|mut fields| {
                                 fields.extend(outputs);
                                 fields
                             })
                         } else {
+                            projected_origin = ProjectionOrigin::Projected;
+                            removed.clear();
                             Some(outputs)
                         };
                     } else if matches!(effect, Effect::Aggregate | Effect::Correlation) {
@@ -1132,6 +1319,8 @@ impl Checker<'_> {
         self.after_aggregate = enclosing_after_aggregate;
         self.reads = enclosing_reads;
         self.projected_input = enclosing_projection;
+        self.projected_origin_input = enclosing_origin;
+        self.removed_input = enclosing_removed;
         *state = PipelineState {
             has_input,
             aggregated,
@@ -1142,6 +1331,8 @@ impl Checker<'_> {
             ordered,
             narrowed,
             projected,
+            projected_origin,
+            removed,
             present,
         };
     }
@@ -2682,6 +2873,7 @@ impl Checker<'_> {
         }
         let mut unique = BTreeSet::new();
         let mut projections = BTreeMap::new();
+        let mut branch_removed = BTreeSet::new();
         let mut equated = BTreeSet::new();
         if let Some(globals) = args.get("globalConstraints").filter(|v| !has_parameter(v)) {
             equated.extend(catalog::fields(globals));
@@ -2922,13 +3114,15 @@ impl Checker<'_> {
                 self.unsupported("CQL_UNSUPPORTED_CORRELATION_ROWS","The aggregation pipeline must be statically bounded to at most one output row; use a qualified scalar aggregate or explicit head(1)/tail(1).",Some(call),false);
             }
             projections.insert(name.clone(), state.projected);
+            branch_removed.extend(state.removed.into_iter().map(|f| format!("{name}.{f}")));
         }
         let queries = mandatory
             .iter()
             .map(|v| (*v, false))
             .chain(aggregations.iter().map(|v| (v, true)))
             .collect::<Vec<_>>();
-        let (outputs, unknown) = catalog::correlation_outputs(args, &queries, &projections);
+        let (mut outputs, unknown) = catalog::correlation_outputs(args, &queries, &projections);
+        outputs.retain(|f| !branch_removed.contains(f));
         self.correlation_columns
             .insert(call.start, unknown.is_empty().then_some(outputs));
         if mandatory.len() > 1
@@ -3086,6 +3280,8 @@ impl Checker<'_> {
                     replaced: !self.stored_input,
                     narrowed: self.narrowed,
                     projected: self.projected_input.clone(),
+                    projected_origin: self.projected_origin_input,
+                    removed: self.removed_input.clone(),
                     ..PipelineState::default()
                 };
                 self.pipeline_state(
@@ -4056,21 +4252,36 @@ fn match_nrows_warning(
     table: &str,
     field: &str,
     args: &BTreeMap<String, &Value>,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let suffix = "Aggregate the table to one row per key or use correlate() for time-bounded event matching.";
     match match_row_cap(args) {
-        MatchRowCap::Default => Some(format!(
-            "match keeps at most 1 row per key from defineTable '{table}' (default nrows=1; maximum {MAX_MATCH_NROWS} with nrows=max), so the later comparison of {field} may miss matches when a key has multiple rows. {suffix}"
+        MatchRowCap::Default => Some((
+            format!(
+                "match keeps at most 1 row per key from defineTable '{table}' (default nrows=1; maximum {MAX_MATCH_NROWS} with nrows=max), so the later comparison of {field} may miss matches when a key has multiple rows. Set nrows=max (or nrows=<N>), aggregate the table to one row per key with groupBy(...) when one summary value per key suffices, or use correlate() for time-bounded event matching."
+            ),
+            true,
         )),
-        MatchRowCap::Parameter => Some(format!(
-            "match caps matched rows per event (up to {MAX_MATCH_NROWS}) from defineTable '{table}', so the later comparison of {field} can miss matches when a key exceeds nrows. {suffix}"
+        MatchRowCap::Parameter => Some((
+            format!(
+                "match caps matched rows per event (up to {MAX_MATCH_NROWS}) from defineTable '{table}', so the later comparison of {field} can miss matches when a key exceeds nrows. {suffix}"
+            ),
+            false,
         )),
-        MatchRowCap::Max => Some(format!(
-            "match with nrows=max keeps at most {MAX_MATCH_NROWS} rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {MAX_MATCH_NROWS} rows. {suffix}"
+        MatchRowCap::Max => Some((
+            format!(
+                "match with nrows=max keeps at most {MAX_MATCH_NROWS} rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {MAX_MATCH_NROWS} rows. {suffix}"
+            ),
+            false,
         )),
-        MatchRowCap::Limit(n) => Some(format!(
-            "match with nrows={n} keeps at most {n} rows per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {n} rows. {suffix}"
-        )),
+        MatchRowCap::Limit(n) => {
+            let rows_word = if n == 1 { "row" } else { "rows" };
+            Some((
+                format!(
+                    "match with nrows={n} keeps at most {n} {rows_word} per event from defineTable '{table}', so the later comparison of {field} can silently miss matches when a key has more than {n} {rows_word}. {suffix}"
+                ),
+                false,
+            ))
+        }
         MatchRowCap::Invalid => None,
     }
 }

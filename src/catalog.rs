@@ -214,16 +214,16 @@ pub fn correlation_links(pipeline: &Pipeline) -> Vec<(&str, &str, bool)> {
     links
 }
 
+pub const CORRELATE_BUILTINS: [&str; 4] =
+    ["@id", "@timestamp", "@ingesttimestamp", "@timestamp.nanos"];
+
 /// Exact exports; None retains an explicitly unknown all-fields projection.
 pub fn correlation_outputs(
     args: &BTreeMap<String, &Value>,
     queries: &[(&Value, bool)],
     columns: &BTreeMap<String, Option<BTreeSet<String>>>,
 ) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut outputs: BTreeSet<String> = ["@id", "@timestamp", "@ingesttimestamp"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let mut outputs = BTreeSet::new();
     let mut unknown = BTreeSet::new();
     for (value, aggregation) in queries {
         let Value::Query {
@@ -235,17 +235,29 @@ pub fn correlation_outputs(
             continue;
         };
         let mut fields = BTreeSet::new();
+        let known = columns.get(name).and_then(|c| c.as_ref());
         let include = attributes
             .iter()
             .find(|a| a.name.as_deref() == Some("include"));
         if *aggregation || include.is_some_and(|a| query_all_fields(&a.value)) {
-            if let Some(Some(known)) = columns.get(name) {
+            if let Some(known) = known {
                 fields.extend(known.iter().cloned());
             } else {
                 unknown.insert(format!("{name}."));
             }
         } else if let Some(include) = include {
-            fields.extend(self::fields(&include.value));
+            for field in self::fields(&include.value) {
+                if known.is_none_or(|cols| cols.contains(&field)) {
+                    fields.insert(field);
+                }
+            }
+        }
+        if !*aggregation {
+            for builtin in CORRELATE_BUILTINS {
+                if known.is_none_or(|cols| cols.contains(builtin)) {
+                    fields.insert(builtin.to_owned());
+                }
+            }
         }
         if !*aggregation
             && args

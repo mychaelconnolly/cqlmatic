@@ -1,0 +1,3 @@
+- Fixed `correlate()` export tracking so mandatory queries export built-in `@id`, `@timestamp`, `@ingesttimestamp`, and `@timestamp.nanos` under their `Label.<field>` prefix (unless removed or projected out in that query) rather than as bare `@id`/`@timestamp`/`@ingesttimestamp`.
+- Lowered `CQL_MATCH_NROWS` from a warning to an informational note when `nrows` is explicitly set (`nrows=max`, numeric `1..=500`, or parameterized), while keeping omitted `nrows` (default `1`) as a warning.
+- Added concrete rewrite guidance to `CQL_UNEXPORTED_FIELD`, `CQL_DROPPED_FIELD`, `CQL_JOIN_MAX`, and omitted-`nrows` `CQL_MATCH_NROWS` warnings.

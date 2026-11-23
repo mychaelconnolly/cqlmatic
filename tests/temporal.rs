@@ -161,7 +161,7 @@ fn correlation_contexts_and_temporal_references_are_checked() {
 fn correlation_exports_preserve_each_source_and_unknown_shapes() {
     let prefix = "correlate(A:{user=*} include:[user],B:{host <=> A.user},aggregation=[N:{user <=> A.user | count()}])";
     let r = check(
-        &format!("{prefix} | select([A.user,B.host,N._count,@timestamp])"),
+        &format!("{prefix} | select([A.user,B.host,N._count,A.@timestamp,B.@id])"),
         false,
     );
     assert_eq!(r.outcome, Outcome::Ready);
@@ -169,6 +169,21 @@ fn correlation_exports_preserve_each_source_and_unknown_shapes() {
         !r.diagnostics.iter().any(|d| d.code == "CQL_DROPPED_FIELD"),
         "{:?}",
         r.diagnostics
+    );
+    assert!(
+        !r.diagnostics
+            .iter()
+            .any(|d| d.code == "CQL_UNEXPORTED_FIELD"),
+        "{:?}",
+        r.diagnostics
+    );
+    let r = check(&format!("{prefix} | select(@timestamp)"), true);
+    assert_eq!(r.outcome, Outcome::NeedsContext);
+    assert!(
+        r.grounding
+            .missing
+            .iter()
+            .any(|m| m.contains("@timestamp: not exported"))
     );
     let r = check(&format!("{prefix} | select(user)"), true);
     assert_eq!(r.outcome, Outcome::NeedsContext);
@@ -232,7 +247,7 @@ fn unknown_correlation_columns_do_not_prove_absence_or_entire_array_ownership() 
     let prefix = "correlate(A:{#repo=example | user=*} include:*)";
     for tail in [
         r#"s:="x" | splitString(s,by=",",as="A.parts") | "A.parts[3]"=*"#,
-        r#"case { @timestamp=123456789 | "A.secret":=1; * } | "A.secret"=*"#,
+        r#"case { A.@timestamp=123456789 | "A.secret":=1; * } | "A.secret"=*"#,
         r#""A.items[0]":=1 | array:eval("A.items[]",asArray="out[]",var=x,function={out:=x}) | out[0]=*"#,
         r#""A.items[0].k":=1 | objectArray:exists("A.items[]",var=x,condition={x.k=*})"#,
     ] {
@@ -246,8 +261,8 @@ fn unknown_correlation_columns_do_not_prove_absence_or_entire_array_ownership() 
     }
     for tail in [
         r#""A.secret":=1 | "A.secret"=*"#,
-        r#"drop(["A.secret"]) | case { @timestamp=123456789 | "A.secret":=1; * } | "A.secret"=*"#,
-        r#"select(@timestamp) | s:="x" | splitString(s,by=",",as="A.parts") | "A.parts[3]"=*"#,
+        r#"drop(["A.secret"]) | case { A.@timestamp=123456789 | "A.secret":=1; * } | "A.secret"=*"#,
+        r#"select(A.@timestamp) | s:="x" | splitString(s,by=",",as="A.parts") | "A.parts[3]"=*"#,
     ] {
         assert_eq!(
             check(&format!("{prefix} | {tail}"), true).outcome,
