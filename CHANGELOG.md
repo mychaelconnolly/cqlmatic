@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.13
+
+- Setup, inventory and capture no longer refuse a storage location because of who else can access it or because its path passes through a link. 0.1.12 stopped with `SETUP_PROTECTION` when the state directory, or any directory above it, gave rights to another account: on Windows any access rule on the state directory for an account other than the user and SYSTEM, as a directory made in Explorer or under `C:\` has; on macOS and Linux a mode beyond the owner or an access-list grant. It stopped with `SETUP_LINK` when the path passed through a symbolic link, junction or other reparse point, as `/tmp` does on macOS. An existing directory is now used as it is. Directories CQLmatic creates are still owner-only (`0700`, files `0600`) on macOS and Linux. On Windows a new directory now takes the access rules of the directory it is created in, where 0.1.12 limited it to the user and SYSTEM, and PowerShell is no longer started to create it. A state directory that this version creates on Windows is refused by 0.1.12 and earlier. `LOCAL_DIRECTORY_PERMISSIONS` is removed, so a pack or state directory writable by its group is accepted, and the saved query and result files given to `import-query-observations` no longer need owner-only modes. State, pack and input files must still be regular files, not links, and the credential file keeps its `0600` rule on macOS and Linux. The default locations rely on your user profile's access rules; choose a `--state` location that only accounts you trust can read. When a storage location cannot be created, read or locked for writing, the error names it and, where access was denied, says to allow it in the sandbox or device policy that blocks it or to choose another.
+
 ## 0.1.12
 
 - Expand `CQL_BARE_COMMAND_WORD` to warn with actionable CQL replacement hints on bare `limit`, `take`, `order`, `project`, `project-away`, `project-rename`, `summarize`, `extend`, and `distinct` pipeline stages (surfaced by both `cqlmatic check` and the `PreToolUse` search guard).
@@ -182,7 +186,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v0112).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v0113).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.
