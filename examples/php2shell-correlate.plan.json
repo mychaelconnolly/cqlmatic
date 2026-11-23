@@ -244,6 +244,11 @@
                   },
                   "filters": [
                     {
+                      "op": "eq",
+                      "field": "event.action",
+                      "value": "file-write"
+                    },
+                    {
                       "op": "glob",
                       "field": "file.path",
                       "pattern": "/var/www/*.php"

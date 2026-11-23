@@ -142,6 +142,11 @@
               },
               "filters": [
                 {
+                  "op": "exists",
+                  "field": "RemoteAddressIP4",
+                  "present": true
+                },
+                {
                   "op": "call",
                   "function": "cidr",
                   "negate": true,

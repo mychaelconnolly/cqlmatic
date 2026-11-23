@@ -121,7 +121,7 @@
       <span class="code-string">"process.command_line"</span>],
   aggregation=[Drops: {
     #repo = <span class="code-string">"endpoints-prod"</span> | #type = <span class="code-string">"auditd"</span>
-    | file.path = <span class="code-string">"/var/www/*.php"</span>
+    | event.action = <span class="code-string">"file-write"</span> | file.path = <span class="code-string">"/var/www/*.php"</span>
     | host.name &lt;=&gt; Probe.host.name | <span class="code-function">count</span>(as=<span class="code-string">"php_writes"</span>)
   } after: <span class="code-string">"Shell +0s"</span> before: <span class="code-string">"Shell +10m"</span>],
   sequence=true, within=<span class="code-string">"10m"</span>)</code></pre>
@@ -204,6 +204,7 @@
 | <span class="code-function">join</span>(query={
     #repo = <span class="code-string">"endpoints-prod"</span>
     | #event_simpleName = <span class="code-string">"NetworkConnectIP4"</span>
+    | RemoteAddressIP4 = <span class="code-string">"*"</span>
     | !<span class="code-function">cidr</span>(field=RemoteAddressIP4,
         subnet=[<span class="code-string">"10.0.0.0/8"</span>, <span class="code-string">"172.16.0.0/12"</span>,
           <span class="code-string">"192.168.0.0/16"</span>])
@@ -248,6 +249,7 @@
   BrotliFetch: {
     #repo = <span class="code-string">"egress-proxy"</span>
     | http.response.headers.content_encoding = <span class="code-string">"br"</span>
+    | destination.ip = <span class="code-string">"*"</span>
     | !<span class="code-function">cidr</span>(field=destination.ip,
         subnet=[<span class="code-string">"10.0.0.0/8"</span>, <span class="code-string">"172.16.0.0/12"</span>,
           <span class="code-string">"192.168.0.0/16"</span>])
@@ -270,7 +272,7 @@
     | host.name &lt;=&gt; Shell.host.name
   } include: [<span class="code-string">"file.path"</span>],
   aggregation=[Callbacks: {
-    #repo = <span class="code-string">"egress-proxy"</span>
+    #repo = <span class="code-string">"egress-proxy"</span> | destination.ip = <span class="code-string">"*"</span>
     | !<span class="code-function">cidr</span>(field=destination.ip,
         subnet=[<span class="code-string">"10.0.0.0/8"</span>, <span class="code-string">"172.16.0.0/12"</span>,
           <span class="code-string">"192.168.0.0/16"</span>])

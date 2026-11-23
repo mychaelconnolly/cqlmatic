@@ -30,6 +30,11 @@
                   "value": "br"
                 },
                 {
+                  "op": "exists",
+                  "field": "destination.ip",
+                  "present": true
+                },
+                {
                   "op": "call",
                   "function": "cidr",
                   "negate": true,
@@ -238,6 +243,11 @@
                     "repo": "egress-proxy"
                   },
                   "filters": [
+                    {
+                      "op": "exists",
+                      "field": "destination.ip",
+                      "present": true
+                    },
                     {
                       "op": "call",
                       "function": "cidr",
