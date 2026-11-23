@@ -349,7 +349,7 @@ After confirming the exact environment and expected source, an illustrative save
 }
 ```
 
-Submit it through `env inventory --request FILE --state PATH_TO_PRIVATE_STATE/state.json --json --summary`. This synthetic identity and window are examples, not execution settings. The referenced originals must be protected files under private ancestry. The saved query must explicitly constrain the attested source; the selected target must match the confirmed inventory. Retrieval must follow the stated completed window.
+Submit it through `env inventory --request FILE --state PATH_TO_PRIVATE_STATE/state.json --json --summary`. This synthetic identity and window are examples, not execution settings. The referenced originals must be regular files, not links. The saved query must explicitly constrain the attested source; the selected target must match the confirmed inventory. Retrieval must follow the stated completed window.
 
 Only accepted direct event pipelines qualify: exact conjunctive source selectors, direct data filters, unchanged `select` projections, and `head`, `tail` or `sort` row selection. Derived fields, aliases, aggregates, joins and synthetic pipelines fail closed. Empty, failed, incomplete, malformed or cap-sized responses are rejected before counts. Present nonnull, nonempty values count as positive; numeric `0` and Boolean `false` count. An observation does not establish field population rates, values, global availability or complete discovery.
 

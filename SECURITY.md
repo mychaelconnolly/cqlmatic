@@ -24,9 +24,9 @@ The MCP discovery state file is **unkeyed**: its digest and consistency checks d
 
 Packs, state, receipts, and raw MCP result files can contain tenant field names and values. Keep them local, access-restricted, and out of version control; remove them according to your data-retention policy.
 
-Setup and inventory require dedicated private state directories. On Windows, they create user-owned directories with access limited to the current user and SYSTEM, or verify an existing directory and refuse it if its access is broader. Setup also verifies private file protection for its state, backups, and registration receipts. On Unix, managed directories use `0700` and newly created files use `0600`.
+Setup and inventory keep their state in your user profile by default and rely on its access rules. On macOS and Linux, the directories they create use `0700` and newly created files use `0600`. On Windows, a new directory takes the access rules of the directory it is created in. An existing directory is used as it is: CQLmatic does not check or change who else can read or change it, or whether its path passes through a link. Choose a `--state` location that only accounts you trust can read.
 
-These workflow protections do not configure the native MCP client's credential store or automatically protect externally supplied credential files, saved MCP results, or arbitrary pack/receipt paths outside managed directories. On Windows, the operator must set appropriate ACLs for those external files and lower-level command outputs. Never pass secrets on the command line.
+CQLmatic does not configure the native MCP client's credential store or protect externally supplied credential files, saved MCP results, or pack/receipt paths you choose. On Windows, set appropriate access rules for those files and for lower-level command outputs yourself. Never pass secrets on the command line.
 
 Treat credential exposure, boundary bypass, data exfiltration, unsafe query construction, and data-loss paths as security concerns. A documented unsupported language feature or unverified deployment behavior is not by itself proof of a vulnerability; a reproducible boundary failure is.
 

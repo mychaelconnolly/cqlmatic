@@ -112,6 +112,7 @@ Weigh each finding by what it changes for a person using CQLmatic to write, chec
 - Code that edits a file belonging to another program must not corrupt it or lose its contents, and must work on ordinary setups. It is not required to defend that file's owner against other local users who can already change it.
 - Do not raise an attacker or failure model that the feature's documented guarantee excludes. If the guarantee itself looks wrong, say so once.
 - Prefer a feature that works on ordinary setups and states its limits over one that refuses them.
+- CQLmatic does not check who else can access a storage location or whether its path passes through a link, so that it works on managed workstations and in sandboxes. Do not ask for owner, mode, access-rule or link checks on state, pack or input paths. Storage files must still be regular files, and the credential file keeps its mode rule on macOS and Linux.
 
 ## Rules and what enforces them
 
