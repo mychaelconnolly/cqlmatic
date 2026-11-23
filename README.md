@@ -26,9 +26,9 @@ CrowdStrike's [November 2, 2026 hackathon winners announcement](https://www.crow
 
 **Try CQLmatic and share feedback.** Use sanitized examples to describe gaps in setup, discovery, or query writing.
 
-Version `0.1.11` warns when a query names a source or field your environment map lacks, and a search guard for Claude Code and Codex tells your assistant what `check` found before each search runs. Query checks accept more valid queries, catch more join, sorting, correlation, match, and filter traps, and move eleven general notes from warnings to informational output. See the [release notes](https://docs.cqlmatic.dev/release-notes/) for upgrade details.
+Version `0.1.12` sharpens query-check diagnostics with concrete CQL rewrite hints, fixes `correlate()` built-in metadata export tracking under `Label.<field>`, splits explicit vs. omitted `match()` `nrows` severity, expands `CQL_BARE_COMMAND_WORD` warnings for SQL/KQL stage words, tightens companion skill guidance, and adds four runnable threat-hunting plan examples. See the [release notes](https://docs.cqlmatic.dev/release-notes/) for upgrade details.
 
-**[Try v0.1.11](#try-v0111)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-cqlmatic) · [Technical details](#technical-details)
+**[Try v0.1.12](#try-v0112)** · [Read the setup guide](https://docs.cqlmatic.dev/setup/) · [Share sanitized feedback](#help-test-cqlmatic) · [Technical details](#technical-details)
 
 **Quick start:**
 
@@ -74,7 +74,7 @@ Use the [tester feedback form](https://github.com/mychaelconnolly/cqlmatic/issue
 
 ## Technical details
 
-### Try v0.1.11
+### Try v0.1.12
 
 Use the latest security patch on a supported Node.js release line: **22.x at 22.23.4 or later, 24.x at 24.22.1 or later, or 26.x at 26.12.1 or later**. These minimums include the [Node2Shell fix in Node.js's October security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). End-of-life lines are excluded.
 
@@ -83,37 +83,37 @@ Run these commands from outside the CQLmatic source checkout. Inside that checko
 Run setup on demand:
 
 ```sh
-npx cqlmatic@0.1.11 setup
-npx cqlmatic@0.1.11 env inventory
-npx cqlmatic@0.1.11 status
+npx cqlmatic@0.1.12 setup
+npx cqlmatic@0.1.12 env inventory
+npx cqlmatic@0.1.12 status
 ```
 
-The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.11` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
+The npm package bundles the native CLI for **macOS Apple silicon and Linux x86_64**. It installs no global command and uses no install-time scripts or additional binary downloads. npm may ask before caching the package. Linux requires glibc 2.34 or newer and `libgcc_s.so.1`; Windows x86_64 uses the prebuilt ZIP below; other architectures use source builds. In the guides, replace the `cqlmatic` shorthand with `npx cqlmatic@0.1.12` when using this launcher. For strict stderr framing or supervised cancellation, use the native executable directly; see [input and output rules](USAGE.md#input-and-output-rules).
 
-For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. Version `0.1.11` provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
+For the companion workflow, use an AI assistant that can run CQLmatic, access protected local files, and use an authorized CrowdStrike MCP connection. A web chat with only a remote MCP connection cannot run this binary. Version `0.1.12` provides native setup adapters for **Codex, VS Code Local, Claude Code, and GitHub Copilot CLI/app/VS Code Copilot**; other capable agents have a tracked guided path. `copilot` on Windows and `gh copilot` launch the same Copilot CLI. See [the setup guide](docs/SETUP.md#native-hosts-and-effective-configuration) for each host's effective configuration and OAuth identity checks.
 
 Your Falcon account needs the MCP and underlying data permissions for the searches you authorize. Full parser inventory also needs a **separate Falcon API client with NGSIEM Parsers: READ**. Setup, OAuth consent, allowlisting, and Falcon permissions are described in [the setup guide](docs/SETUP.md).
 
-For **Windows x86_64**, use the prebuilt `cqlmatic-v0.1.11-windows-x86_64.zip` from [Release v0.1.11](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.11). It contains `cqlmatic.exe`; Rust and C++ build tools are not required.
+For **Windows x86_64**, use the prebuilt `cqlmatic-v0.1.12-windows-x86_64.zip` from [Release v0.1.12](https://github.com/mychaelconnolly/cqlmatic/releases/tag/v0.1.12). It contains `cqlmatic.exe`; Rust and C++ build tools are not required.
 
 1. Download the ZIP and `SHA256SUMS` into the same folder. In PowerShell, change to that folder and compute the ZIP's hash:
 
    ```powershell
-   Get-FileHash .\cqlmatic-v0.1.11-windows-x86_64.zip -Algorithm SHA256
+   Get-FileHash .\cqlmatic-v0.1.12-windows-x86_64.zip -Algorithm SHA256
    ```
 
 2. Compare the hash with the ZIP's entry in `SHA256SUMS`. Continue only if they match. Extract into a new folder under your user profile:
 
    ```powershell
-   Expand-Archive .\cqlmatic-v0.1.11-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.11"
+   Expand-Archive .\cqlmatic-v0.1.12-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.12"
    ```
 
 3. Check the executable, then start setup:
 
    ```powershell
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.11\cqlmatic-v0.1.11\cqlmatic.exe" --version
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.11\cqlmatic-v0.1.11\cqlmatic.exe" --help
-   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.11\cqlmatic-v0.1.11\cqlmatic.exe" setup
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.12\cqlmatic-v0.1.12\cqlmatic.exe" --version
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.12\cqlmatic-v0.1.12\cqlmatic.exe" --help
+   & "$env:LOCALAPPDATA\Programs\CQLmatic\v0.1.12\cqlmatic-v0.1.12\cqlmatic.exe" setup
    ```
 
 Administrator access and a global PATH change are unnecessary. See [Windows installation](docs/SETUP.md#install-on-windows) for the full procedure.

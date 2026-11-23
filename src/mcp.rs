@@ -999,11 +999,12 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
                         | "0.1.8"
                         | "0.1.9"
                         | "0.1.10"
+                        | "0.1.11"
                 )
         }
         3 => matches!(
             state.producer_version.as_str(),
-            "0.1.6" | "0.1.7" | "0.1.8" | "0.1.9" | "0.1.10"
+            "0.1.6" | "0.1.7" | "0.1.8" | "0.1.9" | "0.1.10" | "0.1.11"
         ),
         _ => false,
     };
@@ -2010,6 +2011,7 @@ mod recovery_tests {
             ("0.1.8", "0.1.9"),
             ("0.1.9", "0.1.10"),
             ("0.1.10", "0.1.11"),
+            ("0.1.11", "0.1.12"),
         ] {
             for resumable in [false, true] {
                 let run = ready_kind(false, resumable);
@@ -2048,7 +2050,7 @@ mod recovery_tests {
             "MCP search result must have a result array",
         ));
 
-        let outcomes = ["0.1.7", "0.1.8", "0.1.9", "0.1.10"].map(|producer| {
+        let outcomes = ["0.1.7", "0.1.8", "0.1.9", "0.1.10", "0.1.11"].map(|producer| {
             state.producer_version = producer.into();
             let writer = storage::Writer::acquire(&run.state).unwrap();
             store(&writer, &state).unwrap();
@@ -2066,6 +2068,7 @@ mod recovery_tests {
                 ("0.1.8", Err("MCP_STATE_TAMPERED".into())),
                 ("0.1.9", Err("MCP_STATE_TAMPERED".into())),
                 ("0.1.10", Err("MCP_STATE_TAMPERED".into())),
+                ("0.1.11", Err("MCP_STATE_TAMPERED".into())),
             ]
         );
     }
@@ -2087,8 +2090,8 @@ mod recovery_tests {
 
     #[test]
     fn released_ended_attempts_revalidate_retained_bytes_without_remeasuring_lists() {
-        for writer_version in ["0.1.8", "0.1.9", "0.1.10"] {
-            assert_ended_attempt_history(writer_version, "0.1.11");
+        for writer_version in ["0.1.8", "0.1.9", "0.1.10", "0.1.11"] {
+            assert_ended_attempt_history(writer_version, "0.1.12");
         }
     }
 
@@ -2168,19 +2171,25 @@ mod recovery_tests {
     #[test]
     #[ignore = "Set CQLMATIC_V018_BINARY to the unmodified release executable"]
     fn genuine_version_018_ended_attempts_are_readable_by_a_later_producer() {
-        assert_genuine_ended_attempt_history("CQLMATIC_V018_BINARY", "0.1.8", "0.1.11");
+        assert_genuine_ended_attempt_history("CQLMATIC_V018_BINARY", "0.1.8", "0.1.12");
     }
 
     #[test]
     #[ignore = "Set CQLMATIC_V019_BINARY to the unmodified release executable"]
     fn genuine_version_019_ended_attempts_are_readable_by_a_later_producer() {
-        assert_genuine_ended_attempt_history("CQLMATIC_V019_BINARY", "0.1.9", "0.1.11");
+        assert_genuine_ended_attempt_history("CQLMATIC_V019_BINARY", "0.1.9", "0.1.12");
     }
 
     #[test]
     #[ignore = "Set CQLMATIC_V0110_BINARY to the unmodified release executable"]
     fn genuine_version_0110_ended_attempts_are_readable_by_a_later_producer() {
-        assert_genuine_ended_attempt_history("CQLMATIC_V0110_BINARY", "0.1.10", "0.1.11");
+        assert_genuine_ended_attempt_history("CQLMATIC_V0110_BINARY", "0.1.10", "0.1.12");
+    }
+
+    #[test]
+    #[ignore = "Set CQLMATIC_V0111_BINARY to the unmodified release executable"]
+    fn genuine_version_0111_ended_attempts_are_readable_by_a_later_producer() {
+        assert_genuine_ended_attempt_history("CQLMATIC_V0111_BINARY", "0.1.11", "0.1.12");
     }
 
     fn assert_genuine_ended_attempt_history(

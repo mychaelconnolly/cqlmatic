@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.12
+
+- Expand `CQL_BARE_COMMAND_WORD` to warn with actionable CQL replacement hints on bare `limit`, `take`, `order`, `project`, `project-away`, `project-rename`, `summarize`, `extend`, and `distinct` pipeline stages (surfaced by both `cqlmatic check` and the `PreToolUse` search guard).
+- Strengthen `integrations/agent/SKILL.md` guidance to check every hand-written query before searching, account for parser-specific field paths and encodings, and keep projections compact.
+- Fixed `correlate()` export tracking so mandatory queries export built-in `@id`, `@timestamp`, `@ingesttimestamp`, and `@timestamp.nanos` under their `Label.<field>` prefix (unless removed or projected out in that query) rather than as bare `@id`/`@timestamp`/`@ingesttimestamp`.
+- Lowered `CQL_MATCH_NROWS` from a warning to an informational note when `nrows` is explicitly set (`nrows=max`, numeric `1..=500`, or parameterized), while keeping omitted `nrows` (default `1`) as a warning.
+- Added concrete rewrite guidance to `CQL_UNEXPORTED_FIELD`, `CQL_DROPPED_FIELD`, `CQL_JOIN_MAX`, and omitted-`nrows` `CQL_MATCH_NROWS` warnings.
+- Added four runnable threat-hunting plan examples (`examples/php2shell-correlate.plan.json`, `examples/node2shell-brotli.plan.json`, `examples/runtime-shell-c2.plan.json`, and `examples/node2shell-outbound.plan.json`) alongside benchmark charts and rotating examples on the project page.
+
 ## 0.1.11
 
 - `check` and `generate` add the informational note `CQL_ABSOLUTE_TIME_FILTER` when the query's leading filter, the filter stages before its first function call or other stage, compares `@timestamp` with a fixed number using `<`, `<=`, `>` or `>=`, on its own or joined by AND. The query must contain no subquery and must not call `setTimeInterval`, `bucket`, `timeChart`, `start()` or `end()`. The time window belongs in the search request's `start` and `end`, so the query is not tied to one window. `generate` still emits the plan as written. The note does not change `ready`, and `--fail-on-warning` ignores it.
@@ -173,7 +182,7 @@
 First public release.
 
 - Native Rust CLI for recipes, typed plans, bounded English, checking, linting, reference lookup, environment packs, and saved-result assessment.
-- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v0111).
+- On-demand `npx cqlmatic@0.1.0 setup` with bundled macOS Apple silicon and Linux x86_64 executables; use a supported, patched Node.js release as specified in the [README](README.md#try-v0112).
 - Resumable MCP setup for Codex CLI and VS Code, with CIMD preference, manual registration guidance, command previews, and separate configuration, authentication, and tool-discovery states.
 - Environment inventory and offline status covering scouting, confirmed context, parser catalog/bindings/semantic review, source and field measurements, and reconciliation.
 - Source-bound field batches can measure parser-declared fields absent from event samples. Partial refresh preserves untargeted evidence, original dates, annotations, and historical observations.

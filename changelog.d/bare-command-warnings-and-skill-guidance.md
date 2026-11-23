@@ -1,2 +1,0 @@
-- Expand `CQL_BARE_COMMAND_WORD` to warn with actionable CQL replacement hints on bare `limit`, `take`, `order`, `project`, `project-away`, `project-rename`, `summarize`, `extend`, and `distinct` pipeline stages (surfaced by both `cqlmatic check` and the `PreToolUse` search guard).
-- Strengthen `integrations/agent/SKILL.md` guidance to check every hand-written query before searching, account for parser-specific field paths and encodings, and keep projections compact.
