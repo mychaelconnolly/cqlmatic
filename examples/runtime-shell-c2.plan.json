@@ -1,0 +1,406 @@
+{
+  "source": {
+    "repo": "endpoints-prod",
+    "event": "ProcessRollup2"
+  },
+  "filters": [
+    {
+      "op": "any",
+      "items": [
+        {
+          "op": "glob",
+          "field": "ComputerName",
+          "pattern": "WEB-*"
+        },
+        {
+          "op": "glob",
+          "field": "ComputerName",
+          "pattern": "API-*"
+        }
+      ]
+    },
+    {
+      "op": "call",
+      "function": "in",
+      "args": [
+        {
+          "name": "field",
+          "value": {
+            "kind": "field",
+            "name": "ParentBaseFileName"
+          }
+        },
+        {
+          "name": "ignoreCase",
+          "value": {
+            "kind": "literal",
+            "value": true
+          }
+        },
+        {
+          "name": "values",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "php-fpm"
+              },
+              {
+                "kind": "literal",
+                "value": "apache2"
+              },
+              {
+                "kind": "literal",
+                "value": "httpd"
+              },
+              {
+                "kind": "literal",
+                "value": "node"
+              },
+              {
+                "kind": "literal",
+                "value": "bun"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "op": "call",
+      "function": "in",
+      "args": [
+        {
+          "name": "field",
+          "value": {
+            "kind": "field",
+            "name": "FileName"
+          }
+        },
+        {
+          "name": "ignoreCase",
+          "value": {
+            "kind": "literal",
+            "value": true
+          }
+        },
+        {
+          "name": "values",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "sh"
+              },
+              {
+                "kind": "literal",
+                "value": "bash"
+              },
+              {
+                "kind": "literal",
+                "value": "curl"
+              },
+              {
+                "kind": "literal",
+                "value": "wget"
+              },
+              {
+                "kind": "literal",
+                "value": "python3"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "op": "exists",
+      "field": "aid",
+      "present": true
+    },
+    {
+      "op": "exists",
+      "field": "TargetProcessId",
+      "present": true
+    }
+  ],
+  "steps": [
+    {
+      "op": "call",
+      "function": "join",
+      "args": [
+        {
+          "name": "query",
+          "value": {
+            "kind": "query",
+            "plan": {
+              "source": {
+                "repo": "endpoints-prod",
+                "event": "NetworkConnectIP4"
+              },
+              "filters": [
+                {
+                  "op": "exists",
+                  "field": "RemoteAddressIP4",
+                  "present": true
+                },
+                {
+                  "op": "call",
+                  "function": "cidr",
+                  "negate": true,
+                  "args": [
+                    {
+                      "name": "field",
+                      "value": {
+                        "kind": "field",
+                        "name": "RemoteAddressIP4"
+                      }
+                    },
+                    {
+                      "name": "subnet",
+                      "value": {
+                        "kind": "array",
+                        "items": [
+                          {
+                            "kind": "literal",
+                            "value": "10.0.0.0/8"
+                          },
+                          {
+                            "kind": "literal",
+                            "value": "172.16.0.0/12"
+                          },
+                          {
+                            "kind": "literal",
+                            "value": "192.168.0.0/16"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                {
+                  "op": "exists",
+                  "field": "aid",
+                  "present": true
+                },
+                {
+                  "op": "exists",
+                  "field": "ContextProcessId",
+                  "present": true
+                }
+              ],
+              "steps": [
+                {
+                  "op": "group",
+                  "keys": [
+                    "aid",
+                    "ContextProcessId",
+                    "RemoteAddressIP4"
+                  ],
+                  "aggregates": [
+                    {
+                      "function": "count",
+                      "as": "dest_hits"
+                    }
+                  ]
+                },
+                {
+                  "op": "call",
+                  "function": "groupBy",
+                  "args": [
+                    {
+                      "name": "field",
+                      "value": {
+                        "kind": "array",
+                        "items": [
+                          {
+                            "kind": "literal",
+                            "value": "aid"
+                          },
+                          {
+                            "kind": "literal",
+                            "value": "ContextProcessId"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "function",
+                      "value": {
+                        "kind": "array",
+                        "items": [
+                          {
+                            "kind": "call",
+                            "function": "count",
+                            "args": [
+                              {
+                                "name": "as",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": "public_ips"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "call",
+                            "function": "sum",
+                            "args": [
+                              {
+                                "name": "field",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": "dest_hits"
+                                }
+                              },
+                              {
+                                "name": "as",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": "connections"
+                                }
+                              }
+                            ]
+                          },
+                          {
+                            "kind": "call",
+                            "function": "collect",
+                            "args": [
+                              {
+                                "name": "fields",
+                                "value": {
+                                  "kind": "array",
+                                  "items": [
+                                    {
+                                      "kind": "literal",
+                                      "value": "RemoteAddressIP4"
+                                    }
+                                  ]
+                                }
+                              },
+                              {
+                                "name": "limit",
+                                "value": {
+                                  "kind": "literal",
+                                  "value": 10
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "limit",
+                      "value": {
+                        "kind": "field",
+                        "name": "max"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "field",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "aid"
+              },
+              {
+                "kind": "literal",
+                "value": "TargetProcessId"
+              }
+            ]
+          }
+        },
+        {
+          "name": "key",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "aid"
+              },
+              {
+                "kind": "literal",
+                "value": "ContextProcessId"
+              }
+            ]
+          }
+        },
+        {
+          "name": "include",
+          "value": {
+            "kind": "array",
+            "items": [
+              {
+                "kind": "literal",
+                "value": "public_ips"
+              },
+              {
+                "kind": "literal",
+                "value": "connections"
+              },
+              {
+                "kind": "literal",
+                "value": "RemoteAddressIP4"
+              }
+            ]
+          }
+        },
+        {
+          "name": "mode",
+          "value": {
+            "kind": "literal",
+            "value": "inner"
+          }
+        },
+        {
+          "name": "limit",
+          "value": {
+            "kind": "literal",
+            "value": 20000
+          }
+        },
+        {
+          "name": "max",
+          "value": {
+            "kind": "literal",
+            "value": 1
+          }
+        }
+      ]
+    },
+    {
+      "op": "sort",
+      "fields": [
+        "public_ips",
+        "connections"
+      ],
+      "order": "desc",
+      "type": "number",
+      "limit": 20
+    },
+    {
+      "op": "select",
+      "fields": [
+        "ComputerName",
+        "ParentBaseFileName",
+        "FileName",
+        "CommandLine",
+        "public_ips",
+        "connections",
+        "RemoteAddressIP4"
+      ]
+    }
+  ]
+}

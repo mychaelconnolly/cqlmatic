@@ -43,14 +43,16 @@ export const DOCUMENTS = [
 ].map(([source, route, label, group]) => ({ source, route, label, group }));
 
 const ASSETS = new Set([
-  'favicon.svg', 'theme.js', 'quick-start.js', 'site.css', 'docs.css', 'github-mark.svg', 'github-mark.LICENSE.txt',
+  'favicon.svg', 'theme.js', 'quick-start.js', 'examples.js', 'site.css', 'docs.css', 'github-mark.svg', 'github-mark.LICENSE.txt',
   'agentworks-expert-builder-2026.png', 'setup-discovery-query.png',
+  'cqlmatic-benchmark-dark.png', 'cqlmatic-benchmark-light.png',
 ]);
 const SOURCE_ROOTS = ['src', 'data', 'schemas', 'examples', 'licenses', 'tests', 'npm', 'tools', '.github'];
 const SOURCE_FILES = new Set([
   'LICENSE', 'NOTICE', 'Cargo.toml', 'Cargo.lock', 'dev', 'rust-toolchain.toml', 'package.json',
   'site/package.json', 'site/package-lock.json', 'site/build.mjs', 'site/build.test.mjs',
-  'site/theme.test.cjs', 'site/wrangler.jsonc', 'site/wrangler.docs.jsonc',
+  'site/theme.test.cjs', 'site/quick-start.test.cjs', 'site/examples.test.cjs',
+  'site/wrangler.jsonc', 'site/wrangler.docs.jsonc',
 ]);
 const HTML_TAG = /<[a-z](?:[^>"']|"[^"]*"|'[^']*')*>/gi;
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);

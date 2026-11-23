@@ -18,6 +18,7 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <script src="/assets/theme.js"></script>
   <script src="/assets/quick-start.js" defer></script>
+  <script src="/assets/examples.js" defer></script>
   <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body>
@@ -59,6 +60,10 @@
           </div>
           <p class="copy-status" role="status" aria-live="polite"></p>
         </section>
+        <figure class="hero-benchmark">
+          <img class="benchmark-dark" src="/assets/cqlmatic-benchmark-dark.png" width="960" height="614" decoding="async" alt="CQLmatic benchmark: 95% fewer rejected live searches, 59% fewer wrong queries, and 36% fewer live searches per task across 2,333 live CrowdStrike queries in 480 runs. Correct queries without rejected searches improve from 52% to 98% on Opus 5.5 (medium), 56% to 92% on GPT-6.2 Sol (low), 67% to 90% on Sonnet 5.5 (medium), 56% to 83% on Haiku 5.5 (medium), and 17% to 67% on GPT-5.6 Luna (medium).">
+          <img class="benchmark-light" src="/assets/cqlmatic-benchmark-light.png" width="960" height="614" decoding="async" alt="CQLmatic benchmark: 95% fewer rejected live searches, 59% fewer wrong queries, and 36% fewer live searches per task across 2,333 live CrowdStrike queries in 480 runs. Correct queries without rejected searches improve from 52% to 98% on Opus 5.5 (medium), 56% to 92% on GPT-6.2 Sol (low), 67% to 90% on Sonnet 5.5 (medium), 56% to 83% on Haiku 5.5 (medium), and 17% to 67% on GPT-5.6 Luna (medium).">
+        </figure>
         <div class="recognition">
           <img src="/assets/agentworks-expert-builder-2026.png" width="200" height="200" decoding="async" alt="2026 AgentWorks Hackathon Expert Builder badge awarded to the &quot;THIS IS CQL&quot; agent">
           <div>
@@ -68,38 +73,215 @@
         </div>
       </div>
       <figure class="code-example">
-        <figcaption>From intent to CQL</figcaption>
+        <figcaption class="code-head">
+          <span>From intent to CQL</span>
+          <div class="example-controls" hidden></div>
+          <span class="example-progress" aria-hidden="true"></span>
+        </figcaption>
         <div class="code-body">
-          <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Over the past 90 days, which of our London and New York workstations ran PowerShell with ‘-enc’ and connected to at least five IPv4 addresses? Show me the busiest processes, their hosts, and the IPs they reached.”</p>
-          <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Use <code>endpoints-prod</code>, with <code>ComputerName</code> matching <code>LON-WKS-*</code> or <code>NYC-WKS-*</code>. Set a 90-day range when executing. Join <code>ProcessRollup2</code> and <code>NetworkConnectIP4</code> by <code>aid</code> and process ID. Require five distinct destinations; rank by destinations, then connections. Return up to 20 rows with connections per IP and up to 20 destination IPs.</p>
-          <p class="code-label output-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.11/examples/powershell-network.plan.json">View agent input</a></p>
-          <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
-  --plan examples/powershell-network.plan.json</code></pre>
-          <p class="code-label output-label">Generated CQL</p>
-          <pre tabindex="0" aria-label="Generated CQL"><code>#repo = <span class="code-string">"endpoints-prod"</span>
+          <div class="example-slide is-active" data-example-label="PHP2Shell">
+            <div class="example-step">
+              <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Over the past 14 days, did a POST to a <code>.php</code> or upload path returning 500–503 precede a PHP worker OOM or signal-11 crash and a <code>php-fpm</code>, <code>apache2</code>, or <code>httpd</code> shell spawn within 10 minutes? Also count any <code>.php</code> writes under <code>/var/www/</code> right after.”</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Correlate <code>web-edge</code> 5xx POSTs with <code>linux-syslog</code> PHP OOM/SIGSEGV faults and <code>endpoints-prod</code> <code>auditd</code> shell/downloader spawns in order within 10m by <code>host.name</code>, plus a 10m <code>/var/www/*.php</code> write count.</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.11/examples/php2shell-correlate.plan.json">View agent input</a></p>
+              <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
+  --plan examples/php2shell-correlate.plan.json</code></pre>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Generated CQL</p>
+              <pre tabindex="0" aria-label="Generated CQL"><code><span class="code-function">correlate</span>(
+  Probe: {
+    #repo = <span class="code-string">"web-edge"</span> | http.request.method = <span class="code-string">"POST"</span>
+    | <span class="code-function">in</span>(field=http.response.status_code,
+        values=[500, 502, 503])
+    | <span class="code-function">regex</span>(<span class="code-string">"\\.php$|upload"</span>, field=<span class="code-string">"url.path"</span>, flags=<span class="code-string">"i"</span>)
+  } include: [<span class="code-string">"host.name"</span>, <span class="code-string">"source.ip"</span>, <span class="code-string">"url.path"</span>,
+      <span class="code-string">"http.response.status_code"</span>],
+  Fault: {
+    #repo = <span class="code-string">"linux-syslog"</span>
+    | <span class="code-function">regex</span>(<span class="code-string">"Allowed memory size|signal 11|exit code 70"</span>,
+        field=<span class="code-string">"message"</span>, flags=<span class="code-string">"i"</span>)
+    | host.name &lt;=&gt; Probe.host.name
+  } include: [<span class="code-string">"process.name"</span>, <span class="code-string">"message"</span>],
+  Shell: {
+    #repo = <span class="code-string">"endpoints-prod"</span> | #type = <span class="code-string">"auditd"</span>
+    | <span class="code-function">in</span>(field=process.parent.name, ignoreCase=true,
+        values=[<span class="code-string">"php-fpm"</span>, <span class="code-string">"apache2"</span>, <span class="code-string">"httpd"</span>])
+    | <span class="code-function">in</span>(field=process.name, ignoreCase=true,
+        values=[<span class="code-string">"sh"</span>, <span class="code-string">"bash"</span>, <span class="code-string">"curl"</span>, <span class="code-string">"wget"</span>])
+    | host.name &lt;=&gt; Probe.host.name
+  } include: [<span class="code-string">"process.parent.name"</span>, <span class="code-string">"process.name"</span>,
+      <span class="code-string">"process.command_line"</span>],
+  aggregation=[Drops: {
+    #repo = <span class="code-string">"endpoints-prod"</span> | #type = <span class="code-string">"auditd"</span>
+    | event.action = <span class="code-string">"file-write"</span> | file.path = <span class="code-string">"/var/www/*.php"</span>
+    | host.name &lt;=&gt; Probe.host.name | <span class="code-function">count</span>(as=<span class="code-string">"php_writes"</span>)
+  } after: <span class="code-string">"Shell +0s"</span> before: <span class="code-string">"Shell +10m"</span>],
+  sequence=true, within=<span class="code-string">"10m"</span>)</code></pre>
+            </div>
+          </div>
+
+          <div class="example-slide" data-example-label="Node2Shell" hidden>
+            <div class="example-step">
+              <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Over the past 7 days, separate noisy Brotli scanners from hosts actually crashing: which sources sent <code>Content-Encoding: br</code> requests causing 3+ HTTP 5xx errors against hosts whose <code>node</code>, <code>bun</code>, or <code>envoy</code> workers logged a SIGSEGV, coredump, or decompression fault?”</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Build a <code>runtime_crashes</code> table from <code>linux-syslog</code> (<code>node</code>, <code>bun</code>, <code>envoy</code> faults). Aggregate <code>web-edge</code> Brotli requests by host, source IP, and path; compute <code>fault_rate</code>; <code>match</code> strictly onto crashed hosts; rank top 20.</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.11/examples/node2shell-brotli.plan.json">View agent input</a></p>
+              <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
+  --plan examples/node2shell-brotli.plan.json</code></pre>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Generated CQL</p>
+              <pre tabindex="0" aria-label="Generated CQL"><code><span class="code-function">defineTable</span>(query={
+    #repo = <span class="code-string">"linux-syslog"</span>
+    | <span class="code-function">in</span>(field=process.name, ignoreCase=true,
+        values=[<span class="code-string">"node"</span>, <span class="code-string">"bun"</span>, <span class="code-string">"envoy"</span>])
+    | <span class="code-function">regex</span>(<span class="code-string">"SIGSEGV|coredump|Decompression failed"</span>,
+        field=<span class="code-string">"message"</span>, flags=<span class="code-string">"i"</span>)
+    | <span class="code-function">groupBy</span>([<span class="code-string">"host.name"</span>, <span class="code-string">"process.name"</span>],
+        function=[<span class="code-function">count</span>(as=<span class="code-string">"crashes"</span>)], limit=max)
+  }, name=<span class="code-string">"runtime_crashes"</span>,
+     include=[<span class="code-string">"host.name"</span>, <span class="code-string">"process.name"</span>, <span class="code-string">"crashes"</span>])
+| #repo = <span class="code-string">"web-edge"</span>
+| http.request.headers.content_encoding = <span class="code-string">"br"</span>
+| is_fault := <span class="code-function">if</span>(condition=(http.response.status_code &gt;= 500),
+    then=1, else=0)
+| <span class="code-function">groupBy</span>([<span class="code-string">"host.name"</span>, <span class="code-string">"source.ip"</span>, <span class="code-string">"url.path"</span>],
+    function=[<span class="code-function">count</span>(as=<span class="code-string">"br_requests"</span>),
+      <span class="code-function">sum</span>(<span class="code-string">"is_fault"</span>, as=<span class="code-string">"faults"</span>),
+      <span class="code-function">max</span>(<span class="code-string">"http.request.body.bytes"</span>, as=<span class="code-string">"max_bytes"</span>)],
+    limit=max)
+| <span class="code-function">test</span>((faults &gt;= 3)) | fault_rate := (faults / br_requests)
+| <span class="code-function">match</span>(table=<span class="code-string">"runtime_crashes"</span>, field=<span class="code-string">"host.name"</span>,
+    column=<span class="code-string">"host.name"</span>, include=[<span class="code-string">"process.name"</span>, <span class="code-string">"crashes"</span>],
+    strict=true, nrows=1)
+| <span class="code-function">sort</span>([<span class="code-string">"crashes"</span>, <span class="code-string">"faults"</span>],
+    order=<span class="code-string">"desc"</span>, type=<span class="code-string">"number"</span>, limit=20)
+| <span class="code-function">select</span>([<span class="code-string">"host.name"</span>, <span class="code-string">"process.name"</span>, <span class="code-string">"source.ip"</span>,
+    <span class="code-string">"url.path"</span>, <span class="code-string">"br_requests"</span>, <span class="code-string">"faults"</span>, <span class="code-string">"fault_rate"</span>,
+    <span class="code-string">"crashes"</span>, <span class="code-string">"max_bytes"</span>])</code></pre>
+            </div>
+          </div>
+
+          <div class="example-slide" data-example-label="Post-exploit" hidden>
+            <div class="example-step">
+              <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Patching stops new PHP2Shell and Node2Shell exploits, not existing footholds. Over the past 30 days on <code>WEB-*</code> and <code>API-*</code> hosts, which <code>php-fpm</code>, <code>apache2</code>, <code>httpd</code>, <code>node</code>, or <code>bun</code> workers spawned a shell or downloader and connected to public IPs?”</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Filter <code>ProcessRollup2</code> on <code>WEB-*</code>/<code>API-*</code> for web/runtime parents spawning shells or downloaders. Inner-join <code>NetworkConnectIP4</code> on <code>aid</code> and process ID, excluding RFC 1918 ranges with <code>!cidr()</code>, with exact distinct IP counts.</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.11/examples/runtime-shell-c2.plan.json">View agent input</a></p>
+              <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
+  --plan examples/runtime-shell-c2.plan.json</code></pre>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Generated CQL</p>
+              <pre tabindex="0" aria-label="Generated CQL"><code>#repo = <span class="code-string">"endpoints-prod"</span>
 | #event_simpleName = <span class="code-string">"ProcessRollup2"</span>
-| (ComputerName = <span class="code-string">"LON-WKS-*"</span> OR ComputerName = <span class="code-string">"NYC-WKS-*"</span>)
-| (FileName = <span class="code-string">"powershell.exe"</span> OR FileName = <span class="code-string">"pwsh.exe"</span>)
-| <span class="code-function">regex</span>(<span class="code-string">"-enc"</span>, field="CommandLine", flags="")
-| aid = "*" | TargetProcessId = "*"
+| (ComputerName = <span class="code-string">"WEB-*"</span> OR ComputerName = <span class="code-string">"API-*"</span>)
+| <span class="code-function">in</span>(field=ParentBaseFileName, ignoreCase=true,
+    values=[<span class="code-string">"php-fpm"</span>, <span class="code-string">"apache2"</span>, <span class="code-string">"httpd"</span>, <span class="code-string">"node"</span>, <span class="code-string">"bun"</span>])
+| <span class="code-function">in</span>(field=FileName, ignoreCase=true,
+    values=[<span class="code-string">"sh"</span>, <span class="code-string">"bash"</span>, <span class="code-string">"curl"</span>, <span class="code-string">"wget"</span>, <span class="code-string">"python3"</span>])
+| aid = <span class="code-string">"*"</span> | TargetProcessId = <span class="code-string">"*"</span>
 | <span class="code-function">join</span>(query={
     #repo = <span class="code-string">"endpoints-prod"</span>
     | #event_simpleName = <span class="code-string">"NetworkConnectIP4"</span>
-    | aid = "*" | ContextProcessId = "*" | RemoteAddressIP4 = "*"
-    | <span class="code-function">groupBy</span>(["aid", "ContextProcessId", "RemoteAddressIP4"],
-        function=[<span class="code-function">count</span>(as="destination_events")], limit=max)
-    | <span class="code-function">groupBy</span>(field=["aid", "ContextProcessId"],
-        function=[<span class="code-function">count</span>(as="destinations"),
-          <span class="code-function">sum</span>(field="destination_events", as="connections"),
-          <span class="code-function">collect</span>(fields=["RemoteAddressIP4"], limit=20)], limit=max)
-  }, field=["aid", "TargetProcessId"], key=["aid", "ContextProcessId"],
-     include=["destinations", "connections", "RemoteAddressIP4"],
-     mode="inner", limit=20000, max=1)
-| <span class="code-function">test</span>((destinations &gt;= 5))
-| connections_per_ip := (connections / destinations)
-| <span class="code-function">sort</span>(["destinations", "connections"], order="desc", type="number", limit=20)
-| <span class="code-function">select</span>(["ComputerName", "ParentBaseFileName", "TargetProcessId", "CommandLine",
-    "destinations", "connections", "connections_per_ip", "RemoteAddressIP4"])</code></pre>
+    | RemoteAddressIP4 = <span class="code-string">"*"</span>
+    | !<span class="code-function">cidr</span>(field=RemoteAddressIP4,
+        subnet=[<span class="code-string">"10.0.0.0/8"</span>, <span class="code-string">"172.16.0.0/12"</span>,
+          <span class="code-string">"192.168.0.0/16"</span>])
+    | aid = <span class="code-string">"*"</span> | ContextProcessId = <span class="code-string">"*"</span>
+    | <span class="code-function">groupBy</span>([<span class="code-string">"aid"</span>, <span class="code-string">"ContextProcessId"</span>, <span class="code-string">"RemoteAddressIP4"</span>],
+        function=[<span class="code-function">count</span>(as=<span class="code-string">"dest_hits"</span>)], limit=max)
+    | <span class="code-function">groupBy</span>(field=[<span class="code-string">"aid"</span>, <span class="code-string">"ContextProcessId"</span>],
+        function=[<span class="code-function">count</span>(as=<span class="code-string">"public_ips"</span>),
+          <span class="code-function">sum</span>(field=<span class="code-string">"dest_hits"</span>, as=<span class="code-string">"connections"</span>),
+          <span class="code-function">collect</span>(fields=[<span class="code-string">"RemoteAddressIP4"</span>], limit=10)],
+        limit=max)
+  }, field=[<span class="code-string">"aid"</span>, <span class="code-string">"TargetProcessId"</span>],
+     key=[<span class="code-string">"aid"</span>, <span class="code-string">"ContextProcessId"</span>],
+     include=[<span class="code-string">"public_ips"</span>, <span class="code-string">"connections"</span>, <span class="code-string">"RemoteAddressIP4"</span>],
+     mode=<span class="code-string">"inner"</span>, limit=20000, max=1)
+| <span class="code-function">sort</span>([<span class="code-string">"public_ips"</span>, <span class="code-string">"connections"</span>],
+    order=<span class="code-string">"desc"</span>, type=<span class="code-string">"number"</span>, limit=20)
+| <span class="code-function">select</span>([<span class="code-string">"ComputerName"</span>, <span class="code-string">"ParentBaseFileName"</span>, <span class="code-string">"FileName"</span>,
+    <span class="code-string">"CommandLine"</span>, <span class="code-string">"public_ips"</span>, <span class="code-string">"connections"</span>,
+    <span class="code-string">"RemoteAddressIP4"</span>])</code></pre>
+            </div>
+          </div>
+
+          <div class="example-slide" data-example-label="Outbound" hidden>
+            <div class="example-step">
+              <p class="code-label analyst-request"><strong>Analyst request</strong><br>“Node2Shell also hits outbound HTTP clients. Over the past 14 days, did any host receive an external <code>Content-Encoding: br</code> response, then have <code>node</code>, <code>bun</code>, or <code>python3</code> spawn a shell and read <code>.env</code>, <code>.aws/credentials</code>, or <code>/etc/shadow</code> within 5 minutes? Count external requests for 10 minutes after.”</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label agent-interpretation"><strong>Agent interpretation</strong><br>Correlate external <code>egress-proxy</code> Brotli responses (<code>!cidr()</code> RFC 1918) with <code>auditd</code> runtime shell spawns and secret-file reads in sequence within 5m by <code>host.name</code>, plus a 10m post-shell external request count.</p>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Agent → CQLmatic · <a href="https://github.com/mychaelconnolly/cqlmatic/blob/v0.1.11/examples/node2shell-outbound.plan.json">View agent input</a></p>
+              <pre tabindex="0" aria-label="Example terminal command"><code><span class="prompt">$</span> cqlmatic generate \
+  --plan examples/node2shell-outbound.plan.json</code></pre>
+            </div>
+            <svg class="flow-arrow example-arrow" width="14" height="22" viewBox="0 0 14 22" aria-hidden="true" focusable="false"><path d="M7 1v19m-4.5-4.5L7 20l4.5-4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <div class="example-step">
+              <p class="code-label">Generated CQL</p>
+              <pre tabindex="0" aria-label="Generated CQL"><code><span class="code-function">correlate</span>(
+  BrotliFetch: {
+    #repo = <span class="code-string">"egress-proxy"</span>
+    | http.response.headers.content_encoding = <span class="code-string">"br"</span>
+    | destination.ip = <span class="code-string">"*"</span>
+    | !<span class="code-function">cidr</span>(field=destination.ip,
+        subnet=[<span class="code-string">"10.0.0.0/8"</span>, <span class="code-string">"172.16.0.0/12"</span>,
+          <span class="code-string">"192.168.0.0/16"</span>])
+    | host.name = <span class="code-string">"*"</span>
+  } include: [<span class="code-string">"host.name"</span>, <span class="code-string">"destination.domain"</span>,
+      <span class="code-string">"destination.ip"</span>, <span class="code-string">"http.response.body.bytes"</span>],
+  Shell: {
+    #repo = <span class="code-string">"endpoints-prod"</span> | #type = <span class="code-string">"auditd"</span>
+    | <span class="code-function">in</span>(field=process.parent.name, ignoreCase=true,
+        values=[<span class="code-string">"node"</span>, <span class="code-string">"bun"</span>, <span class="code-string">"python3"</span>])
+    | <span class="code-function">in</span>(field=process.name, ignoreCase=true,
+        values=[<span class="code-string">"sh"</span>, <span class="code-string">"bash"</span>, <span class="code-string">"dash"</span>])
+    | host.name &lt;=&gt; BrotliFetch.host.name
+  } include: [<span class="code-string">"process.parent.name"</span>, <span class="code-string">"process.name"</span>,
+      <span class="code-string">"process.command_line"</span>],
+  SecretAccess: {
+    #repo = <span class="code-string">"endpoints-prod"</span> | #type = <span class="code-string">"auditd"</span>
+    | <span class="code-function">regex</span>(<span class="code-string">"\\.env$|\\.aws/credentials|/etc/shadow"</span>,
+        field=<span class="code-string">"file.path"</span>, flags=<span class="code-string">"i"</span>)
+    | host.name &lt;=&gt; Shell.host.name
+  } include: [<span class="code-string">"file.path"</span>],
+  aggregation=[Callbacks: {
+    #repo = <span class="code-string">"egress-proxy"</span> | destination.ip = <span class="code-string">"*"</span>
+    | !<span class="code-function">cidr</span>(field=destination.ip,
+        subnet=[<span class="code-string">"10.0.0.0/8"</span>, <span class="code-string">"172.16.0.0/12"</span>,
+          <span class="code-string">"192.168.0.0/16"</span>])
+    | host.name &lt;=&gt; BrotliFetch.host.name
+    | <span class="code-function">count</span>(as=<span class="code-string">"outbound_reqs"</span>)
+  } after: <span class="code-string">"Shell +0s"</span> before: <span class="code-string">"Shell +10m"</span>],
+  sequence=true, within=<span class="code-string">"5m"</span>)</code></pre>
+            </div>
+          </div>
         </div>
       </figure>
     </section>

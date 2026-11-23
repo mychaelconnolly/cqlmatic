@@ -15,7 +15,7 @@ function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'cqlmatic-site-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const document of DOCUMENTS) write(root, document.source, `# ${document.source === 'docs/SETUP.md' ? 'Setup' : document.label}\n\nSynthetic documentation.\n`);
-  for (const asset of ['favicon.svg', 'theme.js', 'site.css', 'docs.css', 'github-mark.svg', 'github-mark.LICENSE.txt', 'agentworks-expert-builder-2026.png', 'setup-discovery-query.png']) write(root, `site/public/assets/${asset}`, `synthetic ${asset}\n`);
+  for (const asset of ['favicon.svg', 'theme.js', 'quick-start.js', 'examples.js', 'site.css', 'docs.css', 'github-mark.svg', 'github-mark.LICENSE.txt', 'agentworks-expert-builder-2026.png', 'setup-discovery-query.png', 'cqlmatic-benchmark-dark.png', 'cqlmatic-benchmark-light.png']) write(root, `site/public/assets/${asset}`, `synthetic ${asset}\n`);
   write(root, 'site/public/index.html', '<!doctype html><html lang="en"><head><meta name="description" content="Synthetic"><link rel="canonical" href="https://cqlmatic.dev/"><script src="/assets/theme.js"></script><link rel="stylesheet" href="/assets/site.css"><link rel="icon" href="/assets/favicon.svg"></head><body><h1 id="home">CQLmatic</h1><a href="https://docs.cqlmatic.dev/setup/#setup">Docs</a></body></html>');
   write(root, 'site/public/404.html', '<!doctype html><html lang="en"><head><meta name="robots" content="noindex"><link rel="stylesheet" href="/assets/site.css"></head><body><h1>Page not found</h1><a href="/">Home</a></body></html>');
   write(root, 'site/public/_headers', '/*\n  Content-Security-Policy: default-src \'none\'; img-src \'self\'\n');
