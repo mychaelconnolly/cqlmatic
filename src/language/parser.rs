@@ -9,6 +9,37 @@ pub struct Failure {
 }
 type Result<T> = std::result::Result<T, Failure>;
 
+fn bare_command_word_hint(word: &str) -> Option<&'static str> {
+    match word.to_ascii_lowercase().as_str() {
+        "limit" | "take" => {
+            Some(" Use head() or tail() to limit rows, or quote it to search for the text.")
+        }
+        "order" => Some(" Use sort() to order rows, or quote it to search for the text."),
+        "project" | "project-away" | "project-rename" => Some(
+            " Use select(), drop(), or rename() to shape fields, or quote it to search for the text.",
+        ),
+        "summarize" => {
+            Some(" Use groupBy() or an aggregate function, or quote it to search for the text.")
+        }
+        "extend" => {
+            Some(" Use field := expression to assign fields, or quote it to search for the text.")
+        }
+        "distinct" => Some(
+            " Use groupBy() or count(field=..., distinct=true), or quote it to search for the text.",
+        ),
+        "where" | "search" => {
+            Some(" Write a filter expression directly, or quote it to search for the text.")
+        }
+        "dedup" => Some(" Use groupBy() or selfJoinFilter(), or quote it to search for the text."),
+        "fields" => Some(" Use select() or drop(), or quote it to search for the text."),
+        "rex" => Some(" Use regex(), or quote it to search for the text."),
+        "spath" => Some(" Use parseJson(), or quote it to search for the text."),
+        "lookup" => Some(" Use match(), or quote it to search for the text."),
+        "tstats" => Some(" Quote it if you meant to search for the text."),
+        _ => None,
+    }
+}
+
 pub fn parse(input: &str) -> Result<Pipeline> {
     if input.contains('\0') || input.encode_utf16().count() > MAX_QUERY_UTF16 {
         return Err(Failure {
@@ -421,16 +452,11 @@ impl Parser<'_> {
                     .find(|f| f.name.eq_ignore_ascii_case(word))
                 {
                     self.advise("CQL_BARE_FUNCTION_NAME", format!("{word} is searched as text; write {}() to call the function, or quote it to search for the text.", function.name), false);
-                } else if [
-                    "where", "search", "dedup", "fields", "rex", "spath", "lookup", "tstats",
-                ]
-                .iter()
-                .any(|w| word.eq_ignore_ascii_case(w))
-                {
+                } else if let Some(hint) = bare_command_word_hint(word) {
                     self.advise(
                         "CQL_BARE_COMMAND_WORD",
                         format!(
-                            "{word} is not a query-language command here and is searched as text."
+                            "{word} is not a query-language command here and is searched as text.{hint}"
                         ),
                         false,
                     );

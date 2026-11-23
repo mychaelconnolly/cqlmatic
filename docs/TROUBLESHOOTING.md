@@ -33,7 +33,7 @@ Keep state, packs, parser definitions, raw results, receipts and credentials pro
 | `CQL_BRANCH_FUNCTION` | Move aggregates, `join`, `selfJoin` and `selfJoinFilter` before or after the whole `case` or `match`. Branch steps may filter, assign and transform. |
 | `CQL_JOIN_PLACEMENT` | Move `join`, `selfJoin` or `selfJoinFilter` out of the function argument to the top level of the query, or of a `join` subquery. Aggregate before or after the join. |
 | `CQL_BARE_FUNCTION_NAME` | A stage starts with an unquoted function name searched as text. Write the function with parentheses, or quote the text. |
-| `CQL_BARE_COMMAND_WORD` | The first word is searched as text, rather than acting as a command. Use CQL filters and functions or quote the text. |
+| `CQL_BARE_COMMAND_WORD` | The first word is searched as text, rather than acting as a command (including non-CQL commands such as `limit`, `take`, `order`, `project`, `summarize`, `extend`, `distinct`, `where`, `dedup`, or `fields`). Use the suggested CQL filter or function, or quote the text. |
 | `CQL_OPERATOR_TEXT` | Bare `&&` is searched as text. Use `and` or a space between terms. |
 | `CQL_OR_PRECEDENCE` | Information: `or` binds tighter than explicit or implied `and`. Add parentheses to make intent explicit. See [operators](https://library.humio.com/crowdstrike-query-language/syntax-operators.html). |
 | `CQL_NULL_TEXT` | Bare `null` compares with the text "null". Use `a=*` for field presence and `not a=*` for absence. |

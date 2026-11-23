@@ -2588,6 +2588,12 @@ fn guard_answers_each_client_and_call_shape_before_the_search() {
                     "{NOTE_HEADING}\n- CQL_SORT_HEAD at line 1, column 70: head after sort can select a different set of rows from the first N in the sorted order. Use sort(..., limit=N) to select the first N rows in that order."
                 )
             );
+            assert_eq!(
+                note(dir.ask(client, gateway, "third-party", "#type=synthetic | limit 20")),
+                format!(
+                    "{NOTE_HEADING}\n- CQL_BARE_COMMAND_WORD: limit is not a query-language command here and is searched as text. Use head() or tail() to limit rows, or quote it to search for the text."
+                )
+            );
             for informational_only in [
                 "#type=synthetic | head(5)",
                 "#type=synthetic | groupBy([alpha_field])",
