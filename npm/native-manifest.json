@@ -1,5 +1,5 @@
 {
-  "version": "0.1.12",
+  "version": "0.1.13",
   "binaries": {
     "darwin-arm64": {
       "sha256": "df8be0c88d15dcc87cf454cd563264921f8878b10ba4394cfe94fc0451ff333c"

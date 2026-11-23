@@ -1,25 +1,20 @@
-# CQLmatic v0.1.12
+# CQLmatic v0.1.13
 
-Query checks give clearer rewrite guidance when a query drops or fails to export a field, misses a join or match row limit, or uses bare SQL/KQL stage words. Correlation export tracking now models `Label.<field>` built-in metadata accurately, explicit `match(..., nrows=...)` limits drop from warnings to informational notes, the companion skill sharpens pre-search check and field-path guidance, and four new runnable threat-hunting plan examples ship alongside updated project-page examples.
+Setup, inventory and capture now work on managed workstations, in sandboxes and in folders you made yourself. Earlier versions refused a state location when another account had rights on it or when its path passed through a link. This version uses the location as it is and relies on your user profile's access rules.
 
-## Query checks
+## Storage locations
 
-- **`correlate()` built-in metadata exports:** Mandatory queries now export `@id`, `@timestamp`, `@ingesttimestamp`, and `@timestamp.nanos` under their `Label.<field>` prefix (unless dropped or projected out inside that branch) rather than as bare `@id`, `@timestamp`, or `@ingesttimestamp`. Array elements rebuilt inside a branch after `array:drop(...)` stay exported, while unrebuilt dropped elements remain unavailable.
-- **`CQL_MATCH_NROWS` severity split:** When `match()` against an in-query `defineTable` sets `nrows` explicitly (`nrows=max`, numeric `1..=500`, or parameterized), `CQL_MATCH_NROWS` is now an informational note instead of a warning. Omitting `nrows` (default `1`) remains a warning with concrete rewrite guidance.
-- **Actionable rewrite guidance:** `CQL_UNEXPORTED_FIELD`, `CQL_DROPPED_FIELD`, `CQL_JOIN_MAX`, and omitted-`nrows` `CQL_MATCH_NROWS` now include concrete rewrite steps (such as adding `include: [field]` on a mandatory query or keeping a dropped field inside its branch pipeline).
-- **Expanded `CQL_BARE_COMMAND_WORD` warnings:** `check` and the `PreToolUse` search guard now warn with direct CQL replacement hints on bare `limit`, `take`, `order`, `project`, `project-away`, `project-rename`, `summarize`, `extend`, and `distinct` pipeline stages.
+- **Existing directories are used as they are.** 0.1.12 stopped with `SETUP_PROTECTION` when the state directory, or any directory above it, gave rights to another account, and with `SETUP_LINK` when the path passed through a symbolic link, junction or other reparse point, as `/tmp` does on macOS. On Windows that refused a directory made in Explorer, any directory under `C:\`, and a profile on which a support or backup group has rights.
+- **New directories:** still owner-only (`0700`, files `0600`) on macOS and Linux. On Windows a new directory now takes the access rules of the directory it is created in, where 0.1.12 limited it to the user and SYSTEM, and PowerShell is no longer started to create it.
+- **Pack and input files:** `LOCAL_DIRECTORY_PERMISSIONS` is removed, so a pack or state directory writable by its group is accepted. The saved query and result files given to `import-query-observations` no longer need owner-only modes.
+- **Unchanged:** state, pack and input files must be regular files, not links, and the credential file keeps its `0600` rule on macOS and Linux.
+- **Clearer errors:** when a storage location cannot be created, read or locked for writing, the error names it. Where access was denied, it says to allow the location in the sandbox or device policy that blocks it, or to choose another.
 
-See [the query reference](docs/QUERY-REFERENCE.md), [coverage](docs/COVERAGE.md), and [troubleshooting](docs/TROUBLESHOOTING.md) for each rule.
-
-## Companion skill and examples
-
-- Updated `integrations/agent/SKILL.md` to check every hand-written query before searching, verify parser-specific field paths and encodings against the map, and keep projections compact.
-- Added four runnable threat-hunting plan examples in `examples/`: `php2shell-correlate.plan.json`, `node2shell-brotli.plan.json`, `runtime-shell-c2.plan.json`, and `node2shell-outbound.plan.json`.
+The default locations rely on your user profile's access rules. Choose a `--state` location that only accounts you trust can read. See [setup](docs/SETUP.md), [the security policy](SECURITY.md) and [troubleshooting](docs/TROUBLESHOOTING.md).
 
 ## Upgrading
 
-- `--fail-on-warning` and search-guard behavior can change in both directions:
-  - Queries with explicit `match(..., nrows=...)` that previously warned only on `CQL_MATCH_NROWS` now pass `--fail-on-warning` and no longer trigger a search-guard note.
-  - Queries that read bare `@id`/`@timestamp`/`@ingesttimestamp` after `correlate()`, or use bare `limit`/`take`/`order`/`project`/`project-away`/`project-rename`/`summarize`/`extend`/`distinct` stages, now warn.
-- Existing `env capture --install` hooks (`capture`, `guard`) from `0.1.11` remain compatible; re-run `cqlmatic env capture --client CLIENT --server SERVER --install` if you move to a new executable path or pinned launcher version.
-- CQLmatic 0.1.12 can inspect 0.1.11 (and earlier 0.1.0–0.1.10) discovery checkpoints in formats 2 and 3. Keep the 0.1.11 executable to resume or settle its unfinished runs. See [installation](docs/SETUP.md) for the package for your platform.
+- State written by 0.1.12 and earlier is used where it is.
+- A state directory that 0.1.13 creates on Windows is refused by 0.1.12 and earlier. To go back to an earlier release after 0.1.13 has created its state, give that release a new `--state` location.
+- If your capture hooks name a version-specific executable path, re-run `cqlmatic env capture --client CLIENT --server SERVER --install` after moving to the new executable.
+- CQLmatic 0.1.13 can inspect 0.1.12 (and earlier 0.1.0–0.1.11) discovery checkpoints in formats 2 and 3. Keep the 0.1.12 executable to resume or settle its unfinished runs. See [installation](docs/SETUP.md) for the package for your platform.
