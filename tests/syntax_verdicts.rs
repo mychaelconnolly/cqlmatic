@@ -400,6 +400,16 @@ fn advisory_filters_preserve_acceptance() {
         ("spath a", "CQL_BARE_COMMAND_WORD"),
         ("lookup a", "CQL_BARE_COMMAND_WORD"),
         ("TSTATS a", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | limit 20", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | LIMIT 200", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | take 50", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | order by a desc", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | project a", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | project-away a", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | project-rename a=b", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | summarize by a", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | extend y=1", "CQL_BARE_COMMAND_WORD"),
+        ("x=1 | distinct a", "CQL_BARE_COMMAND_WORD"),
         ("a=1 && b=2", "CQL_OPERATOR_TEXT"),
         ("a=1 or b=2 c=3", "CQL_OR_PRECEDENCE"),
         ("a=1 or b=2 and c=3", "CQL_OR_PRECEDENCE"),
@@ -457,10 +467,47 @@ fn advisory_code(code: &str) -> bool {
 }
 
 #[test]
+fn bare_command_word_warnings_suggest_cql_alternatives() {
+    let cases = [
+        ("x=1 | limit 20", "head() or tail()"),
+        ("x=1 | take 10", "head() or tail()"),
+        ("x=1 | order by a desc", "sort()"),
+        ("x=1 | project a", "select(), drop(), or rename()"),
+        ("x=1 | project-away a", "select(), drop(), or rename()"),
+        ("x=1 | project-rename a=b", "select(), drop(), or rename()"),
+        ("x=1 | summarize count() by a", "groupBy()"),
+        ("x=1 | extend y=1", "field := expression"),
+        (
+            "x=1 | distinct a",
+            "groupBy() or count(field=..., distinct=true)",
+        ),
+    ];
+    for (query, expected_hint) in cases {
+        let result = check(query);
+        let warning = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "CQL_BARE_COMMAND_WORD")
+            .unwrap_or_else(|| panic!("missing CQL_BARE_COMMAND_WORD for {query}: {result:?}"));
+        assert_eq!(warning.severity, Severity::Warning, "{query}");
+        assert!(
+            warning.message.contains(expected_hint),
+            "{query}: expected {expected_hint:?} in {:?}",
+            warning.message
+        );
+    }
+}
+
+#[test]
 fn explicit_filter_intent_needs_no_advisory() {
     for query in [
         "x=1 | \"count\"",
+        "x=1 | \"limit\"",
+        "x=1 | \"take\"",
+        "x=1 | limit=20",
+        "x=1 | rate limit",
         "x=1 | count()",
+        "x=1 | head(20)",
         "x=1 | error count",
         "count=5",
         "x=1 | head=3",
