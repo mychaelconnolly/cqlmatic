@@ -24,13 +24,6 @@ The optional npm launcher uses Node.js 22+ built-ins and has no npm dependencies
 
 `CQLMATIC_CARGO_HOME` overrides the wrapper's project-local Cargo cache; ordinary Cargo settings such as `CARGO_TARGET_DIR` can place build artifacts elsewhere. This does not change the pinned compiler requirement.
 
-Protected-path tests reject symlinked ancestors. If the OS temporary path traverses a symlink, select a canonical private temporary directory. For example on macOS:
-
-```sh
-test_tmp=$(mktemp -d /private/tmp/cqlmatic-tests.XXXXXX)
-TMPDIR="$test_tmp" ./dev test --offline --locked
-```
-
 ## Native Windows
 
 Use PowerShell from the repository root; `./dev` requires a POSIX shell. Keep checkout line endings as LF so schema drift tests compare the checked-in bytes. `.gitattributes` sets LF for text files; Windows CI also disables Git's automatic CRLF conversion before checkout and runs the following commands with a project-local Cargo cache:

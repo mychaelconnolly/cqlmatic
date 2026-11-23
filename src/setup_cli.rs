@@ -22,9 +22,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-#[cfg(windows)]
-mod windows_acl;
-
 const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 1024 * 1024 * 1024;
 const PROBE_TIMEOUT: u32 = 10;
@@ -145,351 +142,58 @@ pub(crate) fn current_unix_uid() -> Result<u32, Diagnostic> {
         .env_clear()
         .env("LC_ALL", "C")
         .output()
-        .map_err(|_| private_directory_error())?;
+        .map_err(|_| unknown_user())?;
     if !output.status.success() {
-        return Err(private_directory_error());
+        return Err(unknown_user());
     }
     std::str::from_utf8(&output.stdout)
         .ok()
         .and_then(|value| value.trim().parse().ok())
-        .ok_or_else(private_directory_error)
-}
-
-#[cfg(unix)]
-fn check_unix_ancestors(path: &Path, owner: u32) -> Result<(), Diagnostic> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    for ancestor in path.ancestors().skip(1) {
-        let meta = match fs::metadata(ancestor) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(private_directory_error()),
-        };
-        let mode = meta.permissions().mode();
-        if (meta.uid() != 0 && meta.uid() != owner)
-            || (mode & 0o022 != 0
-                && !(mode & 0o1000 != 0 && (meta.uid() == 0 || meta.uid() == owner)))
-        {
-            return Err(private_directory_error());
-        }
-        #[cfg(target_os = "macos")]
-        check_macos_acl(ancestor)?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn check_macos_acl(path: &Path) -> Result<(), Diagnostic> {
-    use std::{
-        ffi::{CString, c_char, c_int, c_void},
-        os::unix::ffi::OsStrExt,
-    };
-    unsafe extern "C" {
-        fn acl_get_file(path: *const c_char, kind: c_int) -> *mut c_void;
-        fn acl_get_entry(acl: *mut c_void, id: c_int, entry: *mut *mut c_void) -> c_int;
-        fn acl_get_tag_type(entry: *mut c_void, tag: *mut c_int) -> c_int;
-        fn acl_valid(acl: *mut c_void) -> c_int;
-        fn acl_free(acl: *mut c_void) -> c_int;
-    }
-    let name = CString::new(path.as_os_str().as_bytes()).map_err(|_| private_directory_error())?;
-    // Darwin returns ENOENT for no ACL; other read errors must fail closed.
-    let acl = unsafe { acl_get_file(name.as_ptr(), 0x100) };
-    if acl.is_null() {
-        return if io::Error::last_os_error().raw_os_error() == Some(2) && fs::metadata(path).is_ok()
-        {
-            Ok(())
-        } else {
-            Err(private_directory_error())
-        };
-    }
-    let result = (|| {
-        if unsafe { acl_valid(acl) } != 0 {
-            return Err(private_directory_error());
-        }
-        // Darwin returns EINVAL after the last indexed entry and caps ACLs at 128 entries.
-        for index in 0..=128 {
-            let mut entry = std::ptr::null_mut();
-            if unsafe { acl_get_entry(acl, index, &mut entry) } != 0 {
-                return if io::Error::last_os_error().raw_os_error() == Some(22) {
-                    Ok(())
-                } else {
-                    Err(private_directory_error())
-                };
-            }
-            let mut tag = 0;
-            if unsafe { acl_get_tag_type(entry, &mut tag) } != 0 || tag != 2 {
-                return Err(private_directory_error());
-            }
-        }
-        Err(private_directory_error())
-    })();
-    if unsafe { acl_free(acl) } != 0 {
-        return Err(private_directory_error());
-    }
-    result
-}
-
-/// Create private storage or verify protection without changing an existing directory.
-pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
-    private_directory(path, true)
-}
-
-/// Verify existing private storage without creating missing directories.
-pub(crate) fn verify_directory(path: &Path) -> Result<(), Diagnostic> {
-    private_directory(path, false)
-}
-
-fn private_directory(path: &Path, create: bool) -> Result<(), Diagnostic> {
-    reject_links(path)?;
-    let created = match fs::symlink_metadata(path) {
-        Ok(_) => false,
-        Err(error) if create && error.kind() == io::ErrorKind::NotFound => true,
-        Err(_) => {
-            return Err(err(
-                "SETUP_STORAGE",
-                "Cannot inspect private setup directory.",
-            ));
-        }
-    };
-    #[cfg(unix)]
-    let owner = current_unix_uid()?;
-    #[cfg(unix)]
-    check_unix_ancestors(path, owner)?;
-    #[cfg(unix)]
-    if created {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        builder
-            .create(path)
-            .map_err(|_| err("SETUP_STORAGE", "Cannot create private setup directory."))?;
-    }
-    #[cfg(not(windows))]
-    if !path.is_dir() {
-        return Err(err(
-            "SETUP_STORAGE",
-            "Private setup storage must be a directory.",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = fs::metadata(path).map_err(|_| {
-            err(
-                "SETUP_PROTECTION",
-                "Cannot inspect setup directory protection.",
-            )
-        })?;
-        if meta.uid() != owner || meta.permissions().mode() & 0o077 != 0 {
-            return Err(private_directory_error());
-        }
-        #[cfg(target_os = "macos")]
-        check_macos_acl(path)?;
-        check_unix_ancestors(path, owner)?;
-    }
-    #[cfg(windows)]
-    check_windows_acl(
-        path,
-        if created {
-            "create-directory"
-        } else {
-            "directory"
-        },
-    )?;
-    #[cfg(windows)]
-    if !path.is_dir() {
-        return Err(err(
-            "SETUP_STORAGE",
-            "Private setup storage must be a directory.",
-        ));
-    }
-    reject_links(path)?;
-    Ok(())
+        .ok_or_else(unknown_user)
 }
 #[cfg(unix)]
-fn private_directory_error() -> Diagnostic {
+fn unknown_user() -> Diagnostic {
     err(
         "SETUP_PROTECTION",
-        "Setup storage or its parent path is accessible or replaceable by another user. Choose a fresh --state path under trusted private ancestry. Setup does not change permissions on existing arbitrary directories.",
+        "Cannot determine the current user account.",
     )
 }
-#[cfg(any(windows, test))]
-const WINDOWS_ACL_CHECK: &str = r#"
-$ErrorActionPreference='Stop'
-[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
-$p=$env:CQLMATIC_SETUP_PATH
-$mode=$env:CQLMATIC_SETUP_ACL_MODE
-$combined=$mode -eq 'directory-file'
-if($combined -or $mode -eq 'input-directory'){$p=$env:CQLMATIC_SETUP_PARENT; $mode='directory'}
-$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User
-function Fail($at,$who,$right,$reason){
-  @{path=[string]$at;sid=[string]$who;right=[string]$right;reason=[string]$reason} | ConvertTo-Json -Compress
-  exit 3
+
+/// Create missing storage, owner-only on Unix. An existing directory is used as it is.
+pub(crate) fn protect_directory(path: &Path) -> Result<(), Diagnostic> {
+    storage_directory(path, true)
 }
-$trusted=@($sid.Value,'S-1-5-18','S-1-5-32-544','S-1-3-0')
-try {$trusted+=([Security.Principal.NTAccount]::new('NT SERVICE','TrustedInstaller')).Translate([Security.Principal.SecurityIdentifier]).Value} catch {}
-$danger=[Security.AccessControl.FileSystemRights]'Delete,DeleteSubdirectoriesAndFiles,ChangePermissions,TakeOwnership'
-function Check-Ancestors {
-  for($d=[IO.Directory]::GetParent($p); $null -ne $d; $d=$d.Parent){
-    try {$attributes=[IO.File]::GetAttributes($d.FullName)} catch {
-      $e=$_.Exception; while($null -ne $e.InnerException){$e=$e.InnerException}
-      if($e -is [IO.FileNotFoundException] -or $e -is [IO.DirectoryNotFoundException]){continue}
-      Fail $d.FullName 'unknown' 'AclInspection' 'inspect'
-    }
-    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Fail $d.FullName 'unknown' 'ReparsePoint' 'reparse-point'}
-    if(($attributes -band [IO.FileAttributes]::Directory) -eq 0){Fail $d.FullName 'unknown' 'Directory' 'not-directory'}
-    try {$ac=$d.GetAccessControl()} catch {Fail $d.FullName 'unknown' 'AclInspection' 'inspect'}
-    $owner=$ac.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if($trusted -notcontains $owner){Fail $d.FullName $owner 'Owner' 'owner'}
-    $rules=$ac.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
-    if(@($rules).Count -eq 0){Fail $d.FullName 'unknown' 'AccessRules' 'empty-acl'}
-    foreach($r in $rules){
-      $rights=[Security.AccessControl.FileSystemRights]($r.FileSystemRights -band $danger)
-      if($r.AccessControlType -eq 'Allow' -and ($r.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and $trusted -notcontains $r.IdentityReference.Value -and $rights -ne 0){Fail $d.FullName $r.IdentityReference.Value $rights.ToString() 'allow'}
-    }
-  }
+
+/// Confirm storage exists without creating missing directories.
+pub(crate) fn verify_directory(path: &Path) -> Result<(), Diagnostic> {
+    storage_directory(path, false)
 }
-function Check-Private {
-  try {
-    $attributes=[IO.File]::GetAttributes($p)
-    if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Fail $p 'unknown' 'ReparsePoint' 'reparse-point'}
-    if($mode -eq 'file'){
-      if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){Fail $p 'unknown' 'RegularFile' 'not-file'}
-      $a=[IO.File]::GetAccessControl($p)
-    } else {
-      if(($attributes -band [IO.FileAttributes]::Directory) -eq 0){Fail $p 'unknown' 'Directory' 'not-directory'}
-      $a=[IO.Directory]::GetAccessControl($p)
-    }
-    $owner=$a.GetOwner([Security.Principal.SecurityIdentifier]).Value
-    if($owner -ne $sid.Value){Fail $p $owner 'Owner' 'owner'}
-    $self=$false
-    foreach($r in $a.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
-      if($r.AccessControlType -eq 'Allow'){
-        if($r.IdentityReference.Value -ne $sid.Value -and $r.IdentityReference.Value -ne 'S-1-5-18'){Fail $p $r.IdentityReference.Value $r.FileSystemRights.ToString() 'allow'}
-        if($r.IdentityReference.Value -eq $sid.Value){$self=$true}
-      }
-    }
-    if(-not $self){Fail $p $sid.Value 'AccessRules' 'missing-self'}
-  } catch {Fail $p 'unknown' 'AclInspection' 'inspect'}
-}
-if($mode -ne 'file'){
-  Check-Ancestors
-  if($mode -eq 'create-directory'){
-    try {
-      $a=New-Object System.Security.AccessControl.DirectorySecurity
-      $a.SetOwner($sid)
-      $a.SetAccessRuleProtection($true,$false)
-      $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
-      $prop=[Security.AccessControl.PropagationFlags]::None
-      $allow=[Security.AccessControl.AccessControlType]::Allow
-      $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$inherit,$prop,$allow))
-      $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$inherit,$prop,$allow))
-      [IO.Directory]::CreateDirectory($p,$a) | Out-Null
-    } catch {Fail $p 'unknown' 'CreateDirectory' 'create'}
-  }
-}
-Check-Private
-if($mode -ne 'file'){Check-Ancestors}
-if($combined){
-  $p=$env:CQLMATIC_SETUP_PATH
-  $mode='file'
-  Check-Private
-}
-"#;
-#[cfg(any(windows, test))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WindowsAclFailure {
-    path: String,
-    sid: String,
-    right: String,
-    reason: String,
-}
-#[cfg(any(windows, test))]
-fn windows_acl_failure(output: &[u8]) -> Diagnostic {
-    windows_acl_diagnostic(serde_json::from_slice(output).ok())
-}
-#[cfg(any(windows, test))]
-fn windows_acl_diagnostic(failure: Option<WindowsAclFailure>) -> Diagnostic {
-    let failure = failure.filter(|failure| {
-        !failure.path.is_empty()
-            && failure.path.len() <= 16 * 1024
-            && [&failure.sid, &failure.right, &failure.reason]
-                .into_iter()
-                .all(|value| {
-                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
-                })
-    });
-    match failure {
-        Some(failure) => err(
-            "SETUP_PROTECTION",
-            format!(
-                "Unsafe Windows ACL at {:?}: principal {}; right {}; check {}. Choose a fresh --state path under trusted private ancestry. Setup does not change existing directory permissions.",
-                failure.path, failure.sid, failure.right, failure.reason
-            ),
-        ),
-        None => err(
-            "SETUP_PROTECTION",
-            "Windows ACL verification failed without a bounded diagnostic. Choose a fresh --state path under trusted private ancestry; no unsafe path is cleaned up automatically.",
-        ),
-    }
-}
-#[cfg(windows)]
-fn check_windows_acl(path: &Path, mode: &str) -> Result<(), Diagnostic> {
-    check_windows_acl_with_parent(path, mode, None)
-}
-#[cfg(any(windows, test))]
-fn configure_windows_acl(command: &mut Command, path: &Path, mode: &str, parent: Option<&Path>) {
-    command
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            WINDOWS_ACL_CHECK,
-        ])
-        .env("CQLMATIC_SETUP_PATH", path)
-        .env("CQLMATIC_SETUP_ACL_MODE", mode);
-    if let Some(parent) = parent {
-        command.env("CQLMATIC_SETUP_PARENT", parent);
-    }
-}
-#[cfg(windows)]
-fn check_windows_acl_with_parent(
-    path: &Path,
-    mode: &str,
-    parent: Option<&Path>,
-) -> Result<(), Diagnostic> {
-    // Creating a private directory stays with the fixed helper; verification of existing
-    // paths applies the same conditions through direct system calls.
-    if mode == "create-directory" {
-        return run_windows_acl_helper(path, mode, parent);
-    }
-    windows_acl::check(path, mode, parent).map_err(|failure| {
-        windows_acl_diagnostic(Some(WindowsAclFailure {
-            path: failure.path,
-            sid: failure.sid,
-            right: failure.right,
-            reason: failure.reason.into(),
-        }))
-    })
-}
-#[cfg(windows)]
-fn run_windows_acl_helper(
-    path: &Path,
-    mode: &str,
-    parent: Option<&Path>,
-) -> Result<(), Diagnostic> {
-    let mut command = powershell()?;
-    configure_windows_acl(&mut command, path, mode, parent);
-    let output = run_bounded_command(command, false, 20, 32 * 1024).map_err(|_| err(
-        "SETUP_PROTECTION",
-        "The fixed Windows ACL helper timed out, exceeded its output budget, or could not be read. No unsafe path is cleaned up automatically.",
-    ))?;
-    if output.success && output.stdout.is_empty() {
-        Ok(())
-    } else {
-        Err(windows_acl_failure(&output.stdout))
+
+fn storage_directory(path: &Path, create: bool) -> Result<(), Diagnostic> {
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(err(
+            "SETUP_STORAGE",
+            "Private setup storage must be a directory.",
+        )),
+        Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path).map_err(|error| {
+                storage::access_error("SETUP_STORAGE", "cannot be created", path, &error)
+            })
+        }
+        Err(error) => Err(storage::access_error(
+            "SETUP_STORAGE",
+            "cannot be read",
+            path,
+            &error,
+        )),
     }
 }
 #[cfg(windows)]
@@ -498,7 +202,7 @@ fn powershell() -> Result<Command, Diagnostic> {
     let root = env::var_os("SystemRoot").ok_or_else(|| {
         err(
             "SETUP_PROTECTION",
-            "SystemRoot is unavailable for the Windows ACL helper.",
+            "SystemRoot is unavailable for starting PowerShell.",
         )
     })?;
     let mut command =
@@ -507,111 +211,22 @@ fn powershell() -> Result<Command, Diagnostic> {
     command.env_remove("PSModulePath");
     Ok(command)
 }
-fn reject_links(path: &Path) -> Result<(), Diagnostic> {
-    let path = std::path::absolute(path)
-        .map_err(|_| err("SETUP_PROTECTION", "Cannot resolve protected path."))?;
-    for ancestor in path.ancestors() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(meta) => {
-                #[cfg(windows)]
-                let linked = {
-                    use std::os::windows::fs::MetadataExt;
-                    meta.file_attributes() & 0x400 != 0
-                };
-                #[cfg(not(windows))]
-                let linked = meta.file_type().is_symlink();
-                if linked {
-                    return Err(err(
-                        "SETUP_LINK",
-                        "Setup paths must not traverse symlinks or Windows reparse points.",
-                    ));
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return Err(err("SETUP_PROTECTION", "Cannot inspect protected path.")),
-        }
-    }
-    Ok(())
-}
-
-/// Missing files are distinguished from unsafe or inaccessible protected paths.
+/// Missing files are distinguished from inaccessible ones.
 pub(crate) fn private_input_exists(path: &Path) -> Result<bool, Diagnostic> {
-    reject_links(path)?;
     match fs::symlink_metadata(path) {
-        Ok(_) => {
-            #[cfg(windows)]
-            verify_windows_private_input(path)?;
-            #[cfg(not(windows))]
-            {
-                verify_directory(parent(path)?)?;
-                verify_private_file(path)?;
-            }
-            Ok(true)
-        }
+        Ok(_) => verify_private_file(path).map(|()| true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(err("SETUP_PROTECTION", "Cannot inspect protected input.")),
+        Err(error) => Err(storage::access_error(
+            "SETUP_STORAGE",
+            "cannot be read",
+            path,
+            &error,
+        )),
     }
-}
-#[cfg(windows)]
-fn verify_windows_private_input(path: &Path) -> Result<(), Diagnostic> {
-    let directory = parent(path)?;
-    reject_links(directory)?;
-    fs::symlink_metadata(directory)
-        .map_err(|_| err("SETUP_STORAGE", "Cannot inspect private setup directory."))?;
-    // Preserve directory ACL failure priority while preparing the single launch.
-    let remaining_checks = (|| {
-        if !directory.is_dir() {
-            return Err(err(
-                "SETUP_STORAGE",
-                "Private setup storage must be a directory.",
-            ));
-        }
-        reject_links(directory)?;
-        reject_links(path)?;
-        if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
-            return Err(err(
-                "SETUP_PROTECTION",
-                "Protected setup input must be a regular file.",
-            ));
-        }
-        Ok(())
-    })();
-    check_windows_acl_with_parent(
-        path,
-        if remaining_checks.is_ok() {
-            "directory-file"
-        } else {
-            "input-directory"
-        },
-        Some(directory),
-    )?;
-    remaining_checks?;
-    // Links that appeared while the helper ran are still refused.
-    reject_links(directory)?;
-    reject_links(path)
 }
 fn load_state(path: &Path) -> Result<SetupState, Diagnostic> {
-    reject_links(path)?;
-    if !path.exists() {
+    if !private_input_exists(path)? {
         return Ok(SetupState::default());
-    }
-    verify_directory(parent(path)?)?;
-    verify_private_file(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(path)
-            .map_err(|_| err("SETUP_STATE", "Cannot inspect state."))?
-            .permissions()
-            .mode()
-            & 0o077
-            != 0
-        {
-            return Err(err(
-                "SETUP_PROTECTION",
-                "Setup state must have owner-only file permissions.",
-            ));
-        }
     }
     let raw = storage::read_bytes(path, MAX_STATE_BYTES)?;
     let stored: StoredState = serde_json::from_slice(&raw).map_err(|_| {
@@ -1316,11 +931,9 @@ fn client_config_path(client: ClientKind) -> Result<PathBuf, Diagnostic> {
             "Native configuration root must be absolute.",
         ));
     }
-    reject_links(&path)?;
     Ok(path)
 }
 fn config_hash(path: &Path) -> Result<Option<String>, Diagnostic> {
-    reject_links(path)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -1330,7 +943,6 @@ fn config_hash(path: &Path) -> Result<Option<String>, Diagnostic> {
     )?)))
 }
 fn read_json_config(path: &Path) -> Result<Value, Diagnostic> {
-    reject_links(path)?;
     let value = if path.exists() {
         let raw = storage::read_bytes(path, MAX_CONFIG_BYTES)?;
         mcp::parse_saved_result(&raw).map_err(|_| {
@@ -1445,7 +1057,7 @@ fn write_new_copilot_config(
             "Copilot configuration needs a parent directory.",
         )
     })?;
-    // The host directory can inherit broad Windows ACLs; stage under protected setup storage.
+    // Stage beside the setup state, which setup has already created.
     let temp = private_dir.join(format!(
         ".cqlmatic-setup-{}-{}.tmp",
         std::process::id(),
@@ -1465,9 +1077,6 @@ fn write_new_copilot_config(
         )
     })?;
     let result = (|| {
-        #[cfg(windows)]
-        protect_copilot_candidate(&temp)?;
-        verify_private_file(&temp)?;
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| {
@@ -1476,7 +1085,6 @@ fn write_new_copilot_config(
                     "Cannot durably write the private Copilot configuration candidate.",
                 )
             })?;
-        reject_links(path)?;
         fs::hard_link(&temp, path).map_err(|cause| {
             if cause.kind() == io::ErrorKind::AlreadyExists {
                 err(
@@ -1507,50 +1115,6 @@ fn write_new_copilot_config(
         let _ = fs::remove_file(&temp);
     }
     result
-}
-#[cfg(windows)]
-fn protect_copilot_candidate(path: &Path) -> Result<(), Diagnostic> {
-    const CREATE: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_SETUP_FILE; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.FileSecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $allow=[Security.AccessControl.AccessControlType]::Allow; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl',$allow)); $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-18'),'FullControl',$allow)); [IO.File]::SetAccessControl($p,$a)"#;
-    let mut command = powershell()?;
-    command
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            CREATE,
-        ])
-        .env("CQLMATIC_SETUP_FILE", path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(|_| {
-        err(
-            "SETUP_PROTECTION",
-            "Cannot protect Copilot configuration candidate.",
-        )
-    })?;
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(_)) => {
-                return Err(err(
-                    "SETUP_PROTECTION",
-                    "Cannot protect Copilot configuration candidate.",
-                ));
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(err(
-                    "SETUP_PROTECTION",
-                    "Copilot candidate ACL protection timed out.",
-                ));
-            }
-        }
-    }
 }
 fn check_portable_shadow(name: &str, copilot: bool) -> Result<(), Diagnostic> {
     let cwd = env::current_dir()
@@ -1984,7 +1548,6 @@ fn save_registration_receipt(
     baseline: &ConfigBaseline,
 ) -> Result<(), Diagnostic> {
     let path = registration_receipt_path(state_path)?;
-    reject_links(&path)?;
     if path.exists() {
         verify_private_file(&path)?;
     }
@@ -2101,40 +1664,14 @@ fn sync_directory(path: &Path) -> Result<(), Diagnostic> {
         )
     })
 }
+/// Storage files are regular files; a link in their place is not followed.
 pub(crate) fn verify_private_file(path: &Path) -> Result<(), Diagnostic> {
-    reject_links(path)?;
     if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
         return Err(err(
             "SETUP_PROTECTION",
             "Protected setup input must be a regular file.",
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let meta = fs::metadata(path)
-            .map_err(|_| err("SETUP_PROTECTION", "Cannot inspect protected file."))?;
-        let owner = fs::metadata(parent(path)?)
-            .map_err(|_| err("SETUP_PROTECTION", "Cannot inspect protected file owner."))?
-            .uid();
-        if !meta.is_file()
-            || meta.uid() != owner
-            || meta.nlink() != 1
-            || meta.permissions().mode() & 0o077 != 0
-        {
-            return Err(err(
-                "SETUP_PROTECTION",
-                "Protected setup files must be owner-only regular files without extra hard links.",
-            ));
-        }
-        #[cfg(target_os = "macos")]
-        check_macos_acl(path)?;
-    }
-    #[cfg(windows)]
-    {
-        check_windows_acl(path, "file")
-    }
-    #[cfg(not(windows))]
     Ok(())
 }
 fn perform(
@@ -3257,60 +2794,6 @@ mod tests {
         );
     }
     #[test]
-    fn setup_windows_acl_failure_details_are_bounded_and_escape_path_controls() {
-        let detail = serde_json::to_vec(&json!({"path":"C:\\synthetic\npath", "sid":"S-1-1-0", "right":"Delete", "reason":"allow"})).unwrap();
-        let diagnostic = windows_acl_failure(&detail);
-        assert_eq!(diagnostic.code, "SETUP_PROTECTION");
-        assert!(diagnostic.message.contains("S-1-1-0"));
-        assert!(diagnostic.message.contains("Delete"));
-        assert!(diagnostic.message.contains("\\n"));
-        assert!(!diagnostic.message.contains('\n'));
-        for invalid in [b"not json".to_vec(), serde_json::to_vec(&json!({"path":"C:\\synthetic", "sid":"S".repeat(257), "right":"Delete", "reason":"allow"})).unwrap()] {
-            assert!(windows_acl_failure(&invalid).message.contains("without a bounded diagnostic"));
-        }
-    }
-    #[test]
-    fn setup_windows_acl_command_uses_fixed_script_and_explicit_paths() {
-        use std::{collections::BTreeMap, ffi::OsStr};
-        let path = Path::new(r"C:\private space ' ; $()\state.json");
-        let directory = Path::new(r"D:\explicit parent");
-        for mode in [
-            "directory",
-            "create-directory",
-            "file",
-            "directory-file",
-            "input-directory",
-        ] {
-            let parent = matches!(mode, "directory-file" | "input-directory").then_some(directory);
-            let mut command = Command::new("synthetic");
-            configure_windows_acl(&mut command, path, mode, parent);
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                [
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    WINDOWS_ACL_CHECK,
-                ]
-                .map(OsStr::new)
-            );
-            let environment = command.get_envs().collect::<BTreeMap<_, _>>();
-            assert_eq!(
-                environment.get(OsStr::new("CQLMATIC_SETUP_PATH")),
-                Some(&Some(path.as_os_str()))
-            );
-            assert_eq!(
-                environment.get(OsStr::new("CQLMATIC_SETUP_ACL_MODE")),
-                Some(&Some(OsStr::new(mode)))
-            );
-            assert_eq!(
-                environment.get(OsStr::new("CQLMATIC_SETUP_PARENT")),
-                parent.map(|path| Some(path.as_os_str())).as_ref()
-            );
-        }
-    }
-    #[test]
     fn setup_interactive_action_errors_resume_but_invalid_state_is_fatal() {
         assert!(fatal_interactive_error("SETUP_PLAN_INTEGRITY"));
         assert!(!fatal_interactive_error("SETUP_DISCOVERY_INPUT"));
@@ -4110,19 +3593,6 @@ mod tests {
             "SETUP_REGISTRATION_RECEIPT"
         );
         assert_eq!(h.runner.native_calls, 1);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
-            assert_eq!(
-                h.action(SetupAction::Preview {
-                    operation: PlanOperation::Recover
-                })
-                .unwrap_err()
-                .code,
-                "SETUP_PROTECTION"
-            );
-        }
     }
     #[test]
     fn setup_codex_preexisting_manual_registration_is_not_inferred_from_url() {
@@ -4789,212 +4259,33 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn allow_windows_users_read(path: &Path) {
-        let output = Command::new("icacls")
-            .arg(path)
-            .args(["/grant", "*S-1-5-32-545:R"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-    }
-    #[cfg(windows)]
     #[test]
-    fn setup_windows_private_input_matches_separate_acl_checks() {
-        for (unsafe_parent, unsafe_file) in
-            [(false, false), (true, false), (false, true), (true, true)]
-        {
-            let temp = Temp::new();
-            let directory = temp.0.join("private space ' ; $()");
-            protect_directory(&directory).unwrap();
-            let path = directory.join("state.json");
-            fs::write(&path, b"synthetic").unwrap();
-            if unsafe_parent {
-                allow_windows_users_read(&directory);
-                assert!(verify_directory(&directory).is_err());
-            } else {
-                verify_directory(&directory).unwrap();
-            }
-            if unsafe_file {
-                allow_windows_users_read(&path);
-                assert!(verify_private_file(&path).is_err());
-            } else {
-                verify_private_file(&path).unwrap();
-            }
-            let expected = verify_directory(parent(&path).unwrap())
-                .and_then(|()| verify_private_file(&path))
-                .map(|()| true);
-            let actual = private_input_exists(&path);
-            assert_eq!(
-                serde_json::to_value(&actual).unwrap(),
-                serde_json::to_value(&expected).unwrap(),
-                "unsafe parent: {unsafe_parent}; unsafe file: {unsafe_file}"
-            );
-            if unsafe_parent || unsafe_file {
-                let diagnostic = actual.unwrap_err();
-                let failing_path = if unsafe_parent { &directory } else { &path };
-                assert_eq!(diagnostic.code, "SETUP_PROTECTION");
-                assert!(
-                    diagnostic
-                        .message
-                        .contains(&format!("{:?}", failing_path.to_string_lossy()))
-                );
-                assert!(diagnostic.message.contains("S-1-5-32-545"));
-                assert!(diagnostic.message.contains("check allow"));
-            } else {
-                assert!(actual.unwrap());
-            }
-        }
-    }
-    #[cfg(windows)]
-    #[test]
-    fn setup_windows_direct_acl_checks_match_the_fixed_helper() {
+    fn setup_state_works_in_a_folder_other_accounts_can_change() {
         let temp = Temp::new();
-        let directory = temp.0.join("private space ' ; $()");
-        protect_directory(&directory).unwrap();
-        let file = directory.join("state.json");
-        fs::write(&file, b"synthetic").unwrap();
-        let nested = directory.join("nested");
-        fs::create_dir(&nested).unwrap();
-        let missing = directory.join("missing.json");
-        let compare = |label: &str| {
-            for (path, mode, parent) in [
-                (&directory, "directory", None),
-                (&file, "file", None),
-                (&file, "directory-file", Some(directory.as_path())),
-                (&file, "input-directory", Some(directory.as_path())),
-                (&nested, "directory", None),
-                (&nested, "file", None),
-                (&file, "directory", None),
-                (&missing, "file", None),
-                (&missing, "directory", None),
-            ] {
-                assert_eq!(
-                    serde_json::to_value(check_windows_acl_with_parent(path, mode, parent))
-                        .unwrap(),
-                    serde_json::to_value(run_windows_acl_helper(path, mode, parent)).unwrap(),
-                    "{label}: {mode} {path:?}"
-                );
-            }
-        };
-        compare("private");
-        check_windows_acl_with_parent(&file, "directory-file", Some(&directory)).unwrap();
-        allow_windows_users_read(&file);
-        compare("readable file");
-        assert!(
-            check_windows_acl_with_parent(&file, "file", None)
-                .unwrap_err()
-                .message
-                .contains("principal S-1-5-32-545; right Read, Synchronize; check allow")
-        );
-        allow_windows_users_read(&directory);
-        compare("readable directory");
-    }
-    #[cfg(windows)]
-    #[test]
-    fn setup_windows_direct_acl_check_refuses_a_replaceable_ancestor() {
-        let temp = Temp::new();
-        let outer = temp.0.join("outer");
-        let inner = outer.join("inner");
-        protect_directory(&inner).unwrap();
-        verify_directory(&inner).unwrap();
+        let shared = temp.0.join("shared");
+        fs::create_dir(&shared).unwrap();
         let acl = Command::new("icacls")
-            .arg(&outer)
-            .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
+            .arg(&shared)
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)M"])
             .output()
             .unwrap();
         assert!(acl.status.success());
-        let direct = verify_directory(&inner).unwrap_err();
-        assert_eq!(direct.code, "SETUP_PROTECTION");
-        assert!(direct.message.contains(
-            "principal S-1-1-0; right DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership; check allow"
-        ));
-        let helper = run_windows_acl_helper(&inner, "directory", None).unwrap_err();
-        assert!(helper.message.contains(
-            "principal S-1-1-0; right DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership; check allow"
-        ));
-    }
-    #[cfg(windows)]
-    #[test]
-    fn setup_windows_private_input_preserves_nonregular_file_diagnostics() {
-        for unsafe_parent in [false, true] {
-            let temp = Temp::new();
-            let directory = temp.0.join("private");
-            protect_directory(&directory).unwrap();
-            let path = directory.join("not-a-file");
-            fs::create_dir(&path).unwrap();
-            if unsafe_parent {
-                allow_windows_users_read(&directory);
-            }
-            let expected = verify_directory(parent(&path).unwrap())
-                .and_then(|()| verify_private_file(&path))
-                .unwrap_err();
-            let actual = private_input_exists(&path).unwrap_err();
-            assert_eq!(
-                serde_json::to_value(&actual).unwrap(),
-                serde_json::to_value(&expected).unwrap()
-            );
-            if !unsafe_parent {
-                assert_eq!(
-                    actual.message,
-                    "Protected setup input must be a regular file."
-                );
-            }
-        }
-    }
-    #[cfg(windows)]
-    #[test]
-    fn setup_windows_missing_private_input_does_not_verify_unsafe_parent() {
-        let temp = Temp::new();
-        let directory = temp.0.join("private");
-        protect_directory(&directory).unwrap();
-        allow_windows_users_read(&directory);
-        assert!(verify_directory(&directory).is_err());
-        let missing = directory.join("missing.json");
-        assert!(!private_input_exists(&missing).unwrap());
-        assert!(!missing.exists());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn setup_new_private_directory_protects_every_parent_at_creation() {
-        let temp = Temp::new();
-        const BROAD_PARENT: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_TEST_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $prop=[Security.AccessControl.PropagationFlags]::None; $allow=[Security.AccessControl.AccessControlType]::Allow; foreach($who in @($sid,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'),[Security.Principal.SecurityIdentifier]::new('S-1-1-0'))){$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($who,'FullControl',$inherit,$prop,$allow))}; [IO.Directory]::SetAccessControl($p,$a)"#;
-        let status = powershell()
-            .unwrap()
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                BROAD_PARENT,
-            ])
-            .env("CQLMATIC_TEST_DIRECTORY", &temp.0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+        let path = shared.join("nested/state.json");
+        with_state(&path, |_, _, _| Ok(())).unwrap();
+        assert!(private_input_exists(&path).unwrap());
+        load_state(&path).unwrap();
+        // The new folder takes the access rules of the folder it was made in.
+        let listed = Command::new("icacls")
+            .arg(shared.join("nested"))
+            .output()
             .unwrap();
-        assert!(status.success());
-        let unsafe_state = temp.0.join("outer/inner/state.json");
-        let diagnostic = with_state(&unsafe_state, |_, _, _| Ok(())).unwrap_err();
-        assert_eq!(diagnostic.code, "SETUP_PROTECTION");
-        assert!(
-            diagnostic
-                .message
-                .contains(&format!("{:?}", temp.0.to_string_lossy()))
+        assert!(String::from_utf8_lossy(&listed.stdout).contains("Everyone:(I)"));
+        let directory = shared.join("not-a-file");
+        fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            private_input_exists(&directory).unwrap_err().message,
+            "Protected setup input must be a regular file."
         );
-        assert!(diagnostic.message.contains("S-1-1-0"));
-        assert!(diagnostic.message.contains("Delete"));
-        assert!(!unsafe_state.exists());
-        assert!(!temp.0.join("outer").exists());
-        let clean = Temp::new();
-        let parent = clean.0.join("outer");
-        let leaf = parent.join("inner");
-        protect_directory(&leaf).unwrap();
-        protect_directory(&parent).unwrap();
-        let candidate = leaf.join("candidate");
-        fs::write(&candidate, b"synthetic").unwrap();
-        verify_private_file(&candidate).unwrap();
     }
     #[cfg(windows)]
     #[test]
@@ -5016,33 +4307,6 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
-    fn setup_windows_acl_postcheck_preserves_a_newly_unsafe_directory() {
-        let temp = Temp::new();
-        let path = temp.0.join("private");
-        let script = WINDOWS_ACL_CHECK.replace(
-            "[IO.Directory]::CreateDirectory($p,$a) | Out-Null",
-            "[IO.Directory]::CreateDirectory($p,$a) | Out-Null; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'FullControl',$inherit,$prop,$allow)); [IO.Directory]::SetAccessControl($p,$a)",
-        );
-        let mut command = powershell().unwrap();
-        command
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &script,
-            ])
-            .env("CQLMATIC_SETUP_PATH", &path)
-            .env("CQLMATIC_SETUP_ACL_MODE", "create-directory");
-        let output = run_bounded_command(command, false, 20, 32 * 1024).unwrap();
-        assert!(!output.success);
-        let diagnostic = windows_acl_failure(&output.stdout);
-        assert!(diagnostic.message.contains("S-1-1-0"));
-        assert!(diagnostic.message.contains("FullControl"));
-        assert!(path.is_dir());
-    }
-    #[cfg(windows)]
-    #[test]
     fn setup_windows_helper_output_is_capped() {
         let mut command = powershell().unwrap();
         command.args([
@@ -5061,29 +4325,6 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
-    fn setup_accepts_inherit_only_ancestor_ace() {
-        let temp = Temp::new();
-        const INHERIT_ONLY: &str = r#"$ErrorActionPreference='Stop'; $p=$env:CQLMATIC_TEST_DIRECTORY; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($sid); $a.SetAccessRuleProtection($true,$false); $inherit=[Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'; $allow=[Security.AccessControl.AccessControlType]::Allow; foreach($who in @($sid,[Security.Principal.SecurityIdentifier]::new('S-1-5-18'))){$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($who,'FullControl',$inherit,[Security.AccessControl.PropagationFlags]::None,$allow))}; $a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'),'Modify',$inherit,[Security.AccessControl.PropagationFlags]::InheritOnly,$allow)); [IO.Directory]::SetAccessControl($p,$a)"#;
-        let status = powershell()
-            .unwrap()
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                INHERIT_ONLY,
-            ])
-            .env("CQLMATIC_TEST_DIRECTORY", &temp.0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        protect_directory(&temp.0.join("private")).unwrap();
-    }
-    #[cfg(windows)]
-    #[test]
     fn setup_resolves_drive_relative_state_paths() {
         let drive = env::current_dir()
             .unwrap()
@@ -5094,91 +4335,54 @@ mod tests {
         let path = absolute(PathBuf::from(format!("{drive}:private\\state.json"))).unwrap();
         assert!(path.is_absolute());
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     #[test]
-    fn setup_refuses_macos_acl_grants_on_ancestors_and_files() {
-        use std::os::unix::fs::PermissionsExt;
+    fn setup_state_works_in_a_shared_directory_reached_through_a_link() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
         let temp = Temp::new();
-        let ancestor = temp.0.join("ancestor");
-        fs::create_dir(&ancestor).unwrap();
-        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(
-            Command::new("/bin/chmod")
-                .args(["+a", "nobody allow search,add_subdirectory,delete_child"])
-                .arg(&ancestor)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let child = ancestor.join("private");
-        assert_eq!(
-            protect_directory(&child).unwrap_err().code,
-            "SETUP_PROTECTION"
-        );
-        assert!(!child.exists());
-
-        let file = temp.0.join("private-file");
-        fs::write(&file, b"synthetic").unwrap();
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(
-            Command::new("/bin/chmod")
-                .args(["+a", "nobody allow read"])
-                .arg(&file)
-                .status()
-                .unwrap()
-                .success()
-        );
-        assert_eq!(
-            verify_private_file(&file).unwrap_err().code,
-            "SETUP_PROTECTION"
-        );
-
-        let denied = temp.0.join("denied");
-        let child = denied.join("child");
-        fs::create_dir(&denied).unwrap();
-        fs::create_dir(&child).unwrap();
-        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
-        let unreadable = check_macos_acl(&child);
-        fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(unreadable.unwrap_err().code, "SETUP_PROTECTION");
-
-        let deny_only = temp.0.join("deny-only");
-        fs::create_dir(&deny_only).unwrap();
-        assert!(
-            Command::new("/bin/chmod")
-                .args(["+a", "nobody deny delete"])
-                .arg(&deny_only)
-                .status()
-                .unwrap()
-                .success()
-        );
-        check_macos_acl(&deny_only).unwrap();
+        let shared = temp.0.join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        let linked = temp.0.join("linked");
+        symlink(&shared, &linked).unwrap();
+        let path = linked.join("nested/state.json");
+        with_state(&path, |_, _, _| Ok(())).unwrap();
+        assert!(private_input_exists(&path).unwrap());
+        load_state(&path).unwrap();
+        // An existing directory keeps its mode; what setup creates is owner-only.
+        assert_eq!(mode(&shared), 0o777);
+        assert_eq!(mode(&shared.join("nested")), 0o700);
+        assert_eq!(mode(&shared.join("nested/state.json")), 0o600);
+        // A state file readable by others is still read.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        load_state(&path).unwrap();
+        // The file itself is not followed when it is a link.
+        let alias = shared.join("alias.json");
+        symlink(&path, &alias).unwrap();
+        assert_eq!(load_state(&alias).unwrap_err().code, "SETUP_PROTECTION");
     }
     #[cfg(unix)]
     #[test]
-    fn setup_refuses_shared_existing_directory_and_linked_paths() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+    fn setup_names_the_storage_location_it_cannot_create() {
+        use std::os::unix::fs::PermissionsExt;
         let temp = Temp::new();
-        fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(
-            protect_directory(&temp.0).unwrap_err().code,
-            "SETUP_PROTECTION"
+        let blocked = temp.0.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o500)).unwrap();
+        let wanted = blocked.join("setup");
+        let diagnostic = with_state(&wanted.join("state.json"), |_, _, _| Ok(())).unwrap_err();
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(diagnostic.code, "SETUP_STORAGE");
+        assert!(
+            diagnostic
+                .message
+                .starts_with(&format!("Storage location {wanted:?} cannot be created: ")),
+            "{}",
+            diagnostic.message
         );
-        assert_eq!(
-            fs::metadata(&temp.0).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        let target = temp.0.join("target");
-        protect_directory(&target).unwrap();
-        let linked = temp.0.join("linked");
-        symlink(&target, &linked).unwrap();
-        assert_eq!(protect_directory(&linked).unwrap_err().code, "SETUP_LINK");
-        fs::set_permissions(&temp.0, fs::Permissions::from_mode(0o777)).unwrap();
-        let unsafe_child = temp.0.join("unsafe");
-        assert_eq!(
-            protect_directory(&unsafe_child).unwrap_err().code,
-            "SETUP_PROTECTION"
-        );
-        assert!(!unsafe_child.exists());
+        assert!(diagnostic.message.ends_with(
+            "If a sandbox or device policy blocks this location, allow it there or choose another location."
+        ));
     }
 }

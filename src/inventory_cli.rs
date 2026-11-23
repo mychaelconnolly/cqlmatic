@@ -946,12 +946,12 @@ fn next_probe_guidance(
 
 fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
     // Preserve only audited messages. Pack decoders can quote values or field names, and
-    // storage and protection errors can carry operating-system details and paths.
+    // storage errors can carry operating-system details and paths.
     let fixed = match error.code.as_str() {
         "INVENTORY_INPUT" => !error
             .message
             .contains("Discovery checkpoint was written by CQLmatic "),
-        "SETUP_PROTECTION" => !error.message.contains("Unsafe Windows ACL at "),
+        "SETUP_STORAGE" => !error.message.starts_with("Storage location "),
         "CAPABILITY_INPUT"
         | "CQL_FIELD"
         | "CQL_INPUT_LIMIT"
@@ -966,7 +966,6 @@ fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
         | "ENV_TENANT"
         | "ENV_VIEW"
         | "INVENTORY_EVIDENCE"
-        | "LOCAL_DIRECTORY_PERMISSIONS"
         | "LOCAL_FILE_TYPE"
         | "LOCAL_PATH"
         | "LOCAL_SERIALIZATION"
@@ -985,7 +984,7 @@ fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
         | "PACK_SERIALIZATION"
         | "PACK_TIME"
         | "PACK_VERSION"
-        | "SETUP_STORAGE" => true,
+        | "SETUP_PROTECTION" => true,
         _ => false,
     };
     let message = if fixed {

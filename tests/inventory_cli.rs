@@ -4577,18 +4577,18 @@ fn drive_relative_inventory_state_can_resume_from_another_directory() {
 }
 
 #[test]
-fn inventory_refuses_nonprivate_explicit_state_parent() {
+fn inventory_accepts_an_explicit_state_folder_other_accounts_can_change() {
     let dir = Temp::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o777)).unwrap();
     }
     #[cfg(windows)]
     {
         let acl = Command::new("icacls")
             .arg(&dir.0)
-            .args(["/grant", "*S-1-5-32-545:(OI)(CI)R"])
+            .args(["/grant", "*S-1-1-0:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)M"])
             .output()
             .unwrap();
         assert!(acl.status.success());
@@ -4606,9 +4606,12 @@ fn inventory_refuses_nonprivate_explicit_state_parent() {
         .arg(request)
         .output()
         .unwrap();
-    assert!(!output.status.success());
-    assert!(!state.exists());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("SETUP_PROTECTION"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(state.is_file());
 }
 
 #[test]
@@ -5267,15 +5270,16 @@ fn observation_action(dir: &Path, query_text: &str, result_data: Value) -> Value
     ));
     #[cfg(unix)]
     {
+        // Files saved by another program are usually readable by others.
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&query, fs::Permissions::from_mode(0o600)).unwrap();
-        fs::set_permissions(&result, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(&query, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o644)).unwrap();
     }
     json!({"kind":"import-query-observations","query_file":query,"result_file":result,"environment":environment(),"source":{"type":"synthetic"},"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","retrieved_at":"2026-01-02T00:00:00Z","caller_assertion":"exact-query-result-target-window"})
 }
 
 #[test]
-fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_summary() {
+fn saved_query_action_reads_exact_files_and_retains_only_an_audit_summary() {
     let dir = Temp::new();
     let action = observation_action(
         &dir.0,
@@ -5307,13 +5311,13 @@ fn saved_query_action_requires_protected_exact_files_and_retains_only_an_audit_s
                 & 0o077,
             0
         );
-        fs::set_permissions(
-            action["result_file"].as_str().unwrap(),
-            fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
+        // A link in place of an original is not followed.
+        let original = PathBuf::from(action["result_file"].as_str().unwrap());
+        let moved = original.with_extension("moved");
+        fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &original).unwrap();
         let before = fs::read(&state_path).unwrap();
-        assert_rejected(&dir.0, action, "owner-only regular files");
+        assert_rejected(&dir.0, action, "must be a regular file");
         assert_eq!(fs::read(state_path).unwrap(), before);
     }
 }

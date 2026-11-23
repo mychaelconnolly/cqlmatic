@@ -34,6 +34,20 @@ fn io(context: &str, e: std::io::Error) -> Diagnostic {
     Diagnostic::error("LOCAL_IO", format!("{context}: {e}"))
 }
 
+/// An access failure that names the location, so that a sandbox or device policy
+/// blocking it can be adjusted.
+pub fn access_error(code: &str, problem: &str, path: &Path, error: &std::io::Error) -> Diagnostic {
+    let hint = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        " If a sandbox or device policy blocks this location, allow it there or choose another location."
+    } else {
+        ""
+    };
+    Diagnostic::error(
+        code,
+        format!("Storage location {path:?} {problem}: {error}.{hint}"),
+    )
+}
+
 fn linked(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -137,24 +151,6 @@ impl Writer {
     }
 
     pub fn matches_identity(&self, path: &Path) -> Result<bool, Diagnostic> {
-        for path in [&self.path, path] {
-            let absolute = std::path::absolute(path)
-                .map_err(|error| io("Cannot resolve owner path", error))?;
-            for ancestor in absolute.ancestors() {
-                match fs::symlink_metadata(ancestor) {
-                    Ok(metadata) => {
-                        if linked(&metadata) {
-                            return Err(Diagnostic::error(
-                                "LOCAL_FILE_TYPE",
-                                "Owner paths must not traverse symlinks or reparse points.",
-                            ));
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(io("Cannot inspect owner path", error)),
-                }
-            }
-        }
         Ok(self.identity()? == path_identity(path)?)
     }
 
@@ -164,20 +160,11 @@ impl Writer {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| io("Cannot create pack directory", e))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| access_error("LOCAL_IO", "cannot be created", parent, &e))?;
             #[cfg(unix)]
             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
                 .map_err(|e| io("Cannot protect pack directory", e))?;
-        }
-        #[cfg(unix)]
-        {
-            let m = fs::metadata(parent).map_err(|e| io("Cannot inspect pack directory", e))?;
-            if m.permissions().mode() & 0o022 != 0 {
-                return Err(Diagnostic::error(
-                    "LOCAL_DIRECTORY_PERMISSIONS",
-                    "Pack directory must not be writable by group or others.",
-                ));
-            }
         }
         if fs::symlink_metadata(path).is_ok_and(|m| linked(&m) || !m.is_file()) {
             return Err(Diagnostic::error(
@@ -196,9 +183,9 @@ impl Writer {
         options.read(true).write(true).create(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let lock = options
-            .open(&lock_path)
-            .map_err(|e| io("Cannot open pack lock", e))?;
+        let lock = options.open(&lock_path).map_err(|e| {
+            access_error("LOCAL_IO", "cannot be locked for writing", &lock_path, &e)
+        })?;
         lock.try_lock().map_err(|_|Diagnostic::error("PACK_BUSY","Another writer holds this pack. Readers may continue using the committed snapshot."))?;
         Ok(Self {
             _lock: lock,
@@ -528,29 +515,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn owner_matching_rejects_linked_files_ancestors_and_lock_files() {
+    fn writers_work_through_linked_and_shared_directories_but_not_linked_files() {
         use std::os::unix::fs::symlink;
         let directory = temp();
-        let path = directory.join("owner.json");
-        let owner = Writer::acquire(&path).unwrap();
-        owner.create_new_bytes(b"{}", 4096).unwrap();
-        let alias = directory.join("alias.json");
-        symlink(&path, &alias).unwrap();
-        assert_eq!(
-            owner.matches_identity(&alias).unwrap_err().code,
-            "LOCAL_FILE_TYPE"
-        );
-        assert_eq!(
-            Writer::acquire(&alias).err().unwrap().code,
-            "LOCAL_FILE_TYPE"
-        );
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o775)).unwrap();
         let ancestor = directory.join("linked");
         symlink(&directory, &ancestor).unwrap();
-        assert_eq!(
+        let path = ancestor.join("owner.json");
+        let owner = Writer::acquire(&path).unwrap();
+        owner.create_new_bytes(b"{}", 4096).unwrap();
+        assert!(
             owner
-                .matches_identity(&ancestor.join("owner.json"))
-                .unwrap_err()
-                .code,
+                .matches_identity(&directory.join("owner.json"))
+                .unwrap()
+        );
+        assert_eq!(
+            fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+            0o775
+        );
+        let alias = directory.join("alias.json");
+        symlink(&path, &alias).unwrap();
+        assert!(owner.matches_identity(&alias).unwrap());
+        assert_eq!(
+            Writer::acquire(&alias).err().unwrap().code,
             "LOCAL_FILE_TYPE"
         );
         let other = directory.join("other.json");
@@ -559,6 +546,34 @@ mod tests {
             Writer::acquire(&other).err().unwrap().code,
             "LOCAL_FILE_TYPE"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn blocked_writer_names_the_location_and_what_to_do() {
+        let directory = temp();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let lock = directory.join(".pack.json.lock");
+        let error = Writer::acquire(&directory.join("pack.json")).err().unwrap();
+        let created = Writer::acquire(&directory.join("new/pack.json"))
+            .err()
+            .unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(error.code, "LOCAL_IO");
+        assert!(
+            error.message.starts_with(&format!(
+                "Storage location {lock:?} cannot be locked for writing: "
+            )),
+            "{}",
+            error.message
+        );
+        assert!(error.message.ends_with(
+            "If a sandbox or device policy blocks this location, allow it there or choose another location."
+        ));
+        assert!(created.message.starts_with(&format!(
+            "Storage location {:?} cannot be created: ",
+            directory.join("new")
+        )));
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]
