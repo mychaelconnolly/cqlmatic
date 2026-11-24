@@ -95,7 +95,7 @@ Examples use synthetic data. Adapt identities, dates, paths, and sources for liv
 
 ### Bounded agent handoff
 
-`--brief` requires `--json` and conflicts with `--summary`. Both `status` and `env inventory` support it, including action responses. Brief projections are at most **4,096 UTF-8 bytes including the envelope and final newline**. The `next-probe` action always emits its single-probe response, whose exact arguments can exceed this limit. Runtime errors use a short fixed diagnostic and exit 2. CLI argument errors and help retain their ordinary behavior. Summary size can grow with inventory size.
+`--brief` requires `--json` and conflicts with `--summary`. Both `status` and `env inventory` support it, including action responses. Brief projections are at most **4,096 UTF-8 bytes including the envelope and final newline**. The `next-probe` action always emits its single-probe response, whose exact arguments can exceed this limit. Runtime errors exit 2. Brief output preserves known error codes with fixed recovery guidance. If the reply could not be written, read status before repeating the action. CLI argument errors and help retain their ordinary behavior. Summary size can grow with inventory size.
 
 The brief includes fixed readiness/completion flags, counts, recorded refresh status, a bounded `refresh_reminder`, Settings attention and at most five total opaque work/attempt references with omission counts. It excludes target/session text, paths, selectors, raw queries/results, parser scripts, freeform explanations and complete lists. References describe unacknowledged revisions; critical unresolved-search flags remain visible even when routine references are omitted. A reserved call is not proof of a running backend search.
 

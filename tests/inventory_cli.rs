@@ -224,7 +224,7 @@ fn refresh_reminder_acknowledgement_is_exact_bounded_and_preserves_due_until_lat
     assert!(stale.stdout.is_empty());
     assert!(stale.stderr.len() <= 4096);
     let error: Value = serde_json::from_slice(&stale.stderr).unwrap();
-    assert_eq!(error["code"], "INVENTORY_BRIEF_FAILED");
+    assert_eq!(error["code"], "INVENTORY_REFRESH_REMINDER_STALE");
     assert_eq!(fs::read(&state).unwrap(), before);
 }
 
@@ -491,7 +491,7 @@ fn brief_reports_and_acknowledges_the_exact_large_notice_without_evidence_text()
     assert!(stale.stdout.is_empty());
     assert!(stale.stderr.len() <= 4096);
     let error: Value = serde_json::from_slice(&stale.stderr).unwrap();
-    assert_eq!(error["code"], "INVENTORY_BRIEF_FAILED");
+    assert_eq!(error["code"], "INVENTORY_EVIDENCE");
     assert_eq!(fs::read(&state).unwrap(), before);
     let acknowledged = brief_call(
         &dir.0,
@@ -538,7 +538,7 @@ fn brief_requires_json_conflicts_with_summary_and_bounds_runtime_failures() {
         assert!(failed.stdout.is_empty());
         assert!(failed.stderr.len() <= 4096);
         let diagnostic: Value = serde_json::from_slice(&failed.stderr).unwrap();
-        assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+        assert_eq!(diagnostic["code"], "LOCAL_IO");
         assert!(
             !String::from_utf8(failed.stderr)
                 .unwrap()
@@ -557,6 +557,16 @@ fn brief_requires_json_conflicts_with_summary_and_bounds_runtime_failures() {
         assert!(failed_output.stderr.len() <= 4096);
         let diagnostic: Value = serde_json::from_slice(&failed_output.stderr).unwrap();
         assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+        assert!(
+            diagnostic["message"]
+                .as_str()
+                .unwrap()
+                .contains("read status")
+                || diagnostic["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Read status")
+        );
     }
 }
 
@@ -1749,10 +1759,10 @@ fn next_probe_brief_matches_full_even_for_long_arguments() {
         .unwrap();
         assert_eq!(refused.status.code(), Some(2));
         assert!(refused.stdout.is_empty());
-        assert_eq!(
-            serde_json::from_slice::<Value>(&refused.stderr).unwrap(),
-            json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error","message":"Inventory brief command failed. Inspect protected full-mode output locally."})
-        );
+        let diagnostic: Value = serde_json::from_slice(&refused.stderr).unwrap();
+        assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
+        assert!(diagnostic["message"].as_str().unwrap().contains("schema"));
+        assert!(!String::from_utf8_lossy(&refused.stderr).contains("p-invalid"));
     }
 }
 
@@ -2402,7 +2412,7 @@ fn non_discovery_search_blockers_do_not_point_to_a_discovery_run() {
                     assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
                     assert_eq!(
                         diagnostic["message"],
-                        "Inventory brief command failed. Inspect protected full-mode output locally."
+                        "Inventory brief command failed. Rerun the same read with full output. If a write failed, read status before retrying it."
                     );
                 } else {
                     assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
@@ -3246,8 +3256,8 @@ fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics(
             if flag == Some("--brief") {
                 assert_eq!(
                     diagnostic,
-                    json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error",
-                    "message":"Inventory brief command failed for discovery run_index 0. Inspect protected full-mode output locally.",
+                    json!({"code":"INVENTORY_INPUT","severity":"error",
+                    "message":"Discovery was prepared against older inventory. Pause it and prepare a run from current inventory.",
                     "pointer":"/discovery_runs/0"})
                 );
                 let text = String::from_utf8(output.stderr).unwrap();
@@ -3278,7 +3288,7 @@ fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics(
     assert_eq!(diagnostic["pointer"], "/discovery_runs/0");
     assert_eq!(
         diagnostic["message"],
-        "Inventory brief command failed for discovery run_index 0. Inspect protected full-mode output locally."
+        "Another writer holds the selected file. Retry after the writer finishes."
     );
     assert_eq!(fs::read(&state_path).unwrap(), before);
     drop(guard);
@@ -3287,11 +3297,11 @@ fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics(
         .output()
         .unwrap();
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
-    assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+    assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
     assert!(diagnostic.get("pointer").is_none());
     assert_eq!(
         diagnostic["message"],
-        "Inventory brief command failed. Inspect protected full-mode output locally."
+        "The discovery run index is out of range. Read status for a valid run index."
     );
     assert_eq!(fs::read(&state_path).unwrap(), before);
 }
@@ -3413,11 +3423,10 @@ fn another_retained_search_blocks_selected_older_work_and_identical_preparation(
             let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
             assert_eq!(diagnostic["pointer"], "/discovery_runs/1");
             let message = diagnostic["message"].as_str().unwrap();
-            assert!(message.contains("run_index 1"), "{diagnostic}");
             if flag == Some("--brief") {
                 assert_eq!(
                     message,
-                    "Inventory brief command failed for discovery run_index 1. Inspect protected full-mode output locally."
+                    "A retained discovery search needs settlement. Reconcile that attempt before dispatching another search."
                 );
                 assert!(output.stderr.len() <= 4096);
                 assert!(!String::from_utf8_lossy(&output.stderr).contains(dir.0.to_str().unwrap()));
@@ -3547,10 +3556,14 @@ fn all_run_preflight_errors_point_to_the_blocking_retained_run() {
                 );
                 if flag == Some("--brief") {
                     assert_eq!(
-                        diagnostic,
-                        json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error",
-                        "message":"Inventory brief command failed for discovery run_index 1. Inspect protected full-mode output locally.",
-                        "pointer":"/discovery_runs/1"})
+                        diagnostic["code"],
+                        match problem {
+                            "corrupt" => "MCP_STATE_TAMPERED",
+                            "locked" => "PACK_BUSY",
+                            "reference" => "INVENTORY_INPUT",
+                            _ => "INVENTORY_BRIEF_FAILED",
+                        },
+                        "{problem}: {diagnostic}"
                     );
                     assert!(output.stderr.len() <= 4096);
                     assert!(
@@ -3893,10 +3906,14 @@ fn completed_run_evidence_errors_point_to_the_blocking_run() {
             );
             if flag == Some("--brief") {
                 assert_eq!(
-                    diagnostic,
-                    json!({"code":"INVENTORY_BRIEF_FAILED","severity":"error",
-                    "message":"Inventory brief command failed for discovery run_index 0. Inspect protected full-mode output locally.",
-                    "pointer":"/discovery_runs/0"})
+                    diagnostic["code"],
+                    match problem {
+                        "locked" => "PACK_BUSY",
+                        "corrupt-receipt" => "MCP_STATE_TAMPERED",
+                        "reference" => "INVENTORY_INPUT",
+                        _ => "INVENTORY_BRIEF_FAILED",
+                    },
+                    "{problem}: {diagnostic}"
                 );
                 assert!(output.stderr.len() <= 4096);
                 assert!(!String::from_utf8_lossy(&output.stderr).contains(dir.0.to_str().unwrap()));
@@ -4074,7 +4091,7 @@ fn completed_discovery_replay_keeps_newer_active_pack_and_validates_artifacts() 
                 "{field}: {diagnostic}"
             );
             if flag == Some("--brief") {
-                assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
+                assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
             } else {
                 assert!(
                     diagnostic["message"]
@@ -5616,5 +5633,27 @@ fn missing_and_unrecognized_answers_keep_all_nine_inventory_routes_blocked() {
             assert_eq!(output.status.code(), Some(2), "{output:?}");
             assert_eq!(fs::read(&state_path).unwrap(), before);
         }
+    }
+}
+
+#[test]
+fn closed_output_after_inventory_write_reports_that_state_may_be_saved() {
+    for mode in [None, Some("--summary"), Some("--brief")] {
+        let dir = Temp::new();
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = inventory_command(&dir.0, json!({"kind":"init"}))
+            .args(mode)
+            .stdout(writer)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let message = diagnostic["message"].as_str().unwrap();
+        assert!(
+            message.contains("may already be saved") && message.contains("Read status"),
+            "{message}"
+        );
+        assert!(dir.0.join("workflow/state.json").is_file());
     }
 }

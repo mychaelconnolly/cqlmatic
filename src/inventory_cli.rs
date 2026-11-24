@@ -105,17 +105,25 @@ fn discovery_run_diagnostic(index: usize, mut diagnostic: Diagnostic) -> Diagnos
     }
     diagnostic
 }
+const OUTPUT_FAILED: &str = "Cannot emit the inventory reply. The change may already be saved. Read status before repeating the action.";
+const BRIEF_FALLBACK: &str = "Inventory brief command failed. Rerun the same read with full output. If a write failed, read status before retrying it.";
+const INVALID_INVENTORY_JSON: &str =
+    "Invalid inventory JSON or unknown fields; inspect the inventory schema.";
+
 fn output(value: &impl Serialize) -> Result<(), Diagnostic> {
     let mut out = io::stdout().lock();
-    serde_json::to_writer(&mut out, value).map_err(|_| fail("Cannot emit inventory result."))?;
-    writeln!(out).map_err(|_| fail("Cannot emit inventory result."))
+    serde_json::to_writer(&mut out, value).map_err(|_| fail(OUTPUT_FAILED))?;
+    writeln!(out)
+        .and_then(|_| out.flush())
+        .map_err(|_| fail(OUTPUT_FAILED))
 }
 
-pub fn brief_failure() -> Diagnostic {
-    Diagnostic::error(
-        "INVENTORY_BRIEF_FAILED",
-        "Inventory brief command failed. Inspect protected full-mode output locally.",
-    )
+fn brief_failure() -> Diagnostic {
+    Diagnostic::error("INVENTORY_BRIEF_FAILED", BRIEF_FALLBACK)
+}
+
+fn brief_output_failure() -> Diagnostic {
+    Diagnostic::error("INVENTORY_BRIEF_FAILED", OUTPUT_FAILED)
 }
 
 pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
@@ -129,30 +137,186 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
                 .ok()
                 .filter(|value| value.to_string() == index)
         });
-    if diagnostic.code == "MCP_STATE_PRODUCER" {
-        let mut failure = Diagnostic::error(
-            "MCP_STATE_PRODUCER",
-            "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally.",
-        );
-        failure.pointer = index.map(|index| format!("/discovery_runs/{index}"));
-        return failure;
-    }
-    let Some(index) = index else {
-        return brief_failure();
+    let prefix = index.map(|index| format!("Discovery run_index {index}: "));
+    let message = prefix
+        .as_deref()
+        .and_then(|prefix| diagnostic.message.strip_prefix(prefix))
+        .unwrap_or(&diagnostic.message);
+    let mut failure = if message == OUTPUT_FAILED
+        && matches!(
+            diagnostic.code.as_str(),
+            "INVENTORY_INPUT" | "INVENTORY_BRIEF_FAILED"
+        ) {
+        brief_output_failure()
+    } else if let Some(reason) = brief_reason(&diagnostic.code, message) {
+        Diagnostic::error(&diagnostic.code, reason)
+    } else {
+        brief_failure()
     };
-    let mut failure = Diagnostic::error(
-        "INVENTORY_BRIEF_FAILED",
-        format!(
-            "Inventory brief command failed for discovery run_index {index}. Inspect protected full-mode output locally."
-        ),
-    );
-    failure.pointer = Some(format!("/discovery_runs/{index}"));
+    failure.pointer = index.map(|index| format!("/discovery_runs/{index}"));
     failure
+}
+
+fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
+    Some(match (code, message) {
+        ("MCP_STATE_PRODUCER", _) => {
+            "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally."
+        }
+        ("INVENTORY_INPUT", INVALID_INVENTORY_JSON) => {
+            "Inventory input did not match the required JSON shape. Inspect the inventory schema and correct the request."
+        }
+        ("INVENTORY_INPUT", msg)
+            if msg.starts_with("Inventory input is missing the required field ") =>
+        {
+            "Inventory input lacks a required field. Inspect the inventory schema and supply the required fields."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Unsupported inventory request version." | "Unsupported status request version.",
+        ) => "Request version is unsupported. Use schema_version 1.",
+        ("INVENTORY_INPUT", "Select state in either --state or the request, not both.") => {
+            "Two state locations were selected. Supply one state selection."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Prepare discovery before selecting a run." | "No prepared discovery run.",
+        ) => "No discovery run is prepared. Prepare discovery first.",
+        ("INVENTORY_INPUT", msg)
+            if msg
+                .strip_prefix("Discovery run_index ")
+                .and_then(|tail| tail.strip_suffix(" is out of range."))
+                .is_some_and(|index| index.parse::<usize>().is_ok()) =>
+        {
+            "The discovery run index is out of range. Read status for a valid run index."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Inventory already exists; resume it or select a new --state path.",
+        ) => "Inventory already exists. Resume it or use a new state location.",
+        ("INVENTORY_INPUT", "Evidence input must differ from inventory state.") => {
+            "The evidence and state must be separate files. Supply the saved evidence file."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Cannot resolve evidence path." | "Retained inventory snapshot does not exist.",
+        ) => {
+            "An evidence file is missing or unreadable. Check the file location and access before retrying."
+        }
+        (
+            "INVENTORY_INPUT",
+            "A retained discovery search has unresolved termination or cleanup. Reconcile that exact attempt before another discovery search.",
+        ) => {
+            "A retained discovery search needs settlement. Reconcile that attempt before dispatching another search."
+        }
+        ("INVENTORY_INPUT", STALE_DISCOVERY_PREDECESSOR) => {
+            "Discovery was prepared against older inventory. Pause it and prepare a run from current inventory."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Retained discovery checkpoint differs from its inventory reference.",
+        ) => {
+            "The checkpoint does not match the selected inventory run. Restore the matching checkpoint before continuing."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Activate the ordinary field pack before preparing optional capability checks.",
+        ) => "Activate a field pack before preparing capability checks.",
+        ("INVENTORY_INPUT", "Unknown capability checkpoint.") => {
+            "The capability checkpoint was not found. Select a saved run from status."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Unknown source ID; use the status source IDs."
+            | "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status --json --summary (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
+        ) => {
+            "The source ID is not in the required inventory scope. Read summary status and choose a valid inventory source ID."
+        }
+        ("INVENTORY_EVIDENCE", "Confirm CID, cloud, view and target scope before discovery.") => {
+            "The target is missing. Confirm the target before preparing discovery."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Binding must identify an exact saved parser ID and SHA-256 snapshot.",
+        ) => {
+            "The saved parser version did not match. Select the exact parser ID and snapshot digest from inventory."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Inventory work changed; inspect its current revision before acknowledging.",
+        ) => "The work revision changed. Read status and acknowledge its current revision.",
+        (
+            "INVENTORY_EVIDENCE",
+            "Inventory notice changed or is empty; inspect the selected state's current notice before acknowledging.",
+        ) => {
+            "The inventory notice changed or is empty. Read status before acknowledging the current notice."
+        }
+        ("INVENTORY_EVIDENCE", "Unknown exact refresh attempt.") => {
+            "The refresh attempt was not found. Read status and select the exact recorded attempt."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Expected strict protected host evidence for a provider-enforced search lifetime; a client timeout is insufficient.",
+        ) => {
+            "The host evidence is invalid. Supply the saved proof of a provider-enforced search lifetime."
+        }
+        ("INVENTORY_REFRESH_UNAVAILABLE", _) => {
+            "Automatic inventory refresh is unavailable. Use an explicit manual refresh."
+        }
+        ("INVENTORY_REFRESH_REMINDER_STALE", _) => {
+            "The refresh reminder changed or is not due. Read status before acknowledging the current cycle."
+        }
+        ("DISCOVERY_EVIDENCE", "Use increasing absolute UTC windows of at most seven days.") => {
+            "The discovery window is invalid. Supply increasing absolute UTC timestamps at most seven days apart."
+        }
+        ("PACK_TIME", _) => {
+            "A timestamp is invalid. Use RFC3339 timestamps with an explicit offset."
+        }
+        ("PACK_BUSY", _) => {
+            "Another writer holds the selected file. Retry after the writer finishes."
+        }
+        ("LOCAL_IO", msg) if msg.starts_with("Cannot inspect input: ") => {
+            "An input file is missing or inaccessible. Check its location and access."
+        }
+        ("LOCAL_IO", msg)
+            if msg.starts_with("Cannot open input: ") || msg.starts_with("Cannot read input: ") =>
+        {
+            "An input file could not be read. Check its access and try again."
+        }
+        ("LOCAL_FILE_TYPE", "Input must be a regular file, not a symlink.") => {
+            "Use a regular input file."
+        }
+        (
+            "LOCAL_SIZE",
+            "File exceeds the configured byte budget." | "Input grew beyond the byte budget.",
+        ) => "The input exceeds its size limit. Supply a smaller file.",
+        ("SETUP_STORAGE", msg) if msg.starts_with("Storage location ") => {
+            "The storage location is inaccessible. Check the selected location and its access."
+        }
+        ("PACK_JSON", _) => "The pack JSON is invalid. Supply a valid exported pack.",
+        ("PACK_DIGEST", _) => "The pack digest does not match. Use the intact exported pack.",
+        ("PACK_VERSION", _) => "The pack format is unsupported. Export a compatible pack.",
+        ("MCP_STATE_TAMPERED", _) => {
+            "The checkpoint could not be verified. Recover the intact checkpoint before continuing."
+        }
+        ("MCP_STATE_RESTART", _) => {
+            "The checkpoint format or discovery algorithm is incompatible. Resolve outstanding work before preparing a compatible run."
+        }
+        (
+            "DISCOVERY_BUSY",
+            "No new probe can start; settle the outstanding attempt or resume the paused run first.",
+        ) => {
+            "Discovery cannot start another probe. Settle the outstanding attempt or resume the paused run."
+        }
+        ("DISCOVERY_CLEANUP_PENDING", _) => {
+            "Discovery cleanup is pending. Settle the outstanding attempt before resuming."
+        }
+        _ => return None,
+    })
 }
 
 fn brief_bytes(mut value: Value) -> Result<Vec<u8>, Diagnostic> {
     loop {
-        let mut bytes = serde_json::to_vec(&value).map_err(|_| brief_failure())?;
+        let mut bytes = serde_json::to_vec(&value).map_err(|_| brief_output_failure())?;
         if bytes.len() < 4096 {
             bytes.push(b'\n');
             return Ok(bytes);
@@ -167,7 +331,7 @@ fn brief_bytes(mut value: Value) -> Result<Vec<u8>, Diagnostic> {
             .and_then(Vec::pop)
             .is_none()
         {
-            return Err(brief_failure());
+            return Err(brief_output_failure());
         }
         report["omitted_references"] = json!(
             report["omitted_references"]
@@ -183,7 +347,7 @@ fn output_brief(value: Value) -> Result<(), Diagnostic> {
     let mut out = io::stdout().lock();
     out.write_all(&bytes)
         .and_then(|_| out.flush())
-        .map_err(|_| brief_failure())
+        .map_err(|_| brief_output_failure())
 }
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Diagnostic> {
     let raw = if path == Path::new("-") {
@@ -210,7 +374,7 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Diagnostic> {
             Some((field, _)) => fail(&format!(
                 "Inventory input is missing the required field {field}; inspect the inventory schema."
             )),
-            None => fail("Invalid inventory JSON or unknown fields; inspect the inventory schema."),
+            None => fail(INVALID_INVENTORY_JSON),
         }
     })
 }
@@ -423,7 +587,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             ""
         }
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     if status.active_pack.is_some() {
         let message = if status.capability_blocked {
             "Optional function checks: exact search termination must be settled before another dispatch."
@@ -433,7 +597,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             "Optional function checks: retained separately; inspect dated case outcomes with status --json."
         };
         crate::terminal::secondary(&mut out, message, io::stdout().is_terminal())
-            .map_err(|_| fail("Cannot emit inventory status."))?;
+            .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     let refresh_phase =
         status
@@ -451,7 +615,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         &format!("Recorded inventory refresh phase: {refresh_phase}"),
         io::stdout().is_terminal(),
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     writeln!(
         out,
         "{}",
@@ -463,21 +627,21 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             "Environment inventory: work remains"
         }
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     writeln!(
         out,
         "Discovery mode: {:?}; Quick depth: {:?}",
         status.discovery_mode, status.quick_depth
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
-    writeln!(out, "{}", status.message).map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
+    writeln!(out, "{}", status.message).map_err(|_| fail(OUTPUT_FAILED))?;
     if let Some(pack) = &status.active_pack {
         writeln!(
             out,
             "Active pack: {:?} (SHA-256 {})",
             pack.path, pack.content_digest
         )
-        .map_err(|_| fail("Cannot emit inventory status."))?;
+        .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     writeln!(
         out,
@@ -488,7 +652,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         status.parser_count,
         status.reconciliation
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     for source in &status.sources {
         let selectors = [
             source
@@ -516,9 +680,9 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             source.fields.iter().filter(|f| f.observed).count(),
             source.fields.len()
         )
-        .map_err(|_| fail("Cannot emit inventory status."))?;
+        .map_err(|_| fail(OUTPUT_FAILED))?;
         for action in &source.next_actions {
-            writeln!(out, "  - {action}").map_err(|_| fail("Cannot emit inventory status."))?;
+            writeln!(out, "  - {action}").map_err(|_| fail(OUTPUT_FAILED))?;
         }
     }
     for run in &status.discovery_runs {
@@ -533,16 +697,16 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             run.max_seconds,
             run.source_ids.len()
         )
-        .map_err(|_| fail("Cannot emit inventory status."))?;
+        .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     for failure in &status.failures {
         writeln!(out, "Failure [{:?}]: {:?}", failure.stage, failure.message)
-            .map_err(|_| fail("Cannot emit inventory status."))?;
+            .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     for action in &status.next_actions {
-        writeln!(out, "- {action}").map_err(|_| fail("Cannot emit inventory status."))?;
+        writeln!(out, "- {action}").map_err(|_| fail(OUTPUT_FAILED))?;
     }
-    Ok(())
+    out.flush().map_err(|_| fail(OUTPUT_FAILED))
 }
 
 fn status_brief(
@@ -3962,12 +4126,7 @@ mod tests {
             diagnostic.pointer = Some(pointer.clone());
             let safe = brief_failure_for(&diagnostic);
             assert_eq!(safe.pointer.as_deref(), Some(pointer.as_str()));
-            assert_eq!(
-                safe.message,
-                format!(
-                    "Inventory brief command failed for discovery run_index {index}. Inspect protected full-mode output locally."
-                )
-            );
+            assert_eq!(safe.message, BRIEF_FALLBACK);
             let serialized = serde_json::to_string(&safe).unwrap();
             for excluded in [raw, "UNTRUSTED_CODE", "Synthetic private reference"] {
                 assert!(!serialized.contains(excluded));
@@ -4001,7 +4160,8 @@ mod tests {
         let raw = "Synthetic diagnostic with an untrusted checkpoint path";
         let mut diagnostic = Diagnostic::error("MCP_STATE_PRODUCER", raw);
         diagnostic.reference = Some("Synthetic untrusted reference".into());
-        for pointer in [None, Some("/discovery_runs/7"), Some("/discovery_runs/07")] {
+        let largest = format!("/discovery_runs/{}", usize::MAX);
+        for pointer in [None, Some(largest.as_str()), Some("/discovery_runs/07")] {
             diagnostic.pointer = pointer.map(str::to_owned);
             let safe = brief_failure_for(&diagnostic);
             assert_eq!(safe.code, "MCP_STATE_PRODUCER");
@@ -4012,11 +4172,9 @@ mod tests {
             assert!(safe.message.contains("outstanding inventory searches"));
             assert!(safe.message.contains("concurrent inventory execution"));
             assert!(!safe.message.contains("--state"));
-            assert_eq!(
-                safe.pointer.as_deref(),
-                pointer.filter(|p| *p == "/discovery_runs/7")
-            );
+            assert_eq!(safe.pointer.as_deref(), pointer.filter(|p| *p == largest));
             let serialized = serde_json::to_vec(&safe).unwrap();
+            // The final newline uses the remaining byte.
             assert!(serialized.len() < 4096);
             let serialized = String::from_utf8(serialized).unwrap();
             assert!(!serialized.contains(raw));
