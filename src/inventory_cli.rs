@@ -1,7 +1,7 @@
 //! Inventory CLI I/O. The pure inventory module never reads files or credentials.
 use clap::Args;
 use cqlmatic::{
-    contracts::Diagnostic,
+    contracts::{Diagnostic, Severity},
     discovery,
     environment::Pack,
     inventory::{self, *},
@@ -105,17 +105,27 @@ fn discovery_run_diagnostic(index: usize, mut diagnostic: Diagnostic) -> Diagnos
     }
     diagnostic
 }
+const OUTPUT_FAILED: &str = "Cannot emit the inventory reply. The change may already be saved. Read status before repeating the action.";
+const READ_OUTPUT_FAILED: &str =
+    "Cannot emit inventory status. Restore standard output and retry the read.";
+const BRIEF_FALLBACK: &str = "Inventory brief command failed. Read the full command output.";
+const INVALID_INVENTORY_JSON: &str =
+    "Invalid inventory JSON or unknown fields; inspect the inventory schema.";
+
 fn output(value: &impl Serialize) -> Result<(), Diagnostic> {
     let mut out = io::stdout().lock();
-    serde_json::to_writer(&mut out, value).map_err(|_| fail("Cannot emit inventory result."))?;
-    writeln!(out).map_err(|_| fail("Cannot emit inventory result."))
+    serde_json::to_writer(&mut out, value).map_err(|_| fail(OUTPUT_FAILED))?;
+    writeln!(out)
+        .and_then(|_| out.flush())
+        .map_err(|_| fail(OUTPUT_FAILED))
 }
 
-pub fn brief_failure() -> Diagnostic {
-    Diagnostic::error(
-        "INVENTORY_BRIEF_FAILED",
-        "Inventory brief command failed. Inspect protected full-mode output locally.",
-    )
+fn brief_failure() -> Diagnostic {
+    Diagnostic::error("INVENTORY_BRIEF_FAILED", BRIEF_FALLBACK)
+}
+
+fn brief_output_failure() -> Diagnostic {
+    Diagnostic::error("INVENTORY_BRIEF_FAILED", OUTPUT_FAILED)
 }
 
 pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
@@ -129,30 +139,252 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
                 .ok()
                 .filter(|value| value.to_string() == index)
         });
-    if diagnostic.code == "MCP_STATE_PRODUCER" {
-        let mut failure = Diagnostic::error(
+    let prefix = index.map(|index| format!("Discovery run_index {index}: "));
+    let message = prefix
+        .as_deref()
+        .and_then(|prefix| diagnostic.message.strip_prefix(prefix))
+        .unwrap_or(&diagnostic.message);
+    let mut failure = if message == OUTPUT_FAILED
+        && matches!(
+            diagnostic.code.as_str(),
+            "INVENTORY_INPUT" | "INVENTORY_BRIEF_FAILED"
+        ) {
+        brief_output_failure()
+    } else if message == READ_OUTPUT_FAILED && diagnostic.code == "INVENTORY_INPUT" {
+        Diagnostic::error("INVENTORY_BRIEF_FAILED", READ_OUTPUT_FAILED)
+    } else if diagnostic.code == "INVENTORY_EVIDENCE"
+        && let Some(count) = message
+            .strip_prefix(SOURCE_SELECTION_PREFIX)
+            .and_then(|rest| {
+                rest.strip_prefix("There are ")
+                    .or_else(|| rest.strip_prefix("There is "))
+            })
+            .and_then(|rest| rest.split_once(" valid inventory source ID"))
+            .and_then(|(count, _)| count.parse::<usize>().ok())
+    {
+        Diagnostic::error(
+            "INVENTORY_EVIDENCE",
+            if count == 0 {
+                "There are no selectable inventory sources. Read summary status for the confirmed sources.".into()
+            } else {
+                format!(
+                    "{} Read summary status for the confirmed sources.",
+                    inventory::source_selection_count(count)
+                )
+            },
+        )
+    } else if diagnostic.code == "MCP_STATE_PRODUCER" {
+        Diagnostic::error(
             "MCP_STATE_PRODUCER",
             "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally.",
-        );
-        failure.pointer = index.map(|index| format!("/discovery_runs/{index}"));
-        return failure;
-    }
-    let Some(index) = index else {
-        return brief_failure();
+        )
+    } else if let Some(reason) = brief_reason(&diagnostic.code, message) {
+        let pointer = if index.is_some() {
+            FULL_STEP
+        } else {
+            "Read the full command output."
+        };
+        Diagnostic::error(&diagnostic.code, format!("{reason} {pointer}"))
+    } else {
+        brief_failure()
     };
-    let mut failure = Diagnostic::error(
-        "INVENTORY_BRIEF_FAILED",
-        format!(
-            "Inventory brief command failed for discovery run_index {index}. Inspect protected full-mode output locally."
-        ),
-    );
-    failure.pointer = Some(format!("/discovery_runs/{index}"));
+    failure.pointer = index.map(|index| format!("/discovery_runs/{index}"));
     failure
+}
+
+fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
+    Some(match (code, message) {
+        ("INVENTORY_INPUT", message)
+            if message.starts_with("Unknown inventory action kind ")
+                || message.starts_with("Inventory input has an unknown field ") =>
+        {
+            "Inventory input did not match the required JSON schema."
+        }
+        ("INVENTORY_INPUT", INVALID_INVENTORY_JSON) => {
+            "Inventory input did not match the required JSON schema."
+        }
+        ("INVENTORY_INPUT", msg)
+            if msg.starts_with("Inventory input is missing the required field ") =>
+        {
+            "Inventory input lacks a required schema field."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Unsupported inventory request version." | "Unsupported status request version.",
+        ) => "Request version is unsupported.",
+        ("INVENTORY_INPUT", "Select state in either --state or the request, not both.") => {
+            "Two state locations were selected."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Prepare discovery before selecting a run." | "No prepared discovery run.",
+        ) => "No discovery run is prepared.",
+        ("INVENTORY_INPUT", msg)
+            if msg
+                .strip_prefix("Discovery run_index ")
+                .and_then(|tail| tail.strip_suffix(" is out of range."))
+                .is_some_and(|index| index.parse::<usize>().is_ok()) =>
+        {
+            "The discovery run index is out of range."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Inventory already exists; resume it or select a new --state path.",
+        ) => "Inventory already exists.",
+        ("INVENTORY_INPUT", "Evidence input must differ from inventory state.") => {
+            "The evidence and state must be separate files."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Cannot resolve evidence path." | "Retained inventory snapshot does not exist.",
+        ) => "An evidence file is missing or unreadable.",
+        (
+            "INVENTORY_INPUT",
+            "A retained discovery search has unresolved termination or cleanup. Reconcile that exact attempt before another discovery search.",
+        ) => "A retained discovery search needs settlement.",
+        ("INVENTORY_INPUT", STALE_DISCOVERY_PREDECESSOR) => {
+            "Discovery was prepared against older inventory."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Retained discovery checkpoint differs from its inventory reference.",
+        ) => "The checkpoint does not match the selected inventory run.",
+        (
+            "INVENTORY_INPUT",
+            "Activate the ordinary field pack before preparing optional capability checks.",
+        ) => "Activate a field pack before preparing capability checks.",
+        ("INVENTORY_INPUT", "Unknown capability checkpoint.") => {
+            "The capability checkpoint was not found."
+        }
+        ("INVENTORY_EVIDENCE", "Confirm CID, cloud, view and target scope before discovery.") => {
+            "The target is missing."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Binding must identify an exact saved parser ID and SHA-256 snapshot.",
+        ) => "The saved parser version did not match.",
+        (
+            "INVENTORY_EVIDENCE",
+            "Inventory work changed; inspect its current revision before acknowledging.",
+        ) => "The work revision changed.",
+        (
+            "INVENTORY_EVIDENCE",
+            "Inventory notice changed or is empty; inspect the selected state's current notice before acknowledging.",
+        ) => "The inventory notice changed or is empty.",
+        ("INVENTORY_EVIDENCE", "Unknown exact refresh attempt.") => {
+            "The refresh attempt was not found."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Expected strict protected host evidence for a provider-enforced search lifetime; a client timeout is insufficient.",
+        ) => "The host evidence is invalid.",
+        ("INVENTORY_EVIDENCE", message) if message.starts_with("Refresh host evidence ") => {
+            "The host evidence did not pass refresh validation."
+        }
+        ("INVENTORY_EVIDENCE", message) if message.starts_with("Refresh settlement ") => {
+            "The settlement did not match the reserved refresh."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "The verified provider search lifetime has not elapsed; refresh remains unresolved.",
+        ) => "The recorded times do not establish that the provider lifetime ended.",
+        (
+            "INVENTORY_EVIDENCE",
+            "Reported provider search start must follow exact dispatch and precede settlement.",
+        ) => "The reported search start does not fit the attempt.",
+        ("INVENTORY_EVIDENCE", message)
+            if message.starts_with(
+                "Lifetime reconciliation requires host-attested search_started_at.",
+            ) =>
+        {
+            "A lifetime settlement needs the host-attested search start."
+        }
+        ("INVENTORY_EVIDENCE", "No dispatched refresh lifetime exists.") => {
+            "There is no recorded dispatch for the lifetime settlement. Check the attempt before submitting its actual outcome."
+        }
+        (
+            "INVENTORY_EVIDENCE",
+            "Discovery requires at least one expected source in the confirmed target; follow next_actions in status first.",
+        ) => {
+            "There are no expected sources for discovery. Confirm the target with an expected source first."
+        }
+        ("INVENTORY_INPUT", "Observation input exceeds 8 MiB.") => {
+            "The observation input exceeds 8 MiB."
+        }
+        (
+            "INVENTORY_INPUT",
+            "Cannot inspect observation input."
+            | "Cannot open observation input."
+            | "Cannot inspect opened observation input."
+            | "Cannot read observation input."
+            | "Cannot reinspect observation input."
+            | "Cannot reinspect observation input path.",
+        ) => "An observation input is missing or unreadable.",
+        (
+            "INVENTORY_INPUT",
+            "Observation input changed before it was read."
+            | "Observation input changed while it was being read.",
+        ) => "An observation input changed while opening or reading it.",
+        (
+            "INVENTORY_INPUT",
+            "Retained observation audits exceed the total verification byte budget.",
+        ) => "Retained observation audits exceed the verification budget.",
+        ("SETUP_PROTECTION", "Protected setup input must be a regular file.") => {
+            "A protected input could not be opened as a regular file."
+        }
+        ("SETUP_PROTECTION", "Cannot determine the current user account.") => {
+            "Setup could not determine the current user account."
+        }
+        ("ENV_TENANT", _) => "The account binding is invalid.",
+        ("ENV_VIEW", _) => "The search target is invalid.",
+        (
+            "MCP_DEADLINE",
+            "Discovery active-time budget expired; pause and resume do not renew it."
+            | "Discovery wall-clock budget expired before the last answer was ingested.",
+        ) => "The discovery time limit passed.",
+        ("INVENTORY_REFRESH_UNAVAILABLE", _) => "Automatic inventory refresh is unavailable.",
+        ("INVENTORY_REFRESH_REMINDER_STALE", _) => "The refresh reminder changed or is not due.",
+        ("DISCOVERY_EVIDENCE", "Use increasing absolute UTC windows of at most seven days.") => {
+            "The discovery window is invalid."
+        }
+        ("PACK_TIME", _) => "A timestamp is invalid.",
+        ("PACK_BUSY", _) => "Another writer holds the selected file.",
+        ("LOCAL_IO", msg) if msg.starts_with("Cannot inspect input: ") => {
+            "An input file is missing or inaccessible."
+        }
+        ("LOCAL_IO", msg)
+            if msg.starts_with("Cannot open input: ") || msg.starts_with("Cannot read input: ") =>
+        {
+            "An input file could not be read."
+        }
+        ("LOCAL_FILE_TYPE", "Input must be a regular file, not a symlink.") => {
+            "The input is not a regular file."
+        }
+        (
+            "LOCAL_SIZE",
+            "File exceeds the configured byte budget." | "Input grew beyond the byte budget.",
+        ) => "The input exceeds its size limit.",
+        ("SETUP_STORAGE", msg) if msg.starts_with("Storage location ") => {
+            "The storage location is inaccessible."
+        }
+        ("PACK_JSON", _) => "The pack JSON is invalid.",
+        ("PACK_DIGEST", _) => "The pack digest does not match.",
+        ("PACK_VERSION", _) => "The pack format is unsupported. Export a compatible pack.",
+        ("MCP_STATE_TAMPERED", _) => "The checkpoint could not be verified.",
+        ("MCP_STATE_RESTART", _) => "The checkpoint format or discovery algorithm is incompatible.",
+        (
+            "DISCOVERY_BUSY",
+            "No new probe can start; settle the outstanding attempt or resume the paused run first.",
+        ) => "Discovery cannot start another probe.",
+        ("DISCOVERY_CLEANUP_PENDING", _) => "Discovery cleanup is pending.",
+        _ if code != "INVENTORY_INPUT" => return answer_reason(code),
+        _ => return None,
+    })
 }
 
 fn brief_bytes(mut value: Value) -> Result<Vec<u8>, Diagnostic> {
     loop {
-        let mut bytes = serde_json::to_vec(&value).map_err(|_| brief_failure())?;
+        let mut bytes = serde_json::to_vec(&value).map_err(|_| brief_output_failure())?;
         if bytes.len() < 4096 {
             bytes.push(b'\n');
             return Ok(bytes);
@@ -167,7 +399,7 @@ fn brief_bytes(mut value: Value) -> Result<Vec<u8>, Diagnostic> {
             .and_then(Vec::pop)
             .is_none()
         {
-            return Err(brief_failure());
+            return Err(brief_output_failure());
         }
         report["omitted_references"] = json!(
             report["omitted_references"]
@@ -183,35 +415,83 @@ fn output_brief(value: Value) -> Result<(), Diagnostic> {
     let mut out = io::stdout().lock();
     out.write_all(&bytes)
         .and_then(|_| out.flush())
-        .map_err(|_| brief_failure())
+        .map_err(|_| brief_output_failure())
 }
+fn read_json_bytes(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    if path != Path::new("-") {
+        return storage::read_bytes(path, MAX_STATE_BYTES);
+    }
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(MAX_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| fail("Cannot read inventory request from stdin."))?;
+    if bytes.len() as u64 > MAX_STATE_BYTES {
+        return Err(fail("Inventory input exceeds 64 MiB."));
+    }
+    Ok(bytes)
+}
+
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Diagnostic> {
-    let raw = if path == Path::new("-") {
-        let mut bytes = Vec::new();
-        io::stdin()
-            .take(MAX_STATE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| fail("Cannot read inventory request from stdin."))?;
-        if bytes.len() as u64 > MAX_STATE_BYTES {
-            return Err(fail("Inventory input exceeds 64 MiB."));
-        }
-        bytes
-    } else {
-        storage::read_bytes(path, MAX_STATE_BYTES)?
-    };
-    serde_json::from_slice(&raw).map_err(|error| {
-        // A missing field's name comes from the schema. Nothing from the file is repeated.
-        // The file may be a request or a saved state, so the message names neither.
-        let error = error.to_string();
-        match error
-            .strip_prefix("missing field `")
-            .and_then(|rest| rest.split_once('`'))
-        {
-            Some((field, _)) => fail(&format!(
+    serde_json::from_slice(&read_json_bytes(path)?)
+        .map_err(|error| inventory_decode_error(&error.to_string()))
+}
+
+fn inventory_decode_error(message: &str) -> Diagnostic {
+    if let Some((field, _)) = message
+        .strip_prefix("unknown field `")
+        .and_then(|rest| rest.split_once("`, "))
+    {
+        return fail(&format!(
+            "Inventory input has an unknown field {}. Remove it or use a field from the inventory schema.",
+            request_label(field)
+        ));
+    }
+    message
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split_once('`'))
+        .map_or_else(
+            || fail(INVALID_INVENTORY_JSON),
+            |(field, _)| fail(&format!(
                 "Inventory input is missing the required field {field}; inspect the inventory schema."
             )),
-            None => fail("Invalid inventory JSON or unknown fields; inspect the inventory schema."),
+        )
+}
+
+fn request_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let mut bounded: String = chars.by_ref().take(64).collect();
+    if chars.next().is_some() {
+        bounded.push_str("...");
+    }
+    format!("{bounded:?}")
+}
+
+fn read_inventory_request(path: &Path) -> Result<InventoryRequest, Diagnostic> {
+    let raw = read_json_bytes(path)?;
+    serde_json::from_slice(&raw).map_err(|error| {
+        let message = error.to_string();
+        if message.starts_with("unknown variant `")
+            && let Ok(request) = serde_json::from_slice::<Value>(&raw)
+            && let Some(kind) = request.pointer("/action/kind").and_then(Value::as_str)
+        {
+            let schema: Value = serde_json::from_str(include_str!("../schemas/inventory.json"))
+                .expect("Bundled inventory schema is JSON");
+            let kinds: Vec<_> = schema["$defs"]["InventoryAction"]["oneOf"]
+                .as_array()
+                .expect("Bundled inventory schema lists the actions")
+                .iter()
+                .filter_map(|action| action["properties"]["kind"]["const"].as_str())
+                .collect();
+            if !kinds.contains(&kind) {
+                return fail(&format!(
+                    "Unknown inventory action kind {}. Choose one of {}.",
+                    request_label(kind),
+                    kinds.join(", ")
+                ));
+            }
         }
+        inventory_decode_error(&message)
     })
 }
 
@@ -423,7 +703,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             ""
         }
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     if status.active_pack.is_some() {
         let message = if status.capability_blocked {
             "Optional function checks: exact search termination must be settled before another dispatch."
@@ -433,7 +713,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             "Optional function checks: retained separately; inspect dated case outcomes with status --json."
         };
         crate::terminal::secondary(&mut out, message, io::stdout().is_terminal())
-            .map_err(|_| fail("Cannot emit inventory status."))?;
+            .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     let refresh_phase =
         status
@@ -451,7 +731,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         &format!("Recorded inventory refresh phase: {refresh_phase}"),
         io::stdout().is_terminal(),
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     writeln!(
         out,
         "{}",
@@ -463,21 +743,21 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             "Environment inventory: work remains"
         }
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     writeln!(
         out,
         "Discovery mode: {:?}; Quick depth: {:?}",
         status.discovery_mode, status.quick_depth
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
-    writeln!(out, "{}", status.message).map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
+    writeln!(out, "{}", status.message).map_err(|_| fail(OUTPUT_FAILED))?;
     if let Some(pack) = &status.active_pack {
         writeln!(
             out,
             "Active pack: {:?} (SHA-256 {})",
             pack.path, pack.content_digest
         )
-        .map_err(|_| fail("Cannot emit inventory status."))?;
+        .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     writeln!(
         out,
@@ -488,7 +768,7 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         status.parser_count,
         status.reconciliation
     )
-    .map_err(|_| fail("Cannot emit inventory status."))?;
+    .map_err(|_| fail(OUTPUT_FAILED))?;
     for source in &status.sources {
         let selectors = [
             source
@@ -516,9 +796,9 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             source.fields.iter().filter(|f| f.observed).count(),
             source.fields.len()
         )
-        .map_err(|_| fail("Cannot emit inventory status."))?;
+        .map_err(|_| fail(OUTPUT_FAILED))?;
         for action in &source.next_actions {
-            writeln!(out, "  - {action}").map_err(|_| fail("Cannot emit inventory status."))?;
+            writeln!(out, "  - {action}").map_err(|_| fail(OUTPUT_FAILED))?;
         }
     }
     for run in &status.discovery_runs {
@@ -533,16 +813,83 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             run.max_seconds,
             run.source_ids.len()
         )
-        .map_err(|_| fail("Cannot emit inventory status."))?;
+        .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     for failure in &status.failures {
         writeln!(out, "Failure [{:?}]: {:?}", failure.stage, failure.message)
-            .map_err(|_| fail("Cannot emit inventory status."))?;
+            .map_err(|_| fail(OUTPUT_FAILED))?;
     }
     for action in &status.next_actions {
-        writeln!(out, "- {action}").map_err(|_| fail("Cannot emit inventory status."))?;
+        writeln!(out, "- {action}").map_err(|_| fail(OUTPUT_FAILED))?;
     }
-    Ok(())
+    out.flush().map_err(|_| fail(OUTPUT_FAILED))
+}
+
+fn status_brief(
+    state: &InventoryState,
+    report: &InventoryStatus,
+    session_id: Option<&str>,
+) -> Value {
+    let mut brief = inventory::brief(report, session_id);
+    if let Some((index, next_action)) = status_row_limit(state) {
+        brief["discovery_row_limit"] = json!({
+            "run_index":index,"code":"SEARCH_ROW_LIMIT","message":ROW_LIMIT_REASON,
+            "next_action":next_action
+        });
+    }
+    let runs = &state.discovery_runs;
+    if let Some(index) = runs.iter().enumerate().rev().find_map(|(index, run)| {
+        (run.status == "failed"
+            && !runs[index + 1..].iter().any(|later| {
+                later.status == "complete"
+                    && later.source_ids.len() == run.source_ids.len()
+                    && later
+                        .source_ids
+                        .iter()
+                        .all(|id| run.source_ids.contains(id))
+            }))
+        .then_some(index)
+    }) && let Ok(relay) = inspect_selected_run(state, index)
+        && let Some(failure) = relay_failure_cause(&relay)
+    {
+        let (diagnostic, _) = relay_failure(
+            &failure,
+            !mcp::is_resumable(&relay),
+            relay.request.max_queries,
+        );
+        brief["failed_discovery"] = json!({"run_index":index,"code":diagnostic["code"]});
+    }
+    brief
+}
+
+fn retained_row_limit(relay: &mcp::State) -> bool {
+    relay
+        .failure
+        .as_ref()
+        .is_some_and(|d| d.code == "SEARCH_ROW_LIMIT")
+        || mcp::ended_at_row_limit(relay)
+}
+
+fn status_row_limit(state: &InventoryState) -> Option<(usize, &'static str)> {
+    let index = state.discovery_runs.len().checked_sub(1)?;
+    let run = &state.discovery_runs[index];
+    if !matches!(run.status.as_str(), "paused" | "failed") {
+        return None;
+    }
+    let relay = inspect_selected_run(state, index).ok()?;
+    retained_row_limit(&relay).then(|| (index, retained_row_limit_action(&relay)))
+}
+
+fn note_status_row_limit(state: &InventoryState, report: &mut InventoryStatus) {
+    if let Some((index, next_action)) = status_row_limit(state) {
+        report.next_actions.push(format!(
+            "Discovery run {index}. {ROW_LIMIT_REASON} {next_action}"
+        ));
+    }
+}
+
+fn read_output(result: Result<(), Diagnostic>) -> Result<(), Diagnostic> {
+    result.map_err(|_| fail(READ_OUTPUT_FAILED))
 }
 
 pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
@@ -561,17 +908,24 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
             .or_else(|| request.and_then(|r| r.state.map(PathBuf::from))),
     )?;
     let state = load(&path)?;
-    let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+    let mut report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+    if !args.brief {
+        note_status_row_limit(&state, &mut report);
+    }
     if args.json {
         if args.brief {
-            output_brief(inventory::brief(&report, session_id.as_deref()))?;
+            read_output(output_brief(status_brief(
+                &state,
+                &report,
+                session_id.as_deref(),
+            )))?;
         } else if args.summary {
-            output(&inventory::summary(&report))?;
+            read_output(output(&inventory::summary(&report)))?;
         } else {
-            output(&report)?;
+            read_output(output(&report))?;
         }
     } else {
-        render(&report)?;
+        read_output(render(&report))?;
     }
     Ok(0)
 }
@@ -580,18 +934,21 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     let path = state_path(args.state)?;
     if args.request.is_none() && !args.next_probe {
         let state = load(&path)?;
-        let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+        let mut report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+        if !args.brief {
+            note_status_row_limit(&state, &mut report);
+        }
         if args.json || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             if args.json {
                 if args.brief {
-                    output_brief(inventory::brief(&report, None))?;
+                    read_output(output_brief(status_brief(&state, &report, None)))?;
                 } else if args.summary {
-                    output(&inventory::summary(&report))?;
+                    read_output(output(&inventory::summary(&report)))?;
                 } else {
-                    output(&report)?;
+                    read_output(output(&report))?;
                 }
             } else {
-                render(&report)?;
+                read_output(render(&report))?;
             }
             return Ok(0);
         }
@@ -612,13 +969,20 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
             },
         }
     } else {
-        read_json(args.request.as_deref().expect("request checked"))?
+        read_inventory_request(args.request.as_deref().expect("request checked"))?
     };
     if request.schema_version != 1 {
         return Err(fail("Unsupported inventory request version."));
     }
     if let InventoryAction::NextProbe { run_index, answer } = request.action {
-        output(&json!({"schema_version":1,"action":next_probe(&path, run_index, answer)?}))?;
+        let mut action = next_probe(&path, run_index, answer)?;
+        if args.brief {
+            action
+                .as_object_mut()
+                .expect("next-probe returns an object")
+                .remove("source_id");
+        }
+        output(&json!({"schema_version":1,"action":action}))?;
         return Ok(0);
     }
     let session_id = match &request.action {
@@ -626,12 +990,17 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         | InventoryAction::DispatchRefresh { session_id, .. } => Some(session_id.clone()),
         _ => None,
     };
-    let (report, extra) = apply_and_store(&path, request.action)?;
+    let writer = inventory_writer(&path)?;
+    let (report, extra, state) = apply_locked(&path, request.action, MAX_STATE_BYTES, &writer)?;
+    let brief = args
+        .brief
+        .then(|| status_brief(&state, &report, session_id.as_deref()));
+    drop(writer);
     if args.json {
-        if args.brief {
+        if let Some(brief) = brief {
             output_brief(json!({
                 "schema_version":1,"brief":true,
-                "status":inventory::brief(&report, session_id.as_deref()),
+                "status":brief,
                 "action":action_brief(&extra)
             }))?;
         } else if args.summary {
@@ -655,6 +1024,51 @@ struct NextProbeRun {
     phase: String,
     relay: mcp::State,
     checkpoint: storage::Writer,
+    refusal: Option<Diagnostic>,
+    predecessor_error: Option<Diagnostic>,
+    paused_action: Option<String>,
+    search_blocker: Option<String>,
+}
+
+fn retained_answer_refusal(
+    state: &InventoryState,
+    index: usize,
+    relay: &mcp::State,
+) -> Option<Diagnostic> {
+    if !matches!(relay.status.as_str(), "needs-probes" | "cleanup-pending")
+        || !mcp::has_in_flight(relay)
+    {
+        return None;
+    }
+    let stage = refusal_stage(index, relay);
+    state
+        .failures
+        .iter()
+        .rev()
+        .find_map(|failure| {
+            let code = failure.stage.strip_prefix(&stage)?;
+            answer_reason(code)?;
+            Some(Diagnostic::error(code, &failure.message))
+        })
+        .or_else(|| mcp::outstanding_refusal(relay).cloned())
+}
+
+fn sibling_blocker_action(index: usize) -> String {
+    format!(
+        "Inspect discovery run_index={index} and resolve its blocker before continuing this run."
+    )
+}
+
+fn retained_search_blocker(state: &InventoryState, index: usize, now: &str) -> Option<String> {
+    let blocker = check_retained_searches(state, None, Some(index), now).err()?;
+    Some(
+        blocker
+            .pointer
+            .as_deref()
+            .and_then(|pointer| pointer.strip_prefix("/discovery_runs/"))
+            .and_then(|index| index.parse::<usize>().ok())
+            .map_or_else(|| FULL_STEP.to_owned(), sibling_blocker_action),
+    )
 }
 
 fn inspect_next_probe_run(
@@ -673,12 +1087,64 @@ fn inspect_next_probe_run(
         "complete" | "superseded" => run.status.clone(),
         _ => relay.status.clone(),
     };
+    let refusal = retained_answer_refusal(&state, index, &relay);
+    let predecessor_error = if phase == "paused" {
+        check_discovery_predecessor_for(&state, index, &relay).err()
+    } else {
+        None
+    };
+    let search_blocker = (phase == "paused")
+        .then(|| retained_search_blocker(&state, index, &discovery::timestamp()))
+        .flatten();
+    let paused_action = (phase == "paused").then(|| {
+        if !mcp::has_discovery_work_after_resume(&relay) {
+            query_budget_action(false, relay.request.max_queries).to_owned()
+        } else {
+            format!("Submit resume-discovery with run_index={index} to continue this run.")
+        }
+    });
     Ok(NextProbeRun {
         index,
         phase,
         relay,
         checkpoint,
+        refusal,
+        predecessor_error,
+        paused_action,
+        search_blocker,
     })
+}
+
+const LOCAL_DEADLINE_REASON: &str = "Discovery time limit reached.";
+const LOCAL_DEADLINE_ACTION: &str =
+    "Prepare a new discovery run with enough time for the selected sources.";
+const ROW_LIMIT_REASON: &str = "The answer reached the 10,000-row ceiling. With the same data, repeating this search will reach the ceiling again.";
+const ROW_LIMIT_ACTION: &str = "Prepare a new discovery run over a narrower window.";
+const ROW_LIMIT_DEADLINE_ACTION: &str =
+    "Prepare a new discovery run over a narrower window with enough time for the selected sources.";
+const LEGACY_SEARCH_ACTION: &str = "Confirm the original search outcome with the host. After settlement, prepare a narrower run in a separate inventory.";
+const CURRENT_INVENTORY_ACTION: &str = "Prepare discovery again from the current inventory.";
+const FULL_STEP: &str = "Read the full step output for this run.";
+
+fn row_limit_action(legacy: bool, expired: bool) -> &'static str {
+    if legacy {
+        LEGACY_SEARCH_ACTION
+    } else if expired {
+        ROW_LIMIT_DEADLINE_ACTION
+    } else {
+        ROW_LIMIT_ACTION
+    }
+}
+
+fn retained_row_limit_action(relay: &mcp::State) -> &'static str {
+    row_limit_action(
+        !mcp::is_resumable(relay),
+        relay
+            .failure
+            .as_ref()
+            .is_some_and(|d| d.code == "MCP_DEADLINE")
+            || mcp::time_limit_passed(relay, &discovery::timestamp()),
+    )
 }
 
 fn next_probe(
@@ -709,12 +1175,13 @@ fn next_probe(
             .is_some_and(|answer| answer.outcome == "complete")
     };
     // An answer for a probe that is already answered changes nothing; the run carries on.
-    let answer = answer.filter(|answer| !complete(&run.relay, &answer.probe_id));
+    let answer =
+        answer.filter(|answer| run.phase == "failed" || !complete(&run.relay, &answer.probe_id));
     let (settled, mut diagnostics) = if let Some(answer) = answer {
         let probe_id = answer.probe_id.clone();
         let already_answered = run.relay.answers.contains_key(&probe_id);
         drop(run);
-        let (_, output) = step(vec![answer])?;
+        let (_, output, _) = step(vec![answer])?;
         run = inspect_next_probe_run(path, Some(index), &writer)?;
         let accepted = !already_answered
             && run
@@ -722,16 +1189,24 @@ fn next_probe(
                 .answers
                 .get(&probe_id)
                 .is_some_and(|answer| answer.outcome == "complete");
-        let diagnostics = [output.get("diagnostics"), output.pointer("/relay/diagnostics")]
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_array)
-            .flatten()
-            .map(|d| {
-                json!({"code":d["code"],"severity":d["severity"],
-                    "message":"Inspect the protected discovery checkpoint or inventory failures for details about this answer."})
-            })
-            .collect::<Vec<_>>();
+        let diagnostics = [
+            output.get("diagnostics"),
+            output.pointer("/relay/diagnostics"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|d| serde_json::from_value::<Diagnostic>(d.clone()).ok())
+        .map(|d| {
+            if d.code == "MCP_UNKNOWN_PROBE" && !mcp::has_in_flight(&run.relay) {
+                json!({"code":d.code,"severity":d.severity,"message":
+                    "No probe is outstanding."})
+            } else {
+                safe_answer_diagnostic(&d.code, d.severity)
+            }
+        })
+        .collect::<Vec<_>>();
         (accepted, diagnostics)
     } else {
         (false, Vec::new())
@@ -758,11 +1233,48 @@ fn next_probe(
     }
     let mut cost = json!(mcp::cost(&run.relay, 0));
     let mut phase = run.phase.clone();
+    let mut terminal_failure = relay_failure_cause(&run.relay);
+    let mut source_id = terminal_failure
+        .as_ref()
+        .and_then(|d| conflicted_source_id(&run.relay, d));
+    let row_limited = diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT")
+        || retained_row_limit(&run.relay);
+    let legacy = !mcp::is_resumable(&run.relay);
+    let query_limit = run.relay.request.max_queries;
+    let predecessor_error = run.predecessor_error.take();
+    let paused_action = run.paused_action.take();
+    let search_blocker = run.search_blocker.take();
+    let recover_cleanup = phase == "cleanup-pending" && run.refusal.is_some();
+    if phase == "cleanup-pending" {
+        if diagnostics.is_empty()
+            && let Some(refusal) = &run.refusal
+        {
+            diagnostics.push(safe_answer_diagnostic(
+                &refusal.code,
+                refusal.severity.clone(),
+            ));
+        }
+        if !diagnostics
+            .iter()
+            .any(|d| d["code"] == "DISCOVERY_CLEANUP_PENDING")
+        {
+            diagnostics.push(safe_answer_diagnostic(
+                "DISCOVERY_CLEANUP_PENDING",
+                Severity::Error,
+            ));
+        }
+    } else if !settled
+        && diagnostics.is_empty()
+        && let Some(refusal) = run.refusal.take()
+    {
+        diagnostics.push(safe_answer_diagnostic(&refusal.code, refusal.severity));
+    }
+    let mut expired = mcp::time_limit_passed(&run.relay, &discovery::timestamp());
     drop(run);
 
     let mut dispatched = false;
     let mut reservation_failed = false;
-    let mut expired = false;
+    let mut stale_predecessor = false;
     if let Some(candidate) = &probe
         && outstanding.is_none()
     {
@@ -774,7 +1286,7 @@ fn next_probe(
             run_index: Some(index),
             probe_id: probe_id.clone(),
         }) {
-            Ok((_, mut reservation)) => {
+            Ok((_, mut reservation, _)) => {
                 cost = reservation["relay"]["cost"].take();
                 outstanding = Some(probe_id);
                 dispatched = true;
@@ -789,11 +1301,18 @@ fn next_probe(
         let saved = inspect_next_probe_run(path, Some(index), &writer)
             .map_err(|read_error| poll.err().unwrap_or(read_error))?;
         phase = saved.phase;
+        terminal_failure = relay_failure_cause(&saved.relay);
+        source_id = terminal_failure
+            .as_ref()
+            .and_then(|d| conflicted_source_id(&saved.relay, d));
         outstanding = mcp::outstanding_probe_id(&saved.relay);
         cost = json!(mcp::cost(&saved.relay, 0));
         probe = None;
         reservation_failed = true;
-        expired = error.code == "MCP_DEADLINE";
+        expired |= error.code == "MCP_DEADLINE";
+        stale_predecessor = error.code == "INVENTORY_INPUT"
+            && error.message
+                == format!("Discovery run_index {index}: {STALE_DISCOVERY_PREDECESSOR}");
         diagnostics.push(reservation_diagnostic(error, outstanding.is_some()));
     }
     let phase = if probe.is_some() { "probe" } else { &phase };
@@ -812,6 +1331,63 @@ fn next_probe(
         expired,
         outstanding.is_some(),
     );
+    let next_action = if matches!(phase, "failed" | "activating")
+        && let Some(failure) = terminal_failure
+    {
+        let (diagnostic, guidance) = relay_failure(&failure, legacy, query_limit);
+        diagnostics.retain(|d| d["code"] != diagnostic["code"]);
+        diagnostics.insert(0, diagnostic);
+        if row_limited && failure.code == "MCP_DEADLINE" {
+            if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
+                diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
+            }
+            row_limit_action(legacy, true).to_owned()
+        } else {
+            guidance.to_owned()
+        }
+    } else if row_limited {
+        if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
+            diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
+        }
+        search_blocker.unwrap_or_else(|| row_limit_action(legacy, expired).to_owned())
+    } else if phase == "paused" && expired {
+        diagnostics.push(
+            json!({"code":"MCP_DEADLINE","severity":"error","message":LOCAL_DEADLINE_REASON}),
+        );
+        LOCAL_DEADLINE_ACTION.to_owned()
+    } else if let Some(error) = predecessor_error {
+        let stale = error.code == "INVENTORY_INPUT"
+            && error.message
+                == format!("Discovery run_index {index}: {STALE_DISCOVERY_PREDECESSOR}");
+        diagnostics.push(reservation_diagnostic(error, false));
+        if stale {
+            CURRENT_INVENTORY_ACTION
+        } else {
+            FULL_STEP
+        }
+        .to_owned()
+    } else if stale_predecessor {
+        "Pause this run, then prepare discovery again from the current inventory.".to_owned()
+    } else if phase == "paused"
+        && let Some(action) = search_blocker.or(paused_action)
+    {
+        action
+    } else if recover_cleanup {
+        DiscoveryStepAdvice::Recover.message(index)
+    } else {
+        if diagnostics.is_empty() {
+            let code = match phase {
+                "activation-blocked" => Some("PACK_BUSY"),
+                "cancel-requested" => Some("DISCOVERY_CANCEL_REQUESTED"),
+                "superseded" => Some("DISCOVERY_SUPERSEDED"),
+                _ => None,
+            };
+            if let Some(code) = code {
+                diagnostics.push(safe_answer_diagnostic(code, Severity::Error));
+            }
+        }
+        next_action
+    };
     let mut action = json!({"kind":"next-probe","run_index":index,"state":phase,
         "dispatched":dispatched,"settled":settled,"cost":cost,"next_action":next_action});
     if let Some(mut probe) = probe {
@@ -821,6 +1397,9 @@ fn next_probe(
     }
     if let Some(id) = outstanding {
         action["outstanding_probe_id"] = json!(id);
+    }
+    if let Some(id) = source_id {
+        action["source_id"] = json!(id);
     }
     if !diagnostics.is_empty() {
         action["diagnostics"] = json!(diagnostics);
@@ -906,18 +1485,11 @@ fn next_probe_guidance(
         "probe" => format!(
             "This probe is already reserved. If its search ran, submit the saved result as answer with run_index={index}. Run the search only if it never started."
         ),
-        "complete" => format!(
-            "run_index={index} is complete. Submit reconcile with reviewed_at if it has not been reconciled."
-        ),
+        "complete" => format!("run_index={index} is complete."),
         "needs-probes" if expired && outstanding => format!(
-            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index={index} to close the attempt. If it never started, do not run it; submit pause-discovery with run_index={index}, then next-probe with run_index={index} and no answer."
+            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If the search ran, submit its saved original result as answer with run_index={index}. If it never started, run the exact reserved search once and submit its result. Once settlement is confirmed, prepare a new run."
         ),
-        "needs-probes" if reservation_failed && outstanding => format!(
-            "The reservation reported an error; see diagnostics. Submit next-probe with run_index={index} and no answer to read the outstanding probe."
-        ),
-        "needs-probes" if reservation_failed => format!(
-            "The next probe was not reserved; the diagnostic says why. Resolve that, then submit next-probe with run_index={index} and no answer. If the diagnostic says the run started from an earlier inventory, submit pause-discovery with run_index={index}, then prepare-discovery."
-        ),
+        "needs-probes" if reservation_failed => FULL_STEP.to_owned(),
         "needs-probes" if refused => {
             let next = if outstanding {
                 "read the outstanding probe"
@@ -928,20 +1500,245 @@ fn next_probe_guidance(
                 "The answer was not accepted. Submit next-probe with run_index={index} and no answer to {next}."
             )
         }
-        "paused" => format!("Submit resume-discovery with run_index={index} to continue this run."),
-        "cancel-requested" | "cleanup-pending" => format!(
-            "Settle the outstanding attempt for run_index={index} before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. Then submit resume-discovery with run_index={index}."
-        ),
-        "failed" => format!(
-            "run_index={index} failed and hands out no more probes. Read the reason with discovery-step, run_index={index}, answers: [] and --json alone before submitting prepare-discovery; a new run with the same sources and limits can fail the same way."
-        ),
-        "superseded" => format!(
-            "run_index={index} was superseded by newer inventory evidence. Submit prepare-discovery to measure again."
-        ),
-        _ => {
-            format!("Inspect run_index={index} with discovery-step, answers: [] and --json alone.")
-        }
+        "activation-blocked" | "activating" | "activated" =>
+            "Pack activation is pending. Submit discovery-step with the same run_index and answers: [] to retry activation without another search.".to_owned(),
+        _ => FULL_STEP.to_owned(),
     }
+}
+
+fn relay_failure_cause(relay: &mcp::State) -> Option<Diagnostic> {
+    relay
+        .failure
+        .clone()
+        .or_else(|| mcp::pending_activation_conflict(relay))
+}
+
+fn selector_conflict(error: &Diagnostic) -> Option<&str> {
+    (error.code == "PACK_INTEGRITY").then_some(())?;
+    error
+        .message
+        .strip_prefix("Source selector restrictions differ for source ")?
+        .strip_suffix("; a broad measurement cannot replace narrower source evidence.")
+}
+
+fn conflicted_source_id(relay: &mcp::State, error: &Diagnostic) -> Option<String> {
+    let id = selector_conflict(error)?;
+    if let Some(session) = &relay.session {
+        session.verified_predecessor(&relay.pack).ok()?;
+    }
+    let pack = storage::read_pack(&relay.pack).ok()?;
+    let record = pack.data.sources.iter().find(|record| record["id"] == id)?;
+    let selectors = cqlmatic::environment::source(record).ok()?.selectors?;
+    Some(discovery::source_id(&cqlmatic::contracts::Scope {
+        repo: selectors.repo,
+        type_: selectors.type_,
+        event: None,
+    }))
+}
+
+fn query_budget_action(legacy: bool, query_limit: u32) -> &'static str {
+    if legacy {
+        FULL_STEP
+    } else if query_limit < 1000 {
+        "Prepare a new run with a larger max_queries for the full selected scope."
+    } else {
+        "Prepare a new run with fewer measurements per run."
+    }
+}
+
+fn relay_failure(error: &Diagnostic, legacy: bool, query_limit: u32) -> (Value, &'static str) {
+    let (code, reason, next) = match (error.code.as_str(), error.message.as_str()) {
+        (
+            "DISCOVERY_EVIDENCE",
+            "Discovery budget exhausted; the working pack must remain unchanged."
+            | "Discovery query budget exhausted."
+            | "Discovery attempt budget exhausted; resume does not renew it.",
+        ) => (
+            "DISCOVERY_EVIDENCE",
+            "Discovery search budget exhausted.",
+            query_budget_action(legacy, query_limit),
+        ),
+        ("PACK_INTEGRITY", _) if selector_conflict(error).is_some() => (
+            "PACK_INTEGRITY",
+            "The measured scope conflicts with imported restrictions.",
+            FULL_STEP,
+        ),
+        (
+            "DISCOVERY_EVIDENCE",
+            "Quiet or empty measurement windows cannot replace an existing schema."
+            | "Quiet source measurements cannot establish observed presence."
+            | "Census returned no sources; no empty replacement was activated.",
+        ) => (
+            "DISCOVERY_EVIDENCE",
+            "Discovery found no events or no usable field listing in the window.",
+            FULL_STEP,
+        ),
+        (
+            "MCP_DEADLINE",
+            "Discovery active-time budget expired; pause and resume do not renew it."
+            | "Discovery wall-clock budget expired before the last answer was ingested.",
+        ) => (
+            "MCP_DEADLINE",
+            LOCAL_DEADLINE_REASON,
+            if legacy {
+                FULL_STEP
+            } else {
+                LOCAL_DEADLINE_ACTION
+            },
+        ),
+        ("MCP_DEADLINE", _) => (
+            "MCP_DEADLINE",
+            "The hosted search reported a timeout.",
+            if legacy {
+                LEGACY_SEARCH_ACTION
+            } else {
+                FULL_STEP
+            },
+        ),
+        ("MCP_TOOL_ERROR", _) => (
+            "MCP_TOOL_ERROR",
+            "The hosted search reported an error.",
+            if legacy {
+                LEGACY_SEARCH_ACTION
+            } else {
+                FULL_STEP
+            },
+        ),
+        (
+            "MCP_ACTIVATION_CONFLICT",
+            "The starting pack changed; no new search or replacement is allowed for this checkpoint.",
+        ) => (
+            "MCP_ACTIVATION_CONFLICT",
+            "The inventory pack used to prepare discovery changed.",
+            FULL_STEP,
+        ),
+        ("MCP_ACTIVATION_CONFLICT", mcp::ACTIVATION_PACK_CONFLICT) => (
+            "MCP_ACTIVATION_CONFLICT",
+            "The pack differs from the saved predecessor and activation target.",
+            FULL_STEP,
+        ),
+        ("MCP_ACTIVATION_CONFLICT", mcp::ACTIVATION_RECEIPT_CONFLICT) => (
+            "MCP_ACTIVATION_CONFLICT",
+            "The receipt differs from the saved activation receipt.",
+            "Move the unrelated receipt aside, then retry discovery-step with answers: [] to write the matching receipt.",
+        ),
+        ("MCP_ACTIVATION_CONFLICT", mcp::ACTIVATION_RECEIPT_BEFORE_PACK) => (
+            "MCP_ACTIVATION_CONFLICT",
+            "The activation receipt is present before its matching pack.",
+            FULL_STEP,
+        ),
+        ("SEARCH_ROW_LIMIT", _) => (
+            "SEARCH_ROW_LIMIT",
+            ROW_LIMIT_REASON,
+            row_limit_action(legacy, false),
+        ),
+        ("DISCOVERY_EVIDENCE", _) => (
+            "DISCOVERY_EVIDENCE",
+            "Discovery could not qualify the returned evidence.",
+            FULL_STEP,
+        ),
+        ("PACK_INTEGRITY", _) => (
+            "PACK_INTEGRITY",
+            "The discovery pack did not pass integrity checks.",
+            FULL_STEP,
+        ),
+        ("PACK_ENVIRONMENT_MISMATCH", _) => (
+            "PACK_ENVIRONMENT_MISMATCH",
+            "The saved pack is for a different target.",
+            FULL_STEP,
+        ),
+        ("LOCAL_IO", _) => (
+            "LOCAL_IO",
+            "A discovery artifact could not be read or saved.",
+            FULL_STEP,
+        ),
+        ("PACK_JSON", _) => (
+            "PACK_JSON",
+            "The saved pack could not be decoded.",
+            FULL_STEP,
+        ),
+        ("PACK_DIGEST", _) => (
+            "PACK_DIGEST",
+            "The saved pack did not match its digest.",
+            FULL_STEP,
+        ),
+        ("PACK_VERSION", _) => (
+            "PACK_VERSION",
+            "The saved pack uses an unsupported format.",
+            FULL_STEP,
+        ),
+        ("MCP_SHAPE", _) => (
+            "MCP_SHAPE",
+            "The saved response has an unsupported shape.",
+            FULL_STEP,
+        ),
+        _ if let Some(reason) = answer_reason(&error.code) => {
+            (error.code.as_str(), reason, FULL_STEP)
+        }
+        _ => (
+            "DISCOVERY_FAILED",
+            "The discovery run failed before pack promotion.",
+            FULL_STEP,
+        ),
+    };
+    (
+        json!({"code":code,"severity":"error","message":reason}),
+        next,
+    )
+}
+
+fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
+    let message = answer_reason(code)
+        .unwrap_or("The answer could not be applied. Read the full step output for this run.");
+    json!({"code":code,"severity":severity,"message":message})
+}
+
+fn answer_reason(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "MCP_UNKNOWN_PROBE" => {
+            "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for."
+        }
+        "LOCAL_FILE_TYPE" => "The saved response is not a regular file.",
+        "LOCAL_IO" => "The saved response could not be read or stored.",
+        "LOCAL_SIZE" => "The saved response exceeds the input size limit.",
+        "MCP_TOOL_ERROR" => "The search tool reported an error.",
+        "MCP_SHAPE" => "The response has an unsupported shape.",
+        "MCP_INCOMPLETE" => "The search response reports incomplete results.",
+        "MCP_DEADLINE" => "The search response reports a timeout.",
+        "DISCOVERY_EVIDENCE" => "The result did not provide the evidence required by this probe.",
+        "SEARCH_ROW_LIMIT" => ROW_LIMIT_REASON,
+        "MCP_TOO_LARGE" => "The search response exceeds the size limit.",
+        "DISCOVERY_CANCEL_REQUESTED" => "Cancellation was requested for the outstanding search.",
+        "DISCOVERY_CLEANUP_PENDING" => "The outstanding attempt needs settlement.",
+        "DISCOVERY_ATTEMPT_ENDED" => "The attempt ended and its allowance remains charged.",
+        "DISCOVERY_SUPERSEDED" => "Newer inventory evidence superseded this discovery run.",
+        "DISCOVERY_PHASE" => "This run is not waiting for an answer.",
+        "DISCOVERY_TRANSPORT" => "The run does not accept relayed search results.",
+        "MCP_ALREADY_ANSWERED" => "The probe already has an answer.",
+        "LOCAL_PATH" => "The saved response path is invalid.",
+        "LOCAL_SERIALIZATION" => "The updated discovery state could not be serialized.",
+        "PACK_DURABILITY" => "The discovery write could not be confirmed.",
+        "PACK_SERIALIZATION" => "The discovery pack could not be serialized.",
+        "PACK_SIZE" => "The discovery pack exceeds the size limit.",
+        "PACK_PROFILE" => "The discovery pack uses an unsupported profile.",
+        "PACK_TIME" => "The discovery evidence has an invalid timestamp.",
+        "PACK_BUSY" => "Pack activation is pending.",
+        "MCP_STATE_RESTART" => "The checkpoint is incompatible.",
+        "MCP_RESULT_REUSED" => "An earlier attempt retained this response.",
+        "MCP_REJECTION_LIMIT" => "The rejected-answer history is full.",
+        "INVENTORY_INPUT" => "The answer could not be applied.",
+        _ => return None,
+    })
+}
+
+fn refusal_stage(index: usize, relay: &mcp::State) -> String {
+    // Keep a refused submission scoped to this run and attempt. A later dispatch
+    // or settlement supersedes the refusal without erasing the failure ledger.
+    let attempt = relay
+        .session
+        .as_ref()
+        .map_or(0, |session| session.attempts_len());
+    format!("discovery-answer:{index}:{attempt}:")
 }
 
 fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
@@ -990,7 +1787,7 @@ fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
     let message = if fixed {
         &error.message
     } else if outstanding {
-        "The reservation reported an error. Check the outstanding probe before continuing."
+        "The reservation reported an error."
     } else {
         "The next probe was not reserved."
     };
@@ -1018,7 +1815,7 @@ fn apply_and_store_with_work_budget(
     work_budget: u64,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
     let writer = inventory_writer(path)?;
-    apply_locked(path, action, work_budget, &writer)
+    apply_locked(path, action, work_budget, &writer).map(|(report, extra, _)| (report, extra))
 }
 
 fn inventory_writer(path: &Path) -> Result<storage::Writer, Diagnostic> {
@@ -1033,7 +1830,7 @@ fn apply_locked(
     action: InventoryAction,
     work_budget: u64,
     writer: &storage::Writer,
-) -> Result<(InventoryStatus, Value), Diagnostic> {
+) -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
     let now = discovery::timestamp();
@@ -1088,7 +1885,66 @@ fn apply_locked(
             } else {
                 None
             };
-            inspect_selected_run(&state, index)?;
+            let relay = inspect_selected_run(&state, index)?;
+            let run = &state.discovery_runs[index];
+            let phase = if matches!(run.status.as_str(), "complete" | "superseded") {
+                run.status.as_str()
+            } else {
+                relay.status.as_str()
+            };
+            if let InventoryAction::DiscoveryStep { answers, .. } = &action
+                && !answers.is_empty()
+                && matches!(phase, "complete" | "superseded" | "failed")
+            {
+                let (code, message) = if answers.iter().any(|answer| {
+                    relay
+                        .answers
+                        .get(&answer.probe_id)
+                        .is_some_and(|saved| saved.outcome == "complete")
+                }) {
+                    ("MCP_ALREADY_ANSWERED", "This probe was already answered.")
+                } else if mcp::is_resumable(&relay) {
+                    ("DISCOVERY_PHASE", "This discovery run is finished.")
+                } else {
+                    (
+                        "MCP_UNKNOWN_PROBE",
+                        "No new probes can be answered in this state.",
+                    )
+                };
+                let mut diagnostics = vec![Diagnostic::error(code, message)];
+                if phase == "superseded" {
+                    diagnostics.push(Diagnostic::error(
+                        "DISCOVERY_SUPERSEDED",
+                        "Newer inventory evidence superseded this run. Prepare discovery against the current inventory.",
+                    ));
+                }
+                let mut next_action = None;
+                if phase == "failed"
+                    && let Some(failure) = relay_failure_cause(&relay)
+                {
+                    let (_, guidance) = relay_failure(
+                        &failure,
+                        !mcp::is_resumable(&relay),
+                        relay.request.max_queries,
+                    );
+                    next_action = Some(if retained_row_limit(&relay) {
+                        if failure.code != "SEARCH_ROW_LIMIT" {
+                            diagnostics
+                                .push(Diagnostic::error("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON));
+                        }
+                        retained_row_limit_action(&relay)
+                    } else {
+                        guidance
+                    });
+                    diagnostics.push(failure);
+                }
+                let report = inventory::assess_at(&state, &packs(&state)?, &now)?;
+                let mut reply = json!({"run_index":index,"status":"incomplete","run_status":phase,"diagnostics":diagnostics});
+                if let Some(advice) = next_action {
+                    reply["next_action"] = json!(advice);
+                }
+                return Ok((report, reply, state));
+            }
         }
         let mut ended_runs = Vec::new();
         if !relay_guards.is_empty() {
@@ -1174,13 +2030,6 @@ fn apply_locked(
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
         }
-        if extra["relay"]["status"] == "needs-probes"
-            && let Some(index) = extra["run_index"].as_u64()
-        {
-            extra["next_action"] = json!(format!(
-                "Use run_index {index} for each dispatch-discovery and discovery-step action. Reserve the exact probe before one MCP call, save its entire result, then submit its probe_id and result_file; use discovery-step with answers=[] to poll this run."
-            ));
-        }
         state.validate()?;
         let loaded = packs(&state)?;
         let mut report = inventory::assess_at(&state, &loaded, &now)?;
@@ -1215,8 +2064,70 @@ fn apply_locked(
                 .map_err(|_| fail("Cannot serialize inventory state."))?;
             writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
         }
-        Ok((report, extra))
+        Ok((report, extra, state))
     })()
+}
+
+#[derive(Clone, Copy)]
+enum DiscoveryStepAdvice {
+    Settle,
+    Recover,
+    LegacyFrontier,
+    Reserve,
+}
+
+impl DiscoveryStepAdvice {
+    const ALL: [Self; 4] = [
+        Self::Settle,
+        Self::Recover,
+        Self::LegacyFrontier,
+        Self::Reserve,
+    ];
+
+    fn message(self, index: usize) -> String {
+        match self {
+            Self::Settle => format!(
+                "Submit the saved original result for the outstanding probe as a discovery-step answer with run_index={index}. Confirm settlement before starting another search."
+            ),
+            Self::Recover => format!(
+                "Recover the complete or final response for the same search call. Submit it for the outstanding probe with discovery-step and run_index={index} before starting another search."
+            ),
+            Self::LegacyFrontier => format!(
+                "Read the full discovery-step output for run_index={index} for the exact arguments of the listed probes. Submit their saved results as discovery-step answers."
+            ),
+            Self::Reserve => format!(
+                "Submit next-probe with run_index={index} to reserve the next probe, or use dispatch-discovery with a probe_id from the full step output."
+            ),
+        }
+    }
+}
+
+fn discovery_step_advice(
+    index: usize,
+    legacy: bool,
+    outstanding: bool,
+    output: &mcp::StepOutput,
+) -> Option<String> {
+    let advice = if outstanding
+        && output.status == "cleanup-pending"
+        && output
+            .diagnostics
+            .iter()
+            .any(|d| d.code != "DISCOVERY_CLEANUP_PENDING")
+    {
+        DiscoveryStepAdvice::Recover
+    } else if outstanding {
+        DiscoveryStepAdvice::Settle
+    } else if output.status != "needs-probes" {
+        return None;
+    } else if output.probes.is_empty() {
+        return Some(FULL_STEP.to_owned());
+    } else if legacy {
+        DiscoveryStepAdvice::LegacyFrontier
+    } else {
+        DiscoveryStepAdvice::Reserve
+    };
+    Some(advice.message(index))
 }
 
 fn action_summary(action: &Value) -> Value {
@@ -1231,15 +2142,12 @@ fn action_summary(action: &Value) -> Value {
                 json!(probes.as_array().map_or(0, Vec::len)),
             );
         }
-        if relay.get("status").and_then(Value::as_str) == Some("needs-probes") {
-            let selection = action["run_index"]
-                .as_u64()
-                .map(|index| format!(" with run_index={index}"))
-                .unwrap_or_default();
-            compact["next_action"] = json!(format!(
-                "Submit next-probe{selection} to receive the next probe with its exact arguments."
-            ));
-        } else if let Some(compact) = compact.as_object_mut() {
+        if relay.get("status").and_then(Value::as_str) != Some("needs-probes")
+            && !relay
+                .get("diagnostics")
+                .is_some_and(|d| d.as_array().is_some_and(|d| !d.is_empty()))
+            && let Some(compact) = compact.as_object_mut()
+        {
             compact.remove("next_action");
         }
     }
@@ -1270,6 +2178,88 @@ fn action_brief(action: &Value) -> Value {
         })
     {
         compact["outcome"] = json!(status);
+    }
+    if let Some(status @ ("complete" | "superseded" | "failed")) = action["run_status"].as_str() {
+        compact["run_status"] = json!(status);
+    }
+    let terminal = if matches!(
+        action["relay"]["status"].as_str(),
+        Some("failed" | "activating")
+    ) {
+        action["relay"]["diagnostics"]
+            .as_array()
+            .and_then(|values| values.last())
+    } else if action["run_status"] == "failed" {
+        action["diagnostics"]
+            .as_array()
+            .and_then(|values| values.last())
+    } else {
+        None
+    }
+    .and_then(|value| serde_json::from_value::<Diagnostic>(value.clone()).ok())
+    .map(|failure| {
+        let limit = action["relay"]["cost"]["searches"]["limit"]
+            .as_u64()
+            .unwrap_or(1000) as u32;
+        let (diagnostic, guidance) = relay_failure(&failure, false, limit);
+        (failure.code, diagnostic, guidance)
+    });
+    let mut diagnostics = Vec::new();
+    for (from_action, values) in [
+        (true, &action["diagnostics"]),
+        (false, &action["relay"]["diagnostics"]),
+    ] {
+        for value in values.as_array().into_iter().flatten() {
+            let Ok(diagnostic) = serde_json::from_value::<Diagnostic>(value.clone()) else {
+                continue;
+            };
+            let projected = if let Some((code, terminal, _)) = &terminal
+                && *code == diagnostic.code
+            {
+                terminal.clone()
+            } else if answer_reason(&diagnostic.code).is_some() {
+                safe_answer_diagnostic(&diagnostic.code, diagnostic.severity)
+            } else if from_action && action.get("relay").is_none() {
+                json!(brief_failure_for(&diagnostic))
+            } else {
+                continue;
+            };
+            if !diagnostics
+                .iter()
+                .any(|d: &Value| d["code"] == projected["code"])
+            {
+                diagnostics.push(projected);
+            }
+        }
+    }
+    if !diagnostics.is_empty() {
+        compact["diagnostics"] = json!(diagnostics);
+    }
+    if let Some((_, _, guidance)) = terminal {
+        compact["next_action"] = json!(match action["next_action"].as_str() {
+            Some(next)
+                if action["run_status"] == "failed"
+                    || matches!(next, FULL_STEP | LEGACY_SEARCH_ACTION) =>
+                next,
+            _ => guidance,
+        });
+    }
+    if let Some(next) = action["next_action"].as_str()
+        && (matches!(
+            next,
+            ROW_LIMIT_ACTION | ROW_LIMIT_DEADLINE_ACTION | LEGACY_SEARCH_ACTION
+        ) || next
+            .strip_prefix("Inspect discovery run_index=")
+            .and_then(|rest| rest.split_once(' '))
+            .and_then(|(index, _)| index.parse::<usize>().ok())
+            .is_some_and(|index| sibling_blocker_action(index) == next))
+    {
+        compact["next_action"] = json!(next);
+    }
+    if action["run"]["failure"].is_object() {
+        compact["outcome"] = json!("incomplete");
+        compact["next_action"] =
+            json!("Parser inventory is incomplete. Read the full step output for this run.");
     }
     for key in [
         "initialized",
@@ -1323,15 +2313,25 @@ fn action_brief(action: &Value) -> Value {
     }
     if let Some(probes) = action["relay"]["probes"].as_array() {
         compact["pending_probe_count"] = json!(probes.len());
-        // A brief response carries no probe arguments; say how to get them.
-        if !probes.is_empty() && action["relay"]["status"] == "needs-probes" {
-            let selection = action["run_index"]
+    }
+    if matches!(
+        action["relay"]["status"].as_str(),
+        Some("needs-probes" | "cleanup-pending" | "cancel-requested")
+    ) || (action.get("relay").is_none() && action["run_index"].is_u64())
+    {
+        // Only project fixed instructions parameterized by the selected run's numeric index.
+        if let Some(next) = action["next_action"].as_str()
+            && action["run_status"] != "failed"
+        {
+            let approved = action["run_index"]
                 .as_u64()
-                .map(|index| format!(" with run_index={index}"))
-                .unwrap_or_default();
-            compact["next_action"] = json!(format!(
-                "Submit next-probe{selection} to receive the next probe with its exact arguments."
-            ));
+                .and_then(|index| usize::try_from(index).ok())
+                .is_some_and(|index| {
+                    DiscoveryStepAdvice::ALL
+                        .into_iter()
+                        .any(|advice| advice.message(index) == next)
+                });
+            compact["next_action"] = json!(if approved { next } else { FULL_STEP });
         }
     }
     // The cost figures are counts, so they fit the brief budget whatever else the action holds.
@@ -1827,9 +2827,19 @@ fn finish_discovery(
     Ok(diagnostic)
 }
 
+const STALE_DISCOVERY_PREDECESSOR: &str = "Discovery started from an earlier inventory.";
+
 fn check_discovery_predecessor(state: &InventoryState, index: usize) -> Result<(), Diagnostic> {
     let relay = mcp::inspect_state(Path::new(&state.discovery_runs[index].state_path))
         .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+    check_discovery_predecessor_for(state, index, &relay)
+}
+
+fn check_discovery_predecessor_for(
+    state: &InventoryState,
+    index: usize,
+    relay: &mcp::State,
+) -> Result<(), Diagnostic> {
     if let Some(session) = &relay.session
         && !matches!(relay.status.as_str(), "activating" | "activated")
         && session
@@ -1837,10 +2847,7 @@ fn check_discovery_predecessor(state: &InventoryState, index: usize) -> Result<(
             .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
             != cumulative_predecessor(state)?.as_deref()
     {
-        return Err(discovery_run_failure(
-            index,
-            "Discovery started from an earlier inventory; its accepted captures are retained. Prepare discovery again from the current inventory with explicit finite budgets.",
-        ));
+        return Err(discovery_run_failure(index, STALE_DISCOVERY_PREDECESSOR));
     }
     Ok(())
 }
@@ -1983,6 +2990,7 @@ fn check_retained_searches(
         if relay.status == "paused"
             && mcp::is_resumable(&relay)
             && !mcp::time_limit_passed(&relay, now)
+            && mcp::has_discovery_work_after_resume(&relay)
             && selected_run.is_none()
             && fingerprint.as_ref() == Some(&relay.request_sha256)
         {
@@ -2590,8 +3598,10 @@ fn apply(
                 mode: state.discovery_mode,
                 quick_depth: state.quick_depth,
             });
+            let index = state.discovery_runs.len() - 1;
+            let advice = discovery_step_advice(index, false, false, &output);
             Ok(
-                json!({"run_index":state.discovery_runs.len()-1,"warning":DISCOVERY_WARNING,"relay":output,"next_action":"Before each MCP call, submit dispatch-discovery with its probe_id. Relay that probe through the existing CrowdStrike MCP, save the entire result, then submit discovery-step with probe_id and result_file. The CLI does not implement MCP OAuth or internal model calls."}),
+                json!({"run_index":index,"warning":DISCOVERY_WARNING,"relay":output,"next_action":advice}),
             )
         }
         InventoryAction::DiscoveryStep { answers, run_index } => {
@@ -2601,7 +3611,6 @@ fn apply(
                 .get(run_index)
                 .ok_or_else(|| fail("Prepare discovery before relaying saved answers."))?;
             let already_finalized = matches!(run.status.as_str(), "complete" | "superseded");
-            let already_superseded = run.status == "superseded";
             let answers: Vec<_> = answers
                 .into_iter()
                 .map(|a| (a.probe_id, PathBuf::from(a.result_file)))
@@ -2628,9 +3637,6 @@ fn apply(
                 verify_run_reference(state, run, &relay)
                     .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             }
-            let duplicate_superseded = already_superseded
-                && !answers.is_empty()
-                && answers.iter().all(|(id, _)| relay.answers.contains_key(id));
             let run = state
                 .discovery_runs
                 .get_mut(run_index)
@@ -2664,7 +3670,7 @@ fn apply(
                         | "cancel-requested"
                         | "cleanup-pending"
                 ) {
-                    run.status = relay.status;
+                    run.status.clone_from(&relay.status);
                 }
                 if !already_finalized {
                     run.elapsed_seconds = if resumable {
@@ -2679,7 +3685,15 @@ fn apply(
                 }
             }
             match result {
-                Ok(output) => {
+                Ok(mut output) => {
+                    if relay.status == "activating"
+                        && output
+                            .diagnostics
+                            .iter()
+                            .any(|d| d.code == "MCP_ACTIVATION_CONFLICT")
+                    {
+                        output.status = "activating";
+                    }
                     let superseded = finish_discovery(state, run_index, &output, now)?;
                     if !stored_failure && matches!(output.status, "failed" | "activation-blocked") {
                         for diagnostic in &output.diagnostics {
@@ -2695,19 +3709,106 @@ fn apply(
                         Some(diagnostic) => {
                             json!({"status":"incomplete","diagnostics":[diagnostic],"relay":output})
                         }
-                        None => json!({"relay":output}),
+                        None => {
+                            if output.status == "cleanup-pending" {
+                                if !answers.is_empty()
+                                    && let Some(diagnostic) = output.diagnostics.first()
+                                    && diagnostic.code != "DISCOVERY_CLEANUP_PENDING"
+                                {
+                                    state.failures.push(InventoryFailure {
+                                        stage: format!(
+                                            "{}{}",
+                                            refusal_stage(run_index, &relay),
+                                            diagnostic.code
+                                        ),
+                                        source_id: None,
+                                        message: diagnostic.message.clone(),
+                                        recorded_at: now.into(),
+                                    });
+                                }
+                                if let Some(diagnostic) =
+                                    retained_answer_refusal(state, run_index, &relay)
+                                    && !output.diagnostics.iter().any(|d| d.code == diagnostic.code)
+                                {
+                                    output.diagnostics.insert(0, diagnostic);
+                                }
+                            }
+                            let source_id = output
+                                .diagnostics
+                                .iter()
+                                .find_map(|d| conflicted_source_id(&relay, d));
+                            let limited = retained_row_limit(&relay);
+                            if limited
+                                && !output
+                                    .diagnostics
+                                    .iter()
+                                    .any(|d| d.code == "SEARCH_ROW_LIMIT")
+                            {
+                                output.diagnostics.insert(
+                                    0,
+                                    Diagnostic::error("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON),
+                                );
+                            }
+                            let advice = if limited {
+                                Some(
+                                    (relay.status == "paused")
+                                        .then(|| retained_search_blocker(state, run_index, now))
+                                        .flatten()
+                                        .unwrap_or_else(|| {
+                                            retained_row_limit_action(&relay).to_owned()
+                                        }),
+                                )
+                            } else if !mcp::is_resumable(&relay)
+                                && let Some(failure) = &relay.failure
+                            {
+                                Some(
+                                    relay_failure(failure, true, relay.request.max_queries)
+                                        .1
+                                        .to_owned(),
+                                )
+                            } else {
+                                discovery_step_advice(
+                                    run_index,
+                                    !mcp::is_resumable(&relay),
+                                    mcp::has_in_flight(&relay),
+                                    &output,
+                                )
+                            };
+                            let mut reply = json!({"relay":output});
+                            if let Some(advice) = advice {
+                                reply["next_action"] = json!(advice);
+                            }
+                            if let Some(id) = source_id {
+                                reply["source_id"] = json!(id);
+                            }
+                            reply
+                        }
                     })
                 }
                 Err(diagnostic) => {
-                    if !(duplicate_superseded && diagnostic.code == "MCP_ALREADY_ANSWERED") {
-                        state.failures.push(InventoryFailure {
-                            stage: "discovery".into(),
-                            source_id: None,
-                            message: diagnostic.message.clone(),
-                            recorded_at: now.into(),
-                        });
+                    let bound_refusal = mcp::outstanding_probe_id(&relay).is_some_and(|outstanding| {
+                        relay.status == "needs-probes"
+                            || (relay.status == "cleanup-pending"
+                                && matches!(answers.as_slice(), [(id, _)] if id == &outstanding))
+                    });
+                    state.failures.push(InventoryFailure {
+                        stage: if bound_refusal {
+                            format!("{}{}", refusal_stage(run_index, &relay), diagnostic.code)
+                        } else {
+                            "discovery".into()
+                        },
+                        source_id: None,
+                        message: diagnostic.message.clone(),
+                        recorded_at: now.into(),
+                    });
+                    let mut reply = json!({"status":"incomplete","diagnostics":[diagnostic]});
+                    if relay.status == "cleanup-pending"
+                        && retained_answer_refusal(state, run_index, &relay).is_some()
+                    {
+                        reply["next_action"] =
+                            json!(DiscoveryStepAdvice::Recover.message(run_index));
                     }
-                    Ok(json!({"status":"incomplete","diagnostics":[diagnostic]}))
+                    Ok(reply)
                 }
             }
         }
@@ -2743,7 +3844,8 @@ fn apply(
             run.answered = output.answered;
             run.elapsed_seconds = resumable_elapsed(&run.state_path)
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
-            Ok(json!({"relay":output,"executes_searches":false}))
+            let advice = discovery_step_advice(run_index, false, true, &output);
+            Ok(json!({"relay":output,"next_action":advice,"executes_searches":false}))
         }
         InventoryAction::PauseDiscovery { run_index } => {
             let run_index = discovery_run_index(state, run_index)?;
@@ -2786,7 +3888,13 @@ fn apply(
                 Some(diagnostic) => {
                     json!({"status":"incomplete","diagnostics":[diagnostic],"relay":output,"executes_searches":false})
                 }
-                None => json!({"relay":output,"executes_searches":false}),
+                None => {
+                    let mut reply = json!({"relay":output,"executes_searches":false});
+                    if let Some(advice) = discovery_step_advice(run_index, false, false, &output) {
+                        reply["next_action"] = json!(advice);
+                    }
+                    reply
+                }
             })
         }
         InventoryAction::ImportPack { pack_file } => {
@@ -3670,7 +4778,7 @@ fn interactive(
         },
         "request" => {
             let request: InventoryRequest =
-                read_json(Path::new(&prompt("Inventory request file")?))?;
+                read_inventory_request(Path::new(&prompt("Inventory request file")?))?;
             if request.schema_version != 1 {
                 return Err(fail("Unsupported inventory request version."));
             }
@@ -3715,12 +4823,7 @@ mod tests {
             diagnostic.pointer = Some(pointer.clone());
             let safe = brief_failure_for(&diagnostic);
             assert_eq!(safe.pointer.as_deref(), Some(pointer.as_str()));
-            assert_eq!(
-                safe.message,
-                format!(
-                    "Inventory brief command failed for discovery run_index {index}. Inspect protected full-mode output locally."
-                )
-            );
+            assert_eq!(safe.message, BRIEF_FALLBACK);
             let serialized = serde_json::to_string(&safe).unwrap();
             for excluded in [raw, "UNTRUSTED_CODE", "Synthetic private reference"] {
                 assert!(!serialized.contains(excluded));
@@ -3754,22 +4857,19 @@ mod tests {
         let raw = "Synthetic diagnostic with an untrusted checkpoint path";
         let mut diagnostic = Diagnostic::error("MCP_STATE_PRODUCER", raw);
         diagnostic.reference = Some("Synthetic untrusted reference".into());
-        for pointer in [None, Some("/discovery_runs/7"), Some("/discovery_runs/07")] {
+        let largest = format!("/discovery_runs/{}", usize::MAX);
+        for pointer in [None, Some(largest.as_str()), Some("/discovery_runs/07")] {
             diagnostic.pointer = pointer.map(str::to_owned);
             let safe = brief_failure_for(&diagnostic);
             assert_eq!(safe.code, "MCP_STATE_PRODUCER");
-            assert!(safe.message.contains("unowned"));
-            assert!(safe.message.contains("standalone"));
-            assert!(safe.message.contains("checkpoint"));
-            assert!(safe.message.contains("bound to inventory"));
-            assert!(safe.message.contains("outstanding inventory searches"));
-            assert!(safe.message.contains("concurrent inventory execution"));
-            assert!(!safe.message.contains("--state"));
-            assert_eq!(
-                safe.pointer.as_deref(),
-                pointer.filter(|p| *p == "/discovery_runs/7")
+            assert!(
+                safe.message
+                    .starts_with("Discovery checkpoint requires its producing version.")
             );
+            assert!(!safe.message.contains("--state"));
+            assert_eq!(safe.pointer.as_deref(), pointer.filter(|p| *p == largest));
             let serialized = serde_json::to_vec(&safe).unwrap();
+            // The final newline uses the remaining byte.
             assert!(serialized.len() < 4096);
             let serialized = String::from_utf8(serialized).unwrap();
             assert!(!serialized.contains(raw));
@@ -4032,14 +5132,40 @@ mod tests {
         assert_eq!(value["status"]["references"], json!([]));
         assert_eq!(value["action"]["outcome"], "needs-probes");
         assert_eq!(value["action"]["pending_probe_count"], 1);
-        assert_eq!(
-            value["action"]["next_action"],
-            "Submit next-probe with run_index=3 to receive the next probe with its exact arguments."
-        );
+        assert_eq!(value["action"]["next_action"], FULL_STEP);
         assert!(
             action_brief(&json!({"relay":{"status":"complete","probes":[]}}))
                 .get("next_action")
                 .is_none()
+        );
+        for non_discovery in [
+            json!({"mode":"agent-relayed-mcp","tool":"falcon_search_ngsiem","next_action":"Obtain caller authorization."}),
+            json!({"attempt_id":"refresh-1","phase":"prepared","next_action":"Confirm this exact target."}),
+            json!({"attempt_id":"refresh-1","phase":"dispatched","next_action":"The dispatch is durably reserved."}),
+            json!({"capability":{"run_id":"cap-1"},"next_action":"Review the selected fixed cases."}),
+            json!({"run_id":"cap-1","attempt_id":"attempt-1","phase":"dispatched","next_action":"This exact attempt is reserved."}),
+            json!({"credited_fields":0,"uncredited_fields":1,"next_action":"Inspect the full output."}),
+        ] {
+            assert!(
+                action_brief(&non_discovery).get("next_action").is_none(),
+                "{non_discovery}"
+            );
+        }
+        assert_eq!(
+            action_brief(&json!({
+                "run_index": 2,
+                "status": "incomplete",
+                "next_action": DiscoveryStepAdvice::Recover.message(2),
+            }))["next_action"],
+            DiscoveryStepAdvice::Recover.message(2)
+        );
+        assert_eq!(
+            action_brief(&json!({
+                "run_index": 2,
+                "status": "incomplete",
+                "next_action": raw,
+            }))["next_action"],
+            FULL_STEP
         );
         assert_eq!(
             value["action"]["cost"],
@@ -4176,6 +5302,10 @@ mod tests {
         assert_eq!(capture.details.len(), 1);
         assert_eq!(capture.run.pages_completed, 1);
         assert_eq!(capture.run.parsers_completed, 1);
-        assert_eq!(capture.run.failure.unwrap().code, "HTTP_DEADLINE");
+        assert_eq!(capture.run.failure.as_ref().unwrap().code, "HTTP_DEADLINE");
+        let brief = action_brief(&json!({"parser_count":1,"run":capture.run}));
+        assert_eq!(brief["outcome"], "incomplete");
+        assert!(brief["next_action"].as_str().unwrap().contains(FULL_STEP));
+        assert!(!brief.to_string().contains("Synthetic later deadline"));
     }
 }

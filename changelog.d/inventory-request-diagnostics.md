@@ -1,0 +1,1 @@
+- Name unknown inventory action kinds, unexpected request fields, and the evidence checks that refused refresh or cancellation.

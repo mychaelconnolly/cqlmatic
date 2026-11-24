@@ -65,6 +65,7 @@ impl Temp {
         )
         .unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &self.0)
             .args(["env", "inventory", "--json", "--state"])
             .arg(state)
             .arg("--request")
@@ -80,6 +81,7 @@ impl Temp {
     /// Asks for the run's probe without supplying an answer.
     fn next_probe(&self) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &self.0)
             .args(["env", "inventory", "--json", "--next-probe", "--state"])
             .arg(self.state())
             .output()
@@ -112,7 +114,11 @@ impl Temp {
         self.capture_into(&self.state(), client, server, payload);
     }
     fn capture_into(&self, state: &Path, client: &str, server: &str, payload: Value) {
+        self.capture_bytes(state, client, server, &payload.to_string());
+    }
+    fn capture_bytes(&self, state: &Path, client: &str, server: &str, payload: &str) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &self.0)
             .args(["env", "capture", "--client", client, "--server"])
             .arg(server)
             .arg("--state")
@@ -126,7 +132,7 @@ impl Temp {
             .stdin
             .take()
             .unwrap()
-            .write_all(payload.to_string().as_bytes())
+            .write_all(payload.as_bytes())
             .unwrap();
         let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{payload}");
@@ -135,6 +141,112 @@ impl Temp {
             "{output:?}"
         );
     }
+}
+
+fn check_numeric_capture_reuse(deliver: impl Fn(&Temp, &Value, &str)) {
+    for number in ["0.123456789012345678", "9007199254740993.0"] {
+        for identity in [r#""trace_id":"call","#, ""] {
+            for capture_first in [false, true] {
+                let home = Temp::new();
+                let first = home.probing();
+                let job = if identity.is_empty() {
+                    r#""job_id":"job","#
+                } else {
+                    ""
+                };
+                let body = format!(
+                    r#"{{{identity}"metadata":{{{job}"timing":{number}}},"result":[{{"events":23}}]}}"#
+                );
+                let file = home.0.join("answer.json");
+                fs::write(&file, &body).unwrap();
+                let submit = |probe: &Value| {
+                    home.act_on(
+                        &home.state(),
+                        json!({"kind":"discovery-step","answers":[
+                            {"probe_id":probe["probe_id"],"result_file":file}
+                        ]}),
+                    );
+                };
+                if capture_first {
+                    deliver(&home, &first["probe"], &body);
+                } else {
+                    submit(&first["probe"]);
+                }
+                let second = home.next_probe();
+                assert_ne!(second["probe"]["probe_id"], first["probe"]["probe_id"]);
+                let checkpoint = home.saved()["discovery_runs"][0]["state_path"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let before = fs::read(&checkpoint).unwrap();
+                if capture_first {
+                    submit(&second["probe"]);
+                } else {
+                    deliver(&home, &second["probe"], &body);
+                }
+                let after = home.next_probe();
+                assert_eq!(
+                    after["diagnostics"][0]["code"], "MCP_RESULT_REUSED",
+                    "{number}, {identity}, capture_first={capture_first}: {after}"
+                );
+                assert_eq!(fs::read(&checkpoint).unwrap(), before);
+
+                let other = if number.starts_with("0.") {
+                    "0.123456789012345679"
+                } else {
+                    "9007199254740992.0"
+                };
+                fs::write(&file, body.replace(number, other)).unwrap();
+                submit(&second["probe"]);
+                assert_eq!(home.next_probe()["state"], "complete");
+            }
+        }
+    }
+}
+
+#[test]
+fn capture_keeps_exact_numbers_for_reuse_in_both_delivery_orders() {
+    check_numeric_capture_reuse(|home, probe, body| {
+        let hook = probe_search(probe, json!("synthetic-placeholder")).to_string();
+        home.capture_bytes(
+            &home.state(),
+            "generic",
+            SERVER,
+            &hook.replace(r#""synthetic-placeholder""#, body),
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn pass_through_keeps_exact_numbers_for_reuse_in_both_delivery_orders() {
+    check_numeric_capture_reuse(|home, probe, body| {
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":probe["tool"],"arguments":probe["arguments"]
+        }});
+        let body = body.strip_suffix('}').unwrap();
+        let response = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{body},"_meta":{{}}}}}}"#);
+        let input = format!("{request}\n{response}\n");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &home.0)
+            .args(["env", "pass-through", "--state"])
+            .arg(home.state())
+            .args(["--", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, input.as_bytes());
+    });
 }
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -178,7 +290,11 @@ fn probe_search(probe: &Value, response: Value) -> Value {
 }
 
 fn body(rows: Value) -> String {
-    json!({"result": rows, "trace_id": "00000000-0000-0000-0000-000000000000"}).to_string()
+    body_with_trace(rows, "00000000-0000-0000-0000-000000000000")
+}
+
+fn body_with_trace(rows: Value, trace_id: &str) -> String {
+    json!({"result": rows, "trace_id": trace_id}).to_string()
 }
 
 const WRITTEN_CLIENTS: [(&str, &str, &str, &str); 5] = [
@@ -2315,7 +2431,11 @@ fn capture_answers_the_outstanding_probe_of_a_run() {
     );
 
     // The hosted server's gateway carries the same arguments one level down.
-    let mut through_gateway = probe_search(&second["probe"], counted);
+    let second_counted = json!(body_with_trace(
+        json!([{"events": 10}]),
+        "00000000-0000-0000-0000-000000000002",
+    ));
+    let mut through_gateway = probe_search(&second["probe"], second_counted);
     through_gateway["tool_name"] = json!(format!("mcp__{SERVER}__execute_tool"));
     through_gateway["tool_input"] =
         json!({"name": second["probe"]["tool"], "arguments": second["probe"]["arguments"]});
@@ -2430,12 +2550,16 @@ fn capture_answers_a_probe_despite_a_leftover_copy() {
         let name = entry.unwrap().file_name().into_string().unwrap();
         assert!(!name.starts_with("probe-"), "{name}");
     }
+    let second_counted = body_with_trace(
+        json!([{"events": 10}]),
+        "00000000-0000-0000-0000-000000000002",
+    );
     let leftover = captures.join(format!(
         "probe-{}.json",
-        &cqlmatic::sha256_hex(counted.as_bytes())[..12]
+        &cqlmatic::sha256_hex(second_counted.as_bytes())[..12]
     ));
-    fs::write(&leftover, &counted).unwrap();
-    home.capture(probe_search(&second["probe"], json!(counted)));
+    fs::write(&leftover, &second_counted).unwrap();
+    home.capture(probe_search(&second["probe"], json!(second_counted)));
     assert_eq!(home.next_probe()["state"], "complete");
     assert_eq!(home.tally(), json!({"probe-answered": 2}));
 }
@@ -2480,7 +2604,11 @@ fn capture_answers_the_probe_of_a_resumed_earlier_run() {
     };
     let second = reserve(&[]);
     assert_eq!(second["state"], "probe", "{second}");
-    home.capture(probe_search(&second["probe"], json!(counted)));
+    let second_counted = body_with_trace(
+        json!([{"events": 10}]),
+        "00000000-0000-0000-0000-000000000002",
+    );
+    home.capture(probe_search(&second["probe"], json!(second_counted)));
     let after = reserve(&[]);
     assert_eq!(after["state"], "complete", "{after}");
     assert_eq!(home.tally()["probe-answered"], 1);

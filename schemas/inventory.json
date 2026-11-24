@@ -2231,6 +2231,9 @@
     "RawSnapshot": {
       "type": "object",
       "properties": {
+        "extended_result_framing": {
+          "type": "boolean"
+        },
         "raw_hex": {
           "type": "string"
         },

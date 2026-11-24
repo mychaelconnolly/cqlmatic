@@ -17,6 +17,15 @@ pub const MAX_STATE_BYTES: u64 = 67_108_864;
 pub const STATE_VERSION: u32 = 4;
 pub const REFRESH_OFF_WARNING: &str = "Turning off automatic inventory refresh can leave new repositories, sources, and types undiscovered. Manual refresh remains available.";
 pub const REFRESH_SECONDS: u64 = 300;
+pub const SOURCE_SELECTION_PREFIX: &str = "Source selection is outside the allowed scope. ";
+
+pub fn source_selection_count(count: usize) -> String {
+    if count == 1 {
+        format!("{SOURCE_SELECTION_PREFIX}There is 1 valid inventory source ID.")
+    } else {
+        format!("{SOURCE_SELECTION_PREFIX}There are {count} valid inventory source IDs.")
+    }
+}
 pub const MANUAL_REFRESH_SECONDS: u64 = 600;
 pub const AUTOMATIC_REFRESH_AVAILABLE: bool = false;
 const REFRESH_REMINDER_DAYS: i64 = 30;
@@ -718,6 +727,8 @@ pub struct RawSnapshot {
     pub sha256: String,
     pub retrieved_at: String,
     pub raw_hex: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
 }
 
 impl RawSnapshot {
@@ -735,8 +746,19 @@ impl RawSnapshot {
             sha256: sha256_hex(raw),
             retrieved_at: retrieved_at.into(),
             raw_hex,
+            extended_result_framing: false,
         })
     }
+    pub(crate) fn new_search_result(raw: &[u8], retrieved_at: &str) -> Result<Self, Diagnostic> {
+        let mut snapshot = Self::new(raw, retrieved_at)?;
+        snapshot.extended_result_framing = mcp::uses_extended_framing(raw);
+        Ok(snapshot)
+    }
+
+    pub(crate) fn normalized_result(&self) -> Result<mcp::Normalized, Diagnostic> {
+        mcp::normalize_framed(&self.bytes()?, self.extended_result_framing)
+    }
+
     pub fn bytes(&self) -> Result<Vec<u8>, Diagnostic> {
         environment::parse_time(&self.retrieved_at)?;
         if self.raw_hex.len() > mcp::MAX_RESULT_BYTES * 2 || !self.raw_hex.len().is_multiple_of(2) {
@@ -2004,7 +2026,7 @@ impl InventoryState {
                         "Refresh result requires an exact completed settlement.",
                     ));
                 }
-                refresh_rows(&result.bytes()?)?;
+                refresh_rows(&result.bytes()?, result.extended_result_framing)?;
             } else if attempt.phase == RefreshPhase::Imported {
                 return Err(fail("Imported refresh is missing its original result."));
             }
@@ -2110,7 +2132,7 @@ impl InventoryState {
             if attempt.phase == RefreshPhase::Imported
                 && attempt.environment == target.environment
                 && let Some(result) = &attempt.result
-                && refresh_rows(&result.bytes()?).is_ok()
+                && refresh_rows(&result.bytes()?, result.extended_result_framing).is_ok()
             {
                 let end = environment::parse_time(&attempt.arguments.end)?;
                 last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
@@ -2119,7 +2141,11 @@ impl InventoryState {
         for scout in &self.scouting {
             if scout.plan.environment == target.environment
                 && scout.plan.arguments.repository == target.environment.view
-                && refresh_rows(&scout.snapshot.bytes()?).is_ok()
+                && refresh_rows(
+                    &scout.snapshot.bytes()?,
+                    scout.snapshot.extended_result_framing,
+                )
+                .is_ok()
             {
                 let end = environment::parse_time(&scout.plan.arguments.end)?;
                 last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
@@ -2784,7 +2810,7 @@ impl InventoryState {
         raw: &[u8],
         retrieved_at: &str,
     ) -> Result<usize, Diagnostic> {
-        let rows = refresh_rows(raw)?;
+        let rows = refresh_rows(raw, true)?;
         let mut candidate = self.clone();
         let index = candidate
             .refresh_attempts
@@ -2861,7 +2887,7 @@ impl InventoryState {
                 usize::from(candidate.queue_inventory_work(source, vec![], novel, new_source)?);
         }
         let attempt = &mut candidate.refresh_attempts[index];
-        attempt.result = Some(RawSnapshot::new(raw, retrieved_at)?);
+        attempt.result = Some(RawSnapshot::new_search_result(raw, retrieved_at)?);
         attempt.phase = RefreshPhase::Imported;
         candidate.validate()?;
         *self = candidate;
@@ -3019,7 +3045,7 @@ impl InventoryState {
             {
                 return Err(fail("Scouting belongs to another environment."));
             }
-            if mcp::normalize(&scout.snapshot.bytes()?)?.rows.len() != scout.rows {
+            if scout.snapshot.normalized_result()?.rows.len() != scout.rows {
                 return Err(fail("Scouting row count differs from saved evidence."));
             }
         }
@@ -3183,7 +3209,7 @@ impl InventoryState {
         }
         let evidence = ScoutEvidence {
             plan: plan.clone(),
-            snapshot: RawSnapshot::new(raw, retrieved_at)?,
+            snapshot: RawSnapshot::new_search_result(raw, retrieved_at)?,
             rows: result.rows.len(),
         };
         if self.scouting.iter().any(|scout| {
@@ -3451,11 +3477,47 @@ impl InventoryState {
         Ok(())
     }
     pub fn source_mut(&mut self, id: &str) -> Result<&mut InventorySource, Diagnostic> {
-        self.sources
-            .iter_mut()
-            .find(|s| s.id == id)
-            .ok_or_else(|| fail("Unknown source ID; use the status source IDs."))
+        let index = self
+            .sources
+            .iter()
+            .position(|source| source.id == id)
+            .ok_or_else(|| self.source_selection_error(false))?;
+        Ok(&mut self.sources[index])
     }
+
+    fn source_selection_error(&self, expected_only: bool) -> Diagnostic {
+        let expected = self.sources.iter().filter(|source| source.expected);
+        let other = self
+            .sources
+            .iter()
+            .filter(|source| !expected_only && !source.expected);
+        let valid = expected.chain(other);
+        let count = valid.clone().count();
+        let mut message = source_selection_count(count);
+        if count == 0 {
+            message.push_str(" Read status and confirm the target sources.");
+        } else {
+            message
+                .push_str(" Choose an inventory source ID from this list or read summary status.");
+        }
+        for source in valid.take(20) {
+            message.push_str(&format!("\n- {}", source.id));
+            if let Some(repo) = &source.selectors.repo {
+                message.push_str(&format!(" repo {repo:?}"));
+            }
+            if let Some(type_) = &source.selectors.type_ {
+                message.push_str(&format!(" type {type_:?}"));
+            }
+        }
+        if count > 20 {
+            message.push_str(&format!(
+                "\n{} more source IDs are available in summary status.",
+                count - 20
+            ));
+        }
+        fail(&message)
+    }
+
     pub fn parser_version(&self, id: &str, hash: &str) -> Result<&ParserSnapshot, Diagnostic> {
         self.parsers
             .iter()
@@ -3581,9 +3643,7 @@ impl InventoryState {
             .iter()
             .any(|id| !self.sources.iter().any(|s| s.expected && &s.id == id))
         {
-            return Err(fail(
-                "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status --json --summary (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
-            ));
+            return Err(self.source_selection_error(true));
         }
         if sources.is_empty() {
             return Err(fail(
@@ -3642,19 +3702,37 @@ pub(crate) fn validate_refresh_host(
     text(session_id)?;
     text(&host.capability_reference)?;
     text(&host.verification_evidence)?;
-    if host.schema_version != 1
-        || &host.environment != environment
-        || host.session_id != session_id
-        || !(1..=if automatic {
-            REFRESH_SECONDS
-        } else {
-            MANUAL_REFRESH_SECONDS
-        })
-            .contains(&host.max_search_seconds)
-        || environment::parse_time(&host.verified_at)? > environment::parse_time(now)?
-    {
+    let max_seconds = if automatic {
+        REFRESH_SECONDS
+    } else {
+        MANUAL_REFRESH_SECONDS
+    };
+    for (valid, message) in [
+        (
+            host.schema_version == 1,
+            "Refresh host evidence requires schema_version 1. Export a compatible report.",
+        ),
+        (
+            &host.environment == environment,
+            "Refresh host evidence environment differs from the confirmed target. Use evidence for the selected target.",
+        ),
+        (
+            host.session_id == session_id,
+            "Refresh host evidence session_id differs from the selected session. Use evidence for the selected session.",
+        ),
+    ] {
+        if !valid {
+            return Err(fail(message));
+        }
+    }
+    if !(1..=max_seconds).contains(&host.max_search_seconds) {
+        return Err(fail(&format!(
+            "Refresh host evidence max_search_seconds must be 1..{max_seconds} seconds. Supply a verified provider lifetime in that range."
+        )));
+    }
+    if environment::parse_time(&host.verified_at)? > environment::parse_time(now)? {
         return Err(fail(
-            "Host evidence must bind this exact target/session to a verified provider-enforced search lifetime of 1..300 seconds for automatic refresh or 1..600 seconds for explicit manual refresh. Client wait timeouts do not qualify.",
+            "Refresh host evidence verified_at is in the future. Supply the actual verification time.",
         ));
     }
     Ok(())
@@ -3667,31 +3745,62 @@ pub(crate) fn validate_refresh_settlement(
 ) -> Result<(), Diagnostic> {
     text(&report.evidence)?;
     let recorded = environment::parse_time(&report.recorded_at)?;
-    if (report.termination == RefreshTermination::Completed) != report.result_sha256.is_some()
-        || report
-            .result_sha256
-            .as_ref()
-            .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    for (valid, message) in [
+        (
+            (report.termination == RefreshTermination::Completed) == report.result_sha256.is_some(),
+            "Refresh settlement requires result_sha256 for completed searches and forbids it for other outcomes. Supply the settlement for the actual outcome.",
+        ),
+        (
+            report
+                .result_sha256
+                .as_ref()
+                .is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+            "Refresh settlement result_sha256 is invalid. Use the SHA-256 of the exact saved result.",
+        ),
+        (
+            report.schema_version == 1,
+            "Refresh settlement requires schema_version 1. Export a compatible report.",
+        ),
+        (
+            report.attempt_id == attempt.id,
+            "Refresh settlement attempt_id differs from the reserved attempt. Use evidence for the exact attempt.",
+        ),
+        (
+            report.environment == attempt.environment,
+            "Refresh settlement environment differs from the reserved target. Use evidence for the exact target.",
+        ),
+        (
+            report.session_id == attempt.session_id,
+            "Refresh settlement session_id differs from the reserved session. Use evidence for the exact session.",
+        ),
+        (
+            report.arguments == attempt.arguments,
+            "Refresh settlement arguments differ from the reservation. Use the exact reserved arguments.",
+        ),
+    ] {
+        if !valid {
+            return Err(fail(message));
+        }
+    }
+    if recorded > environment::parse_time(now)?
+        || recorded < environment::parse_time(&attempt.prepared_at)?
     {
         return Err(fail(
-            "Completed refresh settlement requires the exact full result SHA-256; other outcomes cannot attest a result.",
+            "Refresh settlement recorded_at falls outside the prepared-to-current interval. Supply the actual settlement time.",
         ));
     }
-    if report.schema_version != 1
-        || report.attempt_id != attempt.id
-        || report.environment != attempt.environment
-        || report.session_id != attempt.session_id
-        || report.arguments != attempt.arguments
-        || recorded > environment::parse_time(now)?
-        || recorded < environment::parse_time(&attempt.prepared_at)?
-        || (attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted)
-        || attempt
-            .dispatched_at
-            .as_ref()
-            .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
+    if attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted {
+        return Err(fail(
+            "Refresh settlement for a reservation without dispatch requires not-started. Check the recorded dispatch before settling.",
+        ));
+    }
+    if attempt
+        .dispatched_at
+        .as_ref()
+        .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
     {
         return Err(fail(
-            "Settlement must identify the exact target, session, attempt and arguments after dispatch; a lost response is unresolved.",
+            "Refresh settlement recorded_at precedes dispatch. Supply the actual settlement time.",
         ));
     }
     if report.termination == RefreshTermination::LifetimeExpired {
@@ -3729,8 +3838,8 @@ pub(crate) fn validate_refresh_settlement(
 }
 
 type RefreshRows = Vec<(Scope, Vec<String>, u64)>;
-fn refresh_rows(raw: &[u8]) -> Result<RefreshRows, Diagnostic> {
-    let result = mcp::normalize(raw)?;
+fn refresh_rows(raw: &[u8], extended: bool) -> Result<RefreshRows, Diagnostic> {
+    let result = mcp::normalize_framed(raw, extended)?;
     if result.rows.len() >= 10_000 {
         return Err(fail(
             "Cap-sized refresh results cannot establish a complete metadata capture.",
