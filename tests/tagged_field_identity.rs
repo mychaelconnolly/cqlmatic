@@ -190,6 +190,13 @@ impl Workflow {
                     let query = probe["mcp"]["arguments"]["query_string"].as_str().unwrap();
                     json!([{"events":u32::from(query.contains("#event.dataset")) * 10}])
                 }
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for (i, field) in probe["fields"].as_array().unwrap().iter().enumerate() {
+                        row[format!("c{i}")] = json!(u32::from(field == "#event.dataset") * 10);
+                    }
+                    json!([row])
+                }
                 "population" => {
                     let mut row = json!({"total":10});
                     for i in 0..probe["fields"].as_array().unwrap().len() {
@@ -696,6 +703,13 @@ fn first_activation_refuses_duplicate_canonical_tag_spellings() {
                 let query = probe["mcp"]["arguments"]["query_string"].as_str().unwrap();
                 json!([{"events":u32::from(query.contains("#event.dataset")) * 10}])
             }
+            "tag-batch" => {
+                let mut row = json!({"total":10});
+                for (i, field) in probe["fields"].as_array().unwrap().iter().enumerate() {
+                    row[format!("c{i}")] = json!(u32::from(field == "#event.dataset") * 10);
+                }
+                json!([row])
+            }
             "population" => {
                 let mut row = json!({"total":10});
                 for i in 0..probe["fields"].as_array().unwrap().len() {
@@ -778,8 +792,9 @@ fn completed_poll_recovery_and_next_probe_preserve_field_measurement_warning() {
             json!([{"#event.dataset":"synthetic","events":10}])
         } else if query.contains("stats([count(as=total)") {
             let mut row = json!({"total":10});
-            for i in 0..query.matches(", as=c").count() {
-                row[format!("c{i}")] = json!(10);
+            for (i, clause) in query.split("count(").skip(2).enumerate() {
+                let present = clause.contains("#event.dataset") || clause.contains("user");
+                row[format!("c{i}")] = json!(u32::from(present) * 10);
             }
             json!([row])
         } else if query.contains("groupBy([user]") {

@@ -208,6 +208,13 @@ impl Workflow {
                 "fieldset" => json!([{"field":"user"}]),
                 "dataset-facet" => json!([{"#event.dataset":"synthetic","events":10}]),
                 "tag-detect" => json!([{"events":0}]),
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for i in 0..probe["fields"].as_array().unwrap().len() {
+                        row[format!("c{i}")] = json!(0);
+                    }
+                    json!([row])
+                }
                 "population" => {
                     let mut row = json!({"total":10});
                     for i in 0..probe["fields"].as_array().unwrap().len() {

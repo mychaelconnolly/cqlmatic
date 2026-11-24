@@ -109,6 +109,13 @@ impl Inventory {
                 "fieldset" => json!([{"field":"user"}]),
                 "dataset-facet" => json!([]),
                 "tag-detect" => json!([{"events":0}]),
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for i in 0..probe["fields"].as_array().unwrap().len() {
+                        row[format!("c{i}")] = json!(0);
+                    }
+                    json!([row])
+                }
                 "population" => {
                     let mut row = json!({"total":10});
                     for i in 0..probe["fields"].as_array().unwrap().len() {
@@ -248,6 +255,9 @@ fn make_unowned(result: &Value) -> PathBuf {
     .unwrap();
     if state["session"]["sparse_fieldset_fallback"] == true {
         binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    if state["discovery_algorithm"] == "bounded-discovery-v3" {
+        binding.extend_from_slice(b"\0bounded-discovery-v3");
     }
     state["session"]["binding_sha256"] = json!(sha256_hex(&binding));
     write_json(&checkpoint, &state);
