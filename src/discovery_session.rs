@@ -66,7 +66,7 @@ pub struct Session {
     #[serde(default)]
     pub(crate) sparse_fieldset_fallback: bool,
     binding_sha256: String,
-    predecessor_sha256: Option<String>,
+    pub(crate) predecessor_sha256: Option<String>,
     periods: Vec<ActivePeriod>,
     attempts: Vec<Attempt>,
     pub(crate) captures: BTreeMap<String, discovery::Capture>,

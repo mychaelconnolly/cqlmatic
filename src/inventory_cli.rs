@@ -2079,7 +2079,6 @@ fn apply_locked(
                 &relay_guards,
             )?
         };
-        let resolve_work = resolve_work && (!importing_pack || extra["pack_updated"] == true);
         if importing_pack && extra["pack_updated"] == true {
             upgrade_state(&mut state);
         }
@@ -4154,6 +4153,7 @@ fn run_is_finished(state: &InventoryState, run: &DiscoveryRun) -> bool {
 }
 
 fn import_run_advice(
+    state: &InventoryState,
     relay: &mcp::State,
     index: usize,
     inventory_writer: &storage::Writer,
@@ -4187,6 +4187,20 @@ fn import_run_advice(
                 format!(
                     "Settle outstanding_probe_id {probe} first with its original result via next-probe or discovery-step (run_index: {index}), or with confirmed cancellation. Even after importing, settle it before another discovery search."
                 )
+            } else if let Err(blocker) = check_retained_searches(state, None, Some(index), now) {
+                if let Some(other) = blocker
+                    .pointer
+                    .as_deref()
+                    .and_then(|pointer| pointer.strip_prefix("/discovery_runs/"))
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    format!(
+                        "Blocked from continuing until run_index {other} is resolved ({}).",
+                        blocker.message
+                    )
+                } else {
+                    format!("Blocked from continuing ({}).", blocker.message)
+                }
             } else {
                 let action = if relay.status == "paused" {
                     "resume-discovery"
@@ -4251,8 +4265,16 @@ fn guard_import_runs(
         if relay.status == "failed" {
             continue;
         }
-        let matches_predecessor = if matches!(relay.status.as_str(), "activating" | "activated") {
+        if matches!(
+            relay.status.as_str(),
+            "activating" | "activated" | "activation-blocked"
+        ) {
             mcp::inspect_activation_artifacts(&relay).map_err(invalid)?;
+        }
+        let matches_predecessor = if matches!(relay.status.as_str(), "activating" | "activated")
+            || (relay.status == "activation-blocked"
+                && mcp::activation_predecessor(&relay).is_some())
+        {
             mcp::activation_predecessor(&relay) == Some(current_pred.as_deref())
         } else if let Some(session) = &relay.session {
             session.verified_predecessor(&relay.pack).map_err(invalid)? == current_pred.as_deref()
@@ -4268,8 +4290,8 @@ fn guard_import_runs(
         if matches_predecessor {
             blockers.push(index);
             if !supersede_runs {
-                let advice =
-                    import_run_advice(&relay, index, inventory_writer, now).map_err(invalid)?;
+                let advice = import_run_advice(state, &relay, index, inventory_writer, now)
+                    .map_err(invalid)?;
                 details.push(format!("run_index {index} ({}): {advice}", relay.status));
             }
         }

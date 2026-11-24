@@ -970,3 +970,180 @@ fn duplicate_pack_references_do_not_mark_a_checkpoint_finished() {
         "{denied}"
     );
 }
+
+#[test]
+fn corrupted_frozen_predecessor_refuses_import_for_activating_and_activated_runs() {
+    for phase in ["activated", "activating"] {
+        let inv = Inventory::new(&["expected"]);
+        inv.call(inv.import("seed", "Seed", false));
+        let run = inv.prepare(4);
+        stage(&inv, &run, phase);
+
+        // Corrupt one hex digit of activation.predecessor_pack_sha256 while keeping
+        // session.predecessor_sha256, pack bytes, and receipt intact.
+        run.edit(|state| {
+            let digest = state["activation"]["predecessor_pack_sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let first = if digest.starts_with('0') { '1' } else { '0' };
+            state["activation"]["predecessor_pack_sha256"] =
+                json!(format!("{first}{}", &digest[1..]));
+        });
+
+        for supersede in [false, true] {
+            let mut request = inv.import("imported", "Extra", false);
+            request["supersede_runs"] = json!(supersede);
+            let denied = inv.blocked(&request, 0);
+            assert!(
+                message(&denied).contains("disagrees with the bound session predecessor"),
+                "phase={phase} supersede={supersede} denied={denied}"
+            );
+            assert!(
+                message(&denied).contains("Restore the checkpoint folder"),
+                "{denied}"
+            );
+        }
+    }
+}
+
+#[test]
+fn activation_blocked_with_stale_receipt_refuses_under_both_flags() {
+    let inv = Inventory::new(&["expected"]);
+    let run = inv.prepare(4);
+    stage(&inv, &run, "activation-blocked");
+    fs::write(&run.receipt, b"{\"stale\":true}\n").unwrap();
+
+    for supersede in [false, true] {
+        let mut request = inv.import("imported", "Extra", false);
+        request["supersede_runs"] = json!(supersede);
+        let denied = inv.blocked(&request, 0);
+        assert!(
+            message(&denied).contains("MCP receipt path must remain absent before activation"),
+            "supersede={supersede} denied={denied}"
+        );
+        assert!(!message(&denied).contains("discovery-step"), "{denied}");
+    }
+}
+
+#[test]
+fn paused_run_withholds_resume_advice_when_sibling_blocks_continuing() {
+    // Sibling with an outstanding reservation blocks resuming run 0.
+    let inv = Inventory::new(&["expected"]);
+    let run0 = inv.prepare(3);
+    inv.pause(&run0);
+    let run1 = inv.prepare(4);
+    let _probe1 = inv.next(&run1);
+    let request = inv.import("imported", "Extra", false);
+    let denied = inv.blocked(&request, 0);
+    let text = message(&denied);
+    assert!(
+        !text.contains("resume-discovery"),
+        "must withhold blocked resume-discovery: {text}"
+    );
+    assert!(text.contains("run_index 1"), "{text}");
+    assert!(text.contains("supersede_runs: true"), "{text}");
+
+    // Same when sibling run 1 has an earlier producer version.
+    let inv_earlier = Inventory::new(&["expected"]);
+    let r0 = inv_earlier.prepare(3);
+    inv_earlier.pause(&r0);
+    let r1 = inv_earlier.prepare(4);
+    let _p1 = inv_earlier.next(&r1);
+    r1.edit(|state| {
+        state["producer_version"] = json!(EARLIER);
+    });
+    let req_earlier = inv_earlier.import("imported", "Extra", false);
+    let denied_earlier = inv_earlier.blocked(&req_earlier, 0);
+    let text_earlier = message(&denied_earlier);
+    assert!(!text_earlier.contains("resume-discovery"), "{text_earlier}");
+    assert!(text_earlier.contains("run_index 1"), "{text_earlier}");
+    let forced = inv_earlier.call(override_import(req_earlier));
+    assert_eq!(forced["action"]["superseded_runs"], json!([0, 1]));
+}
+
+#[test]
+fn replay_and_update_noop_refuse_missing_completed_pending_evidence() {
+    let inv = Inventory::new(&["expected"]);
+    let seed = inv.import("seed", "Seed", false);
+    inv.call(seed.clone());
+    inv.call(json!({
+        "kind":"record-inventory-hints",
+        "environment":environment(),
+        "hints":[{"source":{"type":"expected"},"fields":["pending_field"]}]
+    }));
+    let run = inv.prepare(4);
+    let probe = inv.next(&run);
+    inv.settle(&run, &probe);
+    assert_eq!(
+        read(&inv.state())["discovery_runs"][0]["status"],
+        "complete"
+    );
+    assert!(read(&inv.state())["pending_inventory"][0]["resolution"].is_null());
+
+    // Remove only the completed run's checkpoint while keeping its pack and receipt.
+    let backup = run.bytes();
+    fs::remove_file(&run.checkpoint).unwrap();
+
+    for update in [false, true] {
+        let mut req = seed.clone();
+        req["mode"] = json!(if update { "update" } else { "append" });
+        let denied = inv.blocked(&req, 0);
+        assert!(
+            message(&denied).contains("Completed discovery evidence is missing"),
+            "update={update} denied={denied}"
+        );
+    }
+
+    // Restoring the checkpoint restores clean replay and update no-op.
+    fs::write(&run.checkpoint, backup).unwrap();
+    let replayed = inv.call(seed.clone());
+    assert_eq!(replayed["action"]["pack_updated"], false);
+    let mut noop_update = seed;
+    noop_update["mode"] = json!("update");
+    let unchanged = inv.call(noop_update);
+    assert_eq!(unchanged["action"]["pack_updated"], false);
+}
+
+#[test]
+fn late_settlement_during_cancel_or_cleanup_stays_paused_until_resumed_on_original_predecessor() {
+    for (phase, sources) in [
+        ("cancel-requested", vec!["expected"]),
+        ("cancel-requested", vec!["first", "second"]),
+        ("cleanup-pending", vec!["expected"]),
+        ("cleanup-pending", vec!["first", "second"]),
+    ] {
+        let inv = Inventory::new(&sources);
+        let seed_a = inv.import("seed_a", "Seed A", false);
+        inv.call(seed_a.clone());
+        let run = inv.prepare(4);
+        let probe = inv.next(&run);
+        if phase == "cancel-requested" {
+            inv.pause(&run);
+        } else {
+            inv.answer(&run, &probe, json!({"error":"simulated timeout"}));
+        }
+        assert_eq!(run.status(), phase);
+
+        // Displace with B using override.
+        let mut import_b = inv.import("seed_b", "Seed B", false);
+        import_b["supersede_runs"] = json!(true);
+        let displaced = inv.call(import_b);
+        assert_eq!(displaced["action"]["superseded_runs"], json!([0]));
+
+        // Settling the outstanding attempt with its original result saves the answer
+        // and leaves the run paused (preserving the pause/cleanup transition).
+        let settled = inv.settle(&run, &probe);
+        assert_eq!(
+            settled["action"]["relay"]["status"], "paused",
+            "phase={phase} sources={sources:?} settled={settled}"
+        );
+        assert_eq!(run.status(), "paused");
+
+        // Resuming under B is refused because the predecessor changed.
+        refused(
+            inv.run(json!({"kind":"resume-discovery","run_index":0}), &[]),
+            "INVENTORY_INPUT",
+        );
+    }
+}
