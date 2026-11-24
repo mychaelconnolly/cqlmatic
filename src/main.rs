@@ -2383,7 +2383,9 @@ mod tests {
         assert_eq!(exit_code(&malformed), 2);
         assert_eq!(malformed.unwrap_err().code, "CLI_INPUT");
         for (index, relative) in [(0, true), (1, false)] {
-            let p = &first.probes[index];
+            // The volume comes first; the next search is the dataset facet.
+            let pending = mcp::step(&state, &[]).unwrap();
+            let p = &pending.probes[0];
             let answer = dir.join(format!("answer-{index}.json"));
             let (fixture, body) = if p["kind"] == "volume" {
                 (
@@ -2459,7 +2461,7 @@ mod tests {
             .unwrap(),
             3
         );
-        let id = mcp::step(&state, &[]).unwrap().probes[1]["probe_id"]
+        let id = mcp::step(&state, &[]).unwrap().probes[0]["probe_id"]
             .as_str()
             .unwrap()
             .to_string();

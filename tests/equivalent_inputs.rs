@@ -149,9 +149,10 @@ fn cid_error_explains_accepted_forms() {
 fn discovery_windows_convert_explicit_offsets_to_utc() {
     let expected = initial_plan(&discovery_request(START, END)).unwrap();
     let probes = expected["initial_probes"].as_array().unwrap();
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0]["kind"], "volume");
     assert_eq!(probes[0]["start"], "2026-01-01T00:00:00.12Z");
     assert_eq!(probes[0]["end"], END);
-    assert_eq!(probes[2]["start"], "2026-01-01T23:45:00.5Z");
     for (start, end) in [
         (
             "2026-01-01T00:00:00.120+00:00",

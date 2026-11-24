@@ -863,7 +863,9 @@ use crate::{
 };
 
 const STATE_SCHEMA_VERSION: u32 = 2;
-const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
+const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v3";
+/// The plan of earlier builds: measured each source in turn. Its checkpoints stay readable.
+const EARLIER_DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 
 #[path = "discovery_session.rs"]
 mod session;
@@ -1353,7 +1355,7 @@ fn read_state(path: &Path) -> Result<State, Diagnostic> {
     Ok(state)
 }
 
-/// Refuse lifecycle changes to inspected history from another producing version.
+/// Refuse lifecycle changes to inspected history from another producing version or plan.
 pub fn require_current_producer(state: &State) -> Result<(), Diagnostic> {
     if state.producer_version != env!("CARGO_PKG_VERSION") {
         return Err(Diagnostic::error(
@@ -1363,6 +1365,12 @@ pub fn require_current_producer(state: &State) -> Result<(), Diagnostic> {
                 state.producer_version,
                 env!("CARGO_PKG_VERSION")
             ),
+        ));
+    }
+    if state.discovery_algorithm != DISCOVERY_ALGORITHM {
+        return Err(Diagnostic::error(
+            "MCP_STATE_PRODUCER",
+            "Discovery checkpoint was prepared under an earlier discovery plan; this build can inspect it but not continue it. Preserve the inventory and checkpoint files.",
         ));
     }
     Ok(())
@@ -1401,8 +1409,12 @@ fn inspect_checkpoint(
                 .get("schema_version")
                 .and_then(Value::as_u64)
                 .is_none_or(|version| ![STATE_SCHEMA_VERSION as u64, 3].contains(&version))
-            || header.get("discovery_algorithm").and_then(Value::as_str)
-                != Some(DISCOVERY_ALGORITHM))
+            || !header
+                .get("discovery_algorithm")
+                .and_then(Value::as_str)
+                .is_some_and(|plan| {
+                    [DISCOVERY_ALGORITHM, EARLIER_DISCOVERY_ALGORITHM].contains(&plan)
+                }))
     {
         return Err(Diagnostic::error(
             "MCP_STATE_RESTART",
@@ -1441,8 +1453,9 @@ fn inspect_checkpoint(
     if state.format != "cqlmatic-mcp-state"
         || ![STATE_SCHEMA_VERSION, 3].contains(&state.schema_version)
         || (state.schema_version == 3) != state.session.is_some()
-        || state.discovery_algorithm != DISCOVERY_ALGORITHM
         || (state.producer_version != producer && !compatible_history)
+        // Every listed earlier release wrote only the earlier plan.
+        || (state.discovery_algorithm == DISCOVERY_ALGORITHM && state.producer_version != producer)
         || !matches!(
             state.status.as_str(),
             "needs-probes"
@@ -2134,7 +2147,8 @@ fn replay_mcp(state: &State, remaining: Duration) -> (Option<Pack>, DiscoverRepo
 pub fn has_discovery_work_after_resume(state: &State) -> bool {
     state.session.as_ref().is_some_and(|session| {
         session.attempts_len() < state.request.max_queries as usize
-            || (session.transport == Transport::Mcp
+            || (state.discovery_algorithm == DISCOVERY_ALGORITHM
+                && session.transport == Transport::Mcp
                 && replay_mcp(state, Duration::from_secs(state.request.max_seconds))
                     .0
                     .is_some())
@@ -2409,9 +2423,25 @@ mod recovery_tests {
         drop(held);
         run
     }
+    /// Released producers wrote the earlier plan, so their simulated history carries it.
+    fn released(state: &mut State, producer: &str) {
+        state.producer_version = producer.into();
+        state.discovery_algorithm = EARLIER_DISCOVERY_ALGORITHM.into();
+        if let Some(session) = &state.session {
+            let digest = session::binding(state, session).unwrap();
+            let mut value = serde_json::to_value(&*state).unwrap();
+            value["session"]["binding_sha256"] = json!(digest);
+            *state = serde_json::from_value(value).unwrap();
+        }
+    }
+    fn released_json(saved: &mut Value, producer: &str) {
+        let mut state: State = serde_json::from_value(saved.clone()).unwrap();
+        released(&mut state, producer);
+        *saved = serde_json::to_value(state).unwrap();
+    }
     fn mark_previous_producer(run: &Run) {
         let mut state = read_state(&run.state).unwrap();
-        state.producer_version = "0.1.6".into();
+        released(&mut state, "0.1.6");
         let writer = storage::Writer::acquire(&run.state).unwrap();
         store(&writer, &state).unwrap();
     }
@@ -2570,7 +2600,7 @@ mod recovery_tests {
         assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
         let mut checkpoint: Value = serde_json::from_slice(&fs::read(&run.state).unwrap()).unwrap();
         for producer in ["0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.5"] {
-            checkpoint["producer_version"] = json!(producer);
+            released_json(&mut checkpoint, producer);
             fs::write(&run.state, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
             assert_eq!(inspect_state(&run.state).unwrap().status, "activated");
             let (history, report) = inspect_completed_report(&run.state).unwrap();
@@ -2648,7 +2678,7 @@ mod recovery_tests {
                 let run = ready_kind(false, resumable);
                 assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
                 let mut state = read_state(&run.state).unwrap();
-                state.producer_version = writer_version.into();
+                released(&mut state, writer_version);
                 let writer = storage::Writer::acquire(&run.state).unwrap();
                 store(&writer, &state).unwrap();
                 let before = fs::read(&run.state).unwrap();
@@ -2682,7 +2712,7 @@ mod recovery_tests {
         ));
 
         let outcomes = ["0.1.7", "0.1.8", "0.1.9", "0.1.10", "0.1.11", "0.1.12"].map(|producer| {
-            state.producer_version = producer.into();
+            released(&mut state, producer);
             let writer = storage::Writer::acquire(&run.state).unwrap();
             store(&writer, &state).unwrap();
             (
@@ -2743,7 +2773,7 @@ mod recovery_tests {
         )
         .unwrap();
 
-        saved["producer_version"] = json!(writer_version);
+        released_json(&mut saved, writer_version);
         saved["status"] = json!("paused");
         saved["answers"] = json!({});
         let store_attempt = |saved: &mut Value, attempt: &mut Value, label: &str, raw: &[u8]| {
@@ -2903,7 +2933,7 @@ mod recovery_tests {
         };
         let run = ready_kind(false, true);
         let mut saved = serde_json::to_value(read_state(&run.state).unwrap()).unwrap();
-        saved["producer_version"] = json!("0.1.7");
+        released_json(&mut saved, "0.1.7");
         saved["status"] = json!("cleanup-pending");
         saved["answers"] = json!({});
         let raw = include_bytes!("../tests/fixtures/mcp/hosted-poll-failed.json");
@@ -2997,6 +3027,7 @@ mod recovery_tests {
     fn released_resumable_history_retains_its_owner_binding_after_an_upgrade() {
         let run = ready_kind(false, true);
         assert_eq!(step(&run.state, &[]).unwrap().status, "complete");
+        let unowned = fs::read(&run.state).unwrap();
         mark_previous_producer(&run);
         let before = fs::read(&run.state).unwrap();
         let owner = storage::Writer::acquire(&run.directory.join("inventory.json")).unwrap();
@@ -3004,8 +3035,13 @@ mod recovery_tests {
         session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.7").unwrap();
         assert!(fs::read(&run.state).unwrap() == before);
         drop(writer);
+        // Its producing release bound the checkpoint before the upgrade.
+        fs::write(&run.state, &unowned).unwrap();
         let writer = storage::Writer::acquire(&run.state).unwrap();
-        session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.6").unwrap();
+        session::bind_inventory_owner(&writer, &owner).unwrap();
+        drop(writer);
+        mark_previous_producer(&run);
+        let writer = storage::Writer::acquire(&run.state).unwrap();
         let bound = fs::read(&run.state).unwrap();
         session::bind_inventory_owner_for_producer(&writer, &owner, "0.1.7").unwrap();
         assert!(fs::read(&run.state).unwrap() == bound);

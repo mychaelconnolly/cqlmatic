@@ -77,7 +77,7 @@ fn error(code: &str, message: &str) -> Diagnostic {
     Diagnostic::error(code, message)
 }
 
-fn binding(state: &State, session: &Session) -> Result<String, Diagnostic> {
+pub(super) fn binding(state: &State, session: &Session) -> Result<String, Diagnostic> {
     let mut bytes = serde_json::to_vec(&(
         &state.request_sha256,
         &state.created_at,
@@ -97,6 +97,10 @@ fn binding(state: &State, session: &Session) -> Result<String, Diagnostic> {
             &serde_json::to_vec(owner)
                 .map_err(|_| error("LOCAL_PATH", "Discovery paths must be valid UTF-8."))?,
         );
+    }
+    // Earlier-plan bindings stay unchanged, so relabelling one as this plan reads as tampered.
+    if state.discovery_algorithm == DISCOVERY_ALGORITHM {
+        bytes.extend_from_slice(b"\0bounded-discovery-v3");
     }
     Ok(sha256_hex(&bytes))
 }
@@ -1004,8 +1008,8 @@ pub(super) fn bind_inventory_owner_for_producer(
     if session.inventory_owner.is_some() {
         return require_inventory(&state, owner);
     }
-    if state.producer_version != producer {
-        // Preserve foreign history for its producing executable.
+    if state.producer_version != producer || state.discovery_algorithm != DISCOVERY_ALGORITHM {
+        // Preserve foreign or earlier-plan history byte for byte.
         return Ok(());
     }
     session.inventory_owner = Some(owner.identity()?);

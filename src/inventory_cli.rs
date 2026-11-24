@@ -990,7 +990,7 @@ fn status_brief(
                         .all(|id| run.source_ids.contains(id))
             }))
         .then_some(index)
-    }) && let Ok(relay) = inspect_selected_run(state, index)
+    }) && let Ok(relay) = inspect_selected_run_readonly(state, index)
         && let Some(failure) = relay_failure_cause(&relay)
     {
         let (diagnostic, _) = relay_failure(
@@ -1017,7 +1017,7 @@ fn status_row_limit(state: &InventoryState) -> Option<(usize, &'static str)> {
     if run.pruned_at.is_some() || !matches!(run.status.as_str(), "paused" | "failed") {
         return None;
     }
-    let relay = inspect_selected_run(state, index).ok()?;
+    let relay = inspect_selected_run_readonly(state, index).ok()?;
     retained_row_limit(&relay).then(|| (index, retained_row_limit_action(&relay)))
 }
 
@@ -4425,6 +4425,19 @@ fn verify_run_reference(
         ));
     }
     Ok(())
+}
+
+fn inspect_selected_run_readonly(
+    state: &InventoryState,
+    index: usize,
+) -> Result<mcp::State, Diagnostic> {
+    (|| {
+        let run = &state.discovery_runs[index];
+        let relay = mcp::inspect_state(Path::new(&run.state_path))?;
+        verify_run_reference(state, run, &relay)?;
+        Ok(relay)
+    })()
+    .map_err(|d| discovery_run_diagnostic(index, d))
 }
 
 fn inspect_selected_run(state: &InventoryState, index: usize) -> Result<mcp::State, Diagnostic> {

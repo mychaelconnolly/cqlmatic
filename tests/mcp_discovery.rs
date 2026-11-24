@@ -167,7 +167,7 @@ fn emitted(probe: &Probe, view: &str) -> (String, String, String, String) {
 }
 
 #[test]
-fn census_discovery_finishes_in_four_batches() {
+fn census_discovery_finishes_in_five_batches() {
     let dir = Temp::new();
     let (state, pack, receipt) = paths(dir.path());
     let mut r = request();
@@ -177,10 +177,11 @@ fn census_discovery_finishes_in_four_batches() {
     let mut rounds = 0;
     while output.status == "needs-probes" {
         rounds += 1;
-        assert!(rounds <= 4);
+        assert!(rounds <= 5);
         output = answer_batch(dir.path(), &state, &output);
     }
-    assert_eq!(rounds, 4);
+    // Census, volumes, listings, dependent measurements, then kind facets and values.
+    assert_eq!(rounds, 5);
     assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
     assert_eq!(storage::read_pack(&pack).unwrap().data.sources.len(), 1);
 }
@@ -260,7 +261,7 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
     assert_eq!(initial.exit_code(), 3);
     assert_eq!(initial.status, "needs-probes");
     assert_eq!(initial.answered, 0);
-    assert_eq!(initial.probes.len(), 3);
+    assert_eq!(initial.probes.len(), 1);
     let same = mcp::step(&state, &[]).unwrap();
     assert_eq!(same.exit_code(), 3);
     assert_eq!(same.probes, initial.probes);
@@ -268,8 +269,8 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
     let mut batches = 0;
     while initial.status == "needs-probes" {
         batches += 1;
-        assert!(batches <= 4);
-        if batches == 2 {
+        assert!(batches <= 5);
+        if batches == 3 {
             assert!(initial.probes.iter().any(|probe| {
                 probe["kind"] == "record-kind-facet" && probe["field"] == "#type"
             }));
@@ -286,7 +287,7 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
                     .any(|probe| probe["kind"] == "tag-detect")
             );
         }
-        if batches == 3 {
+        if batches == 4 {
             assert!(initial.probes.iter().any(|probe| {
                 probe["kind"] == "record-kind-facet" && probe["field"] == "#event_simpleName"
             }));
@@ -309,7 +310,7 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
         }
         initial = answer_batch(dir.path(), &state, &initial);
     }
-    assert_eq!(batches, 3);
+    assert_eq!(batches, 4);
     assert_eq!(initial.status, "complete", "{:?}", initial.diagnostics);
     assert_eq!(initial.exit_code(), 0);
     assert!(initial.active_pack_updated);
@@ -472,7 +473,8 @@ fn failed_record_kind_facet_answer_leaves_no_pack() {
         let dir = Temp::new();
         let (state, pack, receipt) = paths(dir.path());
         let first = mcp::init(request(), &state, &pack, &receipt).unwrap();
-        let second = answer_batch(dir.path(), &state, &first);
+        let listed = answer_batch(dir.path(), &state, &first);
+        let second = answer_batch(dir.path(), &state, &listed);
         let kind = second
             .probes
             .iter()
@@ -642,9 +644,13 @@ fn later_failed_answer_ends_run_without_emitting_unanswered_probes_or_changing_p
         let dir = Temp::new();
         let (state, pack, receipt) = paths(dir.path());
         let before = existing_pack(&pack, &request(), false);
-        let first = mcp::init(request(), &state, &pack, &receipt).unwrap();
-        assert_eq!(first.probes[0]["kind"], "volume");
-        assert_eq!(first.probes[1]["kind"], "dataset-facet");
+        let volume = mcp::init(request(), &state, &pack, &receipt).unwrap();
+        assert_eq!(volume.probes.len(), 1);
+        assert_eq!(volume.probes[0]["kind"], "volume");
+        // The listings follow the volume; fail the later one while the earlier is unanswered.
+        let first = answer_batch(dir.path(), &state, &volume);
+        assert_eq!(first.probes[0]["kind"], "dataset-facet");
+        assert_eq!(first.probes[1]["kind"], "fieldset");
         let path = dir.path().join("bad-answer.json");
         fs::write(&path, raw).unwrap();
         let output = mcp::step(
@@ -686,7 +692,9 @@ fn ten_thousand_object_rows_fail_immediately_even_when_earlier_probe_is_unanswer
     let dir = Temp::new();
     let (state, pack, receipt) = paths(dir.path());
     let before = existing_pack(&pack, &request(), false);
-    let first = mcp::init(request(), &state, &pack, &receipt).unwrap();
+    let volume = mcp::init(request(), &state, &pack, &receipt).unwrap();
+    let first = answer_batch(dir.path(), &state, &volume);
+    assert_eq!(first.probes[1]["kind"], "fieldset");
     let path = dir.path().join("ten-thousand.json");
     fs::write(&path, json!({"result":vec![json!({});10_000]}).to_string()).unwrap();
     let output = mcp::step(
@@ -821,7 +829,10 @@ fn empty_fieldset_zero_volume_and_exhausted_budget_fail_closed() {
     ] {
         let dir = Temp::new();
         let (state, pack, receipt) = paths(dir.path());
-        let first = mcp::init(request(), &state, &pack, &receipt).unwrap();
+        let mut first = mcp::init(request(), &state, &pack, &receipt).unwrap();
+        while !first.probes.iter().any(|p| p["kind"] == kind) {
+            first = answer_batch(dir.path(), &state, &first);
+        }
         let answers = first
             .probes
             .iter()
@@ -938,7 +949,8 @@ fn busy_activation_retries_without_receipt_or_repeating_answers() {
     let dir = Temp::new();
     let (state, pack, receipt) = paths(dir.path());
     let first = mcp::init(request(), &state, &pack, &receipt).unwrap();
-    let second = answer_batch(dir.path(), &state, &first);
+    let listed = answer_batch(dir.path(), &state, &first);
+    let second = answer_batch(dir.path(), &state, &listed);
     let third = answer_batch(dir.path(), &state, &second);
     assert_eq!(third.probes.len(), 2);
     assert!(third.probes.iter().any(|p| p["kind"] == "value-facet"));

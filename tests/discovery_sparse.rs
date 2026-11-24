@@ -205,18 +205,19 @@ impl Saved {
     }
     fn legacy(&self, missing: bool) {
         let mut v = self.read();
-        let binding = sha256_hex(
-            &serde_json::to_vec(&json!([
-                v["request_sha256"],
-                v["created_at"],
-                v["pack"],
-                v["receipt"],
-                v["session"]["transport"],
-                v["session"]["predecessor_sha256"]
-            ]))
-            .unwrap(),
-        );
-        v["session"]["binding_sha256"] = json!(binding);
+        let mut binding = serde_json::to_vec(&json!([
+            v["request_sha256"],
+            v["created_at"],
+            v["pack"],
+            v["receipt"],
+            v["session"]["transport"],
+            v["session"]["predecessor_sha256"]
+        ]))
+        .unwrap();
+        if v["discovery_algorithm"] == "bounded-discovery-v3" {
+            binding.extend_from_slice(b"\0bounded-discovery-v3");
+        }
+        v["session"]["binding_sha256"] = json!(sha256_hex(&binding));
         if missing {
             v["session"]
                 .as_object_mut()
@@ -373,7 +374,7 @@ fn sparse_fallback_matches_api_mcp_and_preserves_actual_windows_and_schema_hints
 }
 
 #[test]
-fn empty_recent_fieldset_before_volume_defers_auxiliaries_and_reaches_one_fallback() {
+fn empty_recent_fieldset_defers_auxiliaries_and_reaches_one_fallback() {
     let _lock = SIGNAL.lock().unwrap();
     network::CANCELLED.store(false, Ordering::Relaxed);
     for cap in [None, Some(2)] {
@@ -381,19 +382,23 @@ fn empty_recent_fieldset_before_volume_defers_auxiliaries_and_reaches_one_fallba
         let scenario = Scenario::default();
         let saved = Saved::new(r.clone(), Transport::Mcp);
         let initial = mcp::step(&saved.state, &[]).unwrap();
+        assert_eq!(initial.probes.len(), 1);
+        let volume = wire(&initial.probes[0]);
+        assert_eq!(volume.kind, "volume");
+        let mut output = saved.answer(&volume, scenario.rows(&r, &volume));
         let p = wire(
-            initial
+            output
                 .probes
                 .iter()
                 .find(|p| p["kind"] == "fieldset")
                 .unwrap(),
         );
-        let mut output = saved.answer(&p, vec![]);
+        output = saved.answer(&p, vec![]);
         assert!(
             output
                 .probes
                 .iter()
-                .all(|p| matches!(p["kind"].as_str(), Some("volume" | "dataset-facet")))
+                .all(|p| matches!(p["kind"].as_str(), Some("dataset-facet" | "fieldset")))
         );
         let dataset = wire(
             output
@@ -403,10 +408,6 @@ fn empty_recent_fieldset_before_volume_defers_auxiliaries_and_reaches_one_fallba
                 .unwrap(),
         );
         output = saved.answer(&dataset, scenario.rows(&r, &dataset));
-        assert_eq!(output.probes.len(), 1);
-        assert_eq!(output.probes[0]["kind"], "volume");
-        let volume = wire(&output.probes[0]);
-        output = saved.answer(&volume, scenario.rows(&r, &volume));
         assert_eq!(output.probes.len(), 1);
         let fallback = wire(&output.probes[0]);
         assert_eq!(fallback.kind, "fieldset");
@@ -448,12 +449,18 @@ fn full_empty_short_zero_and_insufficient_budget_never_activate() {
             empty_full: case == "full-empty" || case == "short",
             zero_volume: case == "zero",
         };
+        // The volume, then the listings unless the volume is zero.
         let mut answers = BTreeMap::new();
-        for p in discovery::frontier(&r, &answers).unwrap() {
-            answers.insert(
-                discovery::probe_id(&r.environment.view, &p),
-                scenario.rows(&r, &p),
-            );
+        for _ in 0..2 {
+            let Ok(pending) = discovery::frontier(&r, &answers) else {
+                break;
+            };
+            for p in pending {
+                answers.insert(
+                    discovery::probe_id(&r.environment.view, &p),
+                    scenario.rows(&r, &p),
+                );
+            }
         }
         if case == "full-empty" {
             let fallback = discovery::frontier(&r, &answers).unwrap().remove(0);
@@ -465,7 +472,11 @@ fn full_empty_short_zero_and_insufficient_budget_never_activate() {
         assert_ne!(report.status, "complete");
         assert_eq!(
             backend.calls.len(),
-            if case == "full-empty" { 4 } else { 3 }
+            match case {
+                "full-empty" => 4,
+                "zero" => 1,
+                _ => 3,
+            }
         );
         let saved = Saved::new(r.clone(), Transport::Mcp);
         let mut output = mcp::step(&saved.state, &[]).unwrap();
@@ -529,7 +540,7 @@ fn sparse_native_resume_matches_uninterrupted_without_accepted_remote_replay() {
 }
 
 #[test]
-fn old_session_policy_preserves_historical_uncapped_prefix_and_pending_attempt() {
+fn old_session_policy_fails_an_empty_listing_without_a_fallback_search() {
     let _lock = SIGNAL.lock().unwrap();
     network::CANCELLED.store(false, Ordering::Relaxed);
     for missing in [false, true] {
@@ -537,45 +548,25 @@ fn old_session_policy_preserves_historical_uncapped_prefix_and_pending_attempt()
         let saved = Saved::new(r.clone(), Transport::Mcp);
         saved.legacy(missing);
         let initial = mcp::step(&saved.state, &[]).unwrap();
+        assert_eq!(initial.probes.len(), 1);
+        let volume = wire(&initial.probes[0]);
+        assert_eq!(volume.kind, "volume");
+        let output = saved.answer(&volume, vec![json!({"events":3})]);
         let recent = wire(
-            initial
+            output
                 .probes
                 .iter()
                 .find(|p| p["kind"] == "fieldset")
                 .unwrap(),
         );
-        let mut output = saved.answer(&recent, vec![]);
-        let tag = wire(
-            output
-                .probes
-                .iter()
-                .find(|p| p["kind"] == "tag-detect")
-                .unwrap(),
+        assert_ne!(recent.start, r.start);
+        let output = saved.answer(&recent, vec![]);
+        assert_eq!(output.status, "failed", "{:?}", output.diagnostics);
+        assert_eq!(
+            output.diagnostics[0].message,
+            "Quiet or empty measurement windows cannot replace an existing schema."
         );
-        assert_ne!(tag.start, r.start);
-        output = saved.answer(&tag, vec![json!({"events":0})]);
-        let outstanding = wire(
-            output
-                .probes
-                .iter()
-                .find(|p| p["kind"] == "tag-detect")
-                .unwrap(),
-        );
-        mcp::dispatch(
-            &saved.state,
-            &discovery::probe_id(&r.environment.view, &outstanding),
-        )
-        .unwrap();
-        let before = saved.read()["answers"].clone();
-        assert_eq!(before.as_object().unwrap().len(), 2);
-        mcp::inspect_state(&saved.state).unwrap();
-        output = saved.settle(&outstanding, vec![json!({"events":0})]);
-        assert_eq!(output.status, "needs-probes");
-        for (id, answer) in before.as_object().unwrap() {
-            assert_eq!(&saved.read()["answers"][id], answer);
-        }
-        assert!(!output.probes.iter().any(|p| p["kind"] == "fieldset"));
-        assert_eq!(mcp::resumable_info(&saved.state).unwrap()["attempts"], 3);
+        assert_eq!(mcp::resumable_info(&saved.state).unwrap()["attempts"], 2);
     }
     let saved = Saved::new(request(Some(2), false), Transport::Mcp);
     let mut changed = saved.read();
@@ -593,16 +584,16 @@ fn legacy_native_and_format_two_replay_keep_their_original_empty_sample_failure(
         let scenario = Scenario::default();
         let saved = Saved::new(r.clone(), Transport::Native);
         saved.legacy(missing);
-        let answers = discovery::frontier(&r, &BTreeMap::new())
-            .unwrap()
-            .into_iter()
-            .map(|p| {
-                (
+        // The volume, then the dataset facet and the empty recent fieldset.
+        let mut answers = BTreeMap::new();
+        for _ in 0..2 {
+            for p in discovery::frontier(&r, &answers).unwrap() {
+                answers.insert(
                     discovery::probe_id(&r.environment.view, &p),
                     scenario.rows(&r, &p),
-                )
-            })
-            .collect();
+                );
+            }
+        }
         let mut backend = Backend::new(answers);
         backend.cancel_after = Some(2);
         assert_eq!(
@@ -625,16 +616,19 @@ fn legacy_native_and_format_two_replay_keep_their_original_empty_sample_failure(
     let legacy = saved.directory.join("format-two.json");
     let pack = saved.directory.join("format-two-pack.json");
     let receipt = saved.directory.join("format-two-receipt.json");
-    let initial = mcp::init(r.clone(), &legacy, &pack, &receipt).unwrap();
-    let mut answers = vec![];
-    for p in initial.probes.iter().map(wire) {
-        let id = discovery::probe_id(&r.environment.view, &p);
-        let file = saved.directory.join(format!("legacy-{id}.json"));
-        fs::write(&file, json!({"result":scenario.rows(&r,&p)}).to_string()).unwrap();
-        answers.push((id, file));
+    let mut output = mcp::init(r.clone(), &legacy, &pack, &receipt).unwrap();
+    while output.status == "needs-probes" {
+        let mut answers = vec![];
+        for p in output.probes.iter().map(wire) {
+            let id = discovery::probe_id(&r.environment.view, &p);
+            let file = saved.directory.join(format!("legacy-{id}.json"));
+            fs::write(&file, json!({"result":scenario.rows(&r,&p)}).to_string()).unwrap();
+            answers.push((id, file));
+        }
+        output = mcp::step(&legacy, &answers).unwrap();
     }
-    let output = mcp::step(&legacy, &answers).unwrap();
     assert_eq!(output.status, "failed");
+    assert_eq!(output.answered, 3);
     assert!(output.probes.is_empty());
     assert!(!pack.exists());
     assert!(!receipt.exists());

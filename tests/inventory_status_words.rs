@@ -1907,6 +1907,24 @@ fn a_run_written_by_another_release_is_settled_with_that_release() {
     let current = fs::read(&checkpoint).unwrap();
     let mut earlier: Value = serde_json::from_slice(&current).unwrap();
     earlier["producer_version"] = json!("0.1.12");
+    earlier["discovery_algorithm"] = json!("bounded-discovery-v2");
+    let mut binding = serde_json::to_vec(&(
+        &earlier["request_sha256"],
+        &earlier["created_at"],
+        &earlier["pack"],
+        &earlier["receipt"],
+        &earlier["session"]["transport"],
+        &earlier["session"]["predecessor_sha256"],
+    ))
+    .unwrap();
+    if earlier["session"]["sparse_fieldset_fallback"] == true {
+        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    if let Some(owner) = earlier["session"].get("inventory_owner") {
+        binding.extend_from_slice(b"\0inventory-owner-v1\0");
+        binding.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
+    earlier["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
     fs::write(&checkpoint, serde_json::to_vec(&earlier).unwrap()).unwrap();
 
     let next = agreed(&dir.0, "run_index 0");
