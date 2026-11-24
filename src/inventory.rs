@@ -1086,6 +1086,7 @@ pub const OTHER_CENSUS_TYPES: &str =
     "Other types with events in this repository, as seen in saved census captures:";
 pub const QUIET_NOTE: &str = "Zero events in this window does not show that the source is gone. Discovery reserves nothing for the query and never reads its answer.";
 pub const QUIET_BRIEF_POINTER: &str = "Some selected sources had zero events in their latest discovery window. Read status --json for each zero, its window, other types seen in that repository and an optional query.";
+pub const QUIET_RUN_BRIEF_POINTER: &str = "Some selected sources had zero events in this discovery run. Read the full output for this run_index for each zero, its window, other types seen in that repository and an optional query.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -3100,10 +3101,11 @@ impl InventoryState {
         }
         for run in &self.discovery_runs {
             let mut remaining = run.source_ids.iter();
+            let mut seen_quiet = BTreeSet::new();
             if !run
                 .quiet_source_ids
                 .iter()
-                .all(|id| remaining.any(|source| source == id))
+                .all(|id| seen_quiet.insert(id.as_str()) && remaining.any(|source| source == id))
                 || run.status == "complete"
                     && !run.quiet_source_ids.is_empty()
                     && run.quiet_source_ids.len() == run.source_ids.len()
@@ -4229,7 +4231,13 @@ fn mask_literals(line: &str) -> String {
 }
 
 pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus, Diagnostic> {
-    state.validate()?;
+    assess_inner(state, packs, true)
+}
+
+pub fn verify_packs<'a>(
+    state: &InventoryState,
+    packs: &'a [Pack],
+) -> Result<BTreeMap<&'a String, &'a Pack>, Diagnostic> {
     let target = state.target.as_ref();
     let mut verified_packs = BTreeMap::new();
     for pack in packs {
@@ -4250,6 +4258,17 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             "A referenced pack is missing or its digest changed; import the new snapshot explicitly.",
         ));
     }
+    Ok(verified_packs)
+}
+
+fn assess_inner(
+    state: &InventoryState,
+    packs: &[Pack],
+    include_quiet_census: bool,
+) -> Result<InventoryStatus, Diagnostic> {
+    state.validate()?;
+    let target = state.target.as_ref();
+    let verified_packs = verify_packs(state, packs)?;
     let (catalog_complete, parser_ids) = catalog(state)?;
     let mut unclassified = Vec::new();
     for id in parser_ids {
@@ -4259,9 +4278,32 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             unclassified.push(id);
         }
     }
+    let census = if include_quiet_census {
+        let needed_repos: BTreeSet<&str> = state
+            .sources
+            .iter()
+            .filter(|source| {
+                state
+                    .discovery_runs
+                    .iter()
+                    .rev()
+                    .find(|r| r.source_ids.contains(&source.id))
+                    .is_some_and(|r| r.quiet_source_ids.contains(&source.id))
+            })
+            .filter_map(|source| source.selectors.repo.as_deref())
+            .collect();
+        QuietCensusIndex::build(state, &needed_repos)
+    } else {
+        QuietCensusIndex::default()
+    };
     let mut sources = Vec::new();
     for source in &state.sources {
-        sources.push(assess_source(state, source, &verified_packs));
+        sources.push(assess_source(
+            state,
+            source,
+            &verified_packs,
+            include_quiet_census.then_some(&census),
+        ));
     }
     let reconciliation = if state
         .reconciled_evidence_sha256
@@ -4486,7 +4528,16 @@ pub fn assess_at(
     packs: &[Pack],
     now: &str,
 ) -> Result<InventoryStatus, Diagnostic> {
-    let mut status = assess(state, packs)?;
+    assess_at_options(state, packs, now, true)
+}
+
+pub fn assess_at_options(
+    state: &InventoryState,
+    packs: &[Pack],
+    now: &str,
+    include_quiet_census: bool,
+) -> Result<InventoryStatus, Diagnostic> {
+    let mut status = assess_inner(state, packs, include_quiet_census)?;
     status.refresh_reminder = state.refresh_reminder_status(now)?;
     if status
         .refresh_reminder
@@ -4503,6 +4554,7 @@ fn assess_source(
     state: &InventoryState,
     source: &InventorySource,
     packs: &BTreeMap<&String, &Pack>,
+    census: Option<&QuietCensusIndex>,
 ) -> SourceStatus {
     let mut fields = BTreeMap::<String, FieldStatus>::new();
     let mut record_kinds = Vec::new();
@@ -4639,7 +4691,10 @@ fn assess_source(
     let quiet = indexed
         .last()
         .filter(|(_, r)| r.quiet_source_ids.contains(&source.id))
-        .map(|(index, run)| quiet_detail(state, source, *index, run));
+        .map(|(index, run)| match census {
+            Some(census) => quiet_detail(census, state, source, *index, run),
+            None => quiet_placeholder(state, *index, run),
+        });
     let quick_run = state.discovery_mode == DiscoveryMode::Quick
         && runs.last().is_some_and(|r| {
             r.mode == DiscoveryMode::Quick
@@ -4766,11 +4821,34 @@ pub fn run_quiet_sources(state: &InventoryState, run_index: usize) -> Vec<Value>
     let Some(run) = state.discovery_runs.get(run_index) else {
         return vec![];
     };
-    run.quiet_source_ids
+    run_quiet_sources_for(state, run_index, &run.quiet_source_ids)
+}
+
+/// The quiet sources of one run for an explicit verified list of quiet source IDs.
+pub fn run_quiet_sources_for(
+    state: &InventoryState,
+    run_index: usize,
+    quiet_ids: &[String],
+) -> Vec<Value> {
+    let Some(run) = state.discovery_runs.get(run_index) else {
+        return vec![];
+    };
+    let sources: Vec<&InventorySource> = quiet_ids
         .iter()
         .filter_map(|id| state.sources.iter().find(|source| &source.id == id))
+        .collect();
+    if sources.is_empty() {
+        return vec![];
+    }
+    let needed_repos: BTreeSet<&str> = sources
+        .iter()
+        .filter_map(|source| source.selectors.repo.as_deref())
+        .collect();
+    let census = QuietCensusIndex::build(state, &needed_repos);
+    sources
+        .into_iter()
         .map(|source| {
-            let mut entry = json!(quiet_detail(state, source, run_index, run));
+            let mut entry = json!(quiet_detail(&census, state, source, run_index, run));
             entry["source_id"] = json!(source.id);
             entry["selectors"] = json!(source.selectors);
             entry
@@ -4778,13 +4856,34 @@ pub fn run_quiet_sources(state: &InventoryState, run_index: usize) -> Vec<Value>
         .collect()
 }
 
+fn quiet_placeholder(state: &InventoryState, run_index: usize, run: &DiscoveryRun) -> QuietSource {
+    QuietSource {
+        run_index,
+        events: 0,
+        start: run.start.clone(),
+        end: run.end.clone(),
+        view: state
+            .target
+            .as_ref()
+            .map(|target| target.environment.view.clone())
+            .unwrap_or_default(),
+        census: String::new(),
+        other_types: Vec::new(),
+        omitted_types: 0,
+        ceiling_capture: false,
+        query: None,
+        note: String::new(),
+    }
+}
+
 fn quiet_detail(
+    census: &QuietCensusIndex,
     state: &InventoryState,
     source: &InventorySource,
     run_index: usize,
     run: &DiscoveryRun,
 ) -> QuietSource {
-    let (census, other_types, omitted_types, ceiling_capture) = quiet_census(state, source);
+    let (census, other_types, omitted_types, ceiling_capture) = census.lookup(source);
     QuietSource {
         run_index,
         events: 0,
@@ -4806,98 +4905,134 @@ fn quiet_detail(
     }
 }
 
-/// Other types with events in a quiet source's repository, from verified scout and imported
-/// refresh captures: rows split within one capture are summed, and each type keeps its latest
-/// positive capture by window end, window start and digest.
-fn quiet_census(
-    state: &InventoryState,
-    source: &InventorySource,
-) -> (String, Vec<CensusType>, usize, bool) {
-    let Some(repo) = source.selectors.repo.as_deref() else {
-        return (NO_REPOSITORY_CENSUS.into(), vec![], 0, false);
-    };
-    let captures = state
-        .scouting
-        .iter()
-        .map(|scout| (&scout.plan.arguments, &scout.snapshot))
-        .chain(state.refresh_attempts.iter().filter_map(|attempt| {
-            (attempt.phase == RefreshPhase::Imported)
-                .then_some(())
-                .and(attempt.result.as_ref())
-                .map(|result| (&attempt.arguments, result))
-        }));
-    let (mut matching, mut ceiling) = (false, false);
-    let mut latest = BTreeMap::<String, (_, CensusType)>::new();
-    for (arguments, snapshot) in captures {
-        let Ok(result) = snapshot.normalized_result() else {
-            continue;
-        };
-        let (Ok(start), Ok(end)) = (
-            environment::parse_time(&arguments.start),
-            environment::parse_time(&arguments.end),
-        ) else {
-            continue;
-        };
-        let mut counts = BTreeMap::<&str, u64>::new();
-        let mut matched = false;
-        for row in &result.rows {
-            if row.get("#repo").and_then(Value::as_str) != Some(repo) {
-                continue;
-            }
-            matched = true;
-            let Some(type_) = row.get("#type").and_then(Value::as_str).filter(|type_| {
-                !type_.is_empty() && Some(*type_) != source.selectors.type_.as_deref()
-            }) else {
+#[derive(Default)]
+struct RepoCensus {
+    ceiling: bool,
+    latest: BTreeMap<
+        String,
+        (
+            (time::OffsetDateTime, time::OffsetDateTime, String),
+            CensusType,
+        ),
+    >,
+}
+
+/// Decodes each verified scout and imported refresh capture at most once across all quiet sources.
+#[derive(Default)]
+struct QuietCensusIndex {
+    repos: BTreeMap<String, RepoCensus>,
+}
+
+impl QuietCensusIndex {
+    fn build(state: &InventoryState, needed_repos: &BTreeSet<&str>) -> Self {
+        let mut index = Self::default();
+        if needed_repos.is_empty() {
+            return index;
+        }
+        let captures = state
+            .scouting
+            .iter()
+            .map(|scout| (&scout.plan.arguments, &scout.snapshot))
+            .chain(state.refresh_attempts.iter().filter_map(|attempt| {
+                (attempt.phase == RefreshPhase::Imported)
+                    .then_some(())
+                    .and(attempt.result.as_ref())
+                    .map(|result| (&attempt.arguments, result))
+            }));
+        for (arguments, snapshot) in captures {
+            let Ok(result) = snapshot.normalized_result() else {
                 continue;
             };
-            let events = row
-                .get("events")
-                .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
-                .unwrap_or(0);
-            let count = counts.entry(type_).or_default();
-            *count = count.saturating_add(events);
-        }
-        if !matched {
-            continue;
-        }
-        matching = true;
-        ceiling |= result.rows.len() >= 10_000;
-        let key = (end, start, snapshot.sha256.clone());
-        for (type_, events) in counts.into_iter().filter(|(_, events)| *events > 0) {
-            if latest
-                .get(type_)
-                .is_some_and(|(previous, _)| *previous >= key)
-            {
+            let (Ok(start), Ok(end)) = (
+                environment::parse_time(&arguments.start),
+                environment::parse_time(&arguments.end),
+            ) else {
+                continue;
+            };
+            let mut per_repo = BTreeMap::<&str, BTreeMap<&str, u64>>::new();
+            for row in &result.rows {
+                let Some(repo) = row
+                    .get("#repo")
+                    .and_then(Value::as_str)
+                    .filter(|repo| needed_repos.contains(repo))
+                else {
+                    continue;
+                };
+                let counts = per_repo.entry(repo).or_default();
+                let Some(type_) = row
+                    .get("#type")
+                    .and_then(Value::as_str)
+                    .filter(|type_| !type_.is_empty())
+                else {
+                    continue;
+                };
+                let events = row
+                    .get("events")
+                    .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
+                    .unwrap_or(0);
+                let count = counts.entry(type_).or_default();
+                *count = count.saturating_add(events);
+            }
+            if per_repo.is_empty() {
                 continue;
             }
-            latest.insert(
-                type_.into(),
-                (
-                    key.clone(),
-                    CensusType {
-                        type_: type_.into(),
-                        events,
-                        view: arguments.repository.clone(),
-                        start: arguments.start.clone(),
-                        end: arguments.end.clone(),
-                        retrieved_at: snapshot.retrieved_at.clone(),
-                    },
-                ),
-            );
+            let ceiling = result.rows.len() >= 10_000;
+            let key = (end, start, snapshot.sha256.clone());
+            for (repo, counts) in per_repo {
+                let entry = index.repos.entry(repo.into()).or_default();
+                entry.ceiling |= ceiling;
+                for (type_, events) in counts.into_iter().filter(|(_, events)| *events > 0) {
+                    if entry
+                        .latest
+                        .get(type_)
+                        .is_some_and(|(previous, _)| *previous >= key)
+                    {
+                        continue;
+                    }
+                    entry.latest.insert(
+                        type_.into(),
+                        (
+                            key.clone(),
+                            CensusType {
+                                type_: type_.into(),
+                                events,
+                                view: arguments.repository.clone(),
+                                start: arguments.start.clone(),
+                                end: arguments.end.clone(),
+                                retrieved_at: snapshot.retrieved_at.clone(),
+                            },
+                        ),
+                    );
+                }
+            }
         }
+        index
     }
-    let mut types: Vec<_> = latest.into_values().map(|(_, entry)| entry).collect();
-    types.sort_by(|a, b| b.events.cmp(&a.events).then_with(|| a.type_.cmp(&b.type_)));
-    let omitted = types.len().saturating_sub(25);
-    types.truncate(25);
-    let census = if !matching {
-        NO_CENSUS_CAPTURE
-    } else if types.is_empty() {
-        NO_OTHER_CENSUS_TYPE
-    } else {
-        OTHER_CENSUS_TYPES
-    };
-    (census.into(), types, omitted, ceiling)
+
+    fn lookup(&self, source: &InventorySource) -> (String, Vec<CensusType>, usize, bool) {
+        let Some(repo) = source.selectors.repo.as_deref() else {
+            return (NO_REPOSITORY_CENSUS.into(), vec![], 0, false);
+        };
+        let Some(entry) = self.repos.get(repo) else {
+            return (NO_CENSUS_CAPTURE.into(), vec![], 0, false);
+        };
+        let mut types: Vec<_> = entry
+            .latest
+            .values()
+            .map(|(_, item)| item)
+            .filter(|item| Some(item.type_.as_str()) != source.selectors.type_.as_deref())
+            .cloned()
+            .collect();
+        types.sort_by(|a, b| b.events.cmp(&a.events).then_with(|| a.type_.cmp(&b.type_)));
+        let omitted = types.len().saturating_sub(25);
+        types.truncate(25);
+        let census = if types.is_empty() {
+            NO_OTHER_CENSUS_TYPE
+        } else {
+            OTHER_CENSUS_TYPES
+        };
+        (census.into(), types, omitted, entry.ceiling)
+    }
 }
 
 fn source_evidence_dates(pack: &Pack, ids: &[String]) -> Vec<String> {

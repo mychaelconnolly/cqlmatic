@@ -944,7 +944,12 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
             .or_else(|| request.and_then(|r| r.state.map(PathBuf::from))),
     )?;
     let state = load(&path)?;
-    let mut report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+    let mut report = inventory::assess_at_options(
+        &state,
+        &packs(&state)?,
+        &discovery::timestamp(),
+        !args.brief,
+    )?;
     if !args.brief {
         note_status_row_limit(&state, &mut report);
     }
@@ -1011,7 +1016,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         return Err(fail("Unsupported inventory request version."));
     }
     if let InventoryAction::NextProbe { run_index, answer } = request.action {
-        let mut action = next_probe(&path, run_index, answer)?;
+        let mut action = next_probe(&path, run_index, answer, args.brief)?;
         if args.brief {
             action
                 .as_object_mut()
@@ -1027,7 +1032,15 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         _ => None,
     };
     let writer = inventory_writer(&path)?;
-    let (report, extra, state) = apply_locked(&path, request.action, MAX_STATE_BYTES, &writer)?;
+    let (report, extra, state) = apply_locked_options(
+        &path,
+        request.action,
+        MAX_STATE_BYTES,
+        &writer,
+        !args.brief,
+        true,
+    )?;
+    let report = report.expect("inventory run requests a status report");
     let brief = args
         .brief
         .then(|| status_brief(&state, &report, session_id.as_deref()));
@@ -1187,11 +1200,12 @@ fn next_probe(
     path: &Path,
     run_index: Option<usize>,
     answer: Option<DiscoveryAnswer>,
+    brief: bool,
 ) -> Result<Value, Diagnostic> {
     let writer = inventory_writer(path)?;
     let mut run = inspect_next_probe_run(path, run_index, &writer)?;
     let index = run.index;
-    let apply = |action| apply_locked(path, action, MAX_STATE_BYTES, &writer);
+    let apply = |action| apply_locked_options(path, action, MAX_STATE_BYTES, &writer, false, false);
     let step = |answers| {
         apply(InventoryAction::DiscoveryStep {
             run_index: Some(index),
@@ -1306,6 +1320,7 @@ fn next_probe(
         diagnostics.push(safe_answer_diagnostic(&refusal.code, refusal.severity));
     }
     let mut expired = mcp::time_limit_passed(&run.relay, &discovery::timestamp());
+    let mut relay_quiet = mcp::quiet_source_ids(&run.relay).ok().flatten();
     drop(run);
 
     let mut dispatched = false;
@@ -1337,6 +1352,7 @@ fn next_probe(
         let saved = inspect_next_probe_run(path, Some(index), &writer)
             .map_err(|read_error| poll.err().unwrap_or(read_error))?;
         phase = saved.phase;
+        relay_quiet = mcp::quiet_source_ids(&saved.relay).ok().flatten();
         terminal_failure = relay_failure_cause(&saved.relay);
         source_id = terminal_failure
             .as_ref()
@@ -1440,8 +1456,39 @@ fn next_probe(
     if !diagnostics.is_empty() {
         action["diagnostics"] = json!(diagnostics);
     }
-    if let Some(state) = load_existing(path)? {
-        attach_quiet_sources(&state, index, &mut action);
+    let state = if brief && relay_quiet.is_some() {
+        None
+    } else {
+        load_existing(path)?
+    };
+    let quiet_ids = relay_quiet
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.discovery_runs.get(index))
+                .map(|r| r.quiet_source_ids.clone())
+        })
+        .unwrap_or_default();
+    if !quiet_ids.is_empty() {
+        action["quiet_source_count"] = json!(quiet_ids.len());
+        if brief {
+            let mut notices = action
+                .get("notices")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            notices.push(json!({
+                "code": "DISCOVERY_QUIET_SOURCES",
+                "severity": "info",
+                "message": inventory::QUIET_RUN_BRIEF_POINTER
+            }));
+            action["notices"] = json!(notices);
+        } else if let Some(state) = state.as_ref() {
+            let quiet = inventory::run_quiet_sources_for(state, index, &quiet_ids);
+            if !quiet.is_empty() {
+                action["quiet_sources"] = json!(quiet);
+            }
+        }
     }
     Ok(action)
 }
@@ -1880,6 +1927,19 @@ fn apply_locked(
     work_budget: u64,
     writer: &storage::Writer,
 ) -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
+    let (report, extra, state) =
+        apply_locked_options(path, action, work_budget, writer, true, true)?;
+    Ok((report.expect("apply_locked requests report"), extra, state))
+}
+
+fn apply_locked_options(
+    path: &Path,
+    action: InventoryAction,
+    work_budget: u64,
+    writer: &storage::Writer,
+    include_quiet_census: bool,
+    need_report: bool,
+) -> Result<(Option<InventoryStatus>, Value, InventoryState), Diagnostic> {
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
     let now = discovery::timestamp();
@@ -1937,13 +1997,13 @@ fn apply_locked(
             let relay = inspect_selected_run(&state, index)?;
             let run = &state.discovery_runs[index];
             let phase = if matches!(run.status.as_str(), "complete" | "superseded") {
-                run.status.as_str()
+                run.status.clone()
             } else {
-                relay.status.as_str()
+                relay.status.clone()
             };
             if let InventoryAction::DiscoveryStep { answers, .. } = &action
                 && !answers.is_empty()
-                && matches!(phase, "complete" | "superseded" | "failed")
+                && matches!(phase.as_str(), "complete" | "superseded" | "failed")
             {
                 let (code, message) = if answers.iter().any(|answer| {
                     relay
@@ -1987,10 +2047,60 @@ fn apply_locked(
                     });
                     diagnostics.push(failure);
                 }
-                let report = inventory::assess_at(&state, &packs(&state)?, &now)?;
+                let relay_quiet = mcp::quiet_source_ids(&relay)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+                if relay.status == "failed" {
+                    let run = &mut state.discovery_runs[index];
+                    let mut changed = false;
+                    if run.status != "failed" {
+                        run.status = "failed".into();
+                        changed = true;
+                    }
+                    if run.answered != relay.answers.len() {
+                        run.answered = relay.answers.len();
+                        changed = true;
+                    }
+                    if let Some(quiet) = &relay_quiet
+                        && run.quiet_source_ids != *quiet
+                    {
+                        run.quiet_source_ids.clone_from(quiet);
+                        changed = true;
+                    }
+                    if changed {
+                        state.validate()?;
+                        state.updated_at = now.clone();
+                        let bytes = serde_json::to_vec_pretty(&state)
+                            .map_err(|_| fail("Cannot serialize inventory state."))?;
+                        writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
+                    }
+                }
+                let report = if need_report {
+                    Some(inventory::assess_at_options(
+                        &state,
+                        &packs(&state)?,
+                        &now,
+                        include_quiet_census,
+                    )?)
+                } else {
+                    None
+                };
                 let mut reply = json!({"run_index":index,"status":"incomplete","run_status":phase,"diagnostics":diagnostics});
                 if let Some(advice) = next_action {
                     reply["next_action"] = json!(advice);
+                }
+                let quiet_ids = relay_quiet
+                    .as_deref()
+                    .unwrap_or(&state.discovery_runs[index].quiet_source_ids);
+                if !quiet_ids.is_empty() {
+                    if include_quiet_census {
+                        let quiet = inventory::run_quiet_sources_for(&state, index, quiet_ids);
+                        if !quiet.is_empty() {
+                            reply["quiet_source_count"] = json!(quiet.len());
+                            reply["quiet_sources"] = json!(quiet);
+                        }
+                    } else {
+                        reply["quiet_source_count"] = json!(quiet_ids.len());
+                    }
                 }
                 return Ok((report, reply, state));
             }
@@ -2078,24 +2188,54 @@ fn apply_locked(
         )?;
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
-            attach_quiet_sources(&state, index, &mut extra);
+            if include_quiet_census {
+                attach_quiet_sources(&state, index, &mut extra);
+            } else {
+                let count = state
+                    .discovery_runs
+                    .get(index)
+                    .map_or(0, |r| r.quiet_source_ids.len());
+                if count > 0 && extra.is_object() {
+                    extra["quiet_source_count"] = json!(count);
+                }
+            }
         }
         state.validate()?;
         let loaded = packs(&state)?;
-        let mut report = inventory::assess_at(&state, &loaded, &now)?;
-        let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
-            inventory_run_evidence(&state, work_budget, &relay_guards)?
-        } else {
-            (vec![], vec![], false)
-        };
-        if resolve_work {
-            state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
-            if let Some(reviewed_at) = reconcile_at {
-                state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
-                state.reconciled_at = Some(reviewed_at);
+        let needs_work_pass = resolve_work
+            && (reconcile_at.is_some()
+                || state
+                    .pending_inventory
+                    .iter()
+                    .any(|w| w.resolution.is_none()));
+        let (report, evidence_limited) = if need_report || needs_work_pass {
+            let mut report = inventory::assess_at_options(
+                &state,
+                &loaded,
+                &now,
+                include_quiet_census && !needs_work_pass,
+            )?;
+            let (evidence, _evidence_guards, evidence_limited) = if needs_work_pass {
+                inventory_run_evidence(&state, work_budget, &relay_guards)?
+            } else {
+                (vec![], vec![], false)
+            };
+            if needs_work_pass {
+                state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
+                if let Some(reviewed_at) = reconcile_at {
+                    state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
+                    state.reconciled_at = Some(reviewed_at);
+                }
+                if need_report {
+                    report =
+                        inventory::assess_at_options(&state, &loaded, &now, include_quiet_census)?;
+                }
             }
-            report = inventory::assess_at(&state, &loaded, &now)?;
-        }
+            (need_report.then_some(report), evidence_limited)
+        } else {
+            inventory::verify_packs(&state, &loaded)?;
+            (None, false)
+        };
         if evidence_limited {
             extra["inventory_work_evidence_limited"] = json!(true);
             notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
@@ -2407,7 +2547,7 @@ fn action_brief(action: &Value) -> Value {
         .as_u64()
         .is_some_and(|count| count > 0)
     {
-        notices.push(json!({"code":"DISCOVERY_QUIET_SOURCES","severity":"info","message":inventory::QUIET_BRIEF_POINTER}));
+        notices.push(json!({"code":"DISCOVERY_QUIET_SOURCES","severity":"info","message":inventory::QUIET_RUN_BRIEF_POINTER}));
     }
     if let Some(index) = action["notices"].as_array().and_then(|notices| {
         notices

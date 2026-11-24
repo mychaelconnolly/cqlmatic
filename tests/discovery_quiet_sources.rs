@@ -1376,3 +1376,331 @@ fn quiet_sources_cost_one_search_each() {
         0
     );
 }
+
+#[test]
+fn next_probe_brief_omits_census_detail_and_uses_run_pointer() {
+    let dir = Temp::new();
+    confirm(&dir, Depth::SourcesOnly, &["alpha", "bravo"]);
+    let mut state: inventory::InventoryState = serde_json::from_slice(&dir.bytes()).unwrap();
+    let rows: Vec<_> = (0..25)
+        .map(|i| json!({"#repo":"alpha_repo","#type":format!("sibling_{i:02}"),"events":100 - i}))
+        .collect();
+    let raw = serde_json::to_vec(&json!({"result":rows})).unwrap();
+    scout(
+        &mut state,
+        &raw,
+        "2025-12-01T00:00:00Z",
+        "2025-12-02T00:00:00Z",
+    );
+    save(&dir, &state);
+    prepare(&dir, 10, &[], &[]);
+
+    let first = next_probe(&dir, None, true);
+    let probe_id = first["probe"]["probe_id"].as_str().unwrap().to_string();
+    let answer_file = dir.0.join("zero.json");
+    write(&answer_file, &json!({"result":[{"events":0}]}));
+    let answer = (probe_id, answer_file.to_string_lossy().into_owned());
+
+    let after_zero = next_probe(&dir, Some(&answer), true);
+    let poll = next_probe(&dir, None, true);
+    let expected_bravo_probe = after_zero["probe"]["probe_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(poll["probe"]["probe_id"], expected_bravo_probe);
+
+    for reply in [&after_zero, &poll] {
+        assert_eq!(reply["state"], "probe", "{reply}");
+        assert_eq!(reply["quiet_source_count"], 1, "{reply}");
+        assert!(reply.get("quiet_sources").is_none(), "{reply}");
+        let serialized = reply.to_string();
+        assert!(!serialized.contains("sibling_00"), "{serialized}");
+        assert!(!serialized.contains("groupBy([#type]"), "{serialized}");
+        let notices = reply["notices"].as_array().unwrap();
+        let notice = notices
+            .iter()
+            .find(|n| n["code"] == "DISCOVERY_QUIET_SOURCES")
+            .unwrap();
+        assert_eq!(notice["message"], inventory::QUIET_RUN_BRIEF_POINTER);
+    }
+}
+
+#[test]
+fn historical_quiet_run_brief_uses_run_specific_pointer() {
+    let dir = Temp::new();
+    confirm(&dir, Depth::SourcesOnly, &["alpha"]);
+    prepare(&dir, 4, &[], &[]);
+    let first = drive(&dir, &World::new(&[("alpha", 0)]), None);
+    assert_eq!(first.last["state"], "failed");
+
+    prepare(&dir, 4, &[], &[]);
+    let second = drive(&dir, &World::new(&[("alpha", 5)]), None);
+    assert_eq!(second.last["state"], "complete");
+
+    let poll_old = call_brief(
+        &dir,
+        json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+    );
+    let notices = poll_old["action"]["notices"].as_array().unwrap();
+    let notice = notices
+        .iter()
+        .find(|n| n["code"] == "DISCOVERY_QUIET_SOURCES")
+        .unwrap();
+    assert_eq!(notice["message"], inventory::QUIET_RUN_BRIEF_POINTER);
+    assert!(
+        !notice["message"]
+            .as_str()
+            .unwrap()
+            .contains("latest discovery window")
+    );
+}
+
+#[test]
+fn capture_hook_keeps_disjunctive_type_leads_and_exempts_escaped_census_queries() {
+    let dir = Temp::new();
+    confirm(&dir, Depth::SourcesOnly, &["alpha"]);
+    call(&dir, json!({"kind":"reconcile","reviewed_at":END}));
+    let before_pending = status(&dir)["pending_inventory"].as_array().unwrap().len();
+    capture(
+        &dir,
+        &json!({
+            "tool_name": format!("mcp__{SERVER}__falcon_search_ngsiem"),
+            "tool_input": {
+                "repository": VIEW,
+                "query_string": "#repo=alpha_repo (#type=novel_one OR #type=novel_two) | select(user)",
+                "start": START,
+                "end": END
+            },
+            "tool_response": json!({"result":[{"user":"alice"}]}).to_string(),
+        }),
+    );
+    let tally = read(
+        &dir.0
+            .join("workflow")
+            .join("state.json.captures")
+            .join("tally.json"),
+    );
+    assert_eq!(tally["new-source-lead"], 1, "{tally}");
+    assert_eq!(
+        status(&dir)["pending_inventory"].as_array().unwrap().len(),
+        before_pending + 1
+    );
+
+    // An expected typed source whose repository contains a literal `*` still tallies not-creditable.
+    let star_dir = Temp::new();
+    call(&star_dir, Depth::SourcesOnly.mode());
+    let star_scope = Scope {
+        repo: Some("star*repo".into()),
+        type_: Some("star_type".into()),
+        event: None,
+    };
+    call(
+        &star_dir,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources",
+            "context":"Synthetic wildcard repo","expected_sources":[star_scope]}),
+    );
+    call(&star_dir, json!({"kind":"reconcile","reviewed_at":END}));
+    let before = star_dir.bytes();
+    let suggested = discovery::quiet_census_query(&star_scope).unwrap().unwrap();
+    capture(
+        &star_dir,
+        &json!({
+            "tool_name": format!("mcp__{SERVER}__falcon_search_ngsiem"),
+            "tool_input": {"repository": VIEW, "query_string": suggested, "start": START, "end": END},
+            "tool_response": json!({"result":[{"#type":"other","events":5}]}).to_string(),
+        }),
+    );
+    assert!(star_dir.bytes() == before, "state changed");
+    let star_tally = read(
+        &star_dir
+            .0
+            .join("workflow")
+            .join("state.json.captures")
+            .join("tally.json"),
+    );
+    assert_eq!(star_tally, json!({"not-creditable":1}));
+}
+
+#[test]
+fn interrupted_terminal_zero_syncs_on_poll_and_duplicate_submission() {
+    let dir = Temp::new();
+    confirm(&dir, Depth::SourcesOnly, &["alpha"]);
+    prepare(&dir, 4, &[], &[]);
+    let reserved = next_probe(&dir, None, false);
+    let probe_id = reserved["probe"]["probe_id"].as_str().unwrap().to_string();
+    let before_answer = dir.bytes();
+    let zero_file = dir.0.join("zero.json");
+    write(&zero_file, &json!({"result":[{"events":0}]}));
+    let pair = (probe_id.clone(), zero_file.to_string_lossy().into_owned());
+    let failed = next_probe(&dir, Some(&pair), false);
+    assert_eq!(failed["state"], "failed", "{failed}");
+
+    // Simulate a crash after checkpoint commit and before inventory state commit.
+    fs::write(dir.state(), &before_answer).unwrap();
+    let poll = next_probe(&dir, None, false);
+    assert_eq!(poll["state"], "failed", "{poll}");
+    assert_eq!(poll["quiet_source_count"], 1, "{poll}");
+    assert_eq!(poll["quiet_sources"][0]["source_id"], id("alpha"));
+
+    // Duplicate answer submission keeps MCP_ALREADY_ANSWERED and syncs the failed row + quiet IDs.
+    let dup = call(
+        &dir,
+        json!({"kind":"discovery-step","run_index":0,"answers":[{"probe_id":probe_id,"result_file":zero_file}]}),
+    );
+    assert_eq!(dup["action"]["quiet_source_count"], 1, "{dup}");
+    assert!(
+        dup["action"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "MCP_ALREADY_ANSWERED"),
+        "{dup}"
+    );
+    let saved_run = last_run(&dir);
+    assert_eq!(saved_run["status"], "failed");
+    assert_eq!(saved_run["quiet_source_ids"], json!([id("alpha")]));
+}
+
+#[test]
+fn paired_duplicate_source_and_quiet_ids_are_rejected() {
+    let dir = Temp::new();
+    confirm(&dir, Depth::SourcesOnly, &["alpha", "bravo"]);
+    prepare(&dir, 4, &[], &[]);
+    let done = drive(&dir, &World::new(&[("alpha", 5), ("bravo", 0)]), None);
+    assert_eq!(done.last["state"], "complete");
+
+    let mut saved = dir.saved();
+    saved["discovery_runs"][0]["source_ids"] = json!([id("alpha"), id("bravo"), id("bravo")]);
+    saved["discovery_runs"][0]["quiet_source_ids"] = json!([id("bravo"), id("bravo")]);
+    write(&dir.state(), &saved);
+    let output = status_output(&dir, &["--json"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[test]
+fn many_quiet_sources_with_ceiling_scout_stay_fast() {
+    // 1. In-process single-pass check across 50 typed sources and a 10,000-row scout.
+    let dir = Temp::new();
+    let scopes: Vec<Scope> = (0..50)
+        .map(|i| Scope {
+            repo: Some("shared_repo".into()),
+            type_: Some(format!("type_{i:02}")),
+            event: None,
+        })
+        .collect();
+    call(&dir, Depth::SourcesOnly.mode());
+    call(
+        &dir,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources",
+            "context":"Synthetic 50-source ceiling scout","expected_sources":scopes}),
+    );
+    let mut state: inventory::InventoryState = serde_json::from_slice(&dir.bytes()).unwrap();
+    let rows: Vec<_> = (0..10_000)
+        .map(|i| {
+            json!({
+                "#repo": "shared_repo",
+                "#type": format!("type_{:02}", i % 50),
+                "#sourcetype": format!("st_{}", i / 50),
+                "events": 10
+            })
+        })
+        .collect();
+    let raw = serde_json::to_vec(&json!({"result":rows})).unwrap();
+    scout(
+        &mut state,
+        &raw,
+        "2025-12-01T00:00:00Z",
+        "2025-12-02T00:00:00Z",
+    );
+    let source_ids: Vec<String> = state.sources.iter().map(|s| s.id.clone()).collect();
+    state.discovery_runs.push(inventory::DiscoveryRun {
+        state_path: dir.0.join("run.json").to_string_lossy().into_owned(),
+        pack_path: dir.0.join("pack.json").to_string_lossy().into_owned(),
+        receipt_path: dir.0.join("receipt.json").to_string_lossy().into_owned(),
+        elapsed_seconds: 0.0,
+        start: START.into(),
+        end: END.into(),
+        mode: inventory::DiscoveryMode::Quick,
+        quick_depth: inventory::QuickDepth::SourcesOnly,
+        max_queries: 50,
+        max_seconds: 60,
+        value_fields: vec![],
+        source_ids: source_ids.clone(),
+        quiet_source_ids: source_ids[..49].to_vec(),
+        status: "failed".into(),
+        answered: 49,
+    });
+    let full = inventory::assess(&state, &[]).unwrap();
+    let full_quiet: Vec<_> = full
+        .sources
+        .iter()
+        .filter_map(|s| s.quiet.as_ref())
+        .collect();
+    assert_eq!(full_quiet.len(), 49);
+    assert!(
+        full_quiet
+            .iter()
+            .all(|q| q.ceiling_capture && q.other_types.len() == 25 && q.omitted_types == 24)
+    );
+    let brief_status = inventory::assess_at_options(&state, &[], END, false).unwrap();
+    assert_eq!(
+        brief_status
+            .sources
+            .iter()
+            .filter(|s| s.quiet.is_some())
+            .count(),
+        49
+    );
+
+    // 2. End-to-end CLI next-probe --brief across 12 sources with the 10,000-row scout.
+    let cli_dir = Temp::new();
+    call(&cli_dir, Depth::SourcesOnly.mode());
+    call(
+        &cli_dir,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources",
+            "context":"Synthetic 12-source ceiling scout","expected_sources":&scopes[..12]}),
+    );
+    let mut cli_state: inventory::InventoryState =
+        serde_json::from_slice(&cli_dir.bytes()).unwrap();
+    scout(
+        &mut cli_state,
+        &raw,
+        "2025-12-01T00:00:00Z",
+        "2025-12-02T00:00:00Z",
+    );
+    save(&cli_dir, &cli_state);
+    call(
+        &cli_dir,
+        json!({"kind":"prepare-discovery","start":START,"end":END,"max_queries":12,"max_seconds":60}),
+    );
+
+    let zero_file = cli_dir.0.join("zero-12.json");
+    let live_file = cli_dir.0.join("live-12.json");
+    write(&zero_file, &json!({"result":[{"events":0}]}));
+    write(&live_file, &json!({"result":[{"events":7}]}));
+    let zero_path = zero_file.to_string_lossy().into_owned();
+    let live_path = live_file.to_string_lossy().into_owned();
+
+    let mut action = next_probe(&cli_dir, None, true);
+    let mut answered = 0usize;
+    loop {
+        if action["state"] == "complete" {
+            break;
+        }
+        assert_eq!(action["state"], "probe", "after {answered}: {action}");
+        let probe_id = action["probe"]["probe_id"].as_str().unwrap().to_string();
+        let query = action["probe"]["arguments"]["query_string"]
+            .as_str()
+            .unwrap();
+        let file = if query.contains("type_11") {
+            live_path.clone()
+        } else {
+            zero_path.clone()
+        };
+        answered += 1;
+        action = next_probe(&cli_dir, Some(&(probe_id, file)), true);
+    }
+    assert_eq!(answered, 12);
+    assert_eq!(action["quiet_source_count"], 11, "{action}");
+    assert!(action.get("quiet_sources").is_none(), "{action}");
+}

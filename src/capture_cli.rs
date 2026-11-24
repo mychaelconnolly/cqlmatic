@@ -14,6 +14,7 @@ use cqlmatic::{
     contracts::{Analysis, Diagnostic, EnvironmentId, Outcome, Severity},
     discovery,
     inventory::{InventoryAction, InventoryState, QueryObservation, QueryResultAssertion},
+    language::{ast, parser},
     mcp,
     setup::SEARCH_TOOL,
     storage,
@@ -330,6 +331,19 @@ fn observe(
     let Ok(hints) = app::inventory_hints(&search.query) else {
         return "query-not-read";
     };
+    if hints.is_empty()
+        && state.sources.iter().any(|known| {
+            known.expected
+                && known.selectors.type_.is_some()
+                && discovery::quiet_census_query(&known.selectors)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some(search.query.trim())
+        })
+    {
+        return "not-creditable";
+    }
     let [hint] = hints.as_slice() else {
         return "no-single-source";
     };
@@ -344,6 +358,8 @@ fn observe(
         if source.type_.is_none()
             && source.event.is_none()
             && source.repo.is_some()
+            && parser::parse(&search.query)
+                .is_ok_and(|pipeline| !has_non_repo_source_filter(&pipeline))
             && state.sources.iter().any(|known| {
                 known.expected
                     && known.selectors.type_.is_some()
@@ -562,6 +578,63 @@ fn patiently<T>(mut attempt: impl FnMut() -> Result<T, Diagnostic>) -> Result<T,
             result => return result,
         }
     }
+}
+
+fn filter_has_non_repo_source(filter: &ast::Filter) -> bool {
+    match filter {
+        ast::Filter::Compare { field, .. } => {
+            matches!(
+                field.as_str(),
+                "#type" | "#sourcetype" | "#event_simpleName"
+            )
+        }
+        ast::Filter::And(items) | ast::Filter::Or(items) => {
+            items.iter().any(filter_has_non_repo_source)
+        }
+        ast::Filter::Not(inner) => filter_has_non_repo_source(inner),
+        ast::Filter::Call(call) => call_has_non_repo_source_filter(call),
+        ast::Filter::Text(_) | ast::Filter::Bool(_) => false,
+    }
+}
+
+fn call_has_non_repo_source_filter(call: &ast::Call) -> bool {
+    if call.name.eq_ignore_ascii_case("in") {
+        let mut positional = 0usize;
+        for arg in &call.args {
+            let is_field =
+                arg.name.as_deref() == Some("field") || (arg.name.is_none() && positional == 0);
+            if arg.name.is_none() {
+                positional += 1;
+            }
+            if is_field
+                && matches!(
+                    &arg.value,
+                    ast::Value::Word(name) | ast::Value::String(name)
+                        if matches!(name.as_str(), "#type" | "#sourcetype" | "#event_simpleName")
+                )
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_non_repo_source_filter(pipeline: &ast::Pipeline) -> bool {
+    pipeline.steps.iter().any(|step| match step {
+        ast::Step::Filter(filter) => filter_has_non_repo_source(filter),
+        ast::Step::Call(call) => call_has_non_repo_source_filter(call),
+        ast::Step::Case(branches) => branches.iter().any(has_non_repo_source_filter),
+        ast::Step::Match { field, arms } => {
+            matches!(
+                field.as_str(),
+                "#type" | "#sourcetype" | "#event_simpleName"
+            ) || arms
+                .iter()
+                .any(|(_, branch)| has_non_repo_source_filter(branch))
+        }
+        ast::Step::Assign { .. } | ast::Step::Link { .. } => false,
+    })
 }
 
 fn apply(path: &Path, action: InventoryAction) -> Result<Value, Diagnostic> {
