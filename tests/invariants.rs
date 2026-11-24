@@ -163,11 +163,17 @@ fn dataset_facets_reject_malformed_rows_in_execution_and_frontier() {
         assert_eq!(fake.stops, fake.starts);
 
         let initial = discovery::frontier(&request, &BTreeMap::new()).unwrap();
-        let dataset = initial.iter().find(|p| p.kind == "dataset-facet").unwrap();
-        let answered = BTreeMap::from([(
+        assert_eq!(initial[0].kind, "volume");
+        let mut answered = BTreeMap::from([(
+            discovery::probe_id(&request.environment.view, &initial[0]),
+            vec![json!({"events":3})],
+        )]);
+        let listings = discovery::frontier(&request, &answered).unwrap();
+        let dataset = listings.iter().find(|p| p.kind == "dataset-facet").unwrap();
+        answered.insert(
             discovery::probe_id(&request.environment.view, dataset),
             vec![row],
-        )]);
+        );
         assert_eq!(
             discovery::frontier(&request, &answered).unwrap_err().code,
             "DISCOVERY_EVIDENCE"
@@ -565,17 +571,20 @@ fn kind_facet_value_forbidden_in_cql_must_not_activate_a_pack() {
 fn frontier_skips_absent_kinds_and_emits_tag_kinds_with_value_probes() {
     let request = discovery_request();
     let view = &request.environment.view;
-    let initial = discovery::frontier(&request, &BTreeMap::new()).unwrap();
-    assert_eq!(initial.len(), 3);
     let mut answered = BTreeMap::new();
-    for probe in &initial {
-        let rows = match probe.kind.as_str() {
-            "volume" => vec![json!({"events":"3"})],
-            "dataset-facet" => vec![json!({"#event.dataset":"synthetic","events":"3"})],
-            "fieldset" => vec![json!({"field":"user"})],
-            _ => panic!("unexpected initial probe"),
-        };
-        answered.insert(discovery::probe_id(view, probe), rows);
+    // The volume comes first, then the dataset facet and fieldset.
+    for expected in [1, 2] {
+        let base = discovery::frontier(&request, &answered).unwrap();
+        assert_eq!(base.len(), expected);
+        for probe in &base {
+            let rows = match probe.kind.as_str() {
+                "volume" => vec![json!({"events":"3"})],
+                "dataset-facet" => vec![json!({"#event.dataset":"synthetic","events":"3"})],
+                "fieldset" => vec![json!({"field":"user"})],
+                _ => panic!("unexpected initial probe"),
+            };
+            answered.insert(discovery::probe_id(view, probe), rows);
+        }
     }
     let dependent = discovery::frontier(&request, &answered).unwrap();
     assert_eq!(

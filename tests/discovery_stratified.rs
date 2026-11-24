@@ -845,29 +845,32 @@ fn malformed_facets_budgets_and_timeouts_leave_the_active_pack_untouched() {
         let pack = dir.0.join("pack.json");
         let receipt = dir.0.join("receipt.json");
         let old = existing_pack(&pack, r.environment.clone());
-        let output = mcp::init(r, &state, &pack, &receipt).unwrap();
-        let answers = output
-            .probes
-            .iter()
-            .enumerate()
-            .map(|(index, wire)| {
-                let p = wire_probe(wire);
-                let payload = if p.kind == "dataset-facet" && failure != "budget" {
-                    match failure {
-                        "malformed" => json!({"result":[{"#event.dataset":7,"events":1}]}),
-                        "truncated" => json!({"result":scenario.datasets,"partial":true}),
-                        "timeout" => json!({"result":[],"error":"synthetic timeout"}),
-                        _ => unreachable!(),
-                    }
-                } else {
-                    json!({"result":scenario.rows(&request(), &p)})
-                };
-                let path = dir.0.join(format!("answer-{index}.json"));
-                fs::write(&path, payload.to_string()).unwrap();
-                (wire["probe_id"].as_str().unwrap().to_string(), path)
-            })
-            .collect::<Vec<_>>();
-        let output = mcp::step(&state, &answers).unwrap();
+        let mut output = mcp::init(r, &state, &pack, &receipt).unwrap();
+        // The volume answers first; the listings follow in the second batch.
+        for _ in 0..2 {
+            let answers = output
+                .probes
+                .iter()
+                .enumerate()
+                .map(|(index, wire)| {
+                    let p = wire_probe(wire);
+                    let payload = if p.kind == "dataset-facet" && failure != "budget" {
+                        match failure {
+                            "malformed" => json!({"result":[{"#event.dataset":7,"events":1}]}),
+                            "truncated" => json!({"result":scenario.datasets,"partial":true}),
+                            "timeout" => json!({"result":[],"error":"synthetic timeout"}),
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        json!({"result":scenario.rows(&request(), &p)})
+                    };
+                    let path = dir.0.join(format!("answer-{index}.json"));
+                    fs::write(&path, payload.to_string()).unwrap();
+                    (wire["probe_id"].as_str().unwrap().to_string(), path)
+                })
+                .collect::<Vec<_>>();
+            output = mcp::step(&state, &answers).unwrap();
+        }
         assert_eq!(
             output.status, "failed",
             "{failure}: {:?}",

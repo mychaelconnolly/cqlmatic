@@ -345,14 +345,18 @@ fn probe(
 }
 pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     validate_request(r)?;
-    let mut probes = Vec::new();
-    if r.census {
-        probes.push(census_probe(r)?);
-    }
-    for s in &r.sources {
-        probes.extend(base_probes(r, s)?);
-    }
-    let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census","population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
+    // The census answers first, then every source's volume, matching execution.
+    let probes = if r.census {
+        vec![census_probe(r)?]
+    } else {
+        r.sources
+            .iter()
+            .map(|s| volume_probe(r, s))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let listings =
+        "dataset facet and fieldset for every source with events, after every source volume";
+    let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census",listings,"population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
     if r.depth == DiscoveryDepth::SourcesOnly {
         result["depth"] = json!(r.depth);
         result["deferred_stages"] =
@@ -362,6 +366,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
         result["max_population_fields_per_source"] = json!(limit);
         result["deferred_stages"] = json!([
             "base measurements for sources found by explicit census",
+            listings,
             "tag namespace checks",
             "record-kind facets over the full request window",
             "up to ten literal-filtered rare-kind fieldsets over the full request window",
@@ -372,13 +377,22 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     if !r.population_fields.is_empty() {
         result["population_fields"] = json!(r.population_fields);
         let stage = if r.max_population_fields_per_source.is_some() {
-            4
+            5
         } else {
-            1
+            2
         };
         result["deferred_stages"][stage] = json!(
             "source-bound explicit population batches; sampled fields use the sample window and unsampled fields use the full request window"
         );
+    }
+    if r.census && !r.sources.is_empty() {
+        result["deferred_stages"]
+            .as_array_mut()
+            .expect("stages are an array")
+            .insert(
+                0,
+                json!("volume checks for requested sources after the census"),
+            );
     }
     if let Some((low, high)) = expected_searches(r) {
         // An estimate for sources that hold events; the query limit always applies.
@@ -1084,48 +1098,50 @@ pub(crate) fn frontier_with_policy(
     sparse_fieldset_fallback: bool,
 ) -> Result<Vec<Probe>, Diagnostic> {
     validate_request(r)?;
+    let id = |p: &Probe| probe_id(&r.environment.view, p);
     let mut sources = r.sources.clone();
-    let mut pending = Vec::new();
     if r.census {
         let p = census_probe(r)?;
-        if let Some(rows) = answered.get(&probe_id(&r.environment.view, &p)) {
-            census_sources(rows, &mut sources)?;
-        } else {
-            pending.push(p);
-        }
+        let Some(rows) = answered.get(&id(&p)) else {
+            return Ok(vec![p]);
+        };
+        census_sources(rows, &mut sources)?;
     }
     if sources.len() > 100 {
         return Err(fail(
             "More than 100 sources require an explicitly narrowed discovery run.",
         ));
     }
-    for s in sources {
-        validate_scope(&s)?;
-        let base = base_probes(r, &s)?;
-        if r.depth == DiscoveryDepth::SourcesOnly {
-            for p in base {
-                if let Some(rows) = answered.get(&probe_id(&r.environment.view, &p)) {
-                    if count_row(rows)? == 0 {
-                        return Err(fail(
-                            "Quiet source measurements cannot establish observed presence.",
-                        ));
-                    }
+    // Every source's volume comes first, so a quiet source costs one search.
+    let mut pending = Vec::new();
+    for s in &sources {
+        validate_scope(s)?;
+        let p = volume_probe(r, s)?;
+        match answered.get(&id(&p)) {
+            Some(rows) if count_row(rows)? == 0 => {
+                return Err(fail(if r.depth == DiscoveryDepth::SourcesOnly {
+                    "Quiet source measurements cannot establish observed presence."
                 } else {
-                    pending.push(p);
-                }
+                    "Quiet or empty measurement windows cannot replace an existing schema."
+                }));
             }
-            continue;
+            Some(_) => {}
+            None => pending.push(p),
         }
-        if let Some(rows) = answered.get(&probe_id(&r.environment.view, &base[1])) {
+    }
+    if !pending.is_empty() || r.depth == DiscoveryDepth::SourcesOnly {
+        return Ok(pending);
+    }
+    // Then every source's listings, so an empty one fails before dependent searches.
+    let mut listed = Vec::new();
+    for s in &sources {
+        let base = base_probes(r, s)?;
+        if let Some(rows) = answered.get(&id(&base[1])) {
             kind_facet(rows, "#event.dataset", None)?;
         }
-        for p in &base {
-            if !answered.contains_key(&probe_id(&r.environment.view, p)) {
-                pending.push(p.clone());
-            }
-        }
+        pending.extend(unanswered(r, &base[1..], answered));
         let Some(mut fields) = answered
-            .get(&probe_id(&r.environment.view, &base[2]))
+            .get(&id(&base[2]))
             .map(|rows| fieldset_fields(rows))
             .transpose()?
         else {
@@ -1133,87 +1149,61 @@ pub(crate) fn frontier_with_policy(
         };
         let mut full_window = false;
         if sparse_fieldset_fallback && fields.is_empty() {
-            let Some(volume) = answered.get(&probe_id(&r.environment.view, &base[0])) else {
-                continue;
-            };
-            if count_row(volume)? == 0 {
-                return Err(fail(
-                    "Quiet or empty measurement windows cannot replace an existing schema.",
-                ));
-            }
-            let fallback = sparse_fieldset_probe(r, &s)?;
-            if let Some(rows) = answered.get(&probe_id(&r.environment.view, &fallback)) {
-                fields = fieldset_fields(rows)?;
-                if fields.is_empty() {
-                    return Err(fail(
-                        "Quiet or empty measurement windows cannot replace an existing schema.",
-                    ));
-                }
-                full_window = true;
-            } else {
+            let fallback = sparse_fieldset_probe(r, s)?;
+            let Some(rows) = answered.get(&id(&fallback)) else {
                 pending.push(fallback);
                 continue;
-            }
+            };
+            fields = fieldset_fields(rows)?;
+            full_window = true;
         }
+        if fields.is_empty() {
+            return Err(fail(
+                "Quiet or empty measurement windows cannot replace an existing schema.",
+            ));
+        }
+        listed.push((s, base, fields, full_window));
+    }
+    if !pending.is_empty() {
+        return Ok(pending);
+    }
+    for (s, base, fields, full_window) in listed {
         if r.max_population_fields_per_source.is_some() {
-            if base
-                .iter()
-                .any(|p| !answered.contains_key(&probe_id(&r.environment.view, p)))
-            {
-                continue;
-            }
-            if count_row(&answered[&probe_id(&r.environment.view, &base[0])])? == 0
-                || fields.is_empty()
-            {
-                return Err(fail(
-                    "Quiet or empty measurement windows cannot replace an existing schema.",
-                ));
-            }
             match stratified_source(
                 r,
-                &s,
+                s,
                 &fields,
                 full_window,
-                &answered[&probe_id(&r.environment.view, &base[1])],
+                &answered[&id(&base[1])],
                 answered,
             )? {
                 SourceProgress::Pending(probes) => pending.extend(probes),
                 SourceProgress::Complete(_) => {
-                    pending.extend(unanswered(r, &value_probes(r, &s, full_window)?, answered));
+                    pending.extend(unanswered(r, &value_probes(r, s, full_window)?, answered));
                 }
             }
             continue;
         }
-        let measured = sampled_measurements(r, &s, fields.clone(), full_window);
-        let mut dependent = selected_population_probes(r, &s, &measured)?;
-        let tag_probes = tag_probes(r, &s, full_window)?;
+        let measured = sampled_measurements(r, s, fields.clone(), full_window);
+        let mut dependent = selected_population_probes(r, s, &measured)?;
+        let tag_probes = tag_probes(r, s, full_window)?;
         dependent.extend(tag_probes.iter().cloned());
-        dependent.extend(record_kind_probes(r, &s, &fields, &BTreeMap::new())?);
-        for p in &dependent {
-            if !answered.contains_key(&probe_id(&r.environment.view, p)) {
-                pending.push(p.clone());
-            }
+        dependent.extend(record_kind_probes(r, s, &fields, &BTreeMap::new())?);
+        let waiting = unanswered(r, &dependent, answered);
+        if !waiting.is_empty() {
+            pending.extend(waiting);
+            continue;
         }
-        if dependent
-            .iter()
-            .all(|p| answered.contains_key(&probe_id(&r.environment.view, p)))
-        {
-            let mut tags = BTreeMap::new();
-            for p in &tag_probes {
-                let rows = &answered[&probe_id(&r.environment.view, p)];
-                tags.insert(
-                    p.field.clone().expect("tag probe has a name"),
-                    count_row(rows)?,
-                );
-            }
-            let mut final_probes = record_kind_probes(r, &s, &fields, &tags)?;
-            final_probes.extend(value_probes(r, &s, full_window)?);
-            for p in final_probes {
-                if !answered.contains_key(&probe_id(&r.environment.view, &p)) {
-                    pending.push(p);
-                }
-            }
+        let mut tags = BTreeMap::new();
+        for p in &tag_probes {
+            tags.insert(
+                p.field.clone().expect("tag probe has a name"),
+                count_row(&answered[&id(p)])?,
+            );
         }
+        let mut final_probes = record_kind_probes(r, s, &fields, &tags)?;
+        final_probes.extend(value_probes(r, s, full_window)?);
+        pending.extend(unanswered(r, &final_probes, answered));
     }
     Ok(pending)
 }
@@ -1228,20 +1218,15 @@ fn sparse_fieldset_probe(r: &DiscoverRequest, s: &Scope) -> Result<Probe, Diagno
     }
     probe(r, s, "fieldset", "fieldset()", false, vec![], None)
 }
+fn volume_probe(r: &DiscoverRequest, s: &Scope) -> Result<Probe, Diagnostic> {
+    probe(r, s, "volume", "count(as=events)", false, vec![], None)
+}
 fn base_probes(r: &DiscoverRequest, s: &Scope) -> Result<Vec<Probe>, Diagnostic> {
     if r.depth == DiscoveryDepth::SourcesOnly {
-        return Ok(vec![probe(
-            r,
-            s,
-            "volume",
-            "count(as=events)",
-            false,
-            vec![],
-            None,
-        )?]);
+        return Ok(vec![volume_probe(r, s)?]);
     }
     Ok(vec![
-        probe(r, s, "volume", "count(as=events)", false, vec![], None)?,
+        volume_probe(r, s)?,
         probe(
             r,
             s,
@@ -1393,21 +1378,35 @@ impl<B: SearchBackend> Run<'_, B> {
                 "More than 100 sources require an explicitly narrowed discovery run.",
             ));
         }
-        let mut data = PackData::default();
-        for s in sources {
-            validate_scope(&s)?;
-            let mut counts = BTreeMap::new();
+        let mut volumes = Vec::new();
+        for s in &sources {
+            validate_scope(s)?;
+            let rows = self.execute(volume_probe(self.request, s)?)?;
+            if count_row(&rows)? == 0 {
+                return Err(fail(
+                    "Quiet or empty measurement windows cannot replace an existing schema.",
+                ));
+            }
+            volumes.push(rows);
+        }
+        // Every source is listed before any source's dependent measurements.
+        let mut listings = Vec::new();
+        for (s, volume) in sources.iter().zip(volumes) {
             let mut datasets = Vec::new();
             let mut fields = Vec::new();
             let mut answered = BTreeMap::new();
-            for p in base_probes(self.request, &s)? {
+            answered.insert(
+                probe_id(
+                    &self.request.environment.view,
+                    &volume_probe(self.request, s)?,
+                ),
+                volume,
+            );
+            for p in base_probes(self.request, s)?.into_iter().skip(1) {
                 let kind = p.kind.clone();
                 let id = probe_id(&self.request.environment.view, &p);
                 let rows = self.execute(p)?;
                 match kind.as_str() {
-                    "volume" => {
-                        counts.insert(kind, count_row(&rows)?);
-                    }
                     "dataset-facet" => {
                         datasets = kind_facet(&rows, "#event.dataset", None)?
                             .values
@@ -1426,22 +1425,23 @@ impl<B: SearchBackend> Run<'_, B> {
             if self.sparse_fieldset_fallback
                 && fields.is_empty()
                 && self.request.depth != DiscoveryDepth::SourcesOnly
-                && counts.values().all(|n| *n > 0)
             {
-                let p = sparse_fieldset_probe(self.request, &s)?;
+                let p = sparse_fieldset_probe(self.request, s)?;
                 let id = probe_id(&self.request.environment.view, &p);
                 let rows = self.execute(p)?;
                 fields = fieldset_fields(&rows)?;
                 answered.insert(id, rows);
                 full_window = true;
             }
-            if counts.values().any(|n| *n == 0)
-                || fields.is_empty() && self.request.depth != DiscoveryDepth::SourcesOnly
-            {
+            if fields.is_empty() && self.request.depth != DiscoveryDepth::SourcesOnly {
                 return Err(fail(
                     "Quiet or empty measurement windows cannot replace an existing schema.",
                 ));
             }
+            listings.push((datasets, fields, full_window, answered));
+        }
+        let mut data = PackData::default();
+        for (s, (datasets, fields, full_window, answered)) in sources.into_iter().zip(listings) {
             let SourceMeasurements {
                 fields,
                 fieldset_seen,

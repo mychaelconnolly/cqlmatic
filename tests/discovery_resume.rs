@@ -214,6 +214,38 @@ impl SearchBackend for Fake {
     }
 }
 
+fn binding(saved: &Value) -> String {
+    let mut bytes = serde_json::to_vec(&(
+        &saved["request_sha256"],
+        &saved["created_at"],
+        &saved["pack"],
+        &saved["receipt"],
+        &saved["session"]["transport"],
+        &saved["session"]["predecessor_sha256"],
+    ))
+    .unwrap();
+    if saved["session"]["sparse_fieldset_fallback"] == true {
+        bytes.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    if let Some(owner) = saved["session"].get("inventory_owner") {
+        bytes.extend_from_slice(b"\0inventory-owner-v1\0");
+        bytes.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
+    if saved["discovery_algorithm"] == "bounded-discovery-v3" {
+        bytes.extend_from_slice(b"\0bounded-discovery-v3");
+    }
+    sha256_hex(&bytes)
+}
+
+/// Released producers wrote the earlier plan, so simulated release history carries it.
+fn released(saved: &mut Value, producer: &str) {
+    saved["producer_version"] = json!(producer);
+    saved["discovery_algorithm"] = json!("bounded-discovery-v2");
+    if saved.get("session").is_some() {
+        saved["session"]["binding_sha256"] = json!(binding(saved));
+    }
+}
+
 #[test]
 fn native_resume_preserves_origin_and_accepted_captures_without_remote_replay() {
     let _lock = SIGNAL.lock().unwrap();
@@ -1738,19 +1770,7 @@ fn age_checkpoint(run: &Run, closed_seconds: Option<i64>) {
     {
         attempt["dispatched_at"] = json!(at(index as i64 + 1));
     }
-    let mut binding = serde_json::to_vec(&(
-        &saved["request_sha256"],
-        &saved["created_at"],
-        &saved["pack"],
-        &saved["receipt"],
-        &saved["session"]["transport"],
-        &saved["session"]["predecessor_sha256"],
-    ))
-    .unwrap();
-    if saved["session"]["sparse_fieldset_fallback"] == true {
-        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
-    }
-    saved["session"]["binding_sha256"] = json!(sha256_hex(&binding));
+    saved["session"]["binding_sha256"] = json!(binding(&saved));
     run.save(&saved);
     mcp::inspect_state(&run.state).unwrap();
 }
@@ -2094,7 +2114,7 @@ fn earlier_hosted_error_checkpoints_preserve_the_original_shape_diagnostic() {
         ] {
             let run = hosted_error_checkpoint(resumable, raw);
             let mut saved = run.saved();
-            saved["producer_version"] = json!("0.1.6");
+            released(&mut saved, "0.1.6");
             let pointer = diagnostic_pointer(&saved);
             *saved.pointer_mut(&pointer).unwrap() = serde_json::to_value(Diagnostic::error(
                 "MCP_SHAPE",
@@ -2141,7 +2161,7 @@ fn earlier_error_envelope_checkpoints_preserve_their_original_diagnostic() {
     ] {
         let run = hosted_error_checkpoint(false, raw);
         let mut saved = run.saved();
-        saved["producer_version"] = json!("0.1.6");
+        released(&mut saved, "0.1.6");
         let pointer = diagnostic_pointer(&saved);
         *saved.pointer_mut(&pointer).unwrap() =
             serde_json::to_value(Diagnostic::error(code, message)).unwrap();
@@ -2162,7 +2182,7 @@ fn earlier_hosted_error_checkpoints_reject_edited_diagnostics_and_bytes() {
             include_bytes!("fixtures/mcp/hosted-timeout.json"),
         );
         let mut saved = run.saved();
-        saved["producer_version"] = json!("0.1.6");
+        released(&mut saved, "0.1.6");
         let pointer = diagnostic_pointer(&saved);
         *saved.pointer_mut(&pointer).unwrap() = serde_json::to_value(Diagnostic::error(
             "MCP_SHAPE",
@@ -2365,7 +2385,7 @@ fn final_answer_proofs_reject_tampering_and_enforce_budgets() {
                 "terminal" => edited["session"]["attempts"][0]["terminal"] = Value::Null,
                 "bytes" => edited["session"]["attempts"][0]["terminal"]["raw_hex"] = json!("00"),
                 "hash" => edited["session"]["attempts"][0]["terminal"]["raw_sha256"] = json!("bad"),
-                "producer" => edited["producer_version"] = json!("0.1.6"),
+                "producer" => released(&mut edited, "0.1.6"),
                 "native" => edited["session"]["transport"] = json!("native"),
                 _ => {
                     edited["session"]["attempts"][0]["terminal"]["raw_hex"] = json!("7b7d");

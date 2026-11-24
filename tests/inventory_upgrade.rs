@@ -454,7 +454,74 @@ fn command_with_flag(binary: &Path, dir: &Path, action: Value, flag: Option<&str
     if let Some(flag) = flag {
         command.arg(flag);
     }
-    command.output().unwrap()
+    as_writer_ran(
+        binary,
+        || retained_checkpoints(dir),
+        || command.output().unwrap(),
+    )
+}
+
+/// The relabelled writer runs this checkout, which writes the current discovery plan, but the
+/// release it stands for wrote the earlier plan. Its checkpoints are kept on disk as that
+/// release wrote them and carry the current plan only while the relabelled writer runs.
+fn as_writer_ran<T>(
+    binary: &Path,
+    checkpoints: impl Fn() -> Vec<PathBuf>,
+    run: impl FnOnce() -> T,
+) -> T {
+    let relabelled = env!("CARGO_PKG_VERSION") != PREVIOUS_PRODUCER
+        && binary.starts_with(build_directory(
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+            PREVIOUS_PRODUCER,
+            "writer",
+        ));
+    if relabelled {
+        relabel_plan(
+            &checkpoints(),
+            "bounded-discovery-v2",
+            "bounded-discovery-v3",
+        );
+    }
+    let result = run();
+    if relabelled {
+        relabel_plan(
+            &checkpoints(),
+            "bounded-discovery-v3",
+            "bounded-discovery-v2",
+        );
+    }
+    result
+}
+fn relabel_plan(checkpoints: &[PathBuf], from: &str, to: &str) {
+    for path in checkpoints {
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let mut checkpoint: Value = serde_json::from_slice(&bytes).unwrap();
+        if checkpoint["producer_version"] != PREVIOUS_PRODUCER
+            || checkpoint["discovery_algorithm"] != from
+        {
+            continue;
+        }
+        checkpoint["discovery_algorithm"] = json!(to);
+        if checkpoint.get("session").is_some() {
+            save_checkpoint(path, &mut checkpoint);
+        } else {
+            write(path, &checkpoint);
+        }
+    }
+}
+fn retained_checkpoints(dir: &Path) -> Vec<PathBuf> {
+    let Ok(bytes) = fs::read(state(dir)) else {
+        return vec![];
+    };
+    let inventory: Value = serde_json::from_slice(&bytes).unwrap();
+    inventory["discovery_runs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run["state_path"].as_str().map(PathBuf::from))
+        .collect()
 }
 fn call(binary: &Path, dir: &Path, action: Value) -> Value {
     let output = command(binary, dir, action);
@@ -568,6 +635,9 @@ fn save_checkpoint(path: &Path, checkpoint: &mut Value) {
     if let Some(owner) = checkpoint["session"].get("inventory_owner") {
         binding.extend_from_slice(b"\0inventory-owner-v1\0");
         binding.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
+    if checkpoint["discovery_algorithm"] == "bounded-discovery-v3" {
+        binding.extend_from_slice(b"\0bounded-discovery-v3");
     }
     checkpoint["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
     write(path, checkpoint);
@@ -947,6 +1017,8 @@ fn synthetic_stuck_run(dir: &Path, producer: &str, owned: bool, raw: &[u8]) -> P
     let path = checkpoint(dir, index);
     let mut saved = read(&path);
     saved["producer_version"] = json!(producer);
+    // Released producers wrote the earlier discovery plan.
+    saved["discovery_algorithm"] = json!("bounded-discovery-v2");
     saved["status"] = json!("cleanup-pending");
     saved["created_at"] = json!(STUCK_START);
     saved["session"]["periods"] = json!([{"start":STUCK_START,"end":null}]);
@@ -1255,6 +1327,7 @@ fn earlier_discovery_relief_requires_the_exact_producer_transport_attempt_and_ow
     .unwrap();
     let mut saved = read(&legacy);
     saved["producer_version"] = json!("0.1.7");
+    saved["discovery_algorithm"] = json!("bounded-discovery-v2");
     write(&legacy, &saved);
     assert!(!earlier_release_ended(
         &inspect_state(&legacy).unwrap(),
@@ -1418,12 +1491,18 @@ fn release_binary(variable: &str, version: &str) -> PathBuf {
 }
 
 fn standalone_command(binary: &Path, path: &Path, args: &[impl AsRef<std::ffi::OsStr>]) -> Output {
-    Command::new(binary)
-        .args(["env", "discover", "--mcp", "--state"])
-        .arg(path)
-        .args(args)
-        .output()
-        .unwrap()
+    as_writer_ran(
+        binary,
+        || vec![path.to_path_buf()],
+        || {
+            Command::new(binary)
+                .args(["env", "discover", "--mcp", "--state"])
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        },
+    )
 }
 
 #[test]
@@ -1778,6 +1857,9 @@ fn foreign_owner_must_still_match_locked_inventory() {
     binding.extend_from_slice(b"\0inventory-owner-v1\0");
     binding
         .extend_from_slice(&serde_json::to_vec(&checkpoint["session"]["inventory_owner"]).unwrap());
+    if checkpoint["discovery_algorithm"] == "bounded-discovery-v3" {
+        binding.extend_from_slice(b"\0bounded-discovery-v3");
+    }
     checkpoint["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
     write(&path, &checkpoint);
     reject(upgraded(), &dir.0, scout(), "DISCOVERY_INVENTORY_OWNER");
@@ -1962,12 +2044,7 @@ fn standalone_controls_keep_producer_pin_and_inventory_ownership() {
     let owned = Temp::new();
     retained_phase(&owned.0, "paused");
     let before = snapshot(&owned.0);
-    let output = Command::new(old())
-        .args(["env", "discover", "--mcp", "--state"])
-        .arg(checkpoint(&owned.0, 1))
-        .arg("--resume")
-        .output()
-        .unwrap();
+    let output = standalone_command(old(), &checkpoint(&owned.0, 1), &["--resume"]);
     unchanged(&before);
     assert_eq!(output.status.code(), Some(2));
     let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();

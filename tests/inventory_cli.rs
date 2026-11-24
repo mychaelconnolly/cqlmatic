@@ -2262,6 +2262,8 @@ fn completed_legacy_source_run(dir: &Path) -> Value {
     );
     let mut checkpoint: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
     checkpoint["producer_version"] = json!("0.1.5");
+    // Released producers wrote the earlier discovery plan.
+    checkpoint["discovery_algorithm"] = json!("bounded-discovery-v2");
     let pack_path = Path::new(checkpoint["pack"].as_str().unwrap());
     let mut pack = cqlmatic::storage::read_pack(pack_path).unwrap();
     pack.producer_version = "0.1.5".into();
@@ -2557,6 +2559,9 @@ fn save_checkpoint(path: &Path, checkpoint: &mut Value) {
     if let Some(owner) = checkpoint["session"].get("inventory_owner") {
         binding.extend_from_slice(b"\0inventory-owner-v1\0");
         binding.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
+    if checkpoint["discovery_algorithm"] == "bounded-discovery-v3" {
+        binding.extend_from_slice(b"\0bounded-discovery-v3");
     }
     checkpoint["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
     fs::write(path, serde_json::to_vec(checkpoint).unwrap()).unwrap();
@@ -6155,6 +6160,15 @@ fn identified_result_cannot_be_credited_to_another_probe() {
         if ended {
             let volume = fixture(&dir.0, "volume.json", json!({"result":[{"events":23}]}));
             reply = submit(&reply, &volume);
+            // Every source's volume comes before the first listing.
+            assert!(
+                reply["action"]["probe"]["arguments"]["query_string"]
+                    .as_str()
+                    .unwrap()
+                    .contains("synthetic-b")
+            );
+            let volume = fixture(&dir.0, "volume-b.json", json!({"result":[{"events":24}]}));
+            reply = submit(&reply, &volume);
             assert!(
                 reply["action"]["probe"]["arguments"]["query_string"]
                     .as_str()
@@ -6827,6 +6841,9 @@ fn identified_reuse_cannot_end_an_incompatible_or_capped_attempt() {
                 call(&dir.0, json!({"kind":"resume-discovery"}));
                 second = call(&dir.0, json!({"kind":"next-probe"}));
             } else {
+                // Answer the second source's volume so the next search is a listing.
+                let volume = fixture(&dir.0, "volume-b.json", json!({"result":[{"events":24}]}));
+                second = submit_next_answer(&dir.0, &second, Path::new(&volume));
                 assert!(
                     second["action"]["probe"]["arguments"]["query_string"]
                         .as_str()
