@@ -512,7 +512,7 @@ fn ambiguity_names_the_competing_scopes() {
         assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
         let basis = &result.grounding.basis["scope_example:*:aid"];
         assert!(
-            basis.contains("#type=logs") && basis.contains("#type=other"),
+            basis.contains(r#"#type="logs""#) && basis.contains(r#"#type="other""#),
             "{basis}"
         );
         assert!(
@@ -534,11 +534,161 @@ fn two_exact_namespace_variants_still_refuse() {
     let result = check_with_packs(query, &primary, Some(&active));
     assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
     let basis = &result.grounding.basis["scope_example:logs:aid"];
-    assert!(basis.contains("#repo=scope_example #type=logs;"), "{basis}");
+    assert!(
+        basis.contains(r#"#repo="scope_example" #type="logs";"#),
+        "{basis}"
+    );
     assert!(basis.contains(r#"@sourcetype="logs""#), "{basis}");
     assert!(
-        basis.ends_with("Select the snapshot you intend, or update the other."),
+        basis.ends_with(
+            "Select the intended snapshot, or measure the field at the query's own scope."
+        ),
         "{basis}"
+    );
+    assert_ready(&check_with_packs(query, &active, Some(&active)));
+}
+
+#[test]
+fn pasted_strict_selector_keeps_the_full_type() {
+    let mut data = data();
+    data.fields.retain(|f| f["path"] != "aid");
+    add_scoped_field(&mut data, "Windows", "aid");
+    add_scoped_field(&mut data, "Windows Events", "aid");
+    for source in &mut data.sources[1..] {
+        source["selectors"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourcetype");
+    }
+    let listed = data.fields.last_mut().unwrap();
+    listed["evidence_kind"] = json!("documented");
+    listed.as_object_mut().unwrap().remove("coverage");
+    let pack = pack(data);
+    for result in check_both("#repo=scope_example aid=* | count()", &pack) {
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+        let basis = &result.grounding.basis["scope_example:*:aid"];
+        let (selectors, _) = basis.split_once("). ").unwrap();
+        let (_, selectors) = selectors.split_once(" (").unwrap();
+        let pasted = selectors
+            .split("; ")
+            .find(|s| s.contains("Windows Events"))
+            .unwrap();
+        let result = check(&format!("{pasted} aid=* | count()"), &pack);
+        assert_eq!(
+            result.outcome,
+            Outcome::NeedsContext,
+            "{pasted}: {result:?}"
+        );
+        assert_eq!(result.validation.status, Acceptance::Accepted);
+        assert_eq!(
+            result.grounding.basis["scope_example:Windows Events:aid"],
+            "listed field namespace; population not measured"
+        );
+    }
+    assert_ready(&check(
+        "#repo=scope_example #type=Windows aid=* | count()",
+        &pack,
+    ));
+}
+
+#[test]
+fn sourcetype_only_refusal_offers_snapshot_and_measurement_remedies() {
+    let mut measured = data();
+    measured.sources[0]["selectors"] = json!({"repo": REPO, "type": "logs"});
+    let mut primary = measured.clone();
+    primary.sources[0]["selectors"]["sourcetype"] = json!("vendor:a");
+    let mut active = measured.clone();
+    active.sources[0]["selectors"]["sourcetype"] = json!("vendor:b");
+    let primary = pack(primary);
+    let active = pack(active);
+    let query = "#repo=scope_example #type=logs aid=* | count()";
+    let result = check_with_packs(query, &primary, Some(&active));
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    let basis = &result.grounding.basis["scope_example:logs:aid"];
+    assert_eq!(
+        basis.split_once("). ").unwrap().1,
+        "Select the intended snapshot, or measure the field at the query's own scope."
+    );
+    for selector in [r#"@sourcetype="vendor:a""#, r#"@sourcetype="vendor:b""#] {
+        assert!(basis.contains(selector), "{basis}");
+    }
+    assert_ready(&check_with_packs(query, &active, Some(&active)));
+    let measured = pack(measured);
+    let result = check_with_packs(query, &measured, Some(&active));
+    assert_ready(&result);
+    assert_eq!(result.grounding.basis["scope_example:logs:aid"], OBSERVED);
+}
+
+#[test]
+fn narrower_or_independent_selectors_do_not_resolve_ambiguity() {
+    let repo_query = "#repo=scope_example aid=* | count()";
+    let logs = json!({"repo": REPO, "type": "logs"});
+    for (case, query, key, selectors, other) in [
+        (
+            "event family",
+            repo_query,
+            "scope_example:*:aid",
+            json!({"repo": REPO, "event_family": "FileEvent"}),
+            logs.clone(),
+        ),
+        (
+            "sourcetype",
+            repo_query,
+            "scope_example:*:aid",
+            json!({"repo": REPO, "sourcetype": "vendor:enriched"}),
+            logs.clone(),
+        ),
+        (
+            "repository",
+            "#type=logs aid=* | count()",
+            "*:logs:aid",
+            logs,
+            json!({"repo": "other_repo", "type": "logs", "event_family": "FileEvent"}),
+        ),
+    ] {
+        let mut data = data();
+        add_scoped_field(&mut data, "logs", "aid");
+        data.sources[0]["selectors"] = selectors;
+        data.sources[1]["selectors"] = other;
+        let pack = pack(data);
+        for result in check_both(query, &pack) {
+            assert_eq!(result.outcome, Outcome::NeedsContext, "{case}: {result:?}");
+            assert!(
+                result.grounding.basis[key]
+                    .starts_with("multiple source-specific observations; not interchangeable"),
+                "{case}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn different_active_event_family_cannot_override_matching_primary_evidence() {
+    let mut primary = data();
+    primary.sources[0]["selectors"] =
+        json!({"repo": REPO, "type": "logs", "event_family": "FileEvent"});
+    let mut active = primary.clone();
+    active.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let result = check_with_packs(
+        "#repo=scope_example #type=logs #event_simpleName=FileEvent aid=* | count()",
+        &pack(primary),
+        Some(&pack(active)),
+    );
+    assert_ready(&result);
+    assert_eq!(result.grounding.basis["scope_example:logs:aid"], OBSERVED);
+}
+
+#[test]
+fn selected_pack_measurement_at_a_different_scope_is_named() {
+    let active = pack(data());
+    let mut narrow = data();
+    narrow.sources[0]["selectors"]["type"] = json!("logs");
+    let query = "#repo=scope_example aid=* | count()";
+    let result = check_with_packs(query, &pack(narrow), Some(&active));
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    assert_eq!(
+        result.grounding.basis["scope_example:*:aid"],
+        "The selected pack measures this field at a different scope. See the field record at the query's scope in the inventory's active pack."
     );
     assert_ready(&check_with_packs(query, &active, Some(&active)));
 }
@@ -580,7 +730,7 @@ fn exact_documented_active_namespace_cannot_borrow_narrow_primary_measurement() 
     assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
     assert_eq!(
         result.grounding.basis["scope_example:*:aid"],
-        "query-supplied; not measured in selected pack"
+        "The selected pack measures this field at a different scope. See the field record at the query's scope in the inventory's active pack."
     );
 }
 

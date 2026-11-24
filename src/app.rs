@@ -3298,7 +3298,26 @@ fn ground(
             } else if stale {
                 "observation evidence marked stale".into()
             } else if observed && !eligible {
-                "query-supplied; not measured in selected pack".into()
+                let active_has_winner = winning_namespace.is_some_and(|winner| {
+                    evidence
+                        .and_then(|e| e.active_pack)
+                        .filter(|active| active.content_digest != p.content_digest)
+                        .map(decoded_of)
+                        .is_some_and(|active| {
+                            active.sources.iter().any(|source| {
+                                source.selectors.as_ref().map(field_namespace) == Some(winner)
+                                    && active.fields.iter().any(|field| {
+                                        field.source_id == source.id
+                                            && field_matches_requirement(field, &r)
+                                    })
+                            })
+                        })
+                });
+                if active_has_winner {
+                    "The selected pack measures this field at a different scope. See the field record at the query's scope in the inventory's active pack.".into()
+                } else {
+                    "query-supplied; not measured in selected pack".into()
+                }
             } else if accepted_partial {
                 let mut details = Vec::new();
                 if field_evidence != Observation::Qualified {
@@ -3671,25 +3690,35 @@ fn resolve_field_namespace<'a>(
         .iter()
         .copied()
         .filter(|&namespace| exact_namespace(namespace, scope));
-    let next_action = match (exact.next(), exact.next()) {
+    let multiple_exact = match (exact.next(), exact.next()) {
         (Some(winner), None) => return Ok(Some(winner)),
-        (Some(_), Some(_)) => "Select the snapshot you intend, or update the other.",
-        _ => {
-            "Narrow the query to one of these selectors, or measure the field at the query's own scope."
-        }
+        (Some(_), Some(_)) => true,
+        _ => false,
+    };
+    let &(repo, kind, event, _) = namespaces.first().expect("competing namespaces");
+    let next_action = if namespaces
+        .iter()
+        .all(|&(r, k, e, _)| (r, k, e) == (repo, kind, event))
+    {
+        "Select the intended snapshot, or measure the field at the query's own scope."
+    } else if multiple_exact {
+        "Select the snapshot you intend, or update the other."
+    } else {
+        "Narrow the query to one of these selectors, or measure the field at the query's own scope."
     };
     let labels = namespaces
         .iter()
         .map(|&(repo, kind, event, sourcetype)| {
-            let mut label = selector_text(repo, kind);
-            for (field, value) in [("#event_simpleName", event), ("@sourcetype", sourcetype)] {
-                if let Some(value) = value {
-                    if !label.is_empty() {
-                        label.push(' ');
-                    }
-                    label.push_str(&format!("{field}={value:?}"));
-                }
-            }
+            let label = [
+                ("#repo", repo),
+                ("#type", kind),
+                ("#event_simpleName", event),
+                ("@sourcetype", sourcetype),
+            ]
+            .into_iter()
+            .filter_map(|(field, value)| value.map(|value| format!("{field}={}", quote(value))))
+            .collect::<Vec<_>>()
+            .join(" ");
             if label.is_empty() {
                 "unscoped".into()
             } else {
