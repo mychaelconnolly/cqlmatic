@@ -3713,14 +3713,15 @@ pub(crate) fn validate_refresh_host(
             host.session_id == session_id,
             "Refresh host evidence session_id differs from the selected session. Use evidence for the selected session.",
         ),
-        (
-            (1..=max_seconds).contains(&host.max_search_seconds),
-            "Refresh host evidence max_search_seconds is outside the allowed provider lifetime. Supply a verified lifetime within the refresh budget.",
-        ),
     ] {
         if !valid {
             return Err(fail(message));
         }
+    }
+    if !(1..=max_seconds).contains(&host.max_search_seconds) {
+        return Err(fail(&format!(
+            "Refresh host evidence max_search_seconds must be 1..{max_seconds} seconds. Supply a verified provider lifetime in that range."
+        )));
     }
     if environment::parse_time(&host.verified_at)? > environment::parse_time(now)? {
         return Err(fail(

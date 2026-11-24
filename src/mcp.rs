@@ -132,6 +132,22 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
     Ok(body)
 }
 
+fn is_single_text_block(value: &Value) -> bool {
+    let Some([item]) = value.as_array().map(Vec::as_slice) else {
+        return false;
+    };
+    item.as_object().is_some_and(|item| {
+        item.get("type").and_then(Value::as_str) == Some("text")
+            && item.get("text").is_some_and(Value::is_string)
+            && item
+                .keys()
+                .all(|key| matches!(key.as_str(), "type" | "text" | "_meta" | "annotations"))
+            && ["_meta", "annotations"]
+                .iter()
+                .all(|key| item.get(*key).is_none_or(|v| v.is_null() || v.is_object()))
+    })
+}
+
 // Strip only framing metadata. The original bytes are still the evidence.
 fn decode_frame(raw: &[u8], extended: bool) -> Result<(Value, bool), Diagnostic> {
     let mut value = parse_result_json(raw, extended)?;
@@ -150,36 +166,44 @@ fn decode_frame(raw: &[u8], extended: bool) -> Result<(Value, bool), Diagnostic>
         && wrapper
             .get("result")
             .and_then(Value::as_object)
-            .is_some_and(|inner| inner.contains_key("content") || inner.contains_key("result"))
+            .is_some_and(|inner| {
+                inner.get("content").is_some_and(is_single_text_block)
+                    || inner.contains_key("result")
+            })
     {
         value = wrapper.remove("result").expect("Result object was checked");
         changed = true;
     }
-    if let Value::Array(items) = value {
-        value = json!({"content":items});
+    if value.is_array() && is_single_text_block(&value) {
+        value = Value::Object(Map::from_iter([("content".into(), value)]));
         changed = true;
     }
     if let Some(object) = value.as_object_mut()
-        && object.contains_key("content")
+        && object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "content" | "isError" | "structuredContent" | "_meta"
+            )
+        })
         && object
             .get("_meta")
             .is_none_or(|v| v.is_null() || v.is_object())
+        && object.get("isError").is_none_or(Value::is_boolean)
+        && object.get("content").is_some_and(is_single_text_block)
     {
         changed |= object.remove("_meta").is_some();
         if object.get("structuredContent").is_some_and(Value::is_null) {
             object.remove("structuredContent");
             changed = true;
         }
-        if let Some(items) = object.get_mut("content").and_then(Value::as_array_mut)
-            && let [item] = items.as_mut_slice()
-            && let Some(item) = item.as_object_mut()
-            && ["_meta", "annotations"]
-                .iter()
-                .all(|key| item.get(*key).is_none_or(|v| v.is_null() || v.is_object()))
-        {
-            changed |= item.remove("_meta").is_some();
-            changed |= item.remove("annotations").is_some();
-        }
+        let item = object
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|items| items.first_mut())
+            .and_then(Value::as_object_mut)
+            .expect("The single text block was checked");
+        changed |= item.remove("_meta").is_some();
+        changed |= item.remove("annotations").is_some();
     }
     Ok((value, changed))
 }
@@ -1592,6 +1616,53 @@ fn recover_activation(
     }
     finish_activation(writer, &pack_writer, &receipt_writer, state)
 }
+pub const ACTIVATION_PACK_CONFLICT: &str = "Active pack differs from both the frozen predecessor and activation target. No files were replaced on this attempt; prior activation outcome is unknown.";
+pub const ACTIVATION_RECEIPT_CONFLICT: &str =
+    "Receipt differs from the frozen activation receipt. No files were replaced on this attempt.";
+pub const ACTIVATION_RECEIPT_BEFORE_PACK: &str = "Receipt exists before its frozen pack target. No files were replaced on this attempt; prior activation outcome is unknown.";
+
+fn activation_artifacts(
+    state: &State,
+    intent: &ActivationIntent,
+) -> Result<(bool, bool), Diagnostic> {
+    let current_pack = optional_bytes(&state.pack)?;
+    let current_hash = current_pack.as_ref().map(|bytes| sha256_hex(bytes));
+    let target_visible = current_hash.as_deref() == Some(intent.pack_sha256.as_str());
+    if !target_visible && current_hash != intent.predecessor_pack_sha256 {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            ACTIVATION_PACK_CONFLICT,
+        ));
+    }
+    let receipt = optional_bytes(&state.receipt)?;
+    if receipt
+        .as_ref()
+        .is_some_and(|bytes| bytes != intent.receipt_bytes.as_bytes())
+    {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            ACTIVATION_RECEIPT_CONFLICT,
+        ));
+    }
+    if receipt.is_some() && !target_visible {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            ACTIVATION_RECEIPT_BEFORE_PACK,
+        ));
+    }
+    Ok((target_visible, receipt.is_some()))
+}
+
+/// Report a current conflict with the frozen activation artifacts without attempting promotion.
+pub fn pending_activation_conflict(state: &State) -> Option<Diagnostic> {
+    if state.status != "activating" {
+        return None;
+    }
+    activation_artifacts(state, state.activation.as_ref()?)
+        .err()
+        .filter(|error| error.code == "MCP_ACTIVATION_CONFLICT")
+}
+
 fn finish_activation(
     writer: &storage::Writer,
     pack_writer: &storage::Writer,
@@ -1600,31 +1671,13 @@ fn finish_activation(
 ) -> Result<StepOutput, Diagnostic> {
     let completed_bytes = completed_state_bytes(state)?;
     let intent = state.activation.as_ref().ok_or_else(tampered)?;
-    let current_pack = optional_bytes(&state.pack)?;
-    let current_hash = current_pack.as_ref().map(|bytes| sha256_hex(bytes));
-    let target_visible = current_hash.as_deref() == Some(intent.pack_sha256.as_str());
-    if !target_visible && current_hash != intent.predecessor_pack_sha256 {
-        return Ok(activation_conflict(
-            state,
-            "Active pack differs from both the frozen predecessor and activation target. No files were replaced on this attempt; prior activation outcome is unknown.",
-        ));
-    }
-    let receipt = optional_bytes(&state.receipt)?;
-    if receipt
-        .as_ref()
-        .is_some_and(|bytes| bytes != intent.receipt_bytes.as_bytes())
-    {
-        return Ok(activation_conflict(
-            state,
-            "Receipt differs from the frozen activation receipt. No files were replaced on this attempt.",
-        ));
-    }
-    if receipt.is_some() && !target_visible {
-        return Ok(activation_conflict(
-            state,
-            "Receipt exists before its frozen pack target. No files were replaced on this attempt; prior activation outcome is unknown.",
-        ));
-    }
+    let (target_visible, receipt_exists) = match activation_artifacts(state, intent) {
+        Ok(status) => status,
+        Err(d) if d.code == "MCP_ACTIVATION_CONFLICT" => {
+            return Ok(activation_conflict(state, &d.message));
+        }
+        Err(d) => return Err(d),
+    };
     activation_checkpoint("before-pack")?;
     let committed = if target_visible {
         pack_writer.confirm_durable()
@@ -1636,7 +1689,7 @@ fn finish_activation(
     }
     activation_checkpoint("after-pack")?;
     activation_checkpoint("before-receipt")?;
-    let committed = if receipt.is_some() {
+    let committed = if receipt_exists {
         receipt_writer.confirm_durable()
     } else {
         receipt_writer.commit_frozen_bytes(intent.receipt_bytes.as_bytes(), MAX_PACK_BYTES)
@@ -2030,6 +2083,25 @@ mod recovery_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn unrecognized_framings_keep_the_original_rejection() {
+        let item = json!({"type":"text","text":"{}"});
+        for input in [
+            json!([]),
+            json!([item, item]),
+            json!([{"type":"image","data":"eA==","mimeType":"image/png"}]),
+            json!({"content":[{"type":"text","text":"{}","_meta":true}],"_meta":{}}),
+        ] {
+            let raw = input.to_string();
+            let raw = raw.as_bytes();
+            assert!(!uses_extended_framing(raw));
+            assert!(same_diagnostic(
+                &normalize(raw).unwrap_err(),
+                &normalize_framed(raw, false).unwrap_err()
+            ));
         }
     }
 

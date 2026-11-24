@@ -1,0 +1,2 @@
+- Explain expired runs and activation conflicts with recovery steps, and omit brief failure notices once discovery succeeds for the same sources.
+- Show actionable brief input errors and name unknown status request fields. Read errors distinguish an output failure from a saved change.

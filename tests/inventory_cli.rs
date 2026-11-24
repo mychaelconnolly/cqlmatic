@@ -589,15 +589,9 @@ fn brief_requires_json_conflicts_with_summary_and_bounds_runtime_failures() {
         assert!(failed_output.stderr.len() <= 4096);
         let diagnostic: Value = serde_json::from_slice(&failed_output.stderr).unwrap();
         assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
-        assert!(
-            diagnostic["message"]
-                .as_str()
-                .unwrap()
-                .contains("read status")
-                || diagnostic["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Read status")
+        assert_eq!(
+            diagnostic["message"],
+            "Cannot emit inventory status. Restore standard output and retry the read."
         );
     }
 }
@@ -1172,7 +1166,7 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
         assert_eq!(
             action["diagnostics"][0]["message"],
             if code == "MCP_UNKNOWN_PROBE" {
-                "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for. Run the outstanding probe only if its search never started, and submit that probe’s own result."
+                "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for. Run the outstanding probe only if its search never started, and submit that probe's own result."
             } else {
                 "Use a regular file containing the saved response."
             }
@@ -1306,7 +1300,7 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     );
     assert_eq!(
         action["next_action"],
-        "Pause this run, then prepare discovery again from the current inventory. Previously accepted answers are retained."
+        "Pause this run, then prepare discovery again from the current inventory."
     );
     let repeat = json!({"kind":"next-probe","run_index":0});
     let compact = call(&dir.0, repeat.clone());
@@ -1379,7 +1373,7 @@ fn next_probe_does_not_hand_out_a_reserved_probe_after_the_time_limit() {
     assert_eq!(late["action"]["settled"], false);
     assert_eq!(
         late["action"]["next_action"],
-        "Prepare a new run with enough time for the selected sources. Previously accepted answers are retained."
+        "Prepare a new discovery run with enough time for the selected sources."
     );
     let reason = call(
         &dir.0,
@@ -1398,7 +1392,7 @@ fn next_probe_leaves_an_expired_unstarted_probe_to_the_cancellation_steps() {
     confirm_quick_source(&dir.0, "synthetic");
     let mut request = source_run_request(4);
     request["max_seconds"] = json!(1);
-    call(&dir.0, request);
+    let prepared = call(&dir.0, request.clone());
     let reserved = call(&dir.0, json!({"kind":"next-probe"}));
     std::thread::sleep(std::time::Duration::from_secs(2));
     call(&dir.0, json!({"kind":"next-probe"}));
@@ -1415,6 +1409,44 @@ fn next_probe_leaves_an_expired_unstarted_probe_to_the_cancellation_steps() {
             .unwrap()
             .starts_with("Settle the outstanding attempt for run_index=0 before continuing.")
     );
+
+    let probe = &reserved["action"]["probe"]["probe_id"];
+    let relay = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let checkpoint: Value = serde_json::from_slice(&fs::read(relay).unwrap()).unwrap();
+    let attempt = &checkpoint["session"]["attempts"][0];
+    let proof = protected_fixture(
+        &dir.0,
+        "cancelled.json",
+        json!({
+            "schema_version":1,"request_sha256":checkpoint["request_sha256"],"probe_id":probe,
+            "repository":environment()["view"],
+            "query_sha256":cqlmatic::sha256_hex(attempt["probe"]["query"].as_str().unwrap().as_bytes()),
+            "start":attempt["probe"]["start"],"end":attempt["probe"]["end"],
+            "dispatched_at":attempt["dispatched_at"],"outcome":"cancelled","cleanup":"confirmed",
+            "caller_assertion":"exact-host-attempt-terminal-cleanup"}),
+    );
+    cqlmatic::mcp::settle_cancelled(relay, probe.as_str().unwrap(), Path::new(&proof)).unwrap();
+    let poll = brief_call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(poll["action"]["state"], "paused");
+    assert_eq!(poll["action"]["diagnostics"][0]["code"], "MCP_DEADLINE");
+    assert!(
+        poll["action"]["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("Prepare a new")
+    );
+    let resume = inventory_command(&dir.0, json!({"kind":"resume-discovery","run_index":0}))
+        .arg("--brief")
+        .output()
+        .unwrap();
+    assert_eq!(resume.status.code(), Some(2));
+    let diagnostic: Value = serde_json::from_slice(&resume.stderr).unwrap();
+    assert_eq!(diagnostic["code"], "MCP_DEADLINE");
+    assert_eq!(call(&dir.0, request)["action"]["run_index"], 1);
 }
 
 #[test]
@@ -1473,17 +1505,42 @@ fn next_probe_explains_a_run_that_ran_out_of_searches() {
         &dir.0,
         json!({"kind":"discovery-step","run_index":0,"answers":[]}),
     );
+    assert_eq!(reason["status"]["failed_discovery"]["run_index"], 0);
     assert_eq!(reason["action"]["run_index"], 0);
     assert_eq!(reason["action"]["diagnostics"], action["diagnostics"]);
     let status = brief_value(
         Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
             .args(["status", "--json", "--brief", "--state"])
-            .arg(state)
+            .arg(&state)
             .output()
             .unwrap(),
     );
     assert_eq!(status["failed_discovery"]["run_index"], 0);
     assert_eq!(status["failed_discovery"]["code"], "DISCOVERY_EVIDENCE");
+
+    let fresh = call(&dir.0, source_run_request(4));
+    let index = fresh["action"]["run_index"].as_u64().unwrap();
+    let mut next = call(&dir.0, json!({"kind":"next-probe","run_index":index}));
+    assert_eq!(
+        next["action"]["probe"]["probe_id"],
+        first["action"]["probe"]["probe_id"]
+    );
+    for _ in 0..2 {
+        next = call(
+            &dir.0,
+            json!({"kind":"next-probe","run_index":index,"answer":{
+            "probe_id":next["action"]["probe"]["probe_id"],"result_file":result}}),
+        );
+    }
+    assert_eq!(next["action"]["state"], "complete");
+    let status = brief_value(
+        Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--json", "--brief", "--state"])
+            .arg(&state)
+            .output()
+            .unwrap(),
+    );
+    assert!(status.get("failed_discovery").is_none());
 }
 
 #[test]
@@ -4319,14 +4376,13 @@ fn late_completion_is_superseded_without_promotion_or_repeated_mutation() {
     assert_eq!(rejected["action"]["status"], "incomplete");
     assert_eq!(
         rejected["action"]["diagnostics"][0]["code"],
-        "DISCOVERY_PHASE"
+        "DISCOVERY_SUPERSEDED"
     );
     assert_eq!(
         rejected["status"]["discovery_runs"][0]["status"],
         "superseded"
     );
-    assert_eq!(rejected["status"]["failures"].as_array().unwrap().len(), 1);
-    let saved = fs::read(&state_path).unwrap();
+    assert_eq!(fs::read(&state_path).unwrap(), saved);
     for field in ["state_path", "pack_path", "receipt_path"] {
         let path = Path::new(run[field].as_str().unwrap());
         let original = fs::read(path).unwrap();
@@ -5732,6 +5788,51 @@ fn missing_and_unrecognized_answers_keep_all_nine_inventory_routes_blocked() {
             assert_eq!(fs::read(&state_path).unwrap(), before);
         }
     }
+}
+
+#[test]
+fn status_names_unknown_fields_and_reports_output_failure_as_a_read() {
+    let dir = Temp::new();
+    let state = dir.0.join("workflow/state.json");
+    call(&dir.0, json!({"kind":"init"}));
+    let before = fs::read(&state).unwrap();
+    let request = fixture(
+        &dir.0,
+        "status.json",
+        json!({"schema_version":1,"unknown_status_field":true}),
+    );
+    let error = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--json", "--request", &request])
+        .arg("--state")
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert_eq!(error.status.code(), Some(2));
+    let diagnostic: Value = serde_json::from_slice(&error.stderr).unwrap();
+    assert!(
+        diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .contains("\"unknown_status_field\"")
+    );
+    for mode in [None, Some("--summary"), Some("--brief")] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--json", "--state"])
+            .arg(&state)
+            .args(mode)
+            .stdout(writer)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            diagnostic["message"],
+            "Cannot emit inventory status. Restore standard output and retry the read."
+        );
+    }
+    assert_eq!(fs::read(&state).unwrap(), before);
 }
 
 #[test]
