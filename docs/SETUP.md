@@ -131,7 +131,7 @@ Each strict v1 request contains `schema_version: 1`, optional `id`, and `action.
 | `preview` | Named native adapters only, not `host-managed`. `operation` is `configure`, `authenticate`, or the narrowly scoped `recover` flow below. Inspects the current baseline and derives the command or new Copilot file creation, backup, and confirmation hash without connecting. An existing Copilot file without the selected entry returns `SETUP_EXISTING_CONFIG` for host-side addition. |
 | `apply` | Named native adapters only, not `host-managed`. `confirmation_sha256` must match the reviewed preview. Rechecks executable/capabilities where needed and configuration before the command or atomic write. |
 | `confirm-authentication` | Named native adapters only, not `host-managed`. Requires configured state; records user confirmation and remains `authentication-required`. |
-| `import-discovery` | `file` points to a saved strict host report. Named native adapters recheck the selected entry; `external` binds the report without local configuration inspection. |
+| `import-discovery` | `file` points to a saved strict host report. Named native adapters recheck the selected entry. All `host-managed` selections bind the report without local configuration inspection. |
 | `acknowledge-pending` | `confirmation_sha256` identifies the pending plan inspected by the operator. Rechecks protected success provenance, or preserves eligible uncertain CIMD addition context for a fresh recovery preview. Does not run add or login. |
 | `cancel` | No action fields. Saves progress and invalidates an ordinary preview; an unresolved `command-pending` phase remains pending. |
 

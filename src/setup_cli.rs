@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
@@ -1218,13 +1219,16 @@ fn check_portable_shadow(name: &str, copilot: bool) -> Result<(), Diagnostic> {
         .map_err(|_| err("SETUP_PATH", "Cannot inspect the current host workspace."))?;
     check_portable_shadow_from(&cwd, name, copilot)
 }
+fn workspace_mcp_paths(copilot: bool) -> &'static [&'static str] {
+    if copilot {
+        &[".mcp.json", ".github/mcp.json"]
+    } else {
+        &[".mcp.json"]
+    }
+}
 fn check_portable_shadow_from(cwd: &Path, name: &str, copilot: bool) -> Result<(), Diagnostic> {
     for directory in cwd.ancestors() {
-        for relative in if copilot {
-            &[".mcp.json", ".github/mcp.json"][..]
-        } else {
-            &[".mcp.json"][..]
-        } {
+        for relative in workspace_mcp_paths(copilot) {
             let path = directory.join(relative);
             if server_entry(&read_json_config(&path)?, "mcpServers", name)?.is_some() {
                 return Err(err(
@@ -1308,6 +1312,7 @@ struct ServerAdvice {
     skipped: Vec<String>,
     unusable: Vec<String>,
     default_blocked: bool,
+    native_shadowed: BTreeSet<String>,
 }
 
 impl ServerAdvice {
@@ -1315,10 +1320,16 @@ impl ServerAdvice {
         self.usable
             .iter()
             .find(|name| {
-                self.skipped.is_empty() && setup::accepts_server_name(client, name, host_managed)
+                self.skipped.is_empty()
+                    && (host_managed || !self.native_shadowed.contains(*name))
+                    && setup::accepts_server_name(client, name, host_managed)
             })
             .map(String::as_str)
-            .or_else(|| (!self.default_blocked).then_some("cs-mcp"))
+            .or_else(|| {
+                (!self.default_blocked
+                    && (host_managed || !self.native_shadowed.contains("cs-mcp")))
+                .then_some("cs-mcp")
+            })
     }
 
     fn message(&self, client: ClientKind, cloud: Cloud, selected: Option<&str>) -> Option<String> {
@@ -1370,6 +1381,7 @@ fn servers_at_endpoint(
         endpoint_matches: bool,
         enabled: bool,
         search_allowed: bool,
+        shadows_native: bool,
     }
     let copilot = matches!(
         client,
@@ -1378,7 +1390,8 @@ fn servers_at_endpoint(
     let mut advice = ServerAdvice::default();
     let mut seen = std::collections::BTreeMap::<String, Vec<ServerEntry>>::new();
     let endpoint = cloud.endpoint();
-    let mut collect = |name: &str, entry: &Value, pointer: &str| {
+    let mut disabled = BTreeSet::new();
+    let mut collect = |name: &str, entry: &Value, pointer: &str, shadows_native, rejected: bool| {
         let matches = entry
             .pointer(pointer)
             .and_then(Value::as_str)
@@ -1391,8 +1404,9 @@ fn servers_at_endpoint(
             });
         seen.entry(name.to_owned()).or_default().push(ServerEntry {
             endpoint_matches: matches,
-            enabled: entry["enabled"] != false && entry["disabled"] != true,
+            enabled: !rejected && entry["enabled"] != false && entry["disabled"] != true,
             search_allowed,
+            shadows_native,
         });
     };
     let cwd = env::current_dir().ok();
@@ -1409,7 +1423,7 @@ fn servers_at_endpoint(
             if let Some(list) = list {
                 for entry in list {
                     if let Some(name) = entry["name"].as_str() {
-                        collect(name, &entry, "/transport/url");
+                        collect(name, &entry, "/transport/url", false, false);
                     }
                 }
             }
@@ -1421,35 +1435,68 @@ fn servers_at_endpoint(
             } else {
                 "mcpServers"
             };
-            let workspace_paths: &[&str] = match client {
-                ClientKind::ClaudeCode => &[".mcp.json"],
-                ClientKind::VsCode => &[],
-                _ => &[".mcp.json", ".github/mcp.json"],
+            let workspace_paths = if client == ClientKind::VsCode {
+                &[]
+            } else {
+                workspace_mcp_paths(copilot)
             };
+            let user_config = runner.config_path(client);
+            let mut rejected = BTreeSet::new();
+            let mut read_disabled =
+                |path: &Path, key: &str, names: &mut BTreeSet<String>| match read_json_config(path)
+                {
+                    Ok(value) => extend_disabled(names, &value[key]),
+                    Err(error) => advice.skipped.push(skipped_mcp_configuration(path, &error)),
+                };
+            if client == ClientKind::CopilotCli
+                && let Ok(path) = &user_config
+            {
+                read_disabled(
+                    &path.with_file_name("settings.json"),
+                    "disabledMcpServers",
+                    &mut disabled,
+                );
+            }
+            for directory in cwd.iter().flat_map(|path| path.ancestors()) {
+                match client {
+                    ClientKind::ClaudeCode => read_disabled(
+                        &directory.join(".claude/settings.local.json"),
+                        "disabledMcpjsonServers",
+                        &mut rejected,
+                    ),
+                    ClientKind::CopilotCli => read_disabled(
+                        &directory.join(".github/copilot/settings.json"),
+                        "disabledMcpServers",
+                        &mut disabled,
+                    ),
+                    _ => {}
+                }
+            }
+
             let active = cwd.as_ref().and_then(|path| path.canonicalize().ok());
-            let mut inspect = |path: &Path, local_scopes: bool| {
+            let mut inspect = |path: &Path, workspace: bool| {
                 let result = read_json_config(path).and_then(|value| {
-                    let mut scopes = vec![&value];
-                    if local_scopes {
-                        scopes.extend(
-                            value["projects"]
-                                .as_object()
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|(root, project)| {
-                                    Path::new(root)
-                                        .canonicalize()
-                                        .ok()
-                                        .filter(|root| {
-                                            active
-                                                .as_ref()
-                                                .is_some_and(|path| path.starts_with(root))
-                                        })
-                                        .map(|_| project)
-                                }),
-                        );
+                    let mut scopes = vec![(&value, workspace)];
+                    if client == ClientKind::ClaudeCode && !workspace {
+                        let projects = value["projects"].as_object().into_iter().flatten();
+                        let matching_projects = projects.filter_map(|(root, project)| {
+                            let root = Path::new(root).canonicalize().ok()?;
+                            active.as_ref().filter(|path| path.starts_with(&root))?;
+                            Some((root, project))
+                        });
+                        let mut active_project = None;
+                        for (root, project) in matching_projects {
+                            let depth = root.components().count();
+                            if active_project.is_none_or(|(previous, _)| depth > previous) {
+                                active_project = Some((depth, project));
+                            }
+                            scopes.push((project, true));
+                        }
+                        if let Some((_, project)) = active_project {
+                            extend_disabled(&mut disabled, &project["disabledMcpServers"]);
+                        }
                     }
-                    for scope in scopes {
+                    for (scope, shadows_native) in scopes {
                         if let Some(entries) = scope.get(collection) {
                             let entries = entries.as_object().ok_or_else(|| {
                                 err(
@@ -1458,27 +1505,28 @@ fn servers_at_endpoint(
                                 )
                             })?;
                             for (name, entry) in entries {
-                                collect(name, entry, "/url");
+                                collect(
+                                    name,
+                                    entry,
+                                    "/url",
+                                    shadows_native,
+                                    workspace && rejected.contains(name),
+                                );
                             }
                         }
                     }
                     Ok(())
                 });
                 if let Err(error) = result {
-                    advice.skipped.push(format!(
-                        "Skipped MCP configuration at {}. {}",
-                        path.display(),
-                        error.message
-                    ));
+                    advice.skipped.push(skipped_mcp_configuration(path, &error));
                 }
             };
-            let user_config = runner.config_path(client);
             if let Ok(path) = &user_config {
-                inspect(path, client == ClientKind::ClaudeCode);
+                inspect(path, false);
             }
             for directory in cwd.iter().flat_map(|path| path.ancestors()) {
                 for file in workspace_paths {
-                    inspect(&directory.join(file), false);
+                    inspect(&directory.join(file), true);
                 }
             }
             if let Err(error) = user_config {
@@ -1486,7 +1534,11 @@ fn servers_at_endpoint(
             }
         }
     }
+    advice.default_blocked |= disabled.contains("cs-mcp");
     for (name, entries) in seen {
+        if entries.iter().any(|entry| entry.shadows_native) {
+            advice.native_shadowed.insert(name.clone());
+        }
         if !entries.iter().any(|entry| entry.endpoint_matches) {
             advice.default_blocked |= name == "cs-mcp";
             continue;
@@ -1495,7 +1547,7 @@ fn servers_at_endpoint(
             "has an invalid name for setup"
         } else if entries.iter().any(|entry| !entry.endpoint_matches) {
             "may be overridden by a same-name entry for another endpoint or transport"
-        } else if entries.iter().any(|entry| !entry.enabled) {
+        } else if disabled.contains(&name) || entries.iter().any(|entry| !entry.enabled) {
             "is disabled in the client configuration"
         } else if entries.iter().any(|entry| !entry.search_allowed) {
             "has a tool allowlist that excludes the NG-SIEM search tool"
@@ -1508,6 +1560,25 @@ fn servers_at_endpoint(
     }
     advice
 }
+fn extend_disabled(disabled: &mut BTreeSet<String>, value: &Value) {
+    disabled.extend(
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned),
+    );
+}
+
+fn skipped_mcp_configuration(path: &Path, error: &Diagnostic) -> String {
+    format!(
+        "Skipped MCP configuration at {}. {}",
+        path.display(),
+        error.message
+    )
+}
+
 fn configured_fingerprint(
     selection: &Selection,
     path: &Path,
@@ -2110,7 +2181,9 @@ fn perform(
                         diagnostic
                     }
                 })?;
-            let backup = if operation == PlanOperation::Configure {
+            let backup = if operation == PlanOperation::Configure
+                && baseline.server != ExistingServer::Same
+            {
                 backup_path(state_path, &baseline)?
             } else {
                 None
@@ -2242,14 +2315,18 @@ fn perform(
             // Rebuild executable argv from trusted selection/capability data; state is not a command input format.
             let expected =
                 setup::build_plan(state, plan.operation, baseline, plan.backup_path.clone())?;
+            // Earlier no-op previews recorded the derived backup path even though apply
+            // never writes it. Accept that exact path on an already reviewed plan.
+            let expected_backup = if plan.operation == PlanOperation::Configure
+                && (plan.baseline.server != ExistingServer::Same || plan.backup_path.is_some())
+            {
+                backup_path(state_path, &plan.baseline)?
+            } else {
+                None
+            };
             if expected.commands != plan.commands
                 || expected.client != plan.client
-                || plan.backup_path
-                    != if plan.operation == PlanOperation::Configure {
-                        backup_path(state_path, &plan.baseline)?
-                    } else {
-                        None
-                    }
+                || plan.backup_path != expected_backup
             {
                 return Err(err(
                     "SETUP_PLAN_INTEGRITY",
@@ -4571,6 +4648,7 @@ mod tests {
         h.preview();
         let plan = h.state.plan.as_ref().unwrap();
         assert!(plan.commands.is_empty());
+        assert_eq!(plan.backup_path, None);
         assert!(
             !plan
                 .changes
@@ -4585,6 +4663,24 @@ mod tests {
         let plan = h.state.plan.as_ref().unwrap();
         assert_eq!(plan.commands.len(), 1);
         assert!(plan.changes.join(" ").contains("backup remains private"));
+    }
+    #[test]
+    fn setup_applies_a_previously_reviewed_noop_with_a_derived_backup_path() {
+        let mut h = Harness::claude();
+        let endpoint = Cloud::Us1.endpoint();
+        let original = json!({"mcpServers":{"cs-mcp":{"type":"http","url":endpoint}}}).to_string();
+        fs::write(&h.runner.config, &original).unwrap();
+        h.preview();
+        let plan = h.state.plan.as_mut().unwrap();
+        let path = backup_path(&h.path, &plan.baseline).unwrap().unwrap();
+        plan.backup_path = Some(path.clone());
+        let hash = plan.digest().unwrap();
+        plan.confirmation_sha256.clone_from(&hash);
+
+        h.apply(hash).unwrap();
+        assert_eq!(h.runner.native_calls, 0);
+        assert_eq!(fs::read_to_string(&h.runner.config).unwrap(), original);
+        assert!(!Path::new(&path).exists());
     }
     #[test]
     fn setup_reads_comments_and_trailing_commas_outside_strings() {

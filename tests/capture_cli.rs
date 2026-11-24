@@ -1951,6 +1951,49 @@ fn capture_replaces_covered_captures_and_tidies_what_nothing_refers_to() {
 }
 
 #[test]
+fn capture_keeps_the_original_audit_and_replays_it_through_a_state_alias() {
+    let home = Temp::new();
+    home.confirm();
+    let child = home.state().parent().unwrap().join("child");
+    fs::create_dir(&child).unwrap();
+    let alias = child.join("../state.json");
+    let first = search(
+        "#type=synthetic | head(5)",
+        json!(body(json!([{"first": "1"}]))),
+    );
+    home.capture(first.clone());
+    let observation = home.saved()["captured_observations"][0].clone();
+    let path = Path::new(observation["audit_path"].as_str().unwrap());
+    let original = fs::read(path).unwrap();
+    let audit: Value = serde_json::from_slice(&original).unwrap();
+    for file in [
+        path,
+        Path::new(audit["query_file"].as_str().unwrap()),
+        Path::new(audit["result_file"].as_str().unwrap()),
+    ] {
+        age(file);
+    }
+
+    home.act_on(&alias, json!({
+        "kind": "import-query-observations", "query_file": audit["query_file"],
+        "result_file": audit["result_file"], "environment": environment(),
+        "source": {"type": "synthetic"}, "start": observation["start"], "end": observation["end"],
+        "retrieved_at": observation["retrieved_at"], "caller_assertion": "client-hook-capture"
+    }));
+    assert_eq!(home.saved()["captured_observations"], json!([observation]));
+
+    let mut second = first;
+    second["tool_response"] = json!(body(json!([{"second": "1"}])));
+    home.capture_into(&alias, "claude-code", SERVER, second);
+    let saved = home.saved();
+    let observations = saved["captured_observations"].as_array().unwrap();
+    assert_eq!(observations.len(), 2);
+    assert!(observations.contains(&observation));
+    assert_eq!(fs::read(path).unwrap(), original);
+    assert_eq!(home.tally(), json!({"recorded": 2}));
+}
+
+#[test]
 fn capture_never_tidies_the_files_of_another_state_in_its_directory() {
     let dir = Temp::new();
     dir.confirm();
@@ -3438,7 +3481,10 @@ fn capture_install_from_any_path_keeps_one_set_and_leaves_other_hooks_alone() {
         };
         assert_eq!(
             note,
-            json!({"client": client, "server": SERVER, "hooks": hooks})
+            json!({
+                "client": client, "server": SERVER, "hooks": hooks,
+                "settings_path": fs::canonicalize(&file).unwrap()
+            })
         );
         let spelled = match client {
             "codex" => format!("mcp__{}__falcon_search_ngsiem", SERVER.replace('-', "_")),
@@ -3921,6 +3967,32 @@ fn hook_ownership_matches_state_path_aliases() {
             );
             assert_eq!(remaining["hooks"][event], json!([]), "{client}");
         }
+    }
+}
+
+#[test]
+fn hook_marker_is_bound_to_the_profile_and_survives_another_servers_removal() {
+    for (client, profile_var, _, _) in WRITTEN_CLIENTS {
+        let home = Temp::new();
+        let state = home.state();
+        let marker = home.0.join("workflow/state.json.captures/hooks.json");
+        let install = |server, program| install_copy(&home.0, client, server, program, &state);
+        report(install("old", "cqlmatic").args(["--hooks", "capture"]));
+        report(install("working", "npm --silent run cq --").args(["--hooks", "capture"]));
+        let original = fs::read(&marker).unwrap();
+        assert_eq!(
+            report(install("old", "cqlmatic").args(["--hooks", "none"]))["hooks"]["capture"],
+            "removed"
+        );
+        assert_eq!(fs::read(&marker).unwrap(), original, "{client}");
+        let empty = home.0.join("empty-profile");
+        let removed = report(
+            install("working", "cqlmatic")
+                .env(profile_var, &empty)
+                .args(["--hooks", "none"]),
+        );
+        assert_eq!(removed["hooks"]["capture"], "absent");
+        assert_eq!(fs::read(&marker).unwrap(), original, "{client}");
     }
 }
 

@@ -1487,7 +1487,11 @@ fn observation_replay<'a>(
         key["end"] = json!(saved.end);
         key["retrieved_at"] = json!(saved.retrieved_at);
         let path = observation_audit_path(directory, &key)?;
-        if absolute_path(&path)? != saved.audit_path {
+        if absolute_path(&path)? != saved.audit_path
+            && !canonical(&path).is_ok_and(|expected| {
+                canonical(Path::new(&saved.audit_path)).is_ok_and(|recorded| expected == recorded)
+            })
+        {
             return Err(fail(
                 "Retained query observation audit path differs from its attestation.",
             ));

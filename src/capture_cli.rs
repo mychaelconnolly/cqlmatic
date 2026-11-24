@@ -531,43 +531,54 @@ fn tidy(path: &Path, directory: &Path) {
                 .any(|capture| copy_name(&capture.retrieved_at, &capture.result_sha256) == stem)
         })
         .collect::<Vec<_>>();
-    // Audit records of this state's captures that no saved observation refers to. Records of
-    // imports and of other states' captures are left alone.
     let audits = path
         .parent()
         .map(|parent| files(&parent.join("query-observations"), &["json"]))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|audit| {
-            !observations().any(|observation| Path::new(&observation.audit_path) == audit)
-                && record(audit).is_some_and(|record| {
-                    record["observation"]["caller_assertion"] == "client-hook-capture"
-                        && record["query_file"]
-                            .as_str()
-                            .is_some_and(|query| Path::new(query).parent() == Some(&directory))
-                })
-        })
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
     if copies.is_empty() && audits.is_empty() {
         return;
     }
 
-    // An audit record names the files its observation refers to. Those stay, whichever
-    // observation it is; when one record cannot be read, nothing is removed.
-    let mut named = BTreeSet::new();
+    // Resolve the retained references before removing anything. A hook can be
+    // reinstalled through an alias, and an unreadable record may still own a file.
+    let mut retained_audits = BTreeSet::new();
+    let mut retained_copies = BTreeSet::new();
     for observation in observations() {
-        let Some(record) = record(Path::new(&observation.audit_path)) else {
+        let Ok(audit) = fs::canonicalize(&observation.audit_path) else {
             return;
         };
-        for file in ["query_file", "result_file"] {
-            named.insert(record[file].as_str().map(PathBuf::from));
+        let Some(record) = record(&audit) else {
+            return;
+        };
+        retained_audits.insert(audit);
+        for name in ["query_file", "result_file"] {
+            let Some(file) = record[name].as_str() else {
+                continue;
+            };
+            let Ok(file) = fs::canonicalize(file) else {
+                return;
+            };
+            retained_copies.insert(file);
         }
     }
     for copy in copies {
-        if !named.contains(&Some(copy.clone())) {
+        if fs::canonicalize(&copy).is_ok_and(|path| !retained_copies.contains(&path)) {
             let _ = fs::remove_file(copy);
         }
     }
+
+    // Audit records for imports and for other states' captures are left alone.
+    let audits = audits.into_iter().filter(|audit| {
+        fs::canonicalize(audit).is_ok_and(|path| !retained_audits.contains(&path))
+            && record(audit).is_some_and(|record| {
+                record["observation"]["caller_assertion"] == "client-hook-capture"
+                    && record["query_file"]
+                        .as_str()
+                        .and_then(|query| Path::new(query).parent())
+                        .and_then(|parent| fs::canonicalize(parent).ok())
+                        .is_some_and(|parent| parent == directory)
+            })
+    });
     for audit in audits {
         let _ = fs::remove_file(&audit);
         // The writer that created the record left its lock file beside it.

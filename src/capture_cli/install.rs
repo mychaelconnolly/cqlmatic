@@ -219,7 +219,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         let read = || {
             read_settings(&path, &user).map_err(|mut error| {
                 if !args.dry_run {
-                    match mark(args, &[], |_| false) {
+                    match mark(args, &path, &[], |_| true) {
                         Ok(true) => error.message.push_str(" Removed the inventory hook note because the installed hooks could not be confirmed."),
                         Err(marker_error) => error.message.push_str(&format!(" Could not update the inventory hook note. {}", marker_error.message)),
                         Ok(false) => {}
@@ -317,11 +317,10 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 .filter(|(_, status)| certain && matches!(status, Status::Present | Status::Added))
                 .map(|(hook, _)| hook.name)
                 .collect();
-            match mark(args, &hooks, |server| {
-                matches!(
-                    read_settings(&path, &user),
-                    Ok(Settings::File(snapshot)) if has_capture(args, server, &snapshot.bytes)
-                )
+            match mark(args, &path, &hooks, |server| match read_settings(&path, &user) {
+                Ok(Settings::File(snapshot)) => has_capture(args, server, &snapshot.bytes),
+                Ok(Settings::Missing) => false,
+                _ => true,
             }) {
                 Ok(_) if !certain => next_actions.push(
                     "The inventory hook note could not confirm the installed hooks. Review the settings before relying on capture."
@@ -383,11 +382,10 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
     refusal.map_or(Ok(0), Err)
 }
 
-/// Notes beside the inventory state which of this client's hooks are set, as
-/// `<state>.captures/hooks.json`: `{"client", "server", "hooks"}`. Removed when no capture hook
-/// is left for the registration named in the note.
+/// Record the settings file that confirmed capture, so a different profile can't clear the note.
 fn mark(
     args: &CaptureArgs,
+    settings: &Path,
     hooks: &[&str],
     has_registration: impl FnOnce(&str) -> bool,
 ) -> Result<bool, Diagnostic> {
@@ -400,11 +398,18 @@ fn mark(
     let directory = super::captures_directory(&state)
         .ok_or_else(|| crate::input_error("--state must name the inventory state file."))?;
     let marker = directory.join("hooks.json");
+    let Some(settings) = fs::canonicalize(settings)
+        .ok()
+        .or_else(|| resolved_parent_path(settings))
+    else {
+        return Ok(false);
+    };
     if hooks.contains(&"capture") {
         setup_cli::protect_directory(&directory)?;
-        let bytes = serde_json::to_vec_pretty(
-            &json!({"client": name.get_name(), "server": args.server, "hooks": hooks}),
-        )
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "client": name.get_name(), "server": args.server, "hooks": hooks,
+            "settings_path": settings
+        }))
         .expect("A marker serializes");
         storage::Writer::acquire(&marker)?.commit_bytes(&bytes, MAX_MARKER_BYTES)?;
         return Ok(false);
@@ -416,7 +421,14 @@ fn mark(
     let named = storage::read_bytes(&marker, MAX_MARKER_BYTES)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_none_or(|note| {
+        .is_some_and(|note| {
+            // Earlier notes have no profile binding and are replaced on the next install.
+            let Some(noted_path) = note["settings_path"].as_str().map(Path::new) else {
+                return false;
+            };
+            if noted_path != settings && !same_existing_path(noted_path, &settings) {
+                return false;
+            }
             let noted_client = note["client"]
                 .as_str()
                 .and_then(|name| Client::from_str(name, false).ok());
@@ -460,7 +472,6 @@ fn has_capture(args: &CaptureArgs, server: &str, bytes: &[u8]) -> bool {
         .to_possible_value()
         .expect("A capture client has a name");
     let mut launches = Vec::new();
-    let mut current = Vec::new();
     for &shell in shells {
         let Ok(direct) = command(&args, name.get_name(), shell) else {
             return false;
@@ -469,19 +480,20 @@ fn has_capture(args: &CaptureArgs, server: &str, bytes: &[u8]) -> bool {
             return false;
         };
         launches.push(launch);
-        current.push(if copilot {
-            direct
-        } else {
-            shell.fail_open(&direct)
-        });
     }
-    let current: Vec<_> = current.iter().map(String::as_str).collect();
+    let matches_target = |launch: &Launch, command: &str| {
+        launch
+            .prefix(&launch.unwrap(command))
+            .is_some_and(|program| !program.trim().is_empty())
+    };
     entries.iter().any(|entry| {
         if copilot {
-            [entry["bash"].as_str(), entry["powershell"].as_str()]
-                .into_iter()
-                .collect::<Option<Vec<_>>>()
-                .is_some_and(|pair| owns_commands(&launches, &current, &pair))
+            let [Some(bash), Some(powershell)] =
+                [entry["bash"].as_str(), entry["powershell"].as_str()]
+            else {
+                return false;
+            };
+            matches_target(&launches[0], bash) && matches_target(&launches[1], powershell)
         } else {
             entry["hooks"]
                 .as_array()
@@ -490,7 +502,7 @@ fn has_capture(args: &CaptureArgs, server: &str, bytes: &[u8]) -> bool {
                 .any(|handler| {
                     handler["command"]
                         .as_str()
-                        .is_some_and(|command| owns_commands(&launches, &current, &[command]))
+                        .is_some_and(|command| matches_target(&launches[0], command))
                 })
         }
     })
@@ -754,7 +766,7 @@ impl Launch {
             direct: direct.into(),
             arguments,
             argument_prefix,
-            state_identity: state_identity(&state),
+            state_identity: resolved_parent_path(&state),
         })
     }
 
@@ -793,14 +805,28 @@ impl Launch {
         if let Some(prefix) = direct.strip_suffix(&self.arguments) {
             return Some(prefix);
         }
-        let (prefix, argument) = direct.split_once(&self.argument_prefix)?;
-        let state = literal_words(self.shell, argument)?;
-        let [state] = state.as_slice() else {
-            return None;
+        let (prefix, argument) = direct.rsplit_once(&self.argument_prefix)?;
+        let words;
+        let state = if matches!(self.shell, Shell::Cmd) {
+            // Decode the installer's state operand. Unlike shell launchers it may contain '!'.
+            let state = argument.strip_prefix('"')?.strip_suffix('"')?;
+            if state.contains(['"', '%']) {
+                return None;
+            }
+            state
+        } else {
+            words = literal_words(self.shell, argument)?;
+            let [state] = words.as_slice() else {
+                return None;
+            };
+            state
         };
         // Historical commands must have the installer's exact argument spelling.
         if self.shell.quote(state) != argument
-            || self.state_identity.as_ref()? != &state_identity(Path::new(state))?
+            || !same_state(
+                self.state_identity.as_deref()?,
+                &resolved_parent_path(Path::new(state))?,
+            )
         {
             return None;
         }
@@ -822,7 +848,7 @@ impl Launch {
     }
 }
 
-fn state_identity(path: &Path) -> Option<PathBuf> {
+fn resolved_parent_path(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
@@ -860,11 +886,52 @@ fn state_identity(path: &Path) -> Option<PathBuf> {
     }
 }
 
+fn same_state(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Some(left_captures), Some(right_captures)) = (
+        super::captures_directory(left),
+        super::captures_directory(right),
+    ) else {
+        return false;
+    };
+    // Equivalent filenames must refer to the same capture directory as well.
+    same_existing_path(&left_captures, &right_captures)
+        && (same_existing_path(left, right)
+            || [left, right].into_iter().all(|path| {
+                fs::metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+            }))
+}
+
+#[cfg(unix)]
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    fs::metadata(left).is_ok_and(|left| {
+        fs::metadata(right)
+            .is_ok_and(|right| left.dev() == right.dev() && left.ino() == right.ino())
+    })
+}
+
+#[cfg(not(unix))]
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    fs::canonicalize(left)
+        .is_ok_and(|left| fs::canonicalize(right).is_ok_and(|right| left == right))
+}
+
 fn owns_commands(launches: &[Launch], current: &[&str], old: &[&str]) -> bool {
-    if current.len() != old.len() || old.is_empty() {
+    if current.len() != old.len() || launches.len() != old.len() || old.is_empty() {
         return false;
     }
     if current == old || matches!(old, [single] if *single == launches[0].direct) {
+        return true;
+    }
+    if launches.iter().zip(old).all(|(launch, command)| {
+        launch
+            .prefix(&launch.unwrap(command))
+            .is_some_and(|prefix| Some(prefix) == launch.direct.strip_suffix(&launch.arguments))
+    }) {
         return true;
     }
     let programs = launches
@@ -2073,6 +2140,61 @@ mod tests {
             let removed = edit(settings.as_bytes(), &[hook], &launches).unwrap();
             assert!(removed.statuses == [Status::Removed]);
         }
+    }
+
+    #[test]
+    fn cmd_hook_ownership_updates_and_removes_an_aliased_bang_path() {
+        let temp = Temp::new("cmd-alias");
+        let directory = temp.0.join("Inventory !");
+        let child = directory.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let state = directory.join("state.json");
+        fs::write(&state, b"{}").unwrap();
+        let shell = Shell::Cmd;
+        let args = CaptureArgs {
+            client: Client::Codex,
+            server: "synthetic".into(),
+            state: Some(state),
+            install: true,
+            dry_run: true,
+            program: Some(r#""C:\Tools With A Bang!\cqlmatic.exe""#.into()),
+            hooks: Vec::new(),
+        };
+        let old = shell.fail_open(&command(&args, "codex", shell).unwrap());
+        let settings = json!({"hooks": {POST_TOOL_USE: [matcher_hook(".*", &old, true)]}});
+        let args = CaptureArgs {
+            state: Some(child.join("../state.json")),
+            ..args
+        };
+        let direct = command(&args, "codex", shell).unwrap();
+        let launches = [Launch::new(&args, "codex", shell, &direct).unwrap()];
+        let mut hook = Managed {
+            name: "capture",
+            event: POST_TOOL_USE,
+            entry: matcher_hook(".*", &shell.fail_open(&direct), true),
+            previous_matcher: None,
+            wanted: true,
+        };
+        let updated = edit(
+            settings.to_string().as_bytes(),
+            std::slice::from_ref(&hook),
+            &launches,
+        )
+        .unwrap();
+        assert_eq!(json!(updated.statuses[0]), "present");
+        let Edit::Write(bytes) = updated.edit else {
+            panic!("Expected updated command bytes");
+        };
+        let saved: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["hooks"][POST_TOOL_USE], json!([hook.entry]));
+        hook.wanted = false;
+        let removed = edit(&bytes, &[hook], &launches).unwrap();
+        assert_eq!(json!(removed.statuses[0]), "removed");
+        let Edit::Write(bytes) = removed.edit else {
+            panic!("Expected the command to be removed");
+        };
+        let saved: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["hooks"][POST_TOOL_USE], json!([]));
     }
 
     #[cfg(unix)]
