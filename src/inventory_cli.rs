@@ -108,7 +108,7 @@ fn discovery_run_diagnostic(index: usize, mut diagnostic: Diagnostic) -> Diagnos
 const OUTPUT_FAILED: &str = "Cannot emit the inventory reply. The change may already be saved. Read status before repeating the action.";
 const READ_OUTPUT_FAILED: &str =
     "Cannot emit inventory status. Restore standard output and retry the read.";
-const BRIEF_FALLBACK: &str = "Inventory brief command failed. Rerun the same read with full output. If a write failed, read status before retrying it.";
+const BRIEF_FALLBACK: &str = "Inventory brief command failed. Read the full command output.";
 const INVALID_INVENTORY_JSON: &str =
     "Invalid inventory JSON or unknown fields; inspect the inventory schema.";
 
@@ -150,26 +150,41 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
             "INVENTORY_INPUT" | "INVENTORY_BRIEF_FAILED"
         ) {
         brief_output_failure()
-    } else if message == READ_OUTPUT_FAILED && diagnostic.code == "OUTPUT_FAILED" {
+    } else if message == READ_OUTPUT_FAILED && diagnostic.code == "INVENTORY_INPUT" {
         Diagnostic::error("INVENTORY_BRIEF_FAILED", READ_OUTPUT_FAILED)
     } else if diagnostic.code == "INVENTORY_EVIDENCE"
         && let Some(count) = message
             .strip_prefix(SOURCE_SELECTION_PREFIX)
-            .and_then(|rest| rest.split_once(" valid inventory source IDs."))
+            .and_then(|rest| {
+                rest.strip_prefix("There are ")
+                    .or_else(|| rest.strip_prefix("There is "))
+            })
+            .and_then(|rest| rest.split_once(" valid inventory source ID"))
             .and_then(|(count, _)| count.parse::<usize>().ok())
     {
         Diagnostic::error(
             "INVENTORY_EVIDENCE",
             if count == 0 {
-                "There are no selectable inventory sources. Confirm the target with an expected source first.".into()
+                "There are no selectable inventory sources. Read summary status for the confirmed sources.".into()
             } else {
                 format!(
-                    "Source selection is outside the allowed scope. There are {count} valid inventory source IDs. Read summary status to choose one."
+                    "{} Read summary status for the confirmed sources.",
+                    inventory::source_selection_count(count)
                 )
             },
         )
+    } else if diagnostic.code == "MCP_STATE_PRODUCER" {
+        Diagnostic::error(
+            "MCP_STATE_PRODUCER",
+            "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally.",
+        )
     } else if let Some(reason) = brief_reason(&diagnostic.code, message) {
-        Diagnostic::error(&diagnostic.code, reason)
+        let pointer = if index.is_some() {
+            FULL_STEP
+        } else {
+            "Read the full command output."
+        };
+        Diagnostic::error(&diagnostic.code, format!("{reason} {pointer}"))
     } else {
         brief_failure()
     };
@@ -179,129 +194,110 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
 
 fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
     Some(match (code, message) {
-        ("MCP_STATE_PRODUCER", _) => {
-            "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally."
-        }
         ("INVENTORY_INPUT", message)
             if message.starts_with("Unknown inventory action kind ")
                 || message.starts_with("Inventory input has an unknown field ") =>
         {
-            "Inventory input did not match the required JSON shape. Inspect the inventory schema and correct the request."
+            "Inventory input did not match the required JSON schema."
         }
         ("INVENTORY_INPUT", INVALID_INVENTORY_JSON) => {
-            "Inventory input did not match the required JSON shape. Inspect the inventory schema and correct the request."
+            "Inventory input did not match the required JSON schema."
         }
         ("INVENTORY_INPUT", msg)
             if msg.starts_with("Inventory input is missing the required field ") =>
         {
-            "Inventory input lacks a required field. Inspect the inventory schema and supply the required fields."
+            "Inventory input lacks a required schema field."
         }
         (
             "INVENTORY_INPUT",
             "Unsupported inventory request version." | "Unsupported status request version.",
-        ) => "Request version is unsupported. Use schema_version 1.",
+        ) => "Request version is unsupported.",
         ("INVENTORY_INPUT", "Select state in either --state or the request, not both.") => {
-            "Two state locations were selected. Supply one state selection."
+            "Two state locations were selected."
         }
         (
             "INVENTORY_INPUT",
             "Prepare discovery before selecting a run." | "No prepared discovery run.",
-        ) => "No discovery run is prepared. Prepare discovery first.",
+        ) => "No discovery run is prepared.",
         ("INVENTORY_INPUT", msg)
             if msg
                 .strip_prefix("Discovery run_index ")
                 .and_then(|tail| tail.strip_suffix(" is out of range."))
                 .is_some_and(|index| index.parse::<usize>().is_ok()) =>
         {
-            "The discovery run index is out of range. Read status for a valid run index."
+            "The discovery run index is out of range."
         }
         (
             "INVENTORY_INPUT",
             "Inventory already exists; resume it or select a new --state path.",
-        ) => "Inventory already exists. Resume it or use a new state location.",
+        ) => "Inventory already exists.",
         ("INVENTORY_INPUT", "Evidence input must differ from inventory state.") => {
-            "The evidence and state must be separate files. Supply the saved evidence file."
+            "The evidence and state must be separate files."
         }
         (
             "INVENTORY_INPUT",
             "Cannot resolve evidence path." | "Retained inventory snapshot does not exist.",
-        ) => {
-            "An evidence file is missing or unreadable. Check the file location and access before retrying."
-        }
+        ) => "An evidence file is missing or unreadable.",
         (
             "INVENTORY_INPUT",
             "A retained discovery search has unresolved termination or cleanup. Reconcile that exact attempt before another discovery search.",
-        ) => {
-            "A retained discovery search needs settlement. Reconcile that attempt before dispatching another search."
-        }
+        ) => "A retained discovery search needs settlement.",
         ("INVENTORY_INPUT", STALE_DISCOVERY_PREDECESSOR) => {
-            "Discovery was prepared against older inventory. Pause it and prepare a run from current inventory."
+            "Discovery was prepared against older inventory."
         }
         (
             "INVENTORY_INPUT",
             "Retained discovery checkpoint differs from its inventory reference.",
-        ) => {
-            "The checkpoint does not match the selected inventory run. Restore the matching checkpoint before continuing."
-        }
+        ) => "The checkpoint does not match the selected inventory run.",
         (
             "INVENTORY_INPUT",
             "Activate the ordinary field pack before preparing optional capability checks.",
         ) => "Activate a field pack before preparing capability checks.",
         ("INVENTORY_INPUT", "Unknown capability checkpoint.") => {
-            "The capability checkpoint was not found. Select a saved run from status."
+            "The capability checkpoint was not found."
         }
         ("INVENTORY_EVIDENCE", "Confirm CID, cloud, view and target scope before discovery.") => {
-            "The target is missing. Confirm the target before preparing discovery."
+            "The target is missing."
         }
         (
             "INVENTORY_EVIDENCE",
             "Binding must identify an exact saved parser ID and SHA-256 snapshot.",
-        ) => {
-            "The saved parser version did not match. Select the exact parser ID and snapshot digest from inventory."
-        }
+        ) => "The saved parser version did not match.",
         (
             "INVENTORY_EVIDENCE",
             "Inventory work changed; inspect its current revision before acknowledging.",
-        ) => "The work revision changed. Read status and acknowledge its current revision.",
+        ) => "The work revision changed.",
         (
             "INVENTORY_EVIDENCE",
             "Inventory notice changed or is empty; inspect the selected state's current notice before acknowledging.",
-        ) => {
-            "The inventory notice changed or is empty. Read status before acknowledging the current notice."
-        }
+        ) => "The inventory notice changed or is empty.",
         ("INVENTORY_EVIDENCE", "Unknown exact refresh attempt.") => {
-            "The refresh attempt was not found. Read status and select the exact recorded attempt."
+            "The refresh attempt was not found."
         }
         (
             "INVENTORY_EVIDENCE",
             "Expected strict protected host evidence for a provider-enforced search lifetime; a client timeout is insufficient.",
-        ) => {
-            "The host evidence is invalid. Supply the saved proof of a provider-enforced search lifetime."
-        }
+        ) => "The host evidence is invalid.",
         ("INVENTORY_EVIDENCE", message) if message.starts_with("Refresh host evidence ") => {
-            "The host evidence did not pass refresh validation. Check the selected target, session and provider lifetime."
+            "The host evidence did not pass refresh validation."
         }
         ("INVENTORY_EVIDENCE", message) if message.starts_with("Refresh settlement ") => {
-            "The settlement did not match the reserved refresh. Submit evidence for the exact attempt."
+            "The settlement did not match the reserved refresh."
         }
         (
             "INVENTORY_EVIDENCE",
             "The verified provider search lifetime has not elapsed; refresh remains unresolved.",
-        ) => {
-            "The recorded times do not establish that the provider lifetime ended. Verify the actual search start and wait the full provider lifetime before submitting settlement."
-        }
+        ) => "The recorded times do not establish that the provider lifetime ended.",
         (
             "INVENTORY_EVIDENCE",
             "Reported provider search start must follow exact dispatch and precede settlement.",
-        ) => {
-            "The reported search start does not fit the attempt. Supply its actual start between dispatch and settlement, or omit it if the attempt never started."
-        }
+        ) => "The reported search start does not fit the attempt.",
         ("INVENTORY_EVIDENCE", message)
             if message.starts_with(
                 "Lifetime reconciliation requires host-attested search_started_at.",
             ) =>
         {
-            "A lifetime settlement needs the host-attested search start. Supply that time and wait the verified provider lifetime."
+            "A lifetime settlement needs the host-attested search start."
         }
         ("INVENTORY_EVIDENCE", "No dispatched refresh lifetime exists.") => {
             "There is no recorded dispatch for the lifetime settlement. Check the attempt before submitting its actual outcome."
@@ -313,7 +309,7 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
             "There are no expected sources for discovery. Confirm the target with an expected source first."
         }
         ("INVENTORY_INPUT", "Observation input exceeds 8 MiB.") => {
-            "The observation input exceeds 8 MiB. Supply a complete result from a narrower query or window."
+            "The observation input exceeds 8 MiB."
         }
         (
             "INVENTORY_INPUT",
@@ -323,92 +319,64 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
             | "Cannot read observation input."
             | "Cannot reinspect observation input."
             | "Cannot reinspect observation input path.",
-        ) => {
-            "An observation input is missing or unreadable. Check the query and result files before retrying."
-        }
+        ) => "An observation input is missing or unreadable.",
         (
             "INVENTORY_INPUT",
             "Observation input changed before it was read."
             | "Observation input changed while it was being read.",
-        ) => {
-            "An observation input changed while opening or reading it. Wait for the file to finish saving and retry."
-        }
+        ) => "An observation input changed while opening or reading it.",
         (
             "INVENTORY_INPUT",
             "Retained observation audits exceed the total verification byte budget.",
-        ) => {
-            "Retained observation audits exceed the verification budget. Inspect the protected inventory and audits before retrying."
-        }
+        ) => "Retained observation audits exceed the verification budget.",
         ("SETUP_PROTECTION", "Protected setup input must be a regular file.") => {
-            "A protected input could not be opened as a regular file. Verify its location and supply the original file."
+            "A protected input could not be opened as a regular file."
         }
         ("SETUP_PROTECTION", "Cannot determine the current user account.") => {
-            "Setup could not determine the current user account. Check the process account before retrying."
+            "Setup could not determine the current user account."
         }
-        ("ENV_TENANT", _) => {
-            "The account binding is invalid. Supply a Falcon CID or an api-client SHA-256 fingerprint."
-        }
-        ("ENV_VIEW", _) => {
-            "The search target is invalid. Supply a nonempty searchable target without control characters."
-        }
+        ("ENV_TENANT", _) => "The account binding is invalid.",
+        ("ENV_VIEW", _) => "The search target is invalid.",
         (
             "MCP_DEADLINE",
             "Discovery active-time budget expired; pause and resume do not renew it."
             | "Discovery wall-clock budget expired before the last answer was ingested.",
-        ) => {
-            "The discovery time limit passed. Settle any outstanding attempt, then prepare a new run."
-        }
-        ("INVENTORY_REFRESH_UNAVAILABLE", _) => {
-            "Automatic inventory refresh is unavailable. Use an explicit manual refresh."
-        }
-        ("INVENTORY_REFRESH_REMINDER_STALE", _) => {
-            "The refresh reminder changed or is not due. Read status before acknowledging the current cycle."
-        }
+        ) => "The discovery time limit passed.",
+        ("INVENTORY_REFRESH_UNAVAILABLE", _) => "Automatic inventory refresh is unavailable.",
+        ("INVENTORY_REFRESH_REMINDER_STALE", _) => "The refresh reminder changed or is not due.",
         ("DISCOVERY_EVIDENCE", "Use increasing absolute UTC windows of at most seven days.") => {
-            "The discovery window is invalid. Supply increasing absolute UTC timestamps at most seven days apart."
+            "The discovery window is invalid."
         }
-        ("PACK_TIME", _) => {
-            "A timestamp is invalid. Use RFC3339 timestamps with an explicit offset."
-        }
-        ("PACK_BUSY", _) => {
-            "Another writer holds the selected file. Retry after the writer finishes."
-        }
+        ("PACK_TIME", _) => "A timestamp is invalid.",
+        ("PACK_BUSY", _) => "Another writer holds the selected file.",
         ("LOCAL_IO", msg) if msg.starts_with("Cannot inspect input: ") => {
-            "An input file is missing or inaccessible. Check its location and access."
+            "An input file is missing or inaccessible."
         }
         ("LOCAL_IO", msg)
             if msg.starts_with("Cannot open input: ") || msg.starts_with("Cannot read input: ") =>
         {
-            "An input file could not be read. Check its access and try again."
+            "An input file could not be read."
         }
         ("LOCAL_FILE_TYPE", "Input must be a regular file, not a symlink.") => {
-            "Use a regular input file."
+            "The input is not a regular file."
         }
         (
             "LOCAL_SIZE",
             "File exceeds the configured byte budget." | "Input grew beyond the byte budget.",
-        ) => "The input exceeds its size limit. Supply a smaller file.",
+        ) => "The input exceeds its size limit.",
         ("SETUP_STORAGE", msg) if msg.starts_with("Storage location ") => {
-            "The storage location is inaccessible. Check the selected location and its access."
+            "The storage location is inaccessible."
         }
-        ("PACK_JSON", _) => "The pack JSON is invalid. Supply a valid exported pack.",
-        ("PACK_DIGEST", _) => "The pack digest does not match. Use the intact exported pack.",
+        ("PACK_JSON", _) => "The pack JSON is invalid.",
+        ("PACK_DIGEST", _) => "The pack digest does not match.",
         ("PACK_VERSION", _) => "The pack format is unsupported. Export a compatible pack.",
-        ("MCP_STATE_TAMPERED", _) => {
-            "The checkpoint could not be verified. Recover the intact checkpoint before continuing."
-        }
-        ("MCP_STATE_RESTART", _) => {
-            "The checkpoint format or discovery algorithm is incompatible. Resolve outstanding work before preparing a compatible run."
-        }
+        ("MCP_STATE_TAMPERED", _) => "The checkpoint could not be verified.",
+        ("MCP_STATE_RESTART", _) => "The checkpoint format or discovery algorithm is incompatible.",
         (
             "DISCOVERY_BUSY",
             "No new probe can start; settle the outstanding attempt or resume the paused run first.",
-        ) => {
-            "Discovery cannot start another probe. Settle the outstanding attempt or resume the paused run."
-        }
-        ("DISCOVERY_CLEANUP_PENDING", _) => {
-            "Discovery cleanup is pending. Settle the outstanding attempt before resuming."
-        }
+        ) => "Discovery cannot start another probe.",
+        ("DISCOVERY_CLEANUP_PENDING", _) => "Discovery cleanup is pending.",
         _ => return None,
     })
 }
@@ -862,6 +830,10 @@ fn status_brief(
     session_id: Option<&str>,
 ) -> Value {
     let mut brief = inventory::brief(report, session_id);
+    if let Some(index) = status_row_limit(state) {
+        brief["discovery_row_limit"] =
+            json!({"run_index":index,"code":"SEARCH_ROW_LIMIT","message":ROW_LIMIT_REASON});
+    }
     let runs = &state.discovery_runs;
     if let Some(index) = runs.iter().enumerate().rev().find_map(|(index, run)| {
         (run.status == "failed"
@@ -877,14 +849,42 @@ fn status_brief(
     }) && let Ok(relay) = inspect_selected_run(state, index)
         && let Some(failure) = relay_failure_cause(&relay)
     {
-        let (diagnostic, _) = relay_failure(&failure);
+        let (diagnostic, _) = relay_failure(
+            &failure,
+            !mcp::is_resumable(&relay),
+            relay.request.max_queries,
+        );
         brief["failed_discovery"] = json!({"run_index":index,"code":diagnostic["code"]});
     }
     brief
 }
 
+fn retained_row_limit(relay: &mcp::State) -> bool {
+    relay
+        .failure
+        .as_ref()
+        .is_some_and(|d| d.code == "SEARCH_ROW_LIMIT")
+        || mcp::ended_at_row_limit(relay)
+}
+
+fn status_row_limit(state: &InventoryState) -> Option<usize> {
+    let index = state.discovery_runs.len().checked_sub(1)?;
+    let run = &state.discovery_runs[index];
+    (matches!(run.status.as_str(), "paused" | "failed")
+        && inspect_selected_run(state, index).is_ok_and(|relay| retained_row_limit(&relay)))
+    .then_some(index)
+}
+
+fn note_status_row_limit(state: &InventoryState, report: &mut InventoryStatus) {
+    if let Some(index) = status_row_limit(state) {
+        report.next_actions.push(format!(
+            "Discovery run {index}. {ROW_LIMIT_REASON} {FULL_STEP}"
+        ));
+    }
+}
+
 fn read_output(result: Result<(), Diagnostic>) -> Result<(), Diagnostic> {
-    result.map_err(|_| Diagnostic::error("OUTPUT_FAILED", READ_OUTPUT_FAILED))
+    result.map_err(|_| fail(READ_OUTPUT_FAILED))
 }
 
 pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
@@ -903,7 +903,10 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
             .or_else(|| request.and_then(|r| r.state.map(PathBuf::from))),
     )?;
     let state = load(&path)?;
-    let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+    let mut report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+    if !args.brief {
+        note_status_row_limit(&state, &mut report);
+    }
     if args.json {
         if args.brief {
             read_output(output_brief(status_brief(
@@ -926,7 +929,10 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     let path = state_path(args.state)?;
     if args.request.is_none() && !args.next_probe {
         let state = load(&path)?;
-        let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+        let mut report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+        if !args.brief {
+            note_status_row_limit(&state, &mut report);
+        }
         if args.json || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             if args.json {
                 if args.brief {
@@ -1014,6 +1020,7 @@ struct NextProbeRun {
     relay: mcp::State,
     checkpoint: storage::Writer,
     refusal: Option<Value>,
+    predecessor_error: Option<Diagnostic>,
 }
 
 fn inspect_next_probe_run(
@@ -1036,8 +1043,14 @@ fn inspect_next_probe_run(
         let stage = refusal_stage(index, &relay);
         state.failures.iter().rev().find_map(|failure| {
             let code = failure.stage.strip_prefix(&stage)?;
+            answer_reason(code)?;
             Some(safe_answer_diagnostic(code, Severity::Error))
         })
+    } else {
+        None
+    };
+    let predecessor_error = if phase == "paused" {
+        check_discovery_predecessor_for(&state, index, &relay).err()
     } else {
         None
     };
@@ -1047,6 +1060,7 @@ fn inspect_next_probe_run(
         relay,
         checkpoint,
         refusal,
+        predecessor_error,
     })
 }
 
@@ -1054,7 +1068,22 @@ const LOCAL_DEADLINE_REASON: &str = "Discovery time limit reached.";
 const LOCAL_DEADLINE_ACTION: &str =
     "Prepare a new discovery run with enough time for the selected sources.";
 const ROW_LIMIT_REASON: &str = "The answer reached the 10,000-row ceiling. With the same data, repeating this search will reach the ceiling again.";
-const ROW_LIMIT_ACTION: &str = "Prepare a new discovery run over a narrower window. If a field requested through kind_fields or value_fields produced the listing, you can omit that field from the new run.";
+const ROW_LIMIT_ACTION: &str = "Prepare a new discovery run over a narrower window.";
+const ROW_LIMIT_DEADLINE_ACTION: &str =
+    "Prepare a new discovery run over a narrower window with enough time for the selected sources.";
+const LEGACY_SEARCH_ACTION: &str = "Confirm the original search outcome with the host. After settlement, prepare a narrower run in a separate inventory.";
+const CURRENT_INVENTORY_ACTION: &str = "Prepare discovery again from the current inventory.";
+const FULL_STEP: &str = "Read the full step output for this run.";
+
+fn row_limit_action(legacy: bool, expired: bool) -> &'static str {
+    if legacy {
+        LEGACY_SEARCH_ACTION
+    } else if expired {
+        ROW_LIMIT_DEADLINE_ACTION
+    } else {
+        ROW_LIMIT_ACTION
+    }
+}
 
 fn next_probe(
     path: &Path,
@@ -1112,7 +1141,7 @@ fn next_probe(
         .map(|d| {
             if d.code == "MCP_UNKNOWN_PROBE" && !mcp::has_in_flight(&run.relay) {
                 json!({"code":d.code,"severity":d.severity,"message":
-                    "No probe is outstanding. Request the next probe before running a search or submitting an answer."})
+                    "No probe is outstanding."})
             } else {
                 safe_answer_diagnostic(&d.code, d.severity)
             }
@@ -1145,14 +1174,14 @@ fn next_probe(
     let mut cost = json!(mcp::cost(&run.relay, 0));
     let mut phase = run.phase.clone();
     let mut terminal_failure = relay_failure_cause(&run.relay);
-    if terminal_failure.is_some() && phase == "activating" {
-        phase = "failed".into();
-    }
     let mut source_id = terminal_failure
         .as_ref()
         .and_then(|d| conflicted_source_id(&run.relay, d));
     let row_limited = diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT")
-        || mcp::paused_at_row_limit(&run.relay);
+        || retained_row_limit(&run.relay);
+    let legacy = !mcp::is_resumable(&run.relay);
+    let query_limit = run.relay.request.max_queries;
+    let predecessor_error = run.predecessor_error.take();
     if phase == "cleanup-pending" {
         for diagnostic in cleanup_diagnostics(&run.relay, diagnostics.is_empty()) {
             if !diagnostics.contains(&diagnostic) {
@@ -1227,28 +1256,48 @@ fn next_probe(
         expired,
         outstanding.is_some(),
     );
-    let next_action = if phase == "failed"
+    let next_action = if matches!(phase, "failed" | "activating")
         && let Some(failure) = terminal_failure
     {
-        let (diagnostic, guidance) = relay_failure(&failure);
-        diagnostics = vec![diagnostic];
-        guidance.to_owned()
+        let (diagnostic, guidance) = relay_failure(&failure, legacy, query_limit);
+        diagnostics.retain(|d| d["code"] != diagnostic["code"]);
+        diagnostics.insert(0, diagnostic);
+        if row_limited && failure.code == "MCP_DEADLINE" && !legacy {
+            if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
+                diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
+            }
+            ROW_LIMIT_DEADLINE_ACTION.to_owned()
+        } else {
+            guidance.to_owned()
+        }
     } else if row_limited {
         if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
             diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
         }
-        ROW_LIMIT_ACTION.to_owned()
+        row_limit_action(legacy, expired).to_owned()
     } else if phase == "paused" && expired {
         diagnostics.push(
             json!({"code":"MCP_DEADLINE","severity":"error","message":LOCAL_DEADLINE_REASON}),
         );
         LOCAL_DEADLINE_ACTION.to_owned()
+    } else if let Some(error) = predecessor_error {
+        let stale = error.code == "INVENTORY_INPUT"
+            && error.message
+                == format!("Discovery run_index {index}: {STALE_DISCOVERY_PREDECESSOR}");
+        diagnostics.push(reservation_diagnostic(error, false));
+        if stale {
+            CURRENT_INVENTORY_ACTION
+        } else {
+            FULL_STEP
+        }
+        .to_owned()
     } else if stale_predecessor {
         "Pause this run, then prepare discovery again from the current inventory.".to_owned()
     } else {
         if diagnostics.is_empty() {
             let code = match phase {
                 "activation-blocked" => Some("PACK_BUSY"),
+                "cancel-requested" => Some("DISCOVERY_CANCEL_REQUESTED"),
                 "superseded" => Some("DISCOVERY_SUPERSEDED"),
                 _ => None,
             };
@@ -1355,18 +1404,11 @@ fn next_probe_guidance(
         "probe" => format!(
             "This probe is already reserved. If its search ran, submit the saved result as answer with run_index={index}. Run the search only if it never started."
         ),
-        "complete" => format!(
-            "run_index={index} is complete. Submit reconcile with reviewed_at if it has not been reconciled."
-        ),
+        "complete" => format!("run_index={index} is complete."),
         "needs-probes" if expired && outstanding => format!(
-            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index={index} to close the attempt. If it never started, do not run it; submit pause-discovery with run_index={index}, then next-probe with run_index={index} and no answer."
+            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index={index} to close the attempt. If it never started, run the exact reserved search once and submit its result to close the attempt. Then prepare a new run."
         ),
-        "needs-probes" if reservation_failed && outstanding => format!(
-            "The reservation reported an error; see diagnostics. Submit next-probe with run_index={index} and no answer to read the outstanding probe."
-        ),
-        "needs-probes" if reservation_failed => format!(
-            "The next probe was not reserved; the diagnostic says why. Resolve that, then submit next-probe with run_index={index} and no answer. If the diagnostic says the run started from an earlier inventory, submit pause-discovery with run_index={index}, then prepare-discovery."
-        ),
+        "needs-probes" if reservation_failed => FULL_STEP.to_owned(),
         "needs-probes" if refused => {
             let next = if outstanding {
                 "read the outstanding probe"
@@ -1378,23 +1420,9 @@ fn next_probe_guidance(
             )
         }
         "paused" => format!("Submit resume-discovery with run_index={index} to continue this run."),
-        "cancel-requested" | "cleanup-pending" => {
-            let after = if expired {
-                LOCAL_DEADLINE_ACTION.to_owned()
-            } else {
-                format!("Then submit resume-discovery with run_index={index}.")
-            };
-            format!("Settle the outstanding attempt for run_index={index} before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. {after}")
-        },
-        "failed" => "Review the failed run and resolve the cause before preparing discovery again.".into(),
-        "activation-blocked" => "Pack activation is pending. Resolve the blocker, then submit discovery-step with the same run_index and answers: [] to retry activation without another search.".into(),
-        "activating" | "activated" => "Submit discovery-step with the same run_index and answers: [] to finish promoting the verified pack without another search.".into(),
-        "superseded" => format!(
-            "run_index={index} was superseded by newer inventory evidence. Submit prepare-discovery to measure again."
-        ),
-        _ => {
-            format!("Inspect run_index={index} with discovery-step, answers: [] and --json alone.")
-        }
+        "activation-blocked" | "activating" | "activated" =>
+            "Pack activation is pending. Submit discovery-step with the same run_index and answers: [] to retry activation without another search.".to_owned(),
+        _ => FULL_STEP.to_owned(),
     }
 }
 
@@ -1428,7 +1456,7 @@ fn conflicted_source_id(relay: &mcp::State, error: &Diagnostic) -> Option<String
     }))
 }
 
-fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
+fn relay_failure(error: &Diagnostic, legacy: bool, query_limit: u32) -> (Value, &'static str) {
     let (code, reason, next) = match (error.code.as_str(), error.message.as_str()) {
         (
             "DISCOVERY_EVIDENCE",
@@ -1438,12 +1466,18 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
         ) => (
             "DISCOVERY_EVIDENCE",
             "Discovery search budget exhausted.",
-            "Prepare a new run with a larger max_queries for the full selected scope.",
+            if legacy {
+                FULL_STEP
+            } else if query_limit < 1000 {
+                "Prepare a new run with a larger max_queries for the full selected scope."
+            } else {
+                "Prepare a new run with fewer measurements per run."
+            },
         ),
         ("PACK_INTEGRITY", _) if selector_conflict(error).is_some() => (
             "PACK_INTEGRITY",
-            "The measured scope conflicts with imported restrictions. Look for source_id in the full or summary reply.",
-            "Prepare discovery with source_ids that leave out the conflicting source. If it is the only source you need, use a separate inventory with a corrected pack.",
+            "The measured scope conflicts with imported restrictions.",
+            FULL_STEP,
         ),
         (
             "DISCOVERY_EVIDENCE",
@@ -1453,22 +1487,38 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
         ) => (
             "DISCOVERY_EVIDENCE",
             "Discovery found no events or no usable field listing in the window.",
-            "Check the selected sources and window, then prepare discovery where those sources return events and the required field listing.",
+            FULL_STEP,
         ),
         (
             "MCP_DEADLINE",
             "Discovery active-time budget expired; pause and resume do not renew it."
             | "Discovery wall-clock budget expired before the last answer was ingested.",
-        ) => ("MCP_DEADLINE", LOCAL_DEADLINE_REASON, LOCAL_DEADLINE_ACTION),
+        ) => (
+            "MCP_DEADLINE",
+            LOCAL_DEADLINE_REASON,
+            if legacy {
+                FULL_STEP
+            } else {
+                LOCAL_DEADLINE_ACTION
+            },
+        ),
         ("MCP_DEADLINE", _) => (
             "MCP_DEADLINE",
             "The hosted search reported a timeout.",
-            "Confirm that the exact search has ended with the host before preparing more searches. If this legacy run still blocks discovery, prepare a narrower run in a separate inventory after settlement.",
+            if legacy {
+                LEGACY_SEARCH_ACTION
+            } else {
+                FULL_STEP
+            },
         ),
         ("MCP_TOOL_ERROR", _) => (
             "MCP_TOOL_ERROR",
             "The hosted search reported an error.",
-            "Verify the exact search outcome with the host before preparing more searches. If this legacy run still blocks discovery, use a separate inventory only after settlement.",
+            if legacy {
+                LEGACY_SEARCH_ACTION
+            } else {
+                FULL_STEP
+            },
         ),
         (
             "MCP_ACTIVATION_CONFLICT",
@@ -1476,12 +1526,12 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
         ) => (
             "MCP_ACTIVATION_CONFLICT",
             "The inventory pack used to prepare discovery changed.",
-            "Prepare discovery again from the current inventory.",
+            FULL_STEP,
         ),
         ("MCP_ACTIVATION_CONFLICT", mcp::ACTIVATION_PACK_CONFLICT) => (
             "MCP_ACTIVATION_CONFLICT",
             "The pack differs from the saved predecessor and activation target.",
-            "Restore the matching predecessor or target pack. If the pack path was originally empty, move the unrelated file aside. Then retry discovery-step with answers: [].",
+            FULL_STEP,
         ),
         ("MCP_ACTIVATION_CONFLICT", mcp::ACTIVATION_RECEIPT_CONFLICT) => (
             "MCP_ACTIVATION_CONFLICT",
@@ -1491,48 +1541,60 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
         ("MCP_ACTIVATION_CONFLICT", mcp::ACTIVATION_RECEIPT_BEFORE_PACK) => (
             "MCP_ACTIVATION_CONFLICT",
             "The activation receipt is present before its matching pack.",
-            "Move the receipt aside, then retry discovery-step with answers: [] to finish writing the pack and receipt.",
+            FULL_STEP,
         ),
-        ("SEARCH_ROW_LIMIT", _) => ("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON, ROW_LIMIT_ACTION),
+        ("SEARCH_ROW_LIMIT", _) => (
+            "SEARCH_ROW_LIMIT",
+            ROW_LIMIT_REASON,
+            row_limit_action(legacy, false),
+        ),
         ("DISCOVERY_EVIDENCE", _) => (
             "DISCOVERY_EVIDENCE",
             "Discovery could not qualify the returned evidence.",
-            "Review the protected result and selected scope before preparing discovery again.",
+            FULL_STEP,
         ),
         ("PACK_INTEGRITY", _) => (
             "PACK_INTEGRITY",
             "The discovery pack did not pass integrity checks.",
-            "Review the imported pack and discovery scope before preparing discovery again.",
+            FULL_STEP,
         ),
         ("PACK_ENVIRONMENT_MISMATCH", _) => (
             "PACK_ENVIRONMENT_MISMATCH",
             "The saved pack is for a different target.",
-            "Select the matching inventory before preparing discovery again.",
+            FULL_STEP,
         ),
         ("LOCAL_IO", _) => (
             "LOCAL_IO",
             "A discovery artifact could not be read or saved.",
-            "Check access to the saved artifacts before preparing discovery again.",
+            FULL_STEP,
         ),
         ("PACK_JSON", _) => (
             "PACK_JSON",
             "The saved pack could not be decoded.",
-            "Recover a valid pack before preparing discovery again.",
+            FULL_STEP,
         ),
         ("PACK_DIGEST", _) => (
             "PACK_DIGEST",
             "The saved pack did not match its digest.",
-            "Recover the intact pack before preparing discovery again.",
+            FULL_STEP,
         ),
         ("PACK_VERSION", _) => (
             "PACK_VERSION",
             "The saved pack uses an unsupported format.",
-            "Use a compatible pack before preparing discovery again.",
+            FULL_STEP,
         ),
+        ("MCP_SHAPE", _) => (
+            "MCP_SHAPE",
+            "The saved response has an unsupported shape.",
+            FULL_STEP,
+        ),
+        _ if let Some(reason) = answer_reason(&error.code) => {
+            (error.code.as_str(), reason, FULL_STEP)
+        }
         _ => (
             "DISCOVERY_FAILED",
             "The discovery run failed before pack promotion.",
-            "Inspect the protected checkpoint locally and resolve the cause before preparing discovery again.",
+            FULL_STEP,
         ),
     };
     (
@@ -1542,86 +1604,47 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
 }
 
 fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
-    let (code, message) = match code {
-        "MCP_UNKNOWN_PROBE" => (
-            "MCP_UNKNOWN_PROBE",
-            "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for. Run the outstanding probe only if its search never started, and submit that probe's own result.",
-        ),
-        "LOCAL_FILE_TYPE" => (
-            "LOCAL_FILE_TYPE",
-            "Use a regular file containing the saved response.",
-        ),
-        "LOCAL_IO" => (
-            "LOCAL_IO",
-            "Check that the saved response file is readable.",
-        ),
-        "LOCAL_SIZE" => (
-            "LOCAL_SIZE",
-            "Use a saved response within the input size limit.",
-        ),
-        "MCP_TOOL_ERROR" => (
-            "MCP_TOOL_ERROR",
-            "The search tool reported an error. Check the original response and follow the run's next action.",
-        ),
-        "MCP_SHAPE" => (
-            "MCP_SHAPE",
-            "The response has an unsupported shape. Use the original complete tool result.",
-        ),
-        "MCP_INCOMPLETE" => (
-            "MCP_INCOMPLETE",
-            "The search response reports incomplete results. Settle the outstanding attempt before continuing.",
-        ),
-        "MCP_DEADLINE" => (
-            "MCP_DEADLINE",
-            "The search response reports a timeout. Follow the run's settlement or resume guidance.",
-        ),
-        "DISCOVERY_EVIDENCE" => (
-            "DISCOVERY_EVIDENCE",
-            "The result did not provide the evidence required by this probe. Review the saved response before resuming.",
-        ),
-        "SEARCH_ROW_LIMIT" => ("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON),
-        "MCP_TOO_LARGE" => (
-            "MCP_TOO_LARGE",
-            "The search response exceeds the size limit. Check the saved response before settling the attempt.",
-        ),
-        "DISCOVERY_CLEANUP_PENDING" => (
-            "DISCOVERY_CLEANUP_PENDING",
-            "Settle the outstanding attempt before continuing.",
-        ),
-        "DISCOVERY_ATTEMPT_ENDED" => (
-            "DISCOVERY_ATTEMPT_ENDED",
-            "The attempt ended and its allowance remains charged.",
-        ),
-        "DISCOVERY_SUPERSEDED" => (
-            "DISCOVERY_SUPERSEDED",
-            "Newer inventory evidence superseded this discovery run. Prepare discovery against the current inventory.",
-        ),
-        "PACK_BUSY" => (
-            "PACK_BUSY",
-            "The pack writer is busy. Retry activation after the writer finishes.",
-        ),
-        "MCP_STATE_RESTART" => (
-            "MCP_STATE_RESTART",
-            "The checkpoint is incompatible. Prepare a new run after resolving any outstanding attempt.",
-        ),
-        "MCP_RESULT_REUSED" => (
-            "MCP_RESULT_REUSED",
-            "An earlier attempt retained this response. Supply the original response for the outstanding attempt.",
-        ),
-        "MCP_REJECTION_LIMIT" => (
-            "MCP_REJECTION_LIMIT",
-            "The rejected-answer history is full. Settle the outstanding attempt before continuing.",
-        ),
-        "INVENTORY_INPUT" => (
-            "INVENTORY_INPUT",
-            "The answer could not be applied. Check the probe ID and the saved response.",
-        ),
-        _ => (
-            "DISCOVERY_ANSWER_FAILED",
-            "The answer could not be applied. Check the protected local evidence before continuing.",
-        ),
-    };
+    let message = answer_reason(code)
+        .unwrap_or("The answer could not be applied. Read the full step output for this run.");
     json!({"code":code,"severity":severity,"message":message})
+}
+
+fn answer_reason(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "MCP_UNKNOWN_PROBE" => {
+            "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for."
+        }
+        "LOCAL_FILE_TYPE" => "The saved response is not a regular file.",
+        "LOCAL_IO" => "The saved response could not be read or stored.",
+        "LOCAL_SIZE" => "The saved response exceeds the input size limit.",
+        "MCP_TOOL_ERROR" => "The search tool reported an error.",
+        "MCP_SHAPE" => "The response has an unsupported shape.",
+        "MCP_INCOMPLETE" => "The search response reports incomplete results.",
+        "MCP_DEADLINE" => "The search response reports a timeout.",
+        "DISCOVERY_EVIDENCE" => "The result did not provide the evidence required by this probe.",
+        "SEARCH_ROW_LIMIT" => ROW_LIMIT_REASON,
+        "MCP_TOO_LARGE" => "The search response exceeds the size limit.",
+        "DISCOVERY_CANCEL_REQUESTED" => "Cancellation was requested for the outstanding search.",
+        "DISCOVERY_CLEANUP_PENDING" => "The outstanding attempt needs settlement.",
+        "DISCOVERY_ATTEMPT_ENDED" => "The attempt ended and its allowance remains charged.",
+        "DISCOVERY_SUPERSEDED" => "Newer inventory evidence superseded this discovery run.",
+        "DISCOVERY_PHASE" => "This run is not waiting for an answer.",
+        "DISCOVERY_TRANSPORT" => "The run does not accept relayed search results.",
+        "MCP_ALREADY_ANSWERED" => "The probe already has an answer.",
+        "LOCAL_PATH" => "The saved response path is invalid.",
+        "LOCAL_SERIALIZATION" => "The updated discovery state could not be serialized.",
+        "PACK_DURABILITY" => "The discovery write could not be confirmed.",
+        "PACK_SERIALIZATION" => "The discovery pack could not be serialized.",
+        "PACK_SIZE" => "The discovery pack exceeds the size limit.",
+        "PACK_PROFILE" => "The discovery pack uses an unsupported profile.",
+        "PACK_TIME" => "The discovery evidence has an invalid timestamp.",
+        "PACK_BUSY" => "Pack activation is pending.",
+        "MCP_STATE_RESTART" => "The checkpoint is incompatible.",
+        "MCP_RESULT_REUSED" => "An earlier attempt retained this response.",
+        "MCP_REJECTION_LIMIT" => "The rejected-answer history is full.",
+        "INVENTORY_INPUT" => "The answer could not be applied.",
+        _ => return None,
+    })
 }
 
 fn cleanup_diagnostics(relay: &mcp::State, include_refusal: bool) -> Vec<Value> {
@@ -1695,7 +1718,7 @@ fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
     let message = if fixed {
         &error.message
     } else if outstanding {
-        "The reservation reported an error. Check the outstanding probe before continuing."
+        "The reservation reported an error."
     } else {
         "The next probe was not reserved."
     };
@@ -1972,7 +1995,11 @@ fn action_summary(action: &Value) -> Value {
             compact["next_action"] = json!(format!(
                 "Submit next-probe{selection} to receive the next probe with its exact arguments."
             ));
-        } else if let Some(compact) = compact.as_object_mut() {
+        } else if !relay
+            .get("diagnostics")
+            .is_some_and(|d| d.as_array().is_some_and(|d| !d.is_empty()))
+            && let Some(compact) = compact.as_object_mut()
+        {
             compact.remove("next_action");
         }
     }
@@ -2004,21 +2031,48 @@ fn action_brief(action: &Value) -> Value {
     {
         compact["outcome"] = json!(status);
     }
-    if action["relay"]["status"] == "failed"
-        && let Some(failure) = action["relay"]["diagnostics"]
-            .as_array()
-            .and_then(|values| values.last())
+    if matches!(
+        action["relay"]["status"].as_str(),
+        Some("failed" | "activating")
+    ) && let Some(failure) = action["relay"]["diagnostics"]
+        .as_array()
+        .and_then(|values| values.last())
         && let Ok(failure) = serde_json::from_value::<Diagnostic>(failure.clone())
     {
-        let (diagnostic, next_action) = relay_failure(&failure);
+        let limit = action["relay"]["cost"]["searches"]["limit"]
+            .as_u64()
+            .unwrap_or(1000) as u32;
+        let (diagnostic, next_action) = relay_failure(&failure, false, limit);
+        let next_action = match action["next_action"].as_str() {
+            Some(next @ (FULL_STEP | LEGACY_SEARCH_ACTION)) => next,
+            _ => next_action,
+        };
         compact["diagnostics"] = json!([diagnostic]);
         compact["next_action"] = json!(next_action);
     }
+    if let Some(next) = action["next_action"].as_str()
+        && matches!(
+            next,
+            ROW_LIMIT_ACTION | ROW_LIMIT_DEADLINE_ACTION | LEGACY_SEARCH_ACTION
+        )
+        && action["relay"]["diagnostics"]
+            .as_array()
+            .is_some_and(|diagnostics| diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT"))
+    {
+        let mut diagnostics = compact["diagnostics"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
+            diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
+        }
+        compact["diagnostics"] = json!(diagnostics);
+        compact["next_action"] = json!(next);
+    }
     if action["run"]["failure"].is_object() {
         compact["outcome"] = json!("incomplete");
-        compact["next_action"] = json!(
-            "Parser inventory is incomplete. Review the saved captures and retry parser inventory for the remaining work."
-        );
+        compact["next_action"] =
+            json!("Parser inventory is incomplete. Read the full step output for this run.");
     }
     for key in [
         "initialized",
@@ -2576,11 +2630,19 @@ fn finish_discovery(
     Ok(diagnostic)
 }
 
-const STALE_DISCOVERY_PREDECESSOR: &str = "Discovery started from an earlier inventory; its accepted captures are retained. Prepare discovery again from the current inventory with explicit finite budgets.";
+const STALE_DISCOVERY_PREDECESSOR: &str = "Discovery started from an earlier inventory.";
 
 fn check_discovery_predecessor(state: &InventoryState, index: usize) -> Result<(), Diagnostic> {
     let relay = mcp::inspect_state(Path::new(&state.discovery_runs[index].state_path))
         .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+    check_discovery_predecessor_for(state, index, &relay)
+}
+
+fn check_discovery_predecessor_for(
+    state: &InventoryState,
+    index: usize,
+    relay: &mcp::State,
+) -> Result<(), Diagnostic> {
     if let Some(session) = &relay.session
         && !matches!(relay.status.as_str(), "activating" | "activated")
         && session
@@ -3423,7 +3485,15 @@ fn apply(
                 }
             }
             match result {
-                Ok(output) => {
+                Ok(mut output) => {
+                    if relay.status == "activating"
+                        && output
+                            .diagnostics
+                            .iter()
+                            .any(|d| d.code == "MCP_ACTIVATION_CONFLICT")
+                    {
+                        output.status = "activating";
+                    }
                     let superseded = finish_discovery(state, run_index, &output, now)?;
                     if !stored_failure && matches!(output.status, "failed" | "activation-blocked") {
                         for diagnostic in &output.diagnostics {
@@ -3444,7 +3514,35 @@ fn apply(
                                 .diagnostics
                                 .iter()
                                 .find_map(|d| conflicted_source_id(&relay, d));
+                            let limited = retained_row_limit(&relay);
+                            if limited
+                                && !output
+                                    .diagnostics
+                                    .iter()
+                                    .any(|d| d.code == "SEARCH_ROW_LIMIT")
+                            {
+                                output.diagnostics.insert(
+                                    0,
+                                    Diagnostic::error("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON),
+                                );
+                            }
                             let mut reply = json!({"relay":output});
+                            if limited {
+                                reply["next_action"] = json!(row_limit_action(
+                                    !mcp::is_resumable(&relay),
+                                    mcp::time_limit_passed(&relay, now)
+                                        || relay
+                                            .failure
+                                            .as_ref()
+                                            .is_some_and(|d| d.code == "MCP_DEADLINE"),
+                                ));
+                            } else if !mcp::is_resumable(&relay)
+                                && let Some(failure) = &relay.failure
+                            {
+                                reply["next_action"] = json!(
+                                    relay_failure(failure, true, relay.request.max_queries).1
+                                );
+                            }
                             if let Some(id) = source_id {
                                 reply["source_id"] = json!(id);
                             }
@@ -4510,12 +4608,10 @@ mod tests {
             diagnostic.pointer = pointer.map(str::to_owned);
             let safe = brief_failure_for(&diagnostic);
             assert_eq!(safe.code, "MCP_STATE_PRODUCER");
-            assert!(safe.message.contains("unowned"));
-            assert!(safe.message.contains("standalone"));
-            assert!(safe.message.contains("checkpoint"));
-            assert!(safe.message.contains("bound to inventory"));
-            assert!(safe.message.contains("outstanding inventory searches"));
-            assert!(safe.message.contains("concurrent inventory execution"));
+            assert!(
+                safe.message
+                    .starts_with("Discovery checkpoint requires its producing version.")
+            );
             assert!(!safe.message.contains("--state"));
             assert_eq!(safe.pointer.as_deref(), pointer.filter(|p| *p == largest));
             let serialized = serde_json::to_vec(&safe).unwrap();
@@ -4929,12 +5025,7 @@ mod tests {
         assert_eq!(capture.run.failure.as_ref().unwrap().code, "HTTP_DEADLINE");
         let brief = action_brief(&json!({"parser_count":1,"run":capture.run}));
         assert_eq!(brief["outcome"], "incomplete");
-        assert!(
-            brief["next_action"]
-                .as_str()
-                .unwrap()
-                .contains("retry parser inventory")
-        );
+        assert!(brief["next_action"].as_str().unwrap().contains(FULL_STEP));
         assert!(!brief.to_string().contains("Synthetic later deadline"));
     }
 }

@@ -1079,9 +1079,15 @@ fn resume_locked(writer: &storage::Writer, state: &mut State) -> Result<StepOutp
     }
 }
 
-/// Read the cause of a retained row-capped answer while the run is paused.
-pub fn paused_at_row_limit(state: &State) -> bool {
-    if state.status != "paused" {
+/// Read the cause of the last ended attempt in a paused or time-expired run.
+pub fn ended_at_row_limit(state: &State) -> bool {
+    if state.status != "paused"
+        && !(state.status == "failed"
+            && state
+                .failure
+                .as_ref()
+                .is_some_and(|d| d.code == "MCP_DEADLINE"))
+    {
         return false;
     }
     state

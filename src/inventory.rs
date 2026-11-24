@@ -17,8 +17,15 @@ pub const MAX_STATE_BYTES: u64 = 67_108_864;
 pub const STATE_VERSION: u32 = 4;
 pub const REFRESH_OFF_WARNING: &str = "Turning off automatic inventory refresh can leave new repositories, sources, and types undiscovered. Manual refresh remains available.";
 pub const REFRESH_SECONDS: u64 = 300;
-pub const SOURCE_SELECTION_PREFIX: &str =
-    "Source selection is outside the allowed scope. There are ";
+pub const SOURCE_SELECTION_PREFIX: &str = "Source selection is outside the allowed scope. ";
+
+pub fn source_selection_count(count: usize) -> String {
+    if count == 1 {
+        format!("{SOURCE_SELECTION_PREFIX}There is 1 valid inventory source ID.")
+    } else {
+        format!("{SOURCE_SELECTION_PREFIX}There are {count} valid inventory source IDs.")
+    }
+}
 pub const MANUAL_REFRESH_SECONDS: u64 = 600;
 pub const AUTOMATIC_REFRESH_AVAILABLE: bool = false;
 const REFRESH_REMINDER_DAYS: i64 = 30;
@@ -3486,7 +3493,7 @@ impl InventoryState {
             .filter(|source| !expected_only && !source.expected);
         let valid = expected.chain(other);
         let count = valid.clone().count();
-        let mut message = format!("{SOURCE_SELECTION_PREFIX}{count} valid inventory source IDs.");
+        let mut message = source_selection_count(count);
         if count == 0 {
             message.push_str(" Read status and confirm the target sources.");
         } else {

@@ -1,1 +1,1 @@
-- Keep the search row-limit reason on discovery replies and polls. Suggest a narrower window or omitting an optional listing field before starting another run.
+- Report the search row ceiling in discovery replies, polls and status. Report both causes when a capped answer arrives after the run deadline.

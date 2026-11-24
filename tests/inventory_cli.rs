@@ -330,7 +330,7 @@ fn prepare_discovery_says_what_a_source_id_is_and_when_no_source_is_expected() {
     confirm_quick_source(&dir.0, "synthetic");
     let mut named = window.clone();
     named["source_ids"] = json!(["synthetic"]);
-    assert_rejected(&dir.0, named, "1 valid inventory source IDs");
+    assert_rejected(&dir.0, named, "1 valid inventory source ID.");
     // With nothing expected yet, omitting source_ids cannot help.
     let dir = Temp::new();
     call(&dir.0, json!({"kind":"set-discovery-mode","mode":"full"}));
@@ -1138,6 +1138,12 @@ fn next_probe_rereads_an_outstanding_attempt_without_writing_or_charging() {
     assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
     assert_eq!(fs::read(&state).unwrap(), inventory_bytes);
     assert_eq!(fs::read(relay).unwrap(), relay_bytes);
+    let file = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let completed = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":reread["action"]["outstanding_probe_id"],"result_file":file}}),
+    );
+    assert_eq!(completed["action"]["state"], "complete");
 }
 
 #[test]
@@ -1170,9 +1176,9 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
         assert_eq!(
             action["diagnostics"][0]["message"],
             if code == "MCP_UNKNOWN_PROBE" {
-                "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for. Run the outstanding probe only if its search never started, and submit that probe's own result."
+                "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for."
             } else {
-                "Use a regular file containing the saved response."
+                "The saved response is not a regular file."
             }
         );
         assert_eq!(action["cost"]["searches"]["used"], 1);
@@ -1300,7 +1306,7 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     assert!(action.get("probe").is_none() && action.get("outstanding_probe_id").is_none());
     assert_eq!(
         action["diagnostics"][0],
-        json!({"code":"INVENTORY_INPUT","severity":"error","message":"Discovery run_index 0: Discovery started from an earlier inventory; its accepted captures are retained. Prepare discovery again from the current inventory with explicit finite budgets."})
+        json!({"code":"INVENTORY_INPUT","severity":"error","message":"Discovery run_index 0: Discovery started from an earlier inventory."})
     );
     assert_eq!(
         action["next_action"],
@@ -1365,9 +1371,18 @@ fn next_probe_does_not_hand_out_a_reserved_probe_after_the_time_limit() {
     assert_eq!(action["diagnostics"][0]["code"], "MCP_DEADLINE");
     assert_eq!(
         action["next_action"],
-        "The time limit of run_index=0 has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index=0 to close the attempt. If it never started, do not run it; submit pause-discovery with run_index=0, then next-probe with run_index=0 and no answer."
+        "The time limit of run_index=0 has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index=0 to close the attempt. If it never started, run the exact reserved search once and submit its result to close the attempt. Then prepare a new run."
     );
 
+    let original = &reserved["action"]["probe"]["arguments"];
+    assert!(
+        original["query_string"]
+            .as_str()
+            .unwrap()
+            .ends_with("count(as=events)")
+    );
+    assert_eq!(original["start"], request["start"]);
+    assert_eq!(original["end"], request["end"]);
     let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
     let late = call(
         &dir.0,
@@ -1387,11 +1402,17 @@ fn next_probe_does_not_hand_out_a_reserved_probe_after_the_time_limit() {
         reason["action"]["relay"]["diagnostics"][0]["code"],
         "MCP_DEADLINE"
     );
-    assert_eq!(call(&dir.0, request)["action"]["run_index"], 1);
+    request["max_seconds"] = json!(120);
+    let fresh = call(&dir.0, request);
+    assert_eq!(fresh["action"]["run_index"], 1);
+    assert_eq!(
+        relay(&dir.0, fresh, &[], &[], None)["action"]["relay"]["status"],
+        "complete"
+    );
 }
 
 #[test]
-fn next_probe_leaves_an_expired_unstarted_probe_to_the_cancellation_steps() {
+fn next_probe_reports_deadline_after_confirmed_cancellation() {
     let dir = Temp::new();
     confirm_quick_source(&dir.0, "synthetic");
     let mut request = source_run_request(4);
@@ -1407,11 +1428,9 @@ fn next_probe_leaves_an_expired_unstarted_probe_to_the_cancellation_steps() {
         canceled["action"]["outstanding_probe_id"],
         reserved["action"]["probe"]["probe_id"]
     );
-    assert!(
-        canceled["action"]["next_action"]
-            .as_str()
-            .unwrap()
-            .starts_with("Settle the outstanding attempt for run_index=0 before continuing.")
+    assert_eq!(
+        canceled["action"]["next_action"],
+        "Read the full step output for this run."
     );
 
     let probe = &reserved["action"]["probe"]["probe_id"];
@@ -1599,6 +1618,20 @@ fn next_probe_carries_on_when_the_answer_was_already_delivered() {
         json!({"kind":"discovery-step","run_index":0,"answers":[]}),
     );
     assert_eq!(status["action"]["relay"]["diagnostics"], json!([]));
+    let reread = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(reread["action"]["probe"], action["probe"]);
+    assert_eq!(reread["action"]["dispatched"], false);
+    let result = fixture(
+        &dir.0,
+        "second-volume.json",
+        json!({"result":[{"events":11}]}),
+    );
+    let completed = call(
+        &dir.0,
+        json!({"kind":"next-probe","run_index":0,
+        "answer":{"probe_id":reread["action"]["outstanding_probe_id"],"result_file":result}}),
+    );
+    assert_eq!(completed["action"]["state"], "complete");
 }
 
 #[test]
@@ -1624,7 +1657,7 @@ fn next_probe_guides_paused_and_cancel_requested_runs() {
     assert!(canceled["action"].get("probe").is_none());
     assert_eq!(
         canceled["action"]["next_action"],
-        "Settle the outstanding attempt for run_index=0 before continuing. Submit its original complete result as answer, or settle a confirmed cancellation with env discover --mcp --state CHECKPOINT --settle-cancelled PROBE_ID=FILE. Then submit resume-discovery with run_index=0."
+        "Read the full step output for this run."
     );
 }
 
@@ -2571,7 +2604,7 @@ fn non_discovery_search_blockers_do_not_point_to_a_discovery_run() {
                     assert_eq!(diagnostic["code"], "INVENTORY_BRIEF_FAILED");
                     assert_eq!(
                         diagnostic["message"],
-                        "Inventory brief command failed. Rerun the same read with full output. If a write failed, read status before retrying it."
+                        "Inventory brief command failed. Read the full command output."
                     );
                 } else {
                     assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
@@ -3416,7 +3449,7 @@ fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics(
                 assert_eq!(
                     diagnostic,
                     json!({"code":"INVENTORY_INPUT","severity":"error",
-                    "message":"Discovery was prepared against older inventory. Pause it and prepare a run from current inventory.",
+                    "message":"Discovery was prepared against older inventory. Read the full step output for this run.",
                     "pointer":"/discovery_runs/0"})
                 );
                 let text = String::from_utf8(output.stderr).unwrap();
@@ -3447,7 +3480,7 @@ fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics(
     assert_eq!(diagnostic["pointer"], "/discovery_runs/0");
     assert_eq!(
         diagnostic["message"],
-        "Another writer holds the selected file. Retry after the writer finishes."
+        "Another writer holds the selected file. Read the full step output for this run."
     );
     assert_eq!(fs::read(&state_path).unwrap(), before);
     drop(guard);
@@ -3460,7 +3493,7 @@ fn brief_stale_run_failure_preserves_the_selected_index_without_raw_diagnostics(
     assert!(diagnostic.get("pointer").is_none());
     assert_eq!(
         diagnostic["message"],
-        "The discovery run index is out of range. Read status for a valid run index."
+        "The discovery run index is out of range. Read the full command output."
     );
     assert_eq!(fs::read(&state_path).unwrap(), before);
 }
@@ -3585,7 +3618,7 @@ fn another_retained_search_blocks_selected_older_work_and_identical_preparation(
             if flag == Some("--brief") {
                 assert_eq!(
                     message,
-                    "A retained discovery search needs settlement. Reconcile that attempt before dispatching another search."
+                    "A retained discovery search needs settlement. Read the full step output for this run."
                 );
                 assert!(output.stderr.len() <= 4096);
                 assert!(!String::from_utf8_lossy(&output.stderr).contains(dir.0.to_str().unwrap()));
@@ -5832,6 +5865,26 @@ fn status_names_unknown_fields_and_reports_output_failure_as_a_read() {
         assert_eq!(output.status.code(), Some(2));
         let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(
+            diagnostic["code"],
+            if mode == Some("--brief") {
+                "INVENTORY_BRIEF_FAILED"
+            } else {
+                "INVENTORY_INPUT"
+            }
+        );
+        let reread = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--json", "--state"])
+            .arg(&state)
+            .args(mode)
+            .output()
+            .unwrap();
+        assert!(reread.status.success(), "{reread:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reread.stdout).unwrap()["schema_version"],
+            1
+        );
+
+        assert_eq!(
             diagnostic["message"],
             "Cannot emit inventory status. Restore standard output and retry the read."
         );
@@ -5857,6 +5910,12 @@ fn closed_output_after_inventory_write_reports_that_state_may_be_saved() {
             message.contains("may already be saved") && message.contains("Read status"),
             "{message}"
         );
+        let status = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--json", "--state"])
+            .arg(dir.0.join("workflow/state.json"))
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{status:?}");
         assert!(dir.0.join("workflow/state.json").is_file());
     }
 }
@@ -5961,6 +6020,19 @@ fn unknown_source_id_lists_a_bounded_selection_and_brief_only_counts_it() {
         }
         assert_eq!(fs::read(&state).unwrap(), before);
     }
+    let status = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--json", "--summary", "--state"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(status.status.success(), "{status:?}");
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    let mut corrected = action;
+    corrected["source_id"] = status["sources"][0]["source_id"].clone();
+    assert_eq!(
+        call(&dir.0, corrected)["status"]["failures"][0]["source_id"],
+        status["sources"][0]["source_id"]
+    );
 }
 
 #[test]
@@ -6054,7 +6126,7 @@ fn identified_result_cannot_be_credited_to_another_probe() {
             "{query}"
         );
         let id = probe["probe_id"].as_str().unwrap();
-        let before = fs::read(&checkpoint).unwrap();
+        let before = fs::read(checkpoint).unwrap();
         let wrapper = json!({"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":body.to_string()}]}});
         let wrapped = fixture(&dir.0, "wrapped.json", wrapper.clone());
         match route {
@@ -6104,7 +6176,7 @@ fn identified_result_cannot_be_credited_to_another_probe() {
             }
             _ => unreachable!(),
         }
-        assert_eq!(fs::read(&checkpoint).unwrap(), before);
+        assert_eq!(fs::read(checkpoint).unwrap(), before);
         let current = next();
         assert_eq!(current["action"]["outstanding_probe_id"], id);
         let inventory: Value =
@@ -6141,4 +6213,354 @@ fn identifier_free_identical_counts_complete_two_distinct_probes() {
             .len(),
         2
     );
+}
+
+#[test]
+fn row_ceiling_recovery_works_with_and_without_deadline_expiry() {
+    for expired in [false, true] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let mut request = source_run_request(4);
+        if expired {
+            request["max_seconds"] = json!(1);
+        }
+        call(&dir.0, request.clone());
+        let probe = call(&dir.0, json!({"kind":"next-probe"}));
+        if expired {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        let file = fixture(
+            &dir.0,
+            "capped.json",
+            json!({"result": vec![json!({"events":1}); 10_000]}),
+        );
+        let answer = call(
+            &dir.0,
+            json!({"kind":"next-probe","answer":{"probe_id":probe["action"]["probe"]["probe_id"],"result_file":file}}),
+        );
+        let poll = call(&dir.0, json!({"kind":"next-probe"}));
+        let step = json!({"kind":"discovery-step","run_index":0,"answers":[]});
+        let full_step = call(&dir.0, step.clone());
+        let brief_step = brief_call(&dir.0, step);
+        for diagnostics in [
+            &answer["action"]["diagnostics"],
+            &poll["action"]["diagnostics"],
+            &full_step["action"]["relay"]["diagnostics"],
+            &brief_step["action"]["diagnostics"],
+        ] {
+            let diagnostics = diagnostics.as_array().unwrap();
+            assert!(
+                diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT"),
+                "{diagnostics:?}"
+            );
+            assert_eq!(
+                diagnostics.iter().any(|d| d["code"] == "MCP_DEADLINE"),
+                expired
+            );
+        }
+        let guidance = if expired {
+            "Prepare a new discovery run over a narrower window with enough time for the selected sources."
+        } else {
+            "Prepare a new discovery run over a narrower window."
+        };
+        for reply in [answer, poll, full_step, brief_step] {
+            assert_eq!(reply["action"]["next_action"], guidance, "{reply}");
+        }
+        let status = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--state"])
+            .arg(dir.0.join("workflow/state.json"))
+            .args(["--json", "--summary"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(
+            String::from_utf8(status.stdout)
+                .unwrap()
+                .contains("10,000-row ceiling")
+        );
+        let brief = brief_value(
+            Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+                .args(["status", "--state"])
+                .arg(dir.0.join("workflow/state.json"))
+                .args(["--json", "--brief"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(brief["discovery_row_limit"]["code"], "SEARCH_ROW_LIMIT");
+        request["end"] = json!("2026-01-01T02:00:00Z");
+        request["max_seconds"] = json!(120);
+        let fresh = call(&dir.0, request);
+        assert_eq!(fresh["action"]["run_index"], 1);
+        let complete = relay(&dir.0, fresh, &[], &[], None);
+        assert_eq!(complete["action"]["relay"]["status"], "complete");
+    }
+}
+
+#[test]
+fn legacy_search_failures_direct_recovery_away_from_locked_inventory() {
+    for (code, body) in [
+        (
+            "SEARCH_ROW_LIMIT",
+            json!({"result":vec![json!({"events":1});10_000]}),
+        ),
+        (
+            "MCP_DEADLINE",
+            serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-timeout.json")).unwrap(),
+        ),
+        (
+            "MCP_TOOL_ERROR",
+            json!({"result":{"error":"Synthetic hosted failure"}}),
+        ),
+        ("MCP_SHAPE", json!({"unsupported":true})),
+    ] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let prepared = prepare_source_run(&dir.0);
+        let checkpoint = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let mut legacy: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+        legacy["schema_version"] = json!(2);
+        legacy.as_object_mut().unwrap().remove("session");
+        fs::write(checkpoint, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        call(&dir.0, volume_answer(&dir.0, &prepared, body));
+        let reply = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+        assert_eq!(reply["action"]["state"], "failed");
+        assert_eq!(reply["action"]["diagnostics"][0]["code"], code);
+        let recovery = if code == "MCP_SHAPE" {
+            "Read the full step output for this run."
+        } else {
+            "Confirm the original search outcome with the host. After settlement, prepare a narrower run in a separate inventory."
+        };
+        assert_eq!(reply["action"]["next_action"], recovery, "{code}: {reply}");
+        let step = brief_call(
+            &dir.0,
+            json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+        );
+        assert_eq!(step["action"]["diagnostics"][0]["code"], code);
+        assert_eq!(step["action"]["next_action"], recovery);
+        assert_rejected(
+            &dir.0,
+            source_run_request(5),
+            "legacy termination is uncertain",
+        );
+        if code != "MCP_SHAPE" {
+            // Each fixture models a returned terminal host result. Use a new state for the narrower run.
+            let separate = Temp::new();
+            confirm_quick_source(&separate.0, "synthetic");
+            let mut narrower = source_run_request(4);
+            narrower["end"] = json!("2026-01-01T02:00:00Z");
+            let fresh = call(&separate.0, narrower);
+            assert_eq!(
+                relay(&separate.0, fresh, &[], &[], None)["action"]["relay"]["status"],
+                "complete"
+            );
+        }
+    }
+}
+
+#[test]
+fn paused_run_with_changed_predecessor_advises_preparing_from_current_inventory() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let pack = synthetic_inventory_pack(&dir.0);
+    call(&dir.0, json!({"kind":"import-pack","pack_file":pack}));
+    let paused = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(paused["action"]["state"], "paused");
+    assert_eq!(
+        paused["action"]["next_action"],
+        "Prepare discovery again from the current inventory."
+    );
+    assert!(
+        paused["action"]["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("earlier inventory")
+    );
+    assert_rejected(
+        &dir.0,
+        json!({"kind":"resume-discovery","run_index":0}),
+        "earlier inventory",
+    );
+    let fresh = call(&dir.0, source_run_request(4));
+    assert_eq!(
+        relay(&dir.0, fresh, &[], &[], None)["action"]["relay"]["status"],
+        "complete"
+    );
+}
+
+#[test]
+fn answer_to_paused_run_preserves_discovery_phase_and_can_resume() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    call(&dir.0, json!({"kind":"pause-discovery"}));
+    let file = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let refused = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":"p-unreserved","result_file":file}}),
+    );
+    assert_eq!(
+        refused["action"]["diagnostics"][0]["code"],
+        "DISCOVERY_PHASE"
+    );
+    assert_eq!(
+        refused["action"]["diagnostics"][0]["message"],
+        "This run is not waiting for an answer."
+    );
+    assert_eq!(
+        refused["action"]["next_action"],
+        "Submit resume-discovery with run_index=0 to continue this run."
+    );
+    call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+    assert_eq!(
+        call(&dir.0, json!({"kind":"next-probe","run_index":0}))["action"]["state"],
+        "probe"
+    );
+}
+
+#[test]
+fn maximum_discovery_query_budget_can_recover_by_selecting_fewer_measurements() {
+    let dir = Temp::new();
+    confirm_two_sources(&dir.0, "sources-and-fields");
+    let prepared = call(&dir.0, source_run_request(1000));
+    let checkpoint = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let file = fixture(
+        &dir.0,
+        "unusable.json",
+        json!({"result":[{"field":"shape-mismatch"}]}),
+    );
+    let paused = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":first["action"]["probe"]["probe_id"],"result_file":file}}),
+    );
+    assert_eq!(paused["action"]["state"], "paused");
+    let mut saved: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+    let attempt = saved["session"]["attempts"][0].clone();
+    assert_eq!(attempt["outcome"], "completed-unusable");
+    // Reproduce a charged allowance without running 1,000 searches.
+    saved["session"]["attempts"] = json!(vec![attempt; 1000]);
+    fs::write(checkpoint, serde_json::to_vec(&saved).unwrap()).unwrap();
+    call(&dir.0, json!({"kind":"resume-discovery"}));
+    let failure = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(failure["action"]["state"], "failed", "{failure}");
+    assert_eq!(
+        failure["action"]["next_action"],
+        "Prepare a new run with fewer measurements per run."
+    );
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    let fresh = call(&dir.0, source_run_request(1000));
+    let completed = relay(&dir.0, fresh, &[], &[], None);
+    assert_eq!(completed["action"]["relay"]["status"], "complete");
+}
+
+#[test]
+fn activation_pending_retries_without_search_and_conflict_stays_recoverable() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let run = &prepared["status"]["discovery_runs"][0];
+    let pack = Path::new(run["pack_path"].as_str().unwrap());
+    let receipt = Path::new(run["receipt_path"].as_str().unwrap());
+    let relay_path = Path::new(run["state_path"].as_str().unwrap());
+    let state = dir.0.join("workflow/state.json");
+    let before = fs::read(&state).unwrap();
+
+    let probe = call(&dir.0, json!({"kind":"next-probe"}));
+    let file = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
+    let lock = cqlmatic::storage::Writer::acquire(pack).unwrap();
+    let blocked = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe["action"]["probe"]["probe_id"],"result_file":file}}),
+    );
+    assert_eq!(blocked["action"]["state"], "activation-blocked");
+    drop(lock);
+    let still_pending = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(still_pending["action"]["state"], "activation-blocked");
+    assert_eq!(
+        still_pending["action"]["diagnostics"][0]["message"],
+        "Pack activation is pending."
+    );
+    assert_eq!(
+        still_pending["action"]["next_action"],
+        "Pack activation is pending. Submit discovery-step with the same run_index and answers: [] to retry activation without another search."
+    );
+    let step = json!({"kind":"discovery-step","run_index":0,"answers":[]});
+    let completed = call(&dir.0, step.clone());
+    assert_eq!(completed["action"]["relay"]["status"], "complete");
+    assert_eq!(completed["action"]["relay"]["answered"], 1);
+    let frozen_pack = fs::read(pack).unwrap();
+    let frozen_receipt = fs::read(receipt).unwrap();
+
+    let mut checkpoint: Value = serde_json::from_slice(&fs::read(relay_path).unwrap()).unwrap();
+    checkpoint["status"] = json!("activating");
+    checkpoint["pack_sha256"] = Value::Null;
+    save_checkpoint(relay_path, &mut checkpoint);
+    fs::write(&state, before).unwrap();
+    fs::write(receipt, b"unrelated synthetic receipt").unwrap();
+    let conflict = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(conflict["action"]["state"], "activating");
+    assert_eq!(
+        conflict["action"]["diagnostics"][0]["code"],
+        "MCP_ACTIVATION_CONFLICT"
+    );
+    assert_eq!(
+        conflict["action"]["next_action"],
+        "Move the unrelated receipt aside, then retry discovery-step with answers: [] to write the matching receipt."
+    );
+    let protected = call(&dir.0, step.clone());
+    assert_eq!(protected["action"]["relay"]["status"], "activating");
+    assert_eq!(
+        protected["status"]["discovery_runs"][0]["status"],
+        "activating"
+    );
+    fs::rename(receipt, receipt.with_extension("original")).unwrap();
+    let recovered = call(&dir.0, step);
+    assert_eq!(recovered["action"]["relay"]["status"], "complete");
+    assert_eq!(fs::read(pack).unwrap(), frozen_pack);
+    assert_eq!(fs::read(receipt).unwrap(), frozen_receipt);
+}
+
+#[test]
+fn answer_before_reservation_can_recover_by_requesting_the_next_probe() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let prepared = prepare_source_run(&dir.0);
+    let probe_id = &prepared["action"]["relay"]["probes"][0]["probe_id"];
+    let file = fixture(
+        &dir.0,
+        "not-dispatched.json",
+        json!({"result":[{"events":10}]}),
+    );
+    let refused = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe_id,"result_file":file}}),
+    );
+    assert_eq!(
+        refused["action"]["diagnostics"][0]["code"],
+        "MCP_UNKNOWN_PROBE"
+    );
+    assert_eq!(
+        refused["action"]["diagnostics"][0]["message"],
+        "No probe is outstanding."
+    );
+    assert_eq!(
+        refused["action"]["next_action"],
+        "The answer was not accepted. Submit next-probe with run_index=0 and no answer to request the next probe."
+    );
+    let next = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
+    assert_eq!(next["action"]["probe"]["probe_id"], *probe_id);
+    assert_eq!(next["action"]["dispatched"], true);
 }
