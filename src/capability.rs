@@ -512,6 +512,14 @@ impl CapabilityRun {
         let host: RefreshHostEvidence = serde_json::from_slice(host_raw)
             .map_err(|_| fail("Expected strict protected provider-lifetime evidence."))?;
         inventory::validate_refresh_host(&host, &environment, &session_id, false, now)?;
+        // Dispatch needs remaining >= lifetime, and any later dispatch sees less than max_seconds.
+        if max_seconds <= host.max_search_seconds {
+            return Err(fail(&format!(
+                "max_seconds must exceed the host evidence's max_search_seconds ({lifetime}): every dispatch needs that much active time left, and active time counts from preparation. Use at least {}; the time above {lifetime} is what remains for reaching each dispatch.",
+                host.max_search_seconds + 1,
+                lifetime = host.max_search_seconds,
+            )));
+        }
         let mut run = Self {
             id: String::new(),
             environment,
@@ -591,6 +599,13 @@ impl CapabilityRun {
             .saturating_mul(1_000_000_000)
             .saturating_sub(self.active_nanos(now)?) as f64)
             / 1_000_000_000.0)
+    }
+
+    /// Whether the remaining active time still covers one host search lifetime, as dispatch requires.
+    pub fn allowance_covers_search(&self, now: &str) -> Result<bool, Diagnostic> {
+        let host: RefreshHostEvidence = serde_json::from_slice(&self.host_evidence.bytes()?)
+            .map_err(|_| fail("Invalid saved capability host evidence."))?;
+        Ok(self.remaining_seconds(now)? >= host.max_search_seconds as f64)
     }
 
     fn ensure_now(&self, now: &str) -> Result<(), Diagnostic> {
@@ -756,20 +771,43 @@ impl CapabilityRun {
         now: &str,
     ) -> Result<&CapabilityAttempt, Diagnostic> {
         self.validate(self.ordinal)?;
-        let host: RefreshHostEvidence = serde_json::from_slice(&self.host_evidence.bytes()?)
-            .map_err(|_| fail("Invalid saved capability host evidence."))?;
-        if self.blocked()
-            || self.paused()
-            || !self.case_ids.contains(&case_id)
-            || self.case_revision(case_id) != Some(case_id.revision().as_str())
-            || execution_context_id != self.execution_context_id
-            || session_id != self.session_id
-            || self.attempts.len() >= self.max_queries as usize
-            || self.remaining_seconds(now)? < host.max_search_seconds as f64
-        {
-            return Err(fail(
-                "Dispatch requires the prepared context, reviewed case, settled prior attempts and remaining original budget.",
-            ));
+        let refusal = if self.blocked() {
+            Some(
+                "An earlier attempt in this capability checkpoint is unresolved. Reconcile it with submit-capability and its terminal settlement before another dispatch.",
+            )
+        } else if execution_context_id != self.execution_context_id {
+            Some(
+                "The execution_context_id differs from the one this capability checkpoint was prepared with. Dispatch with that context, or use prepare-capabilities for the new one.",
+            )
+        } else if session_id != self.session_id {
+            Some(
+                "The session_id differs from the host session this capability checkpoint was prepared with. Dispatch with that session, or use prepare-capabilities with host evidence for the new session.",
+            )
+        } else if !self.case_ids.contains(&case_id) {
+            Some(
+                "This case is not in the capability checkpoint. Pause the checkpoint with pause-capabilities, then use prepare-capabilities for the cases it does not hold.",
+            )
+        } else if self.case_revision(case_id) != Some(case_id.revision().as_str()) {
+            Some(
+                "The capability checkpoint holds an earlier revision of this case. Use prepare-capabilities to prepare the current revision.",
+            )
+        } else if self.attempts.len() >= self.max_queries as usize {
+            Some(
+                "The capability checkpoint has used all of its max_queries attempts. Use prepare-capabilities for a new run; the checkpoint keeps its history.",
+            )
+        } else if !self.allowance_covers_search(now)? {
+            Some(
+                "The capability checkpoint's remaining active time is below the host evidence's max_search_seconds, so it cannot dispatch again. Use prepare-capabilities for a new run; the checkpoint keeps its history.",
+            )
+        } else if self.paused() {
+            Some(
+                "The capability checkpoint is paused. Resume it with resume-capabilities and its execution_context_id before dispatching.",
+            )
+        } else {
+            None
+        };
+        if let Some(message) = refusal {
+            return Err(fail(message));
         }
         if self
             .attempts
@@ -1158,9 +1196,11 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        assert!(
+        assert_eq!(
             run.dispatch(CaseId::ArrayUnion, "auth", "host", settled)
-                .is_err()
+                .unwrap_err()
+                .message,
+            "The capability checkpoint holds an earlier revision of this case. Use prepare-capabilities to prepare the current revision."
         );
     }
 }

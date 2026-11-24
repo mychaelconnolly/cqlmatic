@@ -2064,14 +2064,21 @@ fn apply(
                     && previous.session_id == session_id
                     && previous.matches_current_cases()
                     && previous.attempts.len() < previous.max_queries as usize
-                    && previous.remaining_seconds(now)? > 0.0
+                    && previous.allowance_covers_search(now)?
                     && previous.status().cases.iter().any(|case| {
                         case.last_outcome != Some(cqlmatic::capability::CapabilityOutcome::Verified)
                     })
                 {
-                    return Err(fail(
-                        "Resume the retained capability checkpoint with its original remaining allowance.",
-                    ));
+                    if case_ids.iter().any(|case| previous.case_ids.contains(case)) {
+                        return Err(fail(
+                            "Resume the retained capability checkpoint with its original remaining allowance.",
+                        ));
+                    }
+                    if !previous.paused() {
+                        return Err(fail(
+                            "A retained capability checkpoint for this execution context and session can still dispatch. Pause it with pause-capabilities before preparing cases it does not hold.",
+                        ));
+                    }
                 }
             }
             distinct_from_state(path, Path::new(&host_evidence_file))?;
