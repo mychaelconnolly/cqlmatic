@@ -148,6 +148,18 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
             "INVENTORY_INPUT" | "INVENTORY_BRIEF_FAILED"
         ) {
         brief_output_failure()
+    } else if diagnostic.code == "INVENTORY_EVIDENCE"
+        && let Some(count) = message
+            .strip_prefix(SOURCE_SELECTION_PREFIX)
+            .and_then(|rest| rest.split_once(" valid inventory source IDs."))
+            .and_then(|(count, _)| count.parse::<usize>().ok())
+    {
+        Diagnostic::error(
+            "INVENTORY_EVIDENCE",
+            format!(
+                "Source selection is outside the allowed scope. There are {count} valid inventory source IDs. Read summary status to choose one."
+            ),
+        )
     } else if let Some(reason) = brief_reason(&diagnostic.code, message) {
         Diagnostic::error(&diagnostic.code, reason)
     } else {
@@ -229,13 +241,6 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ) => "Activate a field pack before preparing capability checks.",
         ("INVENTORY_INPUT", "Unknown capability checkpoint.") => {
             "The capability checkpoint was not found. Select a saved run from status."
-        }
-        (
-            "INVENTORY_EVIDENCE",
-            "Unknown source ID; use the status source IDs."
-            | "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status --json --summary (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
-        ) => {
-            "The source ID is not in the required inventory scope. Read summary status and choose a valid inventory source ID."
         }
         ("INVENTORY_EVIDENCE", "Confirm CID, cloud, view and target scope before discovery.") => {
             "The target is missing. Confirm the target before preparing discovery."

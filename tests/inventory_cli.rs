@@ -333,7 +333,7 @@ fn prepare_discovery_says_what_a_source_id_is_and_when_no_source_is_expected() {
     assert_rejected(
         &dir.0,
         named,
-        "source_ids are the source_id values of expected sources in status --json --summary",
+        "1 valid inventory source IDs",
     );
     // With nothing expected yet, omitting source_ids cannot help.
     let dir = Temp::new();
@@ -5737,4 +5737,52 @@ fn invalid_refresh_host_evidence_names_the_failed_binding() {
             .unwrap()
             .contains("synthetic-other-session")
     );
+}
+
+#[test]
+fn unknown_source_id_lists_a_bounded_selection_and_brief_only_counts_it() {
+    let dir = Temp::new();
+    let sources: Vec<_> = (0..23)
+        .map(|index| json!({"repo":format!("synthetic-repo-{index}"),"type":"synthetic-type"}))
+        .collect();
+    let confirmed = call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":environment(),
+        "scope":"selected-sources","context":"Synthetic discovery target","expected_sources":sources}),
+    );
+    let ids: Vec<_> = confirmed["status"]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["source_id"].as_str().unwrap())
+        .collect();
+    let bad_id = "env:repo:synthetic-repo-1";
+    let action = json!({"kind":"record-failure","stage":"synthetic","source_id":bad_id,
+        "message":"Synthetic record","recorded_at":"2026-01-02T00:00:00Z"});
+    let state = dir.0.join("workflow/state.json");
+    let before = fs::read(&state).unwrap();
+    for mode in [None, Some("--summary"), Some("--brief")] {
+        let output = inventory_command(&dir.0, action.clone())
+            .args(mode)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(diagnostic["code"], "INVENTORY_EVIDENCE");
+        let message = diagnostic["message"].as_str().unwrap();
+        assert!(
+            message.contains("23 valid inventory source IDs"),
+            "{message}"
+        );
+        assert!(!message.contains(bad_id));
+        if mode == Some("--brief") {
+            assert_eq!(ids.iter().filter(|id| message.contains(**id)).count(), 0);
+            assert!(!message.contains("synthetic-repo-"));
+        } else {
+            assert_eq!(ids.iter().filter(|id| message.contains(**id)).count(), 20);
+            assert!(message.contains("3 more") && message.contains("repo \"synthetic-repo-"));
+            assert!(message.contains("type \"synthetic-type\""));
+        }
+        assert_eq!(fs::read(&state).unwrap(), before);
+    }
 }

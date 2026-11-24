@@ -17,6 +17,8 @@ pub const MAX_STATE_BYTES: u64 = 67_108_864;
 pub const STATE_VERSION: u32 = 4;
 pub const REFRESH_OFF_WARNING: &str = "Turning off automatic inventory refresh can leave new repositories, sources, and types undiscovered. Manual refresh remains available.";
 pub const REFRESH_SECONDS: u64 = 300;
+pub const SOURCE_SELECTION_PREFIX: &str =
+    "Source selection is outside the allowed scope. There are ";
 pub const MANUAL_REFRESH_SECONDS: u64 = 600;
 pub const AUTOMATIC_REFRESH_AVAILABLE: bool = false;
 const REFRESH_REMINDER_DAYS: i64 = 30;
@@ -3451,11 +3453,47 @@ impl InventoryState {
         Ok(())
     }
     pub fn source_mut(&mut self, id: &str) -> Result<&mut InventorySource, Diagnostic> {
-        self.sources
-            .iter_mut()
-            .find(|s| s.id == id)
-            .ok_or_else(|| fail("Unknown source ID; use the status source IDs."))
+        let index = self
+            .sources
+            .iter()
+            .position(|source| source.id == id)
+            .ok_or_else(|| self.source_selection_error(false))?;
+        Ok(&mut self.sources[index])
     }
+
+    fn source_selection_error(&self, expected_only: bool) -> Diagnostic {
+        let expected = self.sources.iter().filter(|source| source.expected);
+        let other = self
+            .sources
+            .iter()
+            .filter(|source| !expected_only && !source.expected);
+        let valid = expected.chain(other);
+        let count = valid.clone().count();
+        let mut message = format!("{SOURCE_SELECTION_PREFIX}{count} valid inventory source IDs.");
+        if count == 0 {
+            message.push_str(" Read status and confirm the target sources.");
+        } else {
+            message
+                .push_str(" Choose an inventory source ID from this list or read summary status.");
+        }
+        for source in valid.take(20) {
+            message.push_str(&format!("\n- {}", source.id));
+            if let Some(repo) = &source.selectors.repo {
+                message.push_str(&format!(" repo {repo:?}"));
+            }
+            if let Some(type_) = &source.selectors.type_ {
+                message.push_str(&format!(" type {type_:?}"));
+            }
+        }
+        if count > 20 {
+            message.push_str(&format!(
+                "\n{} more source IDs are available in summary status.",
+                count - 20
+            ));
+        }
+        fail(&message)
+    }
+
     pub fn parser_version(&self, id: &str, hash: &str) -> Result<&ParserSnapshot, Diagnostic> {
         self.parsers
             .iter()
@@ -3581,9 +3619,7 @@ impl InventoryState {
             .iter()
             .any(|id| !self.sources.iter().any(|s| s.expected && &s.id == id))
         {
-            return Err(fail(
-                "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status --json --summary (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
-            ));
+            return Err(self.source_selection_error(true));
         }
         if sources.is_empty() {
             return Err(fail(
