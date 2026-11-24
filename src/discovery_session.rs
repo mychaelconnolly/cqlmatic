@@ -66,7 +66,7 @@ pub struct Session {
     #[serde(default)]
     pub(crate) sparse_fieldset_fallback: bool,
     binding_sha256: String,
-    predecessor_sha256: Option<String>,
+    pub(crate) predecessor_sha256: Option<String>,
     periods: Vec<ActivePeriod>,
     attempts: Vec<Attempt>,
     pub(crate) captures: BTreeMap<String, discovery::Capture>,
@@ -185,6 +185,16 @@ impl Session {
             period.end = Some(now.into());
         }
         Ok(())
+    }
+}
+
+/// Check whether the run has time left to settle, complete, or reserve a search.
+pub fn has_search_allowance(state: &State, now: &str) -> Result<bool, Diagnostic> {
+    let session = state.session.as_ref().ok_or_else(tampered)?;
+    match session.remaining(state, now) {
+        Ok(_) => Ok(has_in_flight(state) || has_discovery_work_after_resume(state)),
+        Err(diagnostic) if diagnostic.code == "MCP_DEADLINE" => Ok(false),
+        Err(diagnostic) => Err(diagnostic),
     }
 }
 

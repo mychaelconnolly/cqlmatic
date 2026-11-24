@@ -1293,7 +1293,10 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     prepare_two_source_run(&dir.0);
     let first = call(&dir.0, json!({"kind":"next-probe"}));
     let pack = synthetic_inventory_pack(&dir.0);
-    call(&dir.0, json!({"kind":"import-pack","pack_file":pack}));
+    call(
+        &dir.0,
+        json!({"kind":"import-pack","supersede_runs":true,"pack_file":pack}),
+    );
     let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
     let accepted = call(
         &dir.0,
@@ -3904,7 +3907,7 @@ fn stale_prepared_discovery_rejects_reservation_but_keeps_pause_and_exact_settle
         }
         call(
             &dir.0,
-            json!({"kind":"import-pack","pack_file":external["status"]["active_pack"]["path"]}),
+            json!({"kind":"import-pack","supersede_runs":true,"pack_file":external["status"]["active_pack"]["path"]}),
         );
         let state_path = dir.0.join("workflow/state.json");
         let relay_path = Path::new(
@@ -4380,7 +4383,7 @@ fn late_completion_is_superseded_without_promotion_or_repeated_mutation() {
     let external = relay(&other.0, prepare_source_run(&other.0), &[], &[], None);
     let imported = call(
         &dir.0,
-        json!({"kind":"import-pack","pack_file":external["status"]["active_pack"]["path"]}),
+        json!({"kind":"import-pack","supersede_runs":true,"pack_file":external["status"]["active_pack"]["path"]}),
     );
     let state_path = dir.0.join("workflow/state.json");
     let before: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
@@ -6472,7 +6475,10 @@ fn paused_run_with_changed_predecessor_advises_preparing_from_current_inventory(
     prepare_source_run(&dir.0);
     call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
     let pack = synthetic_inventory_pack(&dir.0);
-    call(&dir.0, json!({"kind":"import-pack","pack_file":pack}));
+    call(
+        &dir.0,
+        json!({"kind":"import-pack","supersede_runs":true,"pack_file":pack}),
+    );
     let paused = call(&dir.0, json!({"kind":"next-probe","run_index":0}));
     assert_eq!(paused["action"]["state"], "paused");
     assert_eq!(

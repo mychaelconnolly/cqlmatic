@@ -1355,6 +1355,10 @@
             },
             "pack_file": {
               "type": "string"
+            },
+            "supersede_runs": {
+              "type": "boolean",
+              "default": false
             }
           },
           "additionalProperties": false,

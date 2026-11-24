@@ -867,6 +867,7 @@ const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 
 #[path = "discovery_session.rs"]
 mod session;
+pub use session::has_search_allowance;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
     has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
@@ -885,6 +886,14 @@ struct ActivationIntent {
     pack_sha256: String,
     receipt_bytes: String,
     receipt_sha256: String,
+}
+
+/// The frozen starting pack, including an explicitly absent predecessor.
+pub fn activation_predecessor(state: &State) -> Option<Option<&str>> {
+    state
+        .activation
+        .as_ref()
+        .map(|intent| intent.predecessor_pack_sha256.as_deref())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1958,6 +1967,30 @@ fn activation_artifacts(
         ));
     }
     Ok((target_visible, receipt.is_some()))
+}
+
+/// Verify that the on-disk pack and receipt agree with the frozen activation, or that an
+/// activation-blocked run without frozen intent has no stale receipt blocking recovery.
+pub fn inspect_activation_artifacts(state: &State) -> Result<(), Diagnostic> {
+    if state.status == "activation-blocked" && state.activation.is_none() {
+        if optional_bytes(&state.receipt)?.is_some() {
+            return Err(Diagnostic::error(
+                "LOCAL_IO",
+                "MCP receipt path must remain absent before activation.",
+            ));
+        }
+        return Ok(());
+    }
+    let intent = state.activation.as_ref().ok_or_else(tampered)?;
+    if let Some(session) = &state.session
+        && intent.predecessor_pack_sha256 != session.predecessor_sha256
+    {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            "Frozen activation predecessor disagrees with the bound session predecessor.",
+        ));
+    }
+    activation_artifacts(state, intent).map(|_| ())
 }
 
 /// Report a current conflict with the frozen activation artifacts without attempting promotion.

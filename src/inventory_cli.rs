@@ -320,6 +320,12 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ) => {
             "There are no expected sources for discovery. Confirm the target with an expected source first."
         }
+        ("INVENTORY_INPUT", msg) if msg.starts_with(IMPORT_DISPLACES_DISCOVERY) => {
+            "This import would displace discovery runs. Use full output for recovery steps or resubmit with supersede_runs: true."
+        }
+        ("INVENTORY_INPUT", msg) if msg.starts_with(IMPORT_CHECKPOINT_INVALID) => {
+            "A retained discovery checkpoint could not be verified. Use full output to identify the checkpoint to restore."
+        }
         ("INVENTORY_INPUT", "Observation input exceeds 8 MiB.") => {
             "The observation input exceeds 8 MiB."
         }
@@ -619,8 +625,11 @@ fn cumulative_pack_bytes(pack: &Pack) -> Result<Vec<u8>, Diagnostic> {
 }
 
 fn cumulative_predecessor(state: &InventoryState) -> Result<Option<String>, Diagnostic> {
-    Ok(cumulative_pack(state)?
-        .as_ref()
+    staged_predecessor_digest(cumulative_pack(state)?.as_ref())
+}
+
+fn staged_predecessor_digest(pack: Option<&Pack>) -> Result<Option<String>, Diagnostic> {
+    Ok(pack
         .map(cumulative_pack_bytes)
         .transpose()?
         .map(|mut bytes| {
@@ -2070,7 +2079,6 @@ fn apply_locked(
                 &relay_guards,
             )?
         };
-        let resolve_work = resolve_work && (!importing_pack || extra["pack_updated"] == true);
         if importing_pack && extra["pack_updated"] == true {
             upgrade_state(&mut state);
         }
@@ -2208,7 +2216,11 @@ fn action_summary(action: &Value) -> Value {
 
 fn action_brief(action: &Value) -> Value {
     if let Some(entries) = action["not_applied"].as_array() {
-        return json!({"counts":action["counts"], "not_applied_count":entries.len()});
+        let mut brief = json!({"counts":action["counts"],"not_applied_count":entries.len()});
+        if let Some(runs) = action["superseded_runs"].as_array() {
+            brief["superseded_run_count"] = json!(runs.len());
+        }
+        return brief;
     }
     let mut compact =
         json!({"outcome":"applied","notification_only":true,"executes_searches":false});
@@ -4079,9 +4091,19 @@ fn apply(
                 }
             })
         }
-        InventoryAction::ImportPack { pack_file, mode } => {
-            import_pack(path, state, Path::new(&pack_file), mode, now)
-        }
+        InventoryAction::ImportPack {
+            pack_file,
+            mode,
+            supersede_runs,
+        } => import_pack(
+            path,
+            owner,
+            state,
+            Path::new(&pack_file),
+            mode,
+            supersede_runs,
+            now,
+        ),
         InventoryAction::Reconcile { reviewed_at } => {
             cqlmatic::environment::parse_time(&reviewed_at)?;
             Ok(Value::Null)
@@ -4110,11 +4132,184 @@ fn apply(
     }
 }
 
+const IMPORT_DISPLACES_DISCOVERY: &str = "Import would displace retained discovery runs.";
+const IMPORT_CHECKPOINT_INVALID: &str = "Cannot verify retained discovery checkpoint";
+const UNSUPPORTED_DISCOVERY: &str = "This build cannot continue the checkpoint's format or plan.";
+
+fn run_is_finished(state: &InventoryState, run: &DiscoveryRun) -> bool {
+    match run.status.as_str() {
+        "failed" | "superseded" => true,
+        "complete" => {
+            let mut references = state.packs.iter().filter(|pack| pack.path == run.pack_path);
+            references.next().is_some_and(|reference| {
+                reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+                    && references.next().is_none()
+                    && storage::read_pack(Path::new(&reference.path))
+                        .is_ok_and(|pack| pack.content_digest == reference.content_digest)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn import_run_advice(
+    state: &InventoryState,
+    relay: &mcp::State,
+    index: usize,
+    inventory_writer: &storage::Writer,
+    now: &str,
+) -> Result<String, Diagnostic> {
+    if mcp::require_current_producer(relay).is_err() {
+        return Ok(format!(
+            "Producer {} is an earlier build. This build cannot promote, pause, or continue runs written by an earlier build.",
+            relay.producer_version
+        ));
+    }
+    match mcp::inspect_inventory_owner(relay, inventory_writer) {
+        Err(diagnostic) if diagnostic.code == "DISCOVERY_INVENTORY_OWNER" => {
+            return Ok("The checkpoint belongs to a different inventory.".into());
+        }
+        Err(diagnostic) if diagnostic.code == "DISCOVERY_TRANSPORT" => {
+            return Ok(UNSUPPORTED_DISCOVERY.into());
+        }
+        result => result?,
+    };
+    Ok(match relay.status.as_str() {
+        "activated" | "activating" | "activation-blocked" => format!(
+            "Promote or recover it first with discovery-step (run_index: {index}, answers: [])."
+        ),
+        "needs-probes" | "paused" if relay.session.is_none() => UNSUPPORTED_DISCOVERY.into(),
+        "needs-probes" | "paused" if !mcp::has_search_allowance(relay, now)? => {
+            "The run has no remaining search allowance.".into()
+        }
+        _ => {
+            if let Some(probe) = mcp::outstanding_probe_id(relay) {
+                format!(
+                    "Settle outstanding_probe_id {probe} first with its original result via next-probe or discovery-step (run_index: {index}), or with confirmed cancellation. Even after importing, settle it before another discovery search."
+                )
+            } else if let Err(blocker) = check_retained_searches(state, None, Some(index), now) {
+                if let Some(other) = blocker
+                    .pointer
+                    .as_deref()
+                    .and_then(|pointer| pointer.strip_prefix("/discovery_runs/"))
+                    .and_then(|value| value.parse::<usize>().ok())
+                {
+                    format!(
+                        "Blocked from continuing until run_index {other} is resolved ({}).",
+                        blocker.message
+                    )
+                } else {
+                    format!("Blocked from continuing ({}).", blocker.message)
+                }
+            } else {
+                let action = if relay.status == "paused" {
+                    "resume-discovery"
+                } else {
+                    "next-probe"
+                };
+                format!("Finish the run first with {action} (run_index: {index}).")
+            }
+        }
+    })
+}
+
+fn guard_import_runs(
+    state: &InventoryState,
+    inventory_writer: &storage::Writer,
+    previous: Option<&Pack>,
+    now: &str,
+    supersede_runs: bool,
+) -> Result<(Vec<usize>, Vec<storage::Writer>), Diagnostic> {
+    if state.discovery_runs.is_empty() {
+        return Ok((vec![], vec![]));
+    }
+    let current_pred = staged_predecessor_digest(previous)?;
+    let mut guards = Vec::new();
+    let mut blockers = Vec::new();
+    let mut details = vec![IMPORT_DISPLACES_DISCOVERY.to_owned()];
+    for (index, run) in state.discovery_runs.iter().enumerate() {
+        if run_is_finished(state, run) {
+            continue;
+        }
+        let path = Path::new(&run.state_path);
+        let invalid = |diagnostic: Diagnostic| {
+            discovery_run_failure(
+                index,
+                &format!(
+                    "{IMPORT_CHECKPOINT_INVALID} at {}. {} Restore the checkpoint folder before importing.",
+                    path.display(),
+                    diagnostic.message
+                ),
+            )
+        };
+        if !crate::setup_cli::private_input_exists(path).map_err(invalid)? {
+            return Err(invalid(fail("The checkpoint is missing.")));
+        }
+        guards.push(
+            storage::Writer::acquire(path)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?,
+        );
+        let relay = match mcp::inspect_state(path) {
+            Ok(relay) => relay,
+            Err(diagnostic) if diagnostic.code == "MCP_STATE_RESTART" => {
+                blockers.push(index);
+                details.push(format!(
+                    "run_index {index} (last recorded status {}): {UNSUPPORTED_DISCOVERY}",
+                    run.status
+                ));
+                continue;
+            }
+            Err(diagnostic) => return Err(invalid(diagnostic)),
+        };
+        verify_run_reference(state, run, &relay).map_err(invalid)?;
+        if relay.status == "failed" {
+            continue;
+        }
+        if matches!(
+            relay.status.as_str(),
+            "activating" | "activated" | "activation-blocked"
+        ) {
+            mcp::inspect_activation_artifacts(&relay).map_err(invalid)?;
+        }
+        let matches_predecessor = if matches!(relay.status.as_str(), "activating" | "activated")
+            || (relay.status == "activation-blocked"
+                && mcp::activation_predecessor(&relay).is_some())
+        {
+            mcp::activation_predecessor(&relay) == Some(current_pred.as_deref())
+        } else if let Some(session) = &relay.session {
+            session.verified_predecessor(&relay.pack).map_err(invalid)? == current_pred.as_deref()
+        } else {
+            let present = crate::setup_cli::private_input_exists(&relay.pack).map_err(invalid)?;
+            let predecessor = present
+                .then(|| storage::read_bytes(&relay.pack, environment::MAX_PACK_BYTES))
+                .transpose()
+                .map_err(invalid)?
+                .map(|bytes| cqlmatic::sha256_hex(&bytes));
+            predecessor == current_pred
+        };
+        if matches_predecessor {
+            blockers.push(index);
+            if !supersede_runs {
+                let advice = import_run_advice(state, &relay, index, inventory_writer, now)
+                    .map_err(invalid)?;
+                details.push(format!("run_index {index} ({}): {advice}", relay.status));
+            }
+        }
+    }
+    if !supersede_runs && let Some(&first) = blockers.first() {
+        details.push("Or resubmit import-pack with supersede_runs: true.".into());
+        return Err(discovery_run_failure(first, &details.join(" ")));
+    }
+    Ok((blockers, guards))
+}
+
 fn import_pack(
     path: &Path,
+    inventory_writer: &storage::Writer,
     state: &mut InventoryState,
     pack_file: &Path,
     mode: ImportPackMode,
+    supersede_runs: bool,
     now: &str,
 ) -> Result<Value, Diagnostic> {
     use environment::{ImportCounts, ImportUpdateResult};
@@ -4204,6 +4399,13 @@ fn import_pack(
         return Ok(reply);
     }
 
+    let (superseded, guards) = guard_import_runs(
+        state,
+        inventory_writer,
+        previous.as_ref(),
+        now,
+        supersede_runs,
+    )?;
     let directory = snapshot_directory(path, "import", state.packs.len() + 1)?;
     let destination = directory.join("pack.json");
     let bytes = cumulative_pack_bytes(&cumulative)?;
@@ -4219,6 +4421,11 @@ fn import_pack(
     };
     state.active_pack = Some(reference.clone());
     state.packs.push(reference);
+    // Pending-work resolution can acquire one of these same checkpoint locks.
+    drop(guards);
+    if !superseded.is_empty() {
+        reply["superseded_runs"] = json!(superseded);
+    }
     reply["note"] = json!(
         "Imported packs remain usable; their missing workflow history cannot establish full-map completion."
     );
