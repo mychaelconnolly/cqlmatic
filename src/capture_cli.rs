@@ -123,6 +123,7 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
         .is_ok()
         && payload.len() as u64 <= MAX_PAYLOAD_BYTES
         && let Ok(hook) = serde_json::from_slice::<Value>(&payload)
+        && hook.is_object()
     {
         if hook["hook_event_name"] == GUARD_EVENT && guards(args.client) {
             if let Some(answer) = guard(&args, &hook) {
@@ -143,8 +144,10 @@ fn count_failure(state: Option<PathBuf>, reason: &str) {
     let Ok(path) = inventory_cli::state_path(state) else {
         return;
     };
-    let directory = captures_directory(&path);
-    if path.is_file() && setup_cli::protect_directory(&directory).is_ok() {
+    if path.is_file()
+        && let Some(directory) = captures_directory(&path)
+        && setup_cli::protect_directory(&directory).is_ok()
+    {
         let _ = tally(&directory, reason);
     }
 }
@@ -170,9 +173,30 @@ fn search_on_other_server(hook: &Value, client: Client) -> bool {
         Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
         value => value.clone(),
     };
+    let tool = |name: &str, tool: &str| {
+        let Some(server) = name.strip_suffix(tool) else {
+            return false;
+        };
+        match client {
+            Client::Cursor | Client::GeminiCli => server.is_empty(),
+            Client::CopilotApp | Client::CopilotCli | Client::CopilotVscode => server
+                .strip_suffix('-')
+                .is_some_and(|name| !name.is_empty()),
+            Client::Kiro => {
+                server.starts_with("mcp_") && server.ends_with('_')
+                    || server.starts_with('@') && server.ends_with('/')
+            }
+            Client::Cline => server
+                .strip_suffix("__")
+                .is_some_and(|name| !name.is_empty()),
+            _ => server
+                .strip_prefix("mcp__")
+                .and_then(|name| name.strip_suffix("__"))
+                .is_some_and(|name| !name.is_empty()),
+        }
+    };
     name.as_str().is_some_and(|name| {
-        name.ends_with(SEARCH_TOOL)
-            || (name.ends_with("execute_tool") && arguments["name"] == SEARCH_TOOL)
+        tool(name, SEARCH_TOOL) || tool(name, "execute_tool") && arguments["name"] == SEARCH_TOOL
     })
 }
 
@@ -190,8 +214,11 @@ fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
     let repository = arguments["repository"]
         .as_str()
         .unwrap_or(DEFAULT_REPOSITORY);
-    let state = inventory_cli::state_path(args.state.clone()).ok();
-    note(&crate::guard_check(query, state.as_deref(), repository)).map(answer)
+    let state = inventory_cli::state_path(args.state.clone()).ok()?;
+    if state.file_name().is_none() || state.is_dir() {
+        return None;
+    }
+    note(&crate::guard_check(query, Some(&state), repository)).map(answer)
 }
 
 fn note(analysis: &Analysis) -> Option<String> {
@@ -267,8 +294,8 @@ fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize,
 
 fn capture(args: &CaptureArgs, hook: &Value) -> Result<(), Diagnostic> {
     match call(hook, &args.server, args.client) {
-        Some(call) => record(args.state.clone(), call),
-        None => {
+        Some(call) if search_arguments(&call).is_some() => record(args.state.clone(), call),
+        _ => {
             if search_on_other_server(hook, args.client) {
                 count_failure(args.state.clone(), "hook-server-not-matched");
             }
@@ -289,7 +316,9 @@ pub(crate) fn record(state: Option<PathBuf>, call: Call) -> Result<(), Diagnosti
     let Some(environment) = state.target.as_ref().map(|target| &target.environment) else {
         return Ok(());
     };
-    let directory = captures_directory(&path);
+    let Some(directory) = captures_directory(&path) else {
+        return Ok(());
+    };
     setup_cli::protect_directory(&directory)?;
     let outcome = match answer_probe(&path, &directory, &state, &search) {
         Some(outcome) => outcome,
@@ -615,13 +644,10 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), Diagnostic> {
 }
 
 /// Each state file has its own folder, so states sharing a directory keep separate copies.
-fn captures_directory(state: &Path) -> PathBuf {
-    let mut name = state
-        .file_name()
-        .expect("A state path names a file")
-        .to_os_string();
+fn captures_directory(state: &Path) -> Option<PathBuf> {
+    let mut name = state.file_name()?.to_os_string();
     name.push(".captures");
-    state.with_file_name(name)
+    Some(state.with_file_name(name))
 }
 
 fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
@@ -631,7 +657,8 @@ fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    *counts.entry(outcome.into()).or_default() += 1;
+    let count = counts.entry(outcome.into()).or_default();
+    *count = count.saturating_add(1);
     let bytes = serde_json::to_vec_pretty(&counts).expect("A string-keyed count map serializes");
     writer.commit_bytes(&bytes, MAX_TALLY_BYTES)
 }

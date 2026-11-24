@@ -28,6 +28,7 @@ struct Managed {
     name: &'static str,
     event: &'static str,
     entry: Value,
+    previous_matcher: Option<String>,
     wanted: bool,
 }
 
@@ -75,6 +76,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                     name: "capture",
                     event: COPILOT_EVENT,
                     entry: json!({"type": "command", "bash": bash, "powershell": powershell}),
+                    previous_matcher: None,
                     wanted: capture,
                 }],
                 launches,
@@ -92,7 +94,8 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             if client == Client::ClaudeCode {
                 guard_entry["hooks"][0]["onFailure"] = json!("continue");
             }
-            let mut entries = [matcher_hook(&matcher, &command, true), guard_entry];
+            let capture_matcher = format!("mcp__.+__({SEARCH_TOOL}|execute_tool)$");
+            let mut entries = [matcher_hook(&capture_matcher, &command, true), guard_entry];
             // Claude Code on Windows would otherwise pick Git Bash whenever it is installed.
             if cfg!(windows) && client == Client::ClaudeCode {
                 for entry in &mut entries {
@@ -107,12 +110,14 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                         name: "capture",
                         event: POST_TOOL_USE,
                         entry: capture_entry,
+                        previous_matcher: Some(matcher),
                         wanted: capture,
                     },
                     Managed {
                         name: "guard",
                         event: GUARD_EVENT,
                         entry: guard_entry,
+                        previous_matcher: None,
                         wanted: guard,
                     },
                 ],
@@ -383,7 +388,8 @@ fn mark(args: &CaptureArgs, hooks: &[&str]) -> Result<bool, Diagnostic> {
         .expect("A capture client has a name");
     let server = super::codex_server(client, &args.server);
     let state = inventory_cli::state_path(args.state.clone())?;
-    let directory = super::captures_directory(&state);
+    let directory = super::captures_directory(&state)
+        .ok_or_else(|| crate::input_error("--state must name the inventory state file."))?;
     let marker = directory.join("hooks.json");
     if hooks.contains(&"capture") {
         setup_cli::protect_directory(&directory)?;
@@ -868,7 +874,7 @@ fn arguments(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, D
     // The client may start the hook in another directory and with another environment, so
     // register the state this installation resolves, default or not.
     let state = inventory_cli::state_path(args.state.clone())?;
-    if state.is_dir() {
+    if state.file_name().is_none() || state.is_dir() {
         return Err(crate::input_error(
             "--state must name the inventory state file, not a directory.",
         ));
@@ -1239,7 +1245,7 @@ fn edit(bytes: &[u8], managed: &[Managed], launches: &[Launch]) -> Result<Plan, 
         let mut legacy = false;
         let mut ambiguous = false;
         let mut changes = Vec::new();
-        let mut keep = |fields: &[&RawValue], replacements: &[&str]| {
+        let mut keep = |fields: &[&RawValue], replacements: &[&str], matcher: Option<&RawValue>| {
             let old = fields
                 .iter()
                 .map(|field| serde_json::from_str::<String>(field.get()).ok())
@@ -1281,6 +1287,16 @@ fn edit(bytes: &[u8], managed: &[Managed], launches: &[Launch]) -> Result<Plan, 
                     ));
                 }
             }
+            if let Some(matcher) = matcher
+                && serde_json::from_str::<String>(matcher.get()).ok().as_ref()
+                    == hook.previous_matcher.as_ref()
+            {
+                let start = offset(&output, matcher);
+                changes.push((
+                    start..start + matcher.get().len(),
+                    hook.entry["matcher"].to_string(),
+                ));
+            }
             Some(())
         };
         let mut removals = Vec::new();
@@ -1294,20 +1310,26 @@ fn edit(bytes: &[u8], managed: &[Managed], launches: &[Launch]) -> Result<Plan, 
                         .map(|key| raw_member(entry.get().as_bytes(), &[key]));
                     let mut owned = false;
                     if let [Some(bash), Some(powershell)] = fields {
-                        owned = keep(&[bash, powershell], &installed).is_none();
+                        owned = keep(&[bash, powershell], &installed, None).is_none();
                     } else if let Some(command) = fields.into_iter().flatten().next() {
                         // A hook can run on only one shell. Leave it with its owner.
-                        let _ = keep(&[command, command], &[]);
+                        let _ = keep(&[command, command], &[], None);
                     }
                     gone.push(owned);
                 } else if let Some(handlers) = raw_member(entry.get().as_bytes(), &["hooks"])
                     && let Ok(items) = serde_json::from_str::<Vec<&RawValue>>(handlers.get())
                 {
+                    let matcher = if items.len() == 1 && hook.previous_matcher.is_some() {
+                        raw_member(entry.get().as_bytes(), &["matcher"])
+                    } else {
+                        None
+                    };
                     let removed: Vec<_> = items
                         .iter()
                         .map(|item| {
-                            raw_member(item.get().as_bytes(), &["command"])
-                                .is_some_and(|command| keep(&[command], &installed).is_none())
+                            raw_member(item.get().as_bytes(), &["command"]).is_some_and(|command| {
+                                keep(&[command], &installed, matcher).is_none()
+                            })
                         })
                         .collect();
                     let all = !removed.is_empty() && removed.iter().all(|gone| *gone);

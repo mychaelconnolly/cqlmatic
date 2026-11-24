@@ -378,7 +378,7 @@ fn capture_install_previews_writes_and_keeps_the_documented_hooks() {
             }
             let matcher = format!("mcp__{server}__.*");
             json!({"hooks": {
-                "PostToolUse": [{"matcher": matcher, "hooks": [capture]}],
+                "PostToolUse": [{"matcher": "mcp__.+__(falcon_search_ngsiem|execute_tool)$", "hooks": [capture]}],
                 "PreToolUse": [{"matcher": matcher, "hooks": [guard]}],
             }})
         };
@@ -1290,7 +1290,7 @@ fn installed_codex_hook_runs_the_way_codex_starts_it() {
     payload["tool_name"] = json!("mcp__synthetic_server__execute_tool");
     assert_eq!(
         settings["hooks"]["PostToolUse"][0]["matcher"],
-        "mcp__synthetic_server__.*"
+        "mcp__.+__(falcon_search_ngsiem|execute_tool)$"
     );
     // Installing under Codex's own spelling finds the same entry.
     let mut again = Command::new(&executable);
@@ -1479,7 +1479,8 @@ fn capture_flags_an_unmapped_source_and_counts_what_it_skips() {
         dir.tally(),
         json!({
             "new-source-lead": 1, "nothing-new": 1, "not-creditable": 1, "no-single-source": 1,
-            "no-rows": 1, "search-failed": 2, "other-view": 1, "hook-server-not-matched": 1
+            "no-rows": 1, "search-failed": 2, "other-view": 1, "hook-input-unreadable": 1,
+            "hook-server-not-matched": 1
         })
     );
     assert_eq!(dir.saved()["query_observations"], json!([]));
@@ -2247,7 +2248,12 @@ fn concurrent_capture_install_processes_keep_every_reported_hook() {
             assert_eq!(report["installed"], true, "{report}");
             assert_eq!(report["changed"], true, "{report}");
             let entry = &report["entry"]["hooks"]["PostToolUse"][0];
-            assert_eq!(entry["matcher"], format!("mcp__{server}__.*"));
+            assert!(
+                entry["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap()
+                    .contains(server)
+            );
             assert_eq!(hooks.iter().filter(|hook| *hook == entry).count(), 1);
             installed += 1;
         } else {
@@ -2291,7 +2297,10 @@ fn concurrent_capture_install_processes_keep_every_reported_hook() {
         assert_eq!(
             hooks
                 .iter()
-                .filter(|hook| hook["matcher"] == format!("mcp__{server}__.*"))
+                .filter(|hook| hook["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap()
+                    .contains(server))
                 .count(),
             1
         );
@@ -2897,7 +2906,7 @@ fn guard_install_registers_both_events_with_one_fail_open_command() {
             entries[0].clone()
         });
         assert_eq!(capture["hooks"][0]["command"], command);
-        assert_eq!(guard["matcher"], capture["matcher"]);
+        assert_ne!(guard["matcher"], capture["matcher"]);
         // Before the call the client waits for the answer, up to the timeout, and a guard that
         // fails lets the call run.
         let mut handler = json!({"type": "command", "command": command, "timeout": 5});
@@ -3651,4 +3660,96 @@ fn capture_install_marker_tracks_shared_client_and_server() {
         serde_json::from_slice::<Value>(&fs::read(&marker).unwrap()).unwrap()["hooks"],
         json!(["capture"])
     );
+}
+
+#[test]
+fn capture_malformed_input_and_unusable_state_paths_stay_silent() {
+    let home = Temp::new();
+    let directory = fs::canonicalize(&home.0).unwrap();
+    let root = directory.ancestors().last().unwrap();
+    let existing = home.state();
+    fs::create_dir_all(existing.parent().unwrap()).unwrap();
+    fs::write(&existing, b"{}").unwrap();
+    let missing = home.0.join("missing.json");
+    let oversized = vec![b'x'; 20 * 1024 * 1024];
+    for (state, server, input) in [
+        (root, SERVER, &b"{"[..]),
+        (directory.as_path(), SERVER, &b""[..]),
+        (missing.as_path(), SERVER, &b"null"[..]),
+        (existing.as_path(), "", &b"[]"[..]),
+        (existing.as_path(), "--invalid=name", &b"[]"[..]),
+        (existing.as_path(), SERVER, oversized.as_slice()),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
+        let mut child = isolated(&mut command, &home.0)
+            .args(["env", "capture", "--client", "generic"])
+            .arg(format!("--server={server}"))
+            .arg("--state")
+            .arg(state)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if let Err(error) = child.stdin.take().unwrap().write_all(input) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            assert!(input.len() > 16 * 1024 * 1024);
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success() && output.stdout.is_empty() && output.stderr.is_empty(),
+            "{state:?} {server:?}: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn capture_counts_searches_with_an_overlapping_copilot_server_name() {
+    let home = Temp::new();
+    home.confirm();
+    for (tool, arguments) in [
+        ("soc-prod-falcon_search_ngsiem", json!({})),
+        (
+            "soc-prod-execute_tool",
+            json!({"name": "falcon_search_ngsiem"}),
+        ),
+        ("soc-prod-execute_tool", json!({"name": "list_tools"})),
+        ("soc-prod-not_falcon_search_ngsiem", json!({})),
+    ] {
+        home.capture_as(
+            "copilot-cli",
+            "soc",
+            json!({"toolName": tool, "toolArgs": arguments.to_string()}),
+        );
+    }
+    assert_eq!(home.tally(), json!({"hook-server-not-matched": 2}));
+}
+
+#[test]
+fn capture_install_observes_searches_on_other_servers_without_widening_the_guard() {
+    for client in ["claude-code", "codex"] {
+        let home = Temp::new();
+        let state = home.state();
+        let first = report(&mut install_copy(
+            &home.0, client, SERVER, "cqlmatic", &state,
+        ));
+        let capture_matcher = "mcp__.+__(falcon_search_ngsiem|execute_tool)$";
+        assert_eq!(
+            first["entry"]["hooks"]["PostToolUse"][0]["matcher"],
+            capture_matcher
+        );
+        let mut old_settings = first["entry"].clone();
+        let guard_matcher = old_settings["hooks"]["PreToolUse"][0]["matcher"].clone();
+        assert_ne!(guard_matcher, capture_matcher);
+        old_settings["hooks"]["PostToolUse"][0]["matcher"] = guard_matcher;
+        let file = settings_file(&home.0, client);
+        fs::write(&file, old_settings.to_string()).unwrap();
+        report(&mut install_copy(
+            &home.0, client, SERVER, "cqlmatic", &state,
+        ));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(file).unwrap()).unwrap(),
+            first["entry"]
+        );
+    }
 }
