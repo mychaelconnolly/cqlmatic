@@ -1129,12 +1129,20 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
         );
         assert_eq!(
             action["diagnostics"][0]["message"],
-            "Inspect the protected discovery checkpoint or inventory failures for details about this answer."
+            if code == "MCP_UNKNOWN_PROBE" {
+                "Use the outstanding probe ID when resubmitting the saved response."
+            } else {
+                "Use a regular file containing the saved response."
+            }
         );
         assert_eq!(action["cost"]["searches"]["used"], 1);
     }
     let reread = call(&dir.0, json!({"kind":"next-probe"}));
     assert_eq!(reread["action"]["state"], "probe");
+    assert_eq!(
+        reread["action"]["diagnostics"][0]["code"],
+        "LOCAL_FILE_TYPE"
+    );
     assert_eq!(reread["action"]["probe"], first["action"]["probe"]);
     assert_eq!(reread["action"]["dispatched"], false);
     assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
@@ -1208,7 +1216,7 @@ fn next_probe_reports_a_blocked_reservation_after_saving_the_answer() {
     );
     assert_eq!(
         action["next_action"],
-        "The next probe was not reserved; the diagnostic says why. Resolve that, then submit next-probe with run_index=0 and no answer. If the diagnostic says the run started from an earlier inventory, submit pause-discovery with run_index=0, then prepare-discovery."
+        "Pause this run, then prepare discovery again from the current inventory. Previously accepted answers are retained."
     );
     let repeat = json!({"kind":"next-probe","run_index":0});
     let compact = call(&dir.0, repeat.clone());
@@ -1241,7 +1249,7 @@ fn next_probe_marks_an_expired_first_reservation_failed() {
     assert_eq!(action["diagnostics"][0]["code"], "MCP_DEADLINE");
     assert_eq!(
         action["diagnostics"][0]["message"],
-        "Discovery run_index 0: Discovery active-time budget expired; pause and resume do not renew it."
+        "Discovery time limit reached."
     );
     assert_eq!(action["cost"]["searches"]["used"], 0);
     assert_eq!(call(&dir.0, request)["action"]["run_index"], 1);
@@ -1281,7 +1289,7 @@ fn next_probe_does_not_hand_out_a_reserved_probe_after_the_time_limit() {
     assert_eq!(late["action"]["settled"], false);
     assert_eq!(
         late["action"]["next_action"],
-        "run_index=0 failed and hands out no more probes. Read the reason with discovery-step, run_index=0, answers: [] and --json alone before submitting prepare-discovery; a new run with the same sources and limits can fail the same way."
+        "Prepare a new run with enough time for the selected sources. Previously accepted answers are retained."
     );
     let reason = call(
         &dir.0,
@@ -1333,27 +1341,59 @@ fn next_probe_explains_a_run_that_ran_out_of_searches() {
     call(&dir.0, source_run_request(1));
     let first = call(&dir.0, json!({"kind":"next-probe"}));
     let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
-    let ended = call(
-        &dir.0,
-        json!({"kind":"next-probe","answer":{"probe_id":first["action"]["probe"]["probe_id"],"result_file":result}}),
-    );
+    let answer = json!({"kind":"next-probe","answer":{
+        "probe_id":first["action"]["probe"]["probe_id"],"result_file":result}});
+    let ended = call(&dir.0, answer.clone());
     let action = &ended["action"];
     assert_eq!(action["state"], "failed", "{ended}");
     assert_eq!(action["settled"], true);
+    assert_eq!(
+        action["diagnostics"][0]["message"],
+        "Discovery search budget exhausted."
+    );
     assert!(
         action["next_action"]
             .as_str()
             .unwrap()
-            .starts_with("run_index=0 failed and hands out no more probes. Read the reason with discovery-step, run_index=0, answers: [] and --json alone")
+            .contains("larger max_queries")
     );
-    let reason = call(
+
+    let state = dir.0.join("workflow/state.json");
+    let saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    let relay = saved["discovery_runs"][0]["state_path"].as_str().unwrap();
+    let before = fs::read(relay).unwrap();
+    for request in [json!({"kind":"next-probe","run_index":0}), answer] {
+        for mode in [None, Some("--summary"), Some("--brief")] {
+            let output = inventory_command(&dir.0, request.clone())
+                .args(mode)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let polled: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let polled = &polled["action"];
+            for key in ["state", "diagnostics", "next_action", "cost"] {
+                assert_eq!(polled[key], action[key]);
+            }
+            assert_eq!(polled["settled"], false);
+            assert_eq!(polled["dispatched"], false);
+        }
+    }
+    assert_eq!(fs::read(relay).unwrap(), before);
+    let reason = brief_call(
         &dir.0,
         json!({"kind":"discovery-step","run_index":0,"answers":[]}),
     );
-    assert_eq!(
-        reason["action"]["relay"]["diagnostics"][0]["message"],
-        "Discovery budget exhausted; the working pack must remain unchanged."
+    assert_eq!(reason["action"]["run_index"], 0);
+    assert_eq!(reason["action"]["diagnostics"], action["diagnostics"]);
+    let status = brief_value(
+        Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .args(["status", "--json", "--brief", "--state"])
+            .arg(state)
+            .output()
+            .unwrap(),
     );
+    assert_eq!(status["failed_discovery"]["run_index"], 0);
+    assert_eq!(status["failed_discovery"]["code"], "DISCOVERY_EVIDENCE");
 }
 
 #[test]
@@ -1769,6 +1809,10 @@ fn next_probe_hides_request_text_and_keeps_raw_refusal_in_the_checkpoint() {
     );
     let reread = call(&dir.0, json!({"kind":"next-probe"}));
     assert_eq!(reread["action"]["state"], "cleanup-pending");
+    assert_eq!(
+        reread["action"]["diagnostics"],
+        response["action"]["diagnostics"]
+    );
     assert!(reread["action"].get("probe").is_none());
 }
 

@@ -102,7 +102,7 @@ impl Session {
         Ok(self.predecessor_sha256.as_deref())
     }
 
-    pub(crate) fn attempts_len(&self) -> usize {
+    pub fn attempts_len(&self) -> usize {
         self.attempts.len()
     }
     /// Bytes of every answer handed back for this run, accepted or not. A cancelled
@@ -202,6 +202,13 @@ fn outstanding_attempt(state: &State) -> Option<&Attempt> {
             .iter()
             .rfind(|attempt| attempt_uncertain(session.transport, attempt))
     })
+}
+
+pub fn outstanding_refusal(state: &State) -> Option<&Diagnostic> {
+    outstanding_attempt(state)?
+        .rejected_results
+        .last()
+        .map(|result| &result.diagnostic)
 }
 
 pub fn outstanding_probe_id(state: &State) -> Option<String> {
