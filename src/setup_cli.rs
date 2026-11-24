@@ -1307,9 +1307,20 @@ struct ServerAdvice {
     usable: Vec<String>,
     skipped: Vec<String>,
     unusable: Vec<String>,
+    default_blocked: bool,
 }
 
 impl ServerAdvice {
+    fn default_name(&self, client: ClientKind, host_managed: bool) -> Option<&str> {
+        self.usable
+            .iter()
+            .find(|name| {
+                self.skipped.is_empty() && setup::accepts_server_name(client, name, host_managed)
+            })
+            .map(String::as_str)
+            .or_else(|| (!self.default_blocked).then_some("cs-mcp"))
+    }
+
     fn message(&self, client: ClientKind, cloud: Cloud, selected: Option<&str>) -> Option<String> {
         let endpoint = cloud.endpoint();
         let mut lines = Vec::new();
@@ -1355,18 +1366,34 @@ fn servers_at_endpoint(
     codex: Option<&ClientObservation>,
     runner: &mut impl Runner,
 ) -> ServerAdvice {
+    struct ServerEntry {
+        endpoint_matches: bool,
+        enabled: bool,
+        search_allowed: bool,
+    }
+    let copilot = matches!(
+        client,
+        ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode
+    );
     let mut advice = ServerAdvice::default();
-    let mut seen = std::collections::BTreeMap::<String, Vec<(bool, bool)>>::new();
+    let mut seen = std::collections::BTreeMap::<String, Vec<ServerEntry>>::new();
     let endpoint = cloud.endpoint();
     let mut collect = |name: &str, entry: &Value, pointer: &str| {
         let matches = entry
             .pointer(pointer)
             .and_then(Value::as_str)
             .is_some_and(|url| url.trim_end_matches('/') == endpoint);
-        let enabled = entry["enabled"] != false && entry["disabled"] != true;
-        seen.entry(name.to_owned())
-            .or_default()
-            .push((matches, enabled));
+        let search_allowed = !copilot
+            || entry["tools"].as_array().is_none_or(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| matches!(tool.as_str(), Some("*" | SEARCH_TOOL | "execute_tool")))
+            });
+        seen.entry(name.to_owned()).or_default().push(ServerEntry {
+            endpoint_matches: matches,
+            enabled: entry["enabled"] != false && entry["disabled"] != true,
+            search_allowed,
+        });
     };
     let cwd = env::current_dir().ok();
     match client {
@@ -1460,19 +1487,23 @@ fn servers_at_endpoint(
         }
     }
     for (name, entries) in seen {
-        if !entries.iter().any(|(matches, _)| *matches) {
+        if !entries.iter().any(|entry| entry.endpoint_matches) {
+            advice.default_blocked |= name == "cs-mcp";
             continue;
         }
-        let reason = if !setup::accepts_host_managed_server_name(client, &name) {
+        let reason = if !setup::accepts_server_name(client, &name, true) {
             "has an invalid name for setup"
-        } else if entries.iter().any(|(matches, _)| !matches) {
+        } else if entries.iter().any(|entry| !entry.endpoint_matches) {
             "may be overridden by a same-name entry for another endpoint or transport"
-        } else if entries.iter().any(|(_, enabled)| !enabled) {
+        } else if entries.iter().any(|entry| !entry.enabled) {
             "is disabled in the client configuration"
+        } else if entries.iter().any(|entry| !entry.search_allowed) {
+            "has a tool allowlist that excludes the NG-SIEM search tool"
         } else {
             advice.usable.push(name);
             continue;
         };
+        advice.default_blocked |= name == "cs-mcp";
         advice.unusable.push(format!("Found '{}' at {endpoint}, but it {reason}. Check the server in the client before selecting it.", name.escape_debug()));
     }
     advice
@@ -2710,22 +2741,8 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                 if let Some(advice) = found.message(client, cloud, None) {
                     println!("{advice}");
                 }
-                let default = found
-                    .usable
-                    .first()
-                    .filter(|_| found.skipped.is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| "cs-mcp".into());
-                let Some(server_name) = prompt(&rx, &format!("Server name [{default}]: "))? else {
-                    continue;
-                };
-                let server_name = if server_name.is_empty() {
-                    default
-                } else {
-                    server_name
-                };
-                let registration = if !client.is_native() {
-                    RegistrationMode::HostManaged {}
+                let mode = if !client.is_native() {
+                    "host-managed".to_owned()
                 } else {
                     let options = if client == ClientKind::ClaudeCode {
                         "Registration [cimd/host-managed/api-client]: "
@@ -2740,78 +2757,99 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                     let Some(mode) = prompt(&rx, options)? else {
                         continue;
                     };
-                    match mode.as_str() {
-                        "host-managed" => {
+                    mode
+                };
+                if !matches!(
+                    mode.as_str(),
+                    "host-managed" | "cimd" | "manual" | "api-client"
+                ) {
+                    println!("Choose one of the listed registrations.");
+                    continue;
+                }
+                let default = found.default_name(client, mode == "host-managed");
+                let label = default.map_or_else(
+                    || "Server name: ".to_owned(),
+                    |name| format!("Server name [{name}]: "),
+                );
+                let Some(server_name) = prompt(&rx, &label)? else {
+                    continue;
+                };
+                let server_name = if server_name.is_empty() {
+                    let Some(name) = default else {
+                        println!(
+                            "Enter an explicit server name. The default name is already configured and unsuitable for this selection."
+                        );
+                        continue;
+                    };
+                    name.to_owned()
+                } else {
+                    server_name
+                };
+                let registration = match mode.as_str() {
+                    "host-managed" => {
+                        println!(
+                            "Host-managed uses the server already configured in the client and changes nothing there. Sign in to it in the client, then import a saved host report."
+                        );
+                        RegistrationMode::HostManaged {}
+                    }
+                    "cimd" => {
+                        let url = if client == ClientKind::ClaudeCode {
+                            "https://claude.ai/oauth/claude-code-client-metadata".into()
+                        } else if client == ClientKind::VsCode {
+                            "https://vscode.dev/oauth/client-metadata.json".into()
+                        } else {
                             println!(
-                                "Host-managed uses the server already configured in the client and changes nothing there. Sign in to it in the client, then import a saved host report."
+                                "Codex's metadata URL depends on client version/server capabilities. Inspect the exact identity in your native client; there is no assumed universal client ID."
                             );
-                            RegistrationMode::HostManaged {}
-                        }
-                        "cimd" => {
-                            let url = if client == ClientKind::ClaudeCode {
-                                "https://claude.ai/oauth/claude-code-client-metadata".into()
-                            } else if client == ClientKind::VsCode {
-                                "https://vscode.dev/oauth/client-metadata.json".into()
-                            } else {
-                                println!(
-                                    "Codex's metadata URL depends on client version/server capabilities. Inspect the exact identity in your native client; there is no assumed universal client ID."
-                                );
-                                let Some(url) = prompt(&rx, "Exact current Codex metadata URL: ")?
-                                else {
-                                    continue;
-                                };
-                                url
-                            };
-                            println!(
-                                "Metadata identity: {url}\nCanonical endpoint: {}\nConfirm current CrowdStrike CIMD allowlisting and your CrowdStrike MCP role in Falcon. This wizard cannot detect your tenant allowlist.",
-                                cloud.endpoint()
-                            );
-                            let Some(confirm) = prompt(
-                                &rx,
-                                "Type allowlisted after checking that exact identity: ",
-                            )?
+                            let Some(url) = prompt(&rx, "Exact current Codex metadata URL: ")?
                             else {
                                 continue;
                             };
-                            RegistrationMode::Cimd {
-                                metadata_url: url,
-                                allowlist_confirmed: confirm == "allowlisted",
-                            }
-                        }
-                        "manual" => {
-                            println!(
-                                "In Falcon MCP Client Management, register your native client using its actual callback behavior. Enter only its generated client ID here; optional secrets belong solely in the native client's protected UI. Setup records the expected callback but cannot set it for every host."
-                            );
-                            let Some(client_id) = prompt(&rx, "Generated manual MCP client ID: ")?
-                            else {
-                                continue;
-                            };
-                            let Some(callback_url) =
-                                prompt(&rx, "Exact native-client callback URI: ")?
-                            else {
-                                continue;
-                            };
-                            RegistrationMode::Manual {
-                                client_id,
-                                callback_url,
-                            }
-                        }
-                        "api-client" => {
-                            println!(
-                                "Advanced service mode requires a native client's supported plugin. Store credentials through its protected UI. This wizard records only a file reference, does not open it, and leaves service setup pending."
-                            );
-                            let Some(credentials_file) =
-                                prompt(&rx, "Absolute protected credential-file reference: ")?
-                            else {
-                                continue;
-                            };
-                            RegistrationMode::ApiClient { credentials_file }
-                        }
-                        _ => {
-                            println!("Choose one of the listed registrations.");
+                            url
+                        };
+                        println!(
+                            "Metadata identity: {url}\nCanonical endpoint: {}\nConfirm current CrowdStrike CIMD allowlisting and your CrowdStrike MCP role in Falcon. This wizard cannot detect your tenant allowlist.",
+                            cloud.endpoint()
+                        );
+                        let Some(confirm) =
+                            prompt(&rx, "Type allowlisted after checking that exact identity: ")?
+                        else {
                             continue;
+                        };
+                        RegistrationMode::Cimd {
+                            metadata_url: url,
+                            allowlist_confirmed: confirm == "allowlisted",
                         }
                     }
+                    "manual" => {
+                        println!(
+                            "In Falcon MCP Client Management, register your native client using its actual callback behavior. Enter only its generated client ID here; optional secrets belong solely in the native client's protected UI. Setup records the expected callback but cannot set it for every host."
+                        );
+                        let Some(client_id) = prompt(&rx, "Generated manual MCP client ID: ")?
+                        else {
+                            continue;
+                        };
+                        let Some(callback_url) = prompt(&rx, "Exact native-client callback URI: ")?
+                        else {
+                            continue;
+                        };
+                        RegistrationMode::Manual {
+                            client_id,
+                            callback_url,
+                        }
+                    }
+                    "api-client" => {
+                        println!(
+                            "Advanced service mode requires a native client's supported plugin. Store credentials through its protected UI. This wizard records only a file reference, does not open it, and leaves service setup pending."
+                        );
+                        let Some(credentials_file) =
+                            prompt(&rx, "Absolute protected credential-file reference: ")?
+                        else {
+                            continue;
+                        };
+                        RegistrationMode::ApiClient { credentials_file }
+                    }
+                    _ => unreachable!("Selected a listed registration mode"),
                 };
                 SetupAction::Select {
                     selection: Selection {
@@ -4281,6 +4319,41 @@ mod tests {
             Ok(self.0.clone())
         }
     }
+    #[test]
+    fn setup_wizard_defaults_respect_registration_mode_and_configuration() {
+        let temp = Temp::new();
+        let config = temp.0.join("client-config");
+        let mut runner = PanicRunner(config.clone());
+        let endpoint = Cloud::Us1.endpoint();
+        let client = ClientKind::ClaudeCode;
+        let inspect =
+            |runner: &mut PanicRunner| servers_at_endpoint(client, Cloud::Us1, None, runner);
+
+        fs::write(
+            &config,
+            json!({"mcpServers": {
+                "_soc": {"url":endpoint},
+                "aaa-disabled": {"url":endpoint,"enabled":false},
+                "z-enabled": {"url":endpoint}
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let advice = inspect(&mut runner);
+        assert_eq!(advice.default_name(client, true), Some("_soc"));
+        assert_eq!(advice.default_name(client, false), Some("z-enabled"));
+
+        for entry in [
+            json!({"url":endpoint,"disabled":true}),
+            json!({"url":Cloud::Eu1.endpoint()}),
+        ] {
+            fs::write(&config, json!({"mcpServers":{"cs-mcp":entry}}).to_string()).unwrap();
+            let advice = inspect(&mut runner);
+            assert_eq!(advice.default_name(client, true), None);
+            assert_eq!(advice.default_name(client, false), None);
+        }
+    }
+
     #[test]
     fn setup_host_managed_named_clients_use_the_existing_server_unchanged() {
         let endpoint = Cloud::Us1.endpoint();

@@ -476,10 +476,7 @@ impl Selection {
         matches!(self.registration, RegistrationMode::HostManaged {})
     }
     pub fn validate(&self) -> Result<(), Diagnostic> {
-        if !identifier(&self.server_name)
-            && !(self.host_managed()
-                && accepts_host_managed_server_name(self.client, &self.server_name))
-        {
+        if !accepts_server_name(self.client, &self.server_name, self.host_managed()) {
             return Err(error(
                 "SETUP_SERVER_NAME",
                 "Server name must be 1-64 ASCII letters, digits, underscores or hyphens and start with a letter or digit.",
@@ -1233,9 +1230,12 @@ pub fn is_digest(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-pub fn accepts_host_managed_server_name(client: ClientKind, name: &str) -> bool {
+pub fn accepts_server_name(client: ClientKind, name: &str, host_managed: bool) -> bool {
     identifier(name)
-        || client == ClientKind::ClaudeCode && name.starts_with('_') && identifier_bytes(name)
+        || host_managed
+            && client == ClientKind::ClaudeCode
+            && name.starts_with('_')
+            && identifier_bytes(name)
 }
 
 fn identifier(s: &str) -> bool {

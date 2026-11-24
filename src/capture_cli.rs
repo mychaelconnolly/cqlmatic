@@ -36,7 +36,7 @@ const MAX_AUDIT_BYTES: u64 = 1_048_576;
 /// finishes well within it.
 const UNREFERENCED_AFTER: Duration = Duration::from_secs(600);
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct CaptureArgs {
     #[arg(long, value_enum, help = "Client whose hook payload arrives on stdin")]
     client: Client,
