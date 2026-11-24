@@ -896,12 +896,16 @@ fn same_state(left: &Path, right: &Path) -> bool {
     ) else {
         return false;
     };
-    // Equivalent filenames must refer to the same capture directory as well.
-    same_existing_path(&left_captures, &right_captures)
-        && (same_existing_path(left, right)
-            || [left, right].into_iter().all(|path| {
-                fs::metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-            }))
+    let both_missing = |a: &Path, b: &Path| {
+        [a, b].into_iter().all(|path| {
+            fs::metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
+    };
+    // Equivalent filenames must refer to the same capture directory when one exists.
+    (same_existing_path(left, right)
+        && (same_existing_path(&left_captures, &right_captures)
+            || both_missing(&left_captures, &right_captures)))
+        || (both_missing(left, right) && same_existing_path(&left_captures, &right_captures))
 }
 
 #[cfg(unix)]
