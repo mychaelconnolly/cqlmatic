@@ -1231,7 +1231,7 @@ fn apply_locked(
                 extra = json!({"kind":"reconcile",
                     "status":if recorded { "recorded" } else { "already-current" },
                     "evidence_sha256":state.reconciled_evidence_sha256,"reviewed_at":state.reconciled_at,
-                    "completion_detail":report.completion_detail,"next_action":reconcile_next_action(&report)});
+                    "completion_detail":report.completion_detail,"next_action":reconcile_next_action(&state, &report, &now)});
             }
         }
         if evidence_limited {
@@ -1257,33 +1257,64 @@ fn apply_locked(
 }
 
 /// Fixed guidance naming the first open category after a reconcile.
-fn reconcile_next_action(report: &InventoryStatus) -> String {
+fn reconcile_next_action(state: &InventoryState, report: &InventoryStatus, now: &str) -> String {
+    if report.target != Progress::Done {
+        return "Use confirm-target to record the target and scope before continuing inventory work.".into();
+    }
+    if report.capability_blocked {
+        return "A capability search needs settlement. Use submit-capability for the exact attempt before another search.".into();
+    }
+    if report.refresh_blocked {
+        return if report
+            .refresh_attempts
+            .iter()
+            .any(|attempt| attempt.phase == inventory::RefreshPhase::Prepared)
+        {
+            "A refresh is reserved. Settle it with settle-refresh before another search. Use not-started only after confirming it never ran.".into()
+        } else {
+            "A refresh needs settlement. Use settle-refresh for the exact attempt with verified termination evidence before another search.".into()
+        };
+    }
+    if check_retained_searches(state, None, None, now).is_err() {
+        return "Inspect the retained discovery run before another search. Use discovery-step for its saved answer, or pause-discovery and settle any outstanding attempt.".into();
+    }
+
     let detail = report
         .completion_detail
         .as_ref()
         .expect("assessed status carries its completion detail");
     let open = &detail.expected_sources_open;
-    // Source review and parser work are Full discovery steps; Quick completion does not need them.
-    let full = if report.discovery_mode == DiscoveryMode::Quick {
-        "Full discovery: "
-    } else {
-        ""
-    };
+    let quick = report.discovery_mode == DiscoveryMode::Quick;
+    let selected_full =
+        !quick && report.target_scope == Some(inventory::TargetScope::SelectedSources);
+    // Source review and parser work are Full discovery steps.
+    let full = if quick { "Full discovery: " } else { "" };
     if detail.scout_awaiting_capture {
-        "A prepared census is awaiting its capture. Run it once with its exact arguments, save the entire result, import it with import-scout, then reconcile again.".into()
+        if state.scout_plan_matches_target_and_mode() {
+            "Import any saved response with import-scout first. Otherwise confirm whether the search already ran. If it did not, get authorization and run the exact plan once with a finite host budget.".into()
+        } else {
+            "Use prepare-scout for the confirmed target and current mode, with a finite host budget in Quick.".into()
+        }
     } else if open.measurements > 0 {
-        "Expected sources still need completed measurements. Complete a discovery run that covers them, relaying each probe with next-probe, then reconcile again.".into()
+        "Expected sources need measurements. Resume a paused run with resume-discovery or use prepare-discovery, then relay with next-probe.".into()
     } else if open.interpretation_review > 0 {
         format!(
             "{full}Expected sources still need interpretation review. Record each with review-source, then reconcile again."
         )
-    } else if !detail.parser_catalog_captured {
+    } else if !detail.parser_catalog_captured
+        && !(selected_full && open.parser_review_or_binding > 0)
+    {
+        let prefix = if selected_full && report.selected_scope_complete {
+            "Full-environment map: "
+        } else {
+            full
+        };
         format!(
-            "{full}The parser catalog is not captured. Save the complete catalog with import-parsers or fetch-parsers, then reconcile again."
+            "{prefix}To capture the parser catalog, save its complete pages and details with import-parsers."
         )
     } else if open.parser_review_or_binding > 0 {
         format!(
-            "{full}Expected sources still need a parser binding or review. Use bind-parser with a review of every listed line, or parser-not-applicable for a supported native source, then reconcile again."
+            "{full}Use parser-not-applicable for a supported native source. For others, import any missing parser evidence and use bind-parser with the required line reviews."
         )
     } else {
         "No counted work is open. Read full_map_complete, selected_scope_complete or quick_scope_complete, and the status next_actions, for any other remaining work.".into()

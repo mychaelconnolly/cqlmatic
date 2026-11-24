@@ -396,7 +396,7 @@
           "type": "boolean"
         },
         "values_saved": {
-          "description": "The map holds at least one observed value for this field. `values: done` without it\nmeans a completed run sampled the field and the map holds no value for it.",
+          "description": "The retained pack holds at least one observed value for this field. This describes\ncumulative evidence. A later sample can return no values while this flag stays true.",
           "type": "boolean",
           "default": false
         }

@@ -987,8 +987,8 @@ pub struct FieldStatus {
     pub status: Progress,
     pub values: Progress,
     pub values_requested: bool,
-    /// The map holds at least one observed value for this field. `values: done` without it
-    /// means a completed run sampled the field and the map holds no value for it.
+    /// The retained pack holds at least one observed value for this field. This describes
+    /// cumulative evidence. A later sample can return no values while this flag stays true.
     #[serde(default)]
     pub values_saved: bool,
     pub evidence_dates: Vec<String>,
@@ -4085,6 +4085,18 @@ fn mask_literals(line: &str) -> String {
     result
 }
 
+impl InventoryState {
+    /// Whether the saved plan is eligible for import under the current target and mode.
+    pub fn scout_plan_matches_target_and_mode(&self) -> bool {
+        self.scout_plan.as_ref().is_some_and(|plan| {
+            // State validation checks the plan itself. Import also checks these current-state rules.
+            self.validate_scout_environment(&plan.environment).is_ok()
+                && plan.arguments.repository == self.scout_repository(&plan.environment)
+                && (self.discovery_mode != DiscoveryMode::Quick || plan.max_seconds.is_some())
+        })
+    }
+}
+
 pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus, Diagnostic> {
     state.validate()?;
     let target = state.target.as_ref();
@@ -4205,10 +4217,17 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     }
     if state.discovery_mode == DiscoveryMode::Full
         && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
-        && !full_census.is_empty()
         && !full_census_qualifies
+        && let Some(latest) = full_census.last()
     {
-        next_actions.push("No saved search-all census is complete and uncapped. A census that reaches the 10,000-row ceiling cannot show that every source was listed. Prepare scouting over a shorter window and import its entire result; full_map_complete stays false until a census qualifies.".into());
+        let reason = if latest.rows >= 10_000 {
+            "The latest saved search-all census reached the 10,000-row ceiling. Use prepare-scout over a shorter window and import its entire response with import-scout."
+        } else {
+            "The latest saved search-all census rows did not pass census validation. Use prepare-scout for a fresh capture and import its entire response with import-scout."
+        };
+        next_actions.push(format!(
+            "{reason} full_map_complete stays false until a census qualifies."
+        ));
     }
     if !catalog_complete && state.discovery_mode == DiscoveryMode::Full {
         next_actions.push("Complete the native parser catalog and retrieve each exact parser ID; API credentials stay in the supplied protected file.".into());
