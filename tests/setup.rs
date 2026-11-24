@@ -1262,3 +1262,12 @@ fn recovery_origin_validates_its_original_selection_command_and_acknowledged_rev
         "SETUP_RECOVERY_ORIGIN"
     );
 }
+#[test]
+fn handoff_points_at_the_saved_report_schema() {
+    let mut state = SetupState::default();
+    state
+        .select(host_selection(ClientKind::External, Some("synthetic-host")))
+        .unwrap();
+    let handoff = result(state, None).handoff.unwrap();
+    assert!(handoff.contains("host_tool_discovery property of `cqlmatic --schema setup`"));
+}
