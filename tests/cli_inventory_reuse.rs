@@ -1308,3 +1308,68 @@ fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
         pack.content_digest
     );
 }
+
+#[test]
+fn catalog_exact_function_name_ranks_first_in_contracts() {
+    let temp = Temp::new();
+    for (term, name) in [
+        ("in", "in"),
+        ("IF", "if"),
+        ("sort", "sort"),
+        ("match", "match"),
+        ("eval", "eval"),
+    ] {
+        let (code, rows) = temp.document(&["catalog", "--functions", term]);
+        assert_eq!(code, 0);
+        let names: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.first().copied(), Some(name), "{term}: {names:?}");
+        assert_eq!(
+            names[1..],
+            cqlmatic::catalog::FUNCTIONS
+                .iter()
+                .map(|f| f.name)
+                .filter(|f| *f != name && f.to_lowercase().contains(&term.to_lowercase()))
+                .take(9)
+                .collect::<Vec<_>>(),
+            "{term}"
+        );
+    }
+}
+
+#[test]
+fn catalog_exact_function_name_ranks_first_in_knowledge() {
+    let temp = Temp::new();
+    for (term, name) in [
+        ("in", "in"),
+        ("IF", "if"),
+        ("sort", "sort"),
+        ("match", "match"),
+        ("eval", "eval"),
+    ] {
+        let exact = cqlmatic::catalog::function(name).unwrap().reference_id;
+        for flag in [None, Some("--full")] {
+            let cmd = ["catalog", term]
+                .into_iter()
+                .chain(flag)
+                .collect::<Vec<_>>();
+            let (code, rows) = temp.document(&cmd);
+            assert_eq!(code, 0);
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows[0]["id"], exact, "{term}: {rows:?}");
+            let previous = cqlmatic::catalog::search(term, 10, flag.is_some());
+            assert_eq!(
+                rows[1..],
+                previous
+                    .into_iter()
+                    .filter(|row| row["id"] != exact)
+                    .take(9)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}

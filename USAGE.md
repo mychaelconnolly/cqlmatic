@@ -195,7 +195,7 @@ cqlmatic catalog --standard ecs process.name
 | `--full` | Off | Full ordinary knowledge records, including bodies and sources; does not expand function metadata into prose. |
 | `--limit N` | 10 | 1–250 matches for ordinary/functions/standard lookup. Recipe/profile modes emit their complete object/list. |
 
-At most one of `--functions`, `--recipes`, `--profile`, and `--standard` may be selected. All modes are offline JSON output. Compact ordinary records include `supported`, which describes the associated local reference coverage; it is not execution proof. Broader knowledge can describe syntax outside the checker. See the [function/catalog reference](docs/QUERY-REFERENCE.md#function-contracts).
+At most one of `--functions`, `--recipes`, `--profile`, and `--standard` may be selected. All modes are offline JSON output. An exact function name ranks its record first in ordinary and `--functions` searches. Compact ordinary records include `supported`, which describes the associated local reference coverage; it is not execution proof. Broader knowledge can describe syntax outside the checker. See the [function/catalog reference](docs/QUERY-REFERENCE.md#function-contracts).
 
 The current source profile is `cqlmatic-ngsiem-core-v3`: 194 Query candidate names, comprising 193 current candidates and deprecated `lowercase`. The [official-page ledger](data/function-scope.json) separately excludes parser-only `copyEvent` and unreleased `math:spherical2cartesian`. This is name membership with bounded contracts, not confirmation of every documented form or full vendor-compiler coverage. `catalog --profile` reports the actual binary's profile and knowledge revision; pack compatibility uses their explicit metadata binding.
 

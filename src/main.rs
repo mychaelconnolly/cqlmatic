@@ -1410,11 +1410,14 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
     } else if args.recipes {
         output(&app::recipe_catalog(), true)?;
     } else if args.functions {
-        let matches = catalog::FUNCTIONS
-            .iter()
-            .filter(|f| {
-                args.term.is_empty() || f.name.to_lowercase().contains(&args.term.to_lowercase())
-            })
+        let exact = catalog::function(&args.term);
+        let needle = args.term.to_lowercase();
+        let partial = catalog::FUNCTIONS.iter().filter(|f| {
+            !f.name.eq_ignore_ascii_case(&args.term) && f.name.to_lowercase().contains(&needle)
+        });
+        let matches = exact
+            .into_iter()
+            .chain(partial)
             .take(args.limit as usize)
             .map(|f| {
                 let mut value = serde_json::to_value(f).expect("function serializes");
@@ -1430,10 +1433,16 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
             .collect::<Vec<_>>();
         output(&matches, true)?;
     } else {
-        output(
-            &catalog::search(&args.term, args.limit as usize, args.full),
-            args.full,
-        )?;
+        let limit = args.limit as usize;
+        let mut matches = catalog::search(&args.term, limit, args.full);
+        if let Some(function) = catalog::function(&args.term)
+            && let Some(exact) = catalog::search(function.reference_id, 1, args.full).pop()
+        {
+            matches.retain(|row| row["id"] != function.reference_id);
+            matches.insert(0, exact);
+            matches.truncate(limit);
+        }
+        output(&matches, args.full)?;
     }
     Ok(0)
 }
