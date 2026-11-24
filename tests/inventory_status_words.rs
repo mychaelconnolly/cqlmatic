@@ -2034,3 +2034,153 @@ fn brief_discovery_actions_keep_the_status_next_step() {
     );
     assert!(started["action"]["next_action"].is_string(), "{started}");
 }
+
+#[test]
+fn retried_scout_blocks_refresh_and_keeps_reviewed_evidence_current() {
+    let dir = Temp::new();
+    full_inventory(&dir.0, census(1), true, None);
+    call(&dir.0, reconcile());
+    let before = status_json(&dir.0, &[]);
+    assert_eq!(before["full_map_complete"], true);
+    assert_eq!(before["reconciliation"], "done");
+    let reviewed_at = before["completion_detail"]["evidence_reviewed_at"].clone();
+    assert!(reviewed_at.is_string(), "{before}");
+    let state_path = dir.0.join("workflow").join("state.json");
+    let digest_before = serde_json::from_slice::<Value>(&fs::read(&state_path).unwrap()).unwrap()
+        ["reconciled_evidence_sha256"]
+        .clone();
+
+    // Re-preparing the identical scout flags scouting as pending without invalidating evidence.
+    let retry = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            false,
+        ),
+    );
+    assert_eq!(retry["status"]["full_map_complete"], true, "{retry}");
+    assert_eq!(retry["status"]["reconciliation"], "done", "{retry}");
+    assert_eq!(
+        retry["status"]["completion_detail"]["evidence_reviewed_at"],
+        reviewed_at
+    );
+    assert_eq!(
+        retry["status"]["completion_detail"]["scout_awaiting_capture"],
+        true
+    );
+    assert_eq!(
+        status_json(&dir.0, &["--brief"])["refresh"]["blocker"],
+        "pending-scouting"
+    );
+
+    let host = host_evidence(&dir.0);
+    let refused = inventory(
+        &dir.0,
+        json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":host}),
+        &[],
+    );
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("pending scouting"), "{stderr}");
+
+    // Re-importing the identical reply clears the pending flag while keeping evidence current.
+    let imported = call(&dir.0, scout_import(&dir.0, &retry, census(1)));
+    assert_eq!(imported["status"]["full_map_complete"], true, "{imported}");
+    assert_eq!(imported["status"]["reconciliation"], "done", "{imported}");
+    assert_eq!(
+        imported["status"]["completion_detail"]["evidence_reviewed_at"],
+        reviewed_at
+    );
+    assert_eq!(
+        imported["status"]["completion_detail"]["scout_awaiting_capture"],
+        false
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&state_path).unwrap()).unwrap()["reconciled_evidence_sha256"],
+        digest_before
+    );
+    assert_eq!(
+        status_json(&dir.0, &["--brief"])["refresh"]["blocker"],
+        "manual-refresh-available"
+    );
+    let prepared = call(
+        &dir.0,
+        json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":host}),
+    );
+    assert_eq!(
+        prepared["status"]["refresh_attempts"][0]["phase"],
+        "prepared"
+    );
+}
+
+#[test]
+fn due_reminder_and_capability_notes_respect_an_open_discovery_blocker() {
+    let dir = Temp::new();
+    full_inventory(&dir.0, census(1), true, None);
+    call(&dir.0, reconcile());
+    // Start a second discovery run so an active run blocks refresh and capability prep.
+    call(&dir.0, discovery_request(false));
+    let state_path = dir.0.join("workflow").join("state.json");
+    let mut saved: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    saved["target"]["confirmed_at"] = json!("2026-01-01T00:00:00Z");
+    saved["refresh_reminder"]["baseline_at"] = json!("2026-01-01T00:00:00Z");
+    fs::write(&state_path, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+
+    let full = status_json(&dir.0, &[]);
+    let actions: Vec<&str> = full["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(actions[0].contains("run_index 1"), "{actions:?}");
+    assert!(
+        !actions
+            .iter()
+            .any(|s| s.contains("Optional function checks")),
+        "{actions:?}"
+    );
+    let due = actions
+        .iter()
+        .find(|s| s.contains("Inventory refresh is due"))
+        .expect("due reminder kept");
+    assert!(due.contains("Settle the blocking item above"), "{due}");
+
+    let brief = status_json(&dir.0, &["--brief"]);
+    assert_eq!(brief["refresh"]["blocker"], "recorded-discovery-unfinished");
+    let notice = brief["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["code"] == "INVENTORY_REFRESH_DUE")
+        .expect("due notice kept");
+    assert!(
+        notice["message"]
+            .as_str()
+            .unwrap()
+            .contains("Settle the blocker before manual refresh"),
+        "{notice}"
+    );
+
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":1}));
+    let unblocked = status_json(&dir.0, &[]);
+    let actions: Vec<&str> = unblocked["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert!(
+        actions
+            .iter()
+            .any(|s| s.contains("Optional function checks")),
+        "{actions:?}"
+    );
+    let due = actions
+        .iter()
+        .find(|s| s.contains("Inventory refresh is due"))
+        .expect("due reminder kept");
+    assert!(due.contains("Run explicit manual refresh"), "{due}");
+}

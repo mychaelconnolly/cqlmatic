@@ -1598,6 +1598,13 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
             None if !discovery_work.is_empty() || status.retained_run_blocker.is_some() => {
                 "recorded-discovery-unfinished"
             }
+            None if status
+                .completion_detail
+                .as_ref()
+                .is_some_and(|detail| detail.scout_awaiting_capture) =>
+            {
+                "pending-scouting"
+            }
             None => "manual-refresh-available",
         }
     };
@@ -1631,8 +1638,12 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
             "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
     }
     if reminder.is_some_and(|reminder| reminder.show_startup_notice) {
-        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info",
-            "message":"Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."}));
+        let message = if blocker == "manual-refresh-available" {
+            "Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."
+        } else {
+            "Inventory refresh is due. Settle the blocker before manual refresh, or defer 30 days; acknowledgement does not complete refresh."
+        };
+        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info","message":message}));
     }
     if !status.pending_inventory.is_empty() {
         notices.push(json!({"code":"INVENTORY_WORK_PENDING","severity":"warning",
@@ -2703,11 +2714,7 @@ impl InventoryState {
                 "Refresh history reached its finite limit; retain it and use a new explicitly selected workflow state.",
             ));
         }
-        if self
-            .scout_plan
-            .as_ref()
-            .is_some_and(|p| !self.scouting.iter().any(|s| &s.plan == p))
-        {
+        if self.scout_awaiting_capture() {
             return Err(fail(
                 "Finish or safely reconcile pending scouting before preparing refresh; its progress is retained.",
             ));
@@ -2982,10 +2989,17 @@ impl InventoryState {
             reconciled_at: None,
         })
     }
+    pub fn scout_awaiting_capture(&self) -> bool {
+        self.scout_plan
+            .as_ref()
+            .is_some_and(|p| self.scout_plan_pending || !self.scouting.iter().any(|s| &s.plan == p))
+    }
+
     pub fn evidence_digest(&self) -> Result<String, Diagnostic> {
         let mut copy = self.clone();
         copy.reconciled_evidence_sha256 = None;
         copy.reconciled_at = None;
+        copy.scout_plan_pending = false;
         copy.updated_at.clear();
         // Preserve historical reconciliation commitments when the runtime preference default changes.
         copy.refresh_settings = RefreshSettings {
@@ -4236,10 +4250,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             measurements: open(|s| s.measurements != Progress::Done),
         },
         parser_catalog_captured: catalog_complete,
-        scout_awaiting_capture: state
-            .scout_plan
-            .as_ref()
-            .is_some_and(|p| state.scout_plan_pending || !state.scouting.iter().any(|s| &s.plan == p)),
+        scout_awaiting_capture: state.scout_awaiting_capture(),
         latest_census: state.scouting.last().map(|s| CensusSize {
             rows: s.rows,
             at_row_ceiling: s.rows >= 10_000,
@@ -4550,10 +4561,7 @@ pub fn advise(state: &InventoryState, status: &mut InventoryStatus, retained: Op
             attempt.session_id
         ));
     }
-    if !state.capability_blocked()
-        && state.active_pack.is_some()
-        && state.capability_runs.is_empty()
-    {
+    if !blocked && state.active_pack.is_some() && state.capability_runs.is_empty() {
         notes.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
     }
     if !blocked && selected_full && status.scouting != Progress::Done {
@@ -4574,7 +4582,14 @@ pub fn advise(state: &InventoryState, status: &mut InventoryStatus, retained: Op
         .as_ref()
         .is_some_and(|reminder| reminder.due)
     {
-        notes.push("Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh.".into());
+        notes.push(
+            if blocked {
+                "Inventory refresh is due. Settle the blocking item above before running an explicit manual refresh, or choose Remind me in 30 days; acknowledgement does not complete refresh."
+            } else {
+                "Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."
+            }
+            .into(),
+        );
     }
     if let Some(detail) = status.completion_detail.as_mut() {
         detail.next_action = steps.first().cloned();
