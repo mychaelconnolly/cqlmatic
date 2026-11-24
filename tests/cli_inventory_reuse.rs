@@ -1012,3 +1012,88 @@ fn assessment_does_not_turn_the_query_ledger_into_population_rates() {
     assert_inventory_target_message(&rows[0], "findings", DiscoveryMode::Full);
     assert_eq!(fs::read(path).unwrap(), before);
 }
+
+#[test]
+fn default_unconfirmed_scout_leaves_offline_query_commands_unchanged() {
+    let temp = Temp::new();
+    let query = "#repo=sample user=* | count()";
+    let query_file = temp.0.join("query.cql");
+    let result_file = temp.0.join("result.json");
+    fs::write(&query_file, query).unwrap();
+    fs::write(&result_file, r#"{"result":[{"_count":"5"}]}"#).unwrap();
+    let commands = [
+        vec!["check", "--json", "count()"],
+        vec!["check", "--json", "--require-observed", query],
+        vec!["generate", "--json", "--intent", "count events"],
+        vec![
+            "generate",
+            "--json",
+            "--require-observed",
+            "--intent",
+            "count events where user is alice",
+        ],
+        vec![
+            "assess",
+            "--json",
+            "--query-file",
+            query_file.to_str().unwrap(),
+            "--result",
+            result_file.to_str().unwrap(),
+        ],
+    ];
+    let baseline: Vec<_> = commands
+        .iter()
+        .map(|args| temp.binary().args(args).output().unwrap())
+        .collect();
+    let scout = |action: Value| {
+        let request = temp.0.join("request.json");
+        fs::write(
+            &request,
+            json!({"schema_version":1,"action":action}).to_string(),
+        )
+        .unwrap();
+        let (code, result) = temp.one(&[
+            "env",
+            "inventory",
+            "--json",
+            "--state",
+            temp.default_state().to_str().unwrap(),
+            "--request",
+            request.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "{result}");
+        result
+    };
+    let plan = scout(json!({"kind":"prepare-scout","environment":environment(),
+        "start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z"}));
+    let compare = |phase| {
+        for (args, expected) in commands.iter().zip(&baseline) {
+            let actual = temp.binary().args(args).output().unwrap();
+            assert_eq!(
+                (actual.status, &actual.stdout, &actual.stderr),
+                (expected.status, &expected.stdout, &expected.stderr),
+                "{phase}: {args:?}: {}",
+                String::from_utf8_lossy(&actual.stdout)
+            );
+        }
+        let (code, selected) = temp.one(&[
+            "check",
+            "--json",
+            "--inventory-state",
+            temp.default_state().to_str().unwrap(),
+            "count()",
+        ]);
+        assert_eq!(code, 1, "{selected}");
+        assert!(diagnostic(&selected, "CQL_QUICK_INVENTORY", "error"));
+    };
+    compare("prepared");
+    let scout_result = temp.0.join("scout.json");
+    fs::write(
+        &scout_result,
+        json!({"result":[{"#repo":"sample","#type":"logs","events":5}]}).to_string(),
+    )
+    .unwrap();
+    scout(json!({"kind":"import-scout","result_file":scout_result,
+        "arguments":plan["action"]["arguments"],"retrieved_at":"2026-01-02T00:00:00Z"}));
+    compare("imported");
+}
