@@ -12,7 +12,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+pub fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -60,7 +60,7 @@ fn linked(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn path_identity(path: &Path) -> Result<PathBuf, Diagnostic> {
+pub fn path_identity(path: &Path) -> Result<PathBuf, Diagnostic> {
     match fs::canonicalize(path) {
         Ok(path) => return Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -134,7 +134,7 @@ impl Drop for Writer {
         let _ = self._lock.unlock();
     }
 }
-pub(crate) fn writer_lock_path(path: &Path) -> Result<PathBuf, Diagnostic> {
+pub fn writer_lock_path(path: &Path) -> Result<PathBuf, Diagnostic> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -145,6 +145,23 @@ pub(crate) fn writer_lock_path(path: &Path) -> Result<PathBuf, Diagnostic> {
         .to_string_lossy();
     Ok(parent.join(format!(".{name}.lock")))
 }
+#[doc(hidden)]
+pub fn is_fd_exhausted(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(23 | 24))
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(4)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 impl Writer {
     pub fn identity(&self) -> Result<PathBuf, Diagnostic> {
         path_identity(&self.path)
@@ -155,43 +172,118 @@ impl Writer {
     }
 
     pub fn acquire(path: &Path) -> Result<Self, Diagnostic> {
+        Self::acquire_with_fd_flag(path).map_err(|(error, _)| error)
+    }
+
+    #[doc(hidden)]
+    pub fn acquire_with_fd_flag(path: &Path) -> Result<Self, (Diagnostic, bool)> {
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| access_error("LOCAL_IO", "cannot be created", parent, &e))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                let fd = is_fd_exhausted(&e);
+                (
+                    access_error("LOCAL_IO", "cannot be created", parent, &e),
+                    fd,
+                )
+            })?;
             #[cfg(unix)]
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-                .map_err(|e| io("Cannot protect pack directory", e))?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                let fd = is_fd_exhausted(&e);
+                (io("Cannot protect pack directory", e), fd)
+            })?;
         }
         if fs::symlink_metadata(path).is_ok_and(|m| linked(&m) || !m.is_file()) {
-            return Err(Diagnostic::error(
-                "LOCAL_FILE_TYPE",
-                "Pack destination must not be a symlink or non-file.",
+            return Err((
+                Diagnostic::error(
+                    "LOCAL_FILE_TYPE",
+                    "Pack destination must not be a symlink or non-file.",
+                ),
+                false,
             ));
         }
-        let lock_path = writer_lock_path(path)?;
+        let lock_path = writer_lock_path(path).map_err(|e| (e, false))?;
         if fs::symlink_metadata(&lock_path).is_ok_and(|m| linked(&m) || !m.is_file()) {
-            return Err(Diagnostic::error(
-                "LOCAL_FILE_TYPE",
-                "Pack lock must be a regular file.",
+            return Err((
+                Diagnostic::error("LOCAL_FILE_TYPE", "Pack lock must be a regular file."),
+                false,
             ));
         }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let lock = options.open(&lock_path).map_err(|e| {
-            access_error("LOCAL_IO", "cannot be locked for writing", &lock_path, &e)
-        })?;
-        lock.try_lock().map_err(|_|Diagnostic::error("PACK_BUSY","Another writer holds this pack. Readers may continue using the committed snapshot."))?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // A replacement writer must keep the sidecar in its lock domain.
+            options.share_mode(1 | 2);
+        }
+        let open_lock = || {
+            let lock = options.open(&lock_path).map_err(|e| {
+                let fd = is_fd_exhausted(&e);
+                (
+                    access_error("LOCAL_IO", "cannot be locked for writing", &lock_path, &e),
+                    fd,
+                )
+            })?;
+            lock.try_lock().map_err(|_| {
+                (
+                    Diagnostic::error(
+                        "PACK_BUSY",
+                        "Another writer holds this pack. Readers may continue using the committed snapshot.",
+                    ),
+                    false,
+                )
+            })?;
+            Ok::<_, (Diagnostic, bool)>(lock)
+        };
+        #[cfg(windows)]
+        let lock = open_lock()?;
+        #[cfg(unix)]
+        let lock = loop {
+            let lock = open_lock()?;
+            {
+                use std::os::unix::fs::MetadataExt;
+                let held = lock.metadata().map_err(|e| {
+                    let fd = is_fd_exhausted(&e);
+                    (io("Cannot inspect held lock", e), fd)
+                })?;
+                match fs::symlink_metadata(&lock_path) {
+                    Ok(current) if (current.dev(), current.ino()) == (held.dev(), held.ino()) => {}
+                    Ok(current) if current.is_file() && !linked(&current) => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Ok(_) => {
+                        return Err((
+                            Diagnostic::error(
+                                "LOCAL_FILE_TYPE",
+                                "Pack lock must be a regular file.",
+                            ),
+                            false,
+                        ));
+                    }
+                    Err(error) => {
+                        let fd = is_fd_exhausted(&error);
+                        return Err((io("Cannot inspect current lock", error), fd));
+                    }
+                }
+            }
+            break lock;
+        };
         Ok(Self {
             _lock: lock,
             path: path.to_path_buf(),
             parent: parent.to_path_buf(),
         })
+    }
+    /// Retire a sidecar before releasing its Unix lock. An opener of the old inode
+    /// must recheck its identity before it can become a writer.
+    #[cfg(unix)]
+    pub fn unlink_lock(&self) -> Result<(), Diagnostic> {
+        let path = writer_lock_path(&self.path)?;
+        fs::remove_file(path).map_err(|error| io("Cannot retire snapshot lock", error))
     }
     pub fn existing(&self) -> Result<Option<Pack>, Diagnostic> {
         if self.path.exists() {
@@ -212,7 +304,7 @@ impl Writer {
         pack.validate()?;
         let bytes = serde_json::to_vec_pretty(pack)
             .map_err(|_| Diagnostic::error("PACK_SERIALIZATION", "Cannot serialize pack."))?;
-        if bytes.len() as u64 > MAX_PACK_BYTES {
+        if bytes.len().saturating_add(1) as u64 > MAX_PACK_BYTES {
             return Err(Diagnostic::error(
                 "PACK_SIZE",
                 "Pack exceeds the 64 MiB storage budget.",
@@ -221,7 +313,7 @@ impl Writer {
         self.commit_bytes_with(&bytes, stage, sync_parent)
     }
     pub fn commit_bytes(&self, bytes: &[u8], limit: u64) -> Result<(), Diagnostic> {
-        if bytes.len() as u64 > limit {
+        if bytes.len().saturating_add(1) as u64 > limit {
             return Err(Diagnostic::error(
                 "LOCAL_SIZE",
                 "State exceeds its byte budget.",
@@ -230,7 +322,7 @@ impl Writer {
         self.commit_bytes_with(bytes, |_| Ok(()), sync_directory)
     }
     pub fn create_new_bytes(&self, bytes: &[u8], limit: u64) -> Result<(), Diagnostic> {
-        if bytes.len() as u64 > limit {
+        if bytes.len().saturating_add(1) as u64 > limit {
             return Err(Diagnostic::error(
                 "LOCAL_SIZE",
                 "State exceeds its byte budget.",
@@ -479,6 +571,45 @@ mod tests {
             PackData::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn byte_budget_includes_appended_newline() {
+        let directory = temp();
+        let path = directory.join("snapshot");
+        let writer = Writer::acquire(&path).unwrap();
+        assert_eq!(
+            writer.create_new_bytes(b"{}", 2).unwrap_err().code,
+            "LOCAL_SIZE"
+        );
+        assert!(!path.exists());
+        writer.create_new_bytes(b"{}", 3).unwrap();
+        assert_eq!(
+            writer.commit_bytes(b"123", 3).unwrap_err().code,
+            "LOCAL_SIZE"
+        );
+        assert_eq!(read_bytes(&path, 3).unwrap(), b"{}\n");
+        drop(writer);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_writer_keeps_its_lock_sidecar() {
+        let directory = temp();
+        let path = directory.join("snapshot");
+        let writer = Writer::acquire(&path).unwrap();
+        let lock = writer_lock_path(&path).unwrap();
+        let error = fs::remove_file(&lock).unwrap_err();
+        assert!(
+            matches!(error.raw_os_error(), Some(5 | 32)),
+            "expected Windows sharing or access error, got {error:?}"
+        );
+        assert!(lock.exists());
+        assert_eq!(Writer::acquire(&path).err().unwrap().code, "PACK_BUSY");
+        drop(writer);
+        fs::remove_file(&lock).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]

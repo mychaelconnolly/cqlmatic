@@ -8,8 +8,8 @@ use reqwest::{
     Method, Url,
     blocking::{Client, Response},
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::BTreeMap,
     io::Read,
@@ -305,11 +305,11 @@ fn http_status_error(method: &Method, status: reqwest::StatusCode, detail: &str)
         format!("API returned HTTP {}. {}", status.as_u16(), detail),
     )
 }
-fn response_body(
+fn response_body<T: DeserializeOwned>(
     mut body: impl Read,
     content_length: Option<u64>,
     start_accepted: bool,
-) -> Result<Value, Diagnostic> {
+) -> Result<T, Diagnostic> {
     let parsed = (|| {
         if content_length.is_some_and(|n| n > MAX_RESPONSE) {
             return Err(Diagnostic::error(
@@ -431,14 +431,14 @@ impl FalconClient {
         }
         url
     }
-    fn request(
+    fn request<T: DeserializeOwned>(
         &mut self,
         method: Method,
         url: Url,
         body: Option<&Value>,
         deadline: Instant,
         retry_get: bool,
-    ) -> Result<Value, Diagnostic> {
+    ) -> Result<T, Diagnostic> {
         let mut retry = 0;
         let mut reauthenticated = false;
         loop {
@@ -492,7 +492,12 @@ impl FalconClient {
                         continue;
                     }
                     if method == Method::DELETE {
-                        return deletion_result(status);
+                        return serde_json::from_value(deletion_result(status)?).map_err(|_| {
+                            Diagnostic::error(
+                                "HTTP_RESPONSE",
+                                "Cannot decode deletion confirmation.",
+                            )
+                        });
                     }
                     if !status.is_success() {
                         let detail = response_json(response)
@@ -563,6 +568,24 @@ impl FalconClient {
         template: bool,
         deadline: Instant,
     ) -> Result<Value, Diagnostic> {
+        self.request(
+            Method::GET,
+            self.parser_url(id, template)?,
+            None,
+            deadline,
+            true,
+        )
+    }
+    pub fn raw_parser(&mut self, id: &str, deadline: Instant) -> Result<Box<RawValue>, Diagnostic> {
+        self.request(
+            Method::GET,
+            self.parser_url(id, false)?,
+            None,
+            deadline,
+            true,
+        )
+    }
+    fn parser_url(&self, id: &str, template: bool) -> Result<Url, Diagnostic> {
         if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
             return Err(Diagnostic::error(
                 "PARSER_ID",
@@ -582,7 +605,7 @@ impl FalconClient {
         url.query_pairs_mut()
             .append_pair("ids", id)
             .append_pair("repository", "parsers-repository");
-        self.request(Method::GET, url, None, deadline, true)
+        Ok(url)
     }
 }
 pub trait SearchBackend {
@@ -624,7 +647,7 @@ impl SearchBackend for FalconClient {
         let start_ms = epoch_millis(start)?;
         let end_ms = epoch_millis(end)?;
         let body = json!({"queryString":query,"start":start_ms,"end":end_ms,"isLive":false,"allowEventSkipping":false,"useIngestTime":false,"timeZone":"UTC"});
-        let value = self.request(Method::POST, url, Some(&body), deadline, false)?;
+        let value: Value = self.request(Method::POST, url, Some(&body), deadline, false)?;
         value
             .get("id")
             .and_then(Value::as_str)
@@ -643,7 +666,7 @@ impl SearchBackend for FalconClient {
     }
     fn stop(&mut self, view: &str, job: &str, deadline: Instant) -> Result<(), Diagnostic> {
         let url = self.endpoint(&["humio", "api", "v1", "repositories", view, "queryjobs", job]);
-        self.request(Method::DELETE, url, None, deadline, false)
+        self.request::<Value>(Method::DELETE, url, None, deadline, false)
             .map(|_| ())
     }
 }
@@ -1008,6 +1031,14 @@ mod tests {
     }
 
     #[test]
+    fn native_parser_detail_response_keeps_exact_number_tokens() {
+        let input = br#"{"resources":[{"revision":9007199254740993.0}]}"#;
+        let raw: Box<RawValue> =
+            response_body(&input[..], Some(input.len() as u64), false).unwrap();
+        assert_eq!(raw.get().as_bytes(), input);
+    }
+
+    #[test]
     fn accepted_start_body_failures_are_ambiguous_but_preflight_parsing_is_not() {
         let bodies: Vec<(Box<dyn Read>, Option<u64>, &str)> = vec![
             (
@@ -1028,18 +1059,18 @@ mod tests {
             (Box::new(std::io::repeat(b' ')), None, "HTTP_RESPONSE_LIMIT"),
         ];
         for (body, length, cause) in bodies {
-            let diagnostic = response_body(body, length, true).unwrap_err();
+            let diagnostic = response_body::<Value>(body, length, true).unwrap_err();
             assert_eq!(diagnostic.code, "HTTP_START_AMBIGUOUS");
             assert!(diagnostic.message.contains(cause));
         }
         assert_eq!(
-            response_body(std::io::Cursor::new(b"{"), Some(1), false)
+            response_body::<Value>(std::io::Cursor::new(b"{"), Some(1), false)
                 .unwrap_err()
                 .code,
             "HTTP_RESPONSE"
         );
         assert_eq!(
-            response_body(std::io::empty(), Some(MAX_RESPONSE + 1), false)
+            response_body::<Value>(std::io::empty(), Some(MAX_RESPONSE + 1), false)
                 .unwrap_err()
                 .code,
             "HTTP_RESPONSE_LIMIT"
@@ -1095,14 +1126,14 @@ mod tests {
         }
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut diagnostics = vec![
-            response_body(std::io::Cursor::new(b"{"), Some(1), true).unwrap_err(),
-            response_body(
+            response_body::<Value>(std::io::Cursor::new(b"{"), Some(1), true).unwrap_err(),
+            response_body::<Value>(
                 std::io::Cursor::new(b"{\"id\":\"").chain(TruncatedBody),
                 Some(100),
                 true,
             )
             .unwrap_err(),
-            response_body(std::io::empty(), Some(MAX_RESPONSE + 1), true).unwrap_err(),
+            response_body::<Value>(std::io::empty(), Some(MAX_RESPONSE + 1), true).unwrap_err(),
         ];
         for status in [400, 401, 403, 408, 500, 502, 503, 504] {
             diagnostics.push(http_status_error(

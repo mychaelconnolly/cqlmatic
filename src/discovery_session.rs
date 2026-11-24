@@ -45,6 +45,16 @@ struct TerminalEvidence {
     file: PathBuf,
     raw_hex: String,
     raw_sha256: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact_result_framing: bool,
+}
+
+impl TerminalEvidence {
+    fn framing(&self) -> ResultFraming {
+        ResultFraming::saved(self.extended_result_framing, self.exact_result_framing)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,7 +66,7 @@ pub struct Session {
     #[serde(default)]
     pub(crate) sparse_fieldset_fallback: bool,
     binding_sha256: String,
-    predecessor_sha256: Option<String>,
+    pub(crate) predecessor_sha256: Option<String>,
     periods: Vec<ActivePeriod>,
     attempts: Vec<Attempt>,
     pub(crate) captures: BTreeMap<String, discovery::Capture>,
@@ -102,7 +112,20 @@ impl Session {
         Ok(self.predecessor_sha256.as_deref())
     }
 
-    pub(crate) fn attempts_len(&self) -> usize {
+    /// Check a surviving predecessor after a marked run's cleanup has begun.
+    pub fn verify_prune_predecessor(&self, pack: &Path) -> Result<(), Diagnostic> {
+        if optional_bytes(pack)?.is_some_and(|bytes| {
+            self.predecessor_sha256.as_deref() != Some(sha256_hex(&bytes).as_str())
+        }) {
+            return Err(error(
+                "MCP_ACTIVATION_CONFLICT",
+                "The retained starting pack changed.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn attempts_len(&self) -> usize {
         self.attempts.len()
     }
     /// Bytes of every answer handed back for this run, accepted or not. A cancelled
@@ -178,6 +201,16 @@ impl Session {
     }
 }
 
+/// Check whether the run has time left to settle, complete, or reserve a search.
+pub fn has_search_allowance(state: &State, now: &str) -> Result<bool, Diagnostic> {
+    let session = state.session.as_ref().ok_or_else(tampered)?;
+    match session.remaining(state, now) {
+        Ok(_) => Ok(has_in_flight(state) || has_discovery_work_after_resume(state)),
+        Err(diagnostic) if diagnostic.code == "MCP_DEADLINE" => Ok(false),
+        Err(diagnostic) => Err(diagnostic),
+    }
+}
+
 /// Whether a resumable run has used its whole time limit, so it can never continue.
 pub fn time_limit_passed(state: &State, now: &str) -> bool {
     state.session.as_ref().is_some_and(|session| {
@@ -204,6 +237,13 @@ fn outstanding_attempt(state: &State) -> Option<&Attempt> {
     })
 }
 
+pub fn outstanding_refusal(state: &State) -> Option<&Diagnostic> {
+    outstanding_attempt(state)?
+        .rejected_results
+        .last()
+        .map(|result| &result.diagnostic)
+}
+
 pub fn outstanding_probe_id(state: &State) -> Option<String> {
     outstanding_attempt(state)
         .map(|attempt| discovery::probe_id(&state.request.environment.view, &attempt.probe))
@@ -216,13 +256,16 @@ fn ended(outcome: &str) -> bool {
     )
 }
 
-fn reused_evidence(state: &State, before: usize, hash: &str) -> bool {
+fn reused_evidence(state: &State, before: usize, hash: &str, body: Option<&RawValue>) -> bool {
+    let matches_capture = |raw_hex: &str, raw_sha256: &str| {
+        matches_retained_measurement(raw_hex, raw_sha256, hash, body)
+    };
     state.session.as_ref().is_some_and(|s| {
         s.attempts[..before].iter().any(|a| {
             a.terminal
                 .iter()
                 .chain(a.rejected_results.iter().map(|r| &r.evidence))
-                .any(|e| e.raw_sha256 == hash)
+                .any(|e| matches_capture(&e.raw_hex, &e.raw_sha256))
                 || (a.outcome == "complete"
                     && state
                         .answers
@@ -230,7 +273,7 @@ fn reused_evidence(state: &State, before: usize, hash: &str) -> bool {
                             &state.request.environment.view,
                             &a.probe,
                         ))
-                        .is_some_and(|answer| answer.raw_sha256 == hash))
+                        .is_some_and(|answer| matches_capture(&answer.raw_hex, &answer.raw_sha256)))
         })
     })
 }
@@ -275,16 +318,19 @@ pub fn earlier_release_ended(state: &State, now: &str) -> bool {
         && rejected
             .iter()
             .all(|r| r.evidence.raw_sha256 == evidence.raw_sha256)
-        && !reused_evidence(state, earlier.len(), &evidence.raw_sha256)
+        && !reused_evidence(state, earlier.len(), &evidence.raw_sha256, None)
         && elapsed(state, now).is_err_and(|d| d.code == "MCP_DEADLINE")
-        && capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)
-            .is_ok_and(|raw| hosted_attempt_ending(&raw).is_some() || normalize(&raw).is_ok())
+        && capture_bytes(&evidence.raw_hex, &evidence.raw_sha256).is_ok_and(|raw| {
+            hosted_attempt_ending_framed(&raw, false).is_some()
+                || normalize_framed(&raw, false).is_ok()
+        })
 }
 
-fn attempt_ending(raw: &[u8], probe: &Probe) -> Option<&'static str> {
-    hosted_attempt_ending(raw).or_else(|| {
-        (normalize(raw).is_ok() && complete_result(raw, probe).is_err())
-            .then_some("completed-unusable")
+fn attempt_ending(raw: &[u8], probe: &Probe, framing: ResultFraming) -> Option<&'static str> {
+    hosted_attempt_ending_with_framing(raw, framing).or_else(|| {
+        (normalize_classified(raw, true, framing).is_ok()
+            && complete_result(raw, probe, framing).is_err())
+        .then_some("completed-unusable")
     })
 }
 
@@ -536,23 +582,27 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
             )
         {
             let raw = capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)?;
+            let framing = evidence.framing();
             if terminal && ended(&attempt.outcome) {
-                let valid_ending =
-                    if historical_ended_attempts && attempt.outcome == "completed-unusable" {
-                        // Historical list completion is independent of current measurement rules.
-                        normalize(&raw).is_ok()
-                    } else {
-                        attempt_ending(&raw, &attempt.probe) == Some(attempt.outcome.as_str())
-                    };
+                let valid_ending = if historical_ended_attempts
+                    && attempt.outcome == "completed-unusable"
+                {
+                    // Historical list completion is independent of current measurement rules.
+                    normalize_classified(&raw, true, framing).is_ok()
+                } else {
+                    attempt_ending(&raw, &attempt.probe, framing) == Some(attempt.outcome.as_str())
+                };
                 if !valid_ending
-                    || (crate::mcp::hosted_answer_identifies_call(&raw)
-                        && reused_evidence(state, index, &evidence.raw_sha256))
+                    || hosted_answer_body(&raw, framing).is_some_and(|body| {
+                        hosted_answer_identifies_call(&body)
+                            && reused_evidence(state, index, &evidence.raw_sha256, None)
+                    })
                 {
                     return Err(tampered());
                 }
             }
             if terminal && attempt.outcome == "completed" {
-                complete_result(&raw, &attempt.probe).map_err(|_| tampered())?;
+                complete_result(&raw, &attempt.probe, framing).map_err(|_| tampered())?;
             }
             if terminal && session.transport == Transport::Mcp && attempt.outcome == "cancelled" {
                 validate_cancellation(state, attempt, &id, &raw).map_err(|_| tampered())?;
@@ -903,6 +953,29 @@ pub fn inspect_inventory_owner(state: &State, owner: &storage::Writer) -> Result
     Ok(true)
 }
 
+/// Check an owner without acquiring a writer or binding an unowned session.
+pub fn inspect_inventory_owner_path(state: &State, owner: &Path) -> Result<bool, Diagnostic> {
+    let Some(session) = &state.session else {
+        return Ok(false);
+    };
+    if session.transport != Transport::Mcp {
+        return Err(error(
+            "DISCOVERY_TRANSPORT",
+            "Inventory discovery requires the MCP transport.",
+        ));
+    }
+    let Some(recorded) = &session.inventory_owner else {
+        return Ok(false);
+    };
+    if recorded != owner {
+        return Err(error(
+            "DISCOVERY_INVENTORY_OWNER",
+            "Discovery checkpoint belongs to another inventory.",
+        ));
+    }
+    Ok(true)
+}
+
 /// Associate a retained checkpoint only after verifying its complete inventory reference
 /// while holding the inventory writer followed by this checkpoint writer.
 pub fn bind_inventory_owner(
@@ -1058,8 +1131,37 @@ fn resume_locked(writer: &storage::Writer, state: &mut State) -> Result<StepOutp
     }
 }
 
-fn complete_result(raw: &[u8], probe: &Probe) -> Result<Normalized, Diagnostic> {
-    let normalized = normalize(raw)?;
+/// Read the cause of the last ended attempt in a paused or time-expired run.
+pub fn ended_at_row_limit(state: &State) -> bool {
+    if state.status != "paused"
+        && !(state.status == "failed"
+            && state
+                .failure
+                .as_ref()
+                .is_some_and(|d| d.code == "MCP_DEADLINE"))
+    {
+        return false;
+    }
+    state
+        .session
+        .as_ref()
+        .and_then(|session| session.attempts.last())
+        .filter(|attempt| attempt.outcome == "completed-unusable")
+        .and_then(|attempt| attempt.terminal.as_ref())
+        .and_then(|evidence| {
+            capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)
+                .ok()
+                .and_then(|raw| normalize_classified(&raw, true, evidence.framing()).ok())
+        })
+        .is_some_and(|result| result.rows.len() >= 10_000)
+}
+
+fn complete_result(
+    raw: &[u8],
+    probe: &Probe,
+    framing: ResultFraming,
+) -> Result<Normalized, Diagnostic> {
+    let normalized = normalize_classified(raw, true, framing)?;
     if normalized.rows.len() >= 10000 {
         return Err(error(
             "SEARCH_ROW_LIMIT",
@@ -1135,25 +1237,22 @@ pub fn step_resumable(
         }
         let raw = storage::read_bytes(file, MAX_CAPTURE_BYTES as u64)?;
         let now = discovery::timestamp();
-        let normalized = complete_result(&raw, &attempt.probe);
+        let extended = uses_extended_framing(&raw);
+        let earlier = state
+            .session
+            .as_ref()
+            .expect("session checked")
+            .attempts
+            .len()
+            - 1;
+        verify_fresh_result(&raw, |hash, body| {
+            reused_evidence(&state, earlier, hash, body)
+        })?;
+        let normalized = complete_result(&raw, &attempt.probe, ResultFraming::Exact);
         let result = match normalized {
             Ok(result) => result,
             Err(d) => {
-                if let Some(outcome) = attempt_ending(&raw, &attempt.probe) {
-                    let count = state
-                        .session
-                        .as_ref()
-                        .expect("session checked")
-                        .attempts
-                        .len();
-                    if crate::mcp::hosted_answer_identifies_call(&raw)
-                        && reused_evidence(&state, count - 1, &sha256_hex(&raw))
-                    {
-                        return Err(error(
-                            "MCP_RESULT_REUSED",
-                            "This answer was already retained by an earlier attempt.",
-                        ));
-                    }
+                if let Some(outcome) = attempt_ending(&raw, &attempt.probe, ResultFraming::Exact) {
                     let session = state.session.as_mut().expect("session checked");
                     let a = session.attempts.last_mut().expect("attempt checked");
                     a.outcome = outcome.into();
@@ -1161,6 +1260,8 @@ pub fn step_resumable(
                         file: path_identity(file)?,
                         raw_hex: raw_hex(&raw),
                         raw_sha256: sha256_hex(&raw),
+                        extended_result_framing: extended,
+                        exact_result_framing: true,
                     });
                     session.pause_clock(&now)?;
                     let mut output = match elapsed(&state, &now) {
@@ -1174,7 +1275,7 @@ pub fn step_resumable(
                             current_output(&state)?
                         }
                     };
-                    output.diagnostics.insert(0, Diagnostic::warning("DISCOVERY_ATTEMPT_ENDED", format!("Discovery attempt ended as {outcome}; its allowance remains charged. Resume explicitly before dispatching again.")));
+                    output.diagnostics.insert(0, Diagnostic::warning("DISCOVERY_ATTEMPT_ENDED", format!("Discovery attempt ended as {outcome}. Its allowance remains charged.")));
                     output.diagnostics.insert(0, d);
                     return Ok(output);
                 }
@@ -1197,6 +1298,8 @@ pub fn step_resumable(
                         file: path_identity(file)?,
                         raw_hex: raw_hex(&raw),
                         raw_sha256: sha256_hex(&raw),
+                        extended_result_framing: extended,
+                        exact_result_framing: true,
                     },
                     diagnostic: d.clone(),
                 });
@@ -1218,6 +1321,8 @@ pub fn step_resumable(
                 file: path_identity(file)?,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
+                extended_result_framing: extended,
+                exact_result_framing: true,
             });
             session.pause_clock(&now)?;
             return fail_state(&writer, &mut state, d);
@@ -1242,6 +1347,8 @@ pub fn step_resumable(
                 trace_id: result.trace_id,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
+                extended_result_framing: extended,
+                exact_result_framing: true,
                 ingested_at: now.clone(),
                 diagnostic: None,
             },
@@ -1306,23 +1413,46 @@ fn validate_cancellation(
             "Invalid delegated cancellation report.",
         )
     })?;
-    if evidence.schema_version != 1
-        || evidence.request_sha256 != state.request_sha256
-        || evidence.probe_id != probe_id
-        || discovery::probe_id(&state.request.environment.view, &attempt.probe) != probe_id
-        || evidence.repository != state.request.environment.view
-        || evidence.query_sha256 != sha256_hex(attempt.probe.query.as_bytes())
-        || evidence.start != attempt.probe.start
-        || evidence.end != attempt.probe.end
-        || evidence.dispatched_at != attempt.dispatched_at
-        || evidence.outcome != "cancelled"
-        || evidence.cleanup != "confirmed"
-        || evidence.caller_assertion != "exact-host-attempt-terminal-cleanup"
-    {
-        return Err(error(
-            "MCP_CLEANUP_EVIDENCE",
-            "Cancellation evidence must attest terminal cleanup of this exact host attempt, query, target and window.",
-        ));
+    for (valid, field) in [
+        (evidence.schema_version == 1, "schema_version"),
+        (
+            evidence.request_sha256 == state.request_sha256,
+            "request_sha256",
+        ),
+        (
+            evidence.probe_id == probe_id
+                && discovery::probe_id(&state.request.environment.view, &attempt.probe) == probe_id,
+            "probe_id",
+        ),
+        (
+            evidence.repository == state.request.environment.view,
+            "repository",
+        ),
+        (
+            evidence.query_sha256 == sha256_hex(attempt.probe.query.as_bytes()),
+            "query_sha256",
+        ),
+        (evidence.start == attempt.probe.start, "start"),
+        (evidence.end == attempt.probe.end, "end"),
+        (
+            evidence.dispatched_at == attempt.dispatched_at,
+            "dispatched_at",
+        ),
+        (evidence.outcome == "cancelled", "outcome"),
+        (evidence.cleanup == "confirmed", "cleanup"),
+        (
+            evidence.caller_assertion == "exact-host-attempt-terminal-cleanup",
+            "caller_assertion",
+        ),
+    ] {
+        if !valid {
+            return Err(error(
+                "MCP_CLEANUP_EVIDENCE",
+                &format!(
+                    "Cancellation report {field} does not match the required terminal evidence. Supply the report for the exact host attempt."
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1361,6 +1491,8 @@ pub fn settle_cancelled(
         file: path_identity(evidence_file)?,
         raw_hex: raw_hex(&raw),
         raw_sha256: sha256_hex(&raw),
+        extended_result_framing: false,
+        exact_result_framing: false,
     });
     session.pause_clock(&discovery::timestamp())?;
     state.status = "paused".into();

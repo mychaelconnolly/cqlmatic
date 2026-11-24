@@ -583,6 +583,7 @@ fn partial_opt_in_preserves_nonobservation_staleness_and_ambiguity_blocks() {
         cases.push(d);
     }
     let mut d = partial_data();
+    d.sources[0]["selectors"]["type"] = json!("first");
     let mut source = d.sources[0].clone();
     source["id"] = json!("env:source:other");
     source["selectors"]["type"] = json!("other");
