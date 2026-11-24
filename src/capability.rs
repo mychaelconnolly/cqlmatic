@@ -6,7 +6,7 @@ use crate::{
         self, RawSnapshot, RefreshAttempt, RefreshHostEvidence, RefreshPhase, RefreshSettlement,
         RefreshTermination, SearchArguments,
     },
-    mcp, sha256_hex,
+    sha256_hex,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,7 +16,8 @@ pub const MAX_RUNS: usize = 100;
 pub const MAX_ATTEMPTS: u32 = 1000;
 pub const MAX_SECONDS: u64 = 14_400;
 pub const EVIDENCE_DAYS: i64 = 30;
-// Bump when verifier or normalizer acceptance semantics change, even if case inputs stay fixed.
+// The case revision binds the query and expected output. The snapshot separately pins
+// framing acceptance so a new capture format does not reclassify older attempts.
 const VERIFIER_SEMANTICS_REVISION: &str = "capability-case-v1";
 
 #[cfg(test)]
@@ -136,8 +137,8 @@ impl CaseId {
         }
     }
 
-    fn verifies(self, raw: &[u8]) -> bool {
-        let Ok(result) = mcp::normalize(raw) else {
+    fn verifies(self, capture: &RawSnapshot) -> bool {
+        let Ok(result) = capture.normalized_result() else {
             return false;
         };
         let [row] = result.rows.as_slice() else {
@@ -238,9 +239,10 @@ impl CapabilityAttempt {
                 && self
                     .settlement()?
                     .is_some_and(|report| report.termination == RefreshTermination::Completed)
-                && self.capture.as_ref().is_some_and(|capture| {
-                    capture.bytes().is_ok_and(|raw| self.case_id.verifies(&raw))
-                })
+                && self
+                    .capture
+                    .as_ref()
+                    .is_some_and(|capture| self.case_id.verifies(capture))
             {
                 CapabilityOutcome::Verified
             } else {
@@ -972,7 +974,7 @@ impl CapabilityRun {
         };
         attempt.reservation.settlement = Some(RawSnapshot::new(settlement_raw, now)?);
         if let Some(raw) = raw {
-            let capture = RawSnapshot::new(raw, retrieved_at)?;
+            let capture = RawSnapshot::new_search_result(raw, retrieved_at)?;
             if attempt.capture.as_ref().is_some_and(|old| {
                 old.sha256 != capture.sha256 || old.retrieved_at != capture.retrieved_at
             }) {
@@ -980,7 +982,7 @@ impl CapabilityRun {
                     "Capability capture conflicts with the retained exact result.",
                 ));
             }
-            attempt.capture = Some(capture);
+            attempt.capture.get_or_insert(capture);
         }
         attempt.outcome = attempt.outcome()?;
         if candidate.pause_requested && !candidate.blocked() {

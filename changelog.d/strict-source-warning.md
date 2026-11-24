@@ -1,0 +1,1 @@
+- Keep unmapped literal source warnings when checking or generating with strict grounding.

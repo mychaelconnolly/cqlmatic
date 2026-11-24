@@ -12,7 +12,6 @@ use std::{
 };
 
 const EXPIRED_CREATION: &str = "2020-01-01T00:00:00Z";
-const COUNT: &[u8] = include_bytes!("../examples/mcp/count.json");
 const PARTIAL: &[u8] = br#"{"result":[],"partial":true}"#;
 
 enum Timing {
@@ -115,9 +114,17 @@ impl Drop for Run {
 
 #[test]
 fn expired_answers_reopen_with_original_deadline() {
+    let identified_count = br#"{"result":[{"events":771}],"trace_id":"call"}"#;
+    assert_eq!(
+        mcp::normalize(identified_count)
+            .unwrap()
+            .trace_id
+            .as_deref(),
+        Some("call")
+    );
     let row_limit = json!({"result": vec![json!({}); 10_000]}).to_string();
     for raw in [
-        COUNT,
+        identified_count,
         PARTIAL,
         b"{",
         b"\xff",

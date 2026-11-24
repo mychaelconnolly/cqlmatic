@@ -293,6 +293,9 @@ pub struct SetupState {
     pub authentication_evidence: AuthenticationEvidence,
     pub configured_sha256: Option<String>,
     pub discovery_sha256: Option<String>,
+    /// Whether the saved host report listed the available search tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_tool_available: Option<bool>,
     pub last_notice: Option<String>,
     /// Original acknowledged fresh Codex CIMD add; eligibility is not dispatch proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,6 +314,7 @@ impl Default for SetupState {
             authentication_evidence: AuthenticationEvidence::None,
             configured_sha256: None,
             discovery_sha256: None,
+            search_tool_available: None,
             last_notice: None,
             recovery_origin: None,
         }
@@ -394,6 +398,45 @@ impl SetupState {
                 "A prior native command may have changed configuration. Review it before changing selection.",
             ));
         }
+        let fresh_phase = if matches!(selection.registration, RegistrationMode::ApiClient { .. }) {
+            SetupPhase::AdvancedPending
+        } else if selection.host_managed()
+            || !selection.client.needs_executable()
+            || self.clients.iter().any(|c| c.client == selection.client)
+        {
+            SetupPhase::Selected
+        } else {
+            SetupPhase::InstallationRequired
+        };
+        // Replaying a selection keeps evidence, including when it resumes interrupted setup.
+        if self.selection.as_ref() == Some(&selection)
+            && (self.configured || self.authentication_evidence != AuthenticationEvidence::None)
+        {
+            if matches!(
+                self.phase,
+                SetupPhase::Cancelled | SetupPhase::InstallationRequired
+            ) {
+                self.phase = if fresh_phase == SetupPhase::InstallationRequired {
+                    fresh_phase
+                } else {
+                    match self.authentication_evidence {
+                        AuthenticationEvidence::SavedHostToolDiscovery
+                            if self.search_tool_available == Some(true) =>
+                        {
+                            SetupPhase::ToolDiscoveryVerified
+                        }
+                        AuthenticationEvidence::SavedHostToolDiscovery => SetupPhase::Authenticated,
+                        AuthenticationEvidence::UserConfirmed => SetupPhase::AuthenticationRequired,
+                        AuthenticationEvidence::None if self.configured => {
+                            SetupPhase::AuthenticationRequired
+                        }
+                        AuthenticationEvidence::None => fresh_phase,
+                    }
+                };
+                self.last_notice = None;
+            }
+            return Ok(());
+        }
         self.revision += 1;
         self.selection = Some(selection.clone());
         self.plan = None;
@@ -401,25 +444,26 @@ impl SetupState {
         self.configured = false;
         self.configured_sha256 = None;
         self.discovery_sha256 = None;
+        self.search_tool_available = None;
         self.authentication_evidence = AuthenticationEvidence::None;
         self.last_notice = None;
-        self.phase = if matches!(selection.registration, RegistrationMode::ApiClient { .. }) {
-            SetupPhase::AdvancedPending
-        } else if !selection.client.needs_executable()
-            || self.clients.iter().any(|c| c.client == selection.client)
-        {
-            SetupPhase::Selected
-        } else {
-            SetupPhase::InstallationRequired
-        };
+        self.phase = fresh_phase;
         Ok(())
     }
     pub fn invalidate_plan(&mut self) {
         self.revision += 1;
         self.plan = None;
     }
+    pub fn record_tool_availability_before_suspending(&mut self) {
+        match self.phase {
+            SetupPhase::ToolDiscoveryVerified => self.search_tool_available = Some(true),
+            SetupPhase::Authenticated => self.search_tool_available = Some(false),
+            _ => {}
+        }
+    }
     pub fn cancel(&mut self) {
         if self.phase != SetupPhase::CommandPending {
+            self.record_tool_availability_before_suspending();
             self.invalidate_plan();
             self.phase = SetupPhase::Cancelled;
         }
@@ -427,8 +471,12 @@ impl SetupState {
     }
 }
 impl Selection {
+    /// Use the MCP server already configured in the agent; setup registers and changes nothing.
+    pub fn host_managed(&self) -> bool {
+        matches!(self.registration, RegistrationMode::HostManaged {})
+    }
     pub fn validate(&self) -> Result<(), Diagnostic> {
-        if !identifier(&self.server_name) {
+        if !accepts_server_name(self.client, &self.server_name, self.host_managed()) {
             return Err(error(
                 "SETUP_SERVER_NAME",
                 "Server name must be 1-64 ASCII letters, digits, underscores or hyphens and start with a letter or digit.",
@@ -447,11 +495,10 @@ impl Selection {
                 "host_id is only valid when client is external.",
             ));
         }
-        if self.client.is_native() == matches!(self.registration, RegistrationMode::HostManaged {})
-        {
+        if !self.client.is_native() && !self.host_managed() {
             return Err(error(
                 "SETUP_REGISTRATION_MODE",
-                "Named agents use native registration; external agents use host-managed registration.",
+                "External agents use host-managed registration: select registration {\"mode\":\"host-managed\"}.",
             ));
         }
         match &self.registration {
@@ -493,7 +540,7 @@ impl Selection {
                 if self.client == ClientKind::ClaudeCode {
                     return Err(error(
                         "SETUP_REGISTRATION_MODE",
-                        "Claude Code's native setup uses its allowlisted CIMD identity; select CIMD for this adapter.",
+                        "Claude Code's native setup uses its allowlisted CIMD identity; select CIMD for this adapter, or host-managed to use a server already configured in Claude Code.",
                     ));
                 }
                 if client_id.is_empty()
@@ -636,28 +683,49 @@ pub fn verify_discovery(
         .selection
         .as_ref()
         .ok_or_else(|| error("SETUP_SELECTION", "Choose a client and cloud first."))?;
-    let host_managed = !selected.client.is_native();
-    if (selected.client.is_native() && !state.configured)
-        || state.phase == SetupPhase::CommandPending
-    {
+    let host_managed = selected.host_managed();
+    if (!host_managed && !state.configured) || state.phase == SetupPhase::CommandPending {
         return Err(error(
             "SETUP_NOT_CONFIGURED",
             "Complete configuration and inspect any pending native command first.",
         ));
     }
-    if report.schema_version != SCHEMA_VERSION
-        || report.client != selected.client
-        || report.host_id.as_deref() != selected.host_id.as_deref()
-        || report.server_name != selected.server_name
-        || report.endpoint != selected.cloud.endpoint()
-        || !report.authenticated
-        || !is_digest(&raw_sha256)
-        || report.tools.len() > 4096
-    {
-        return Err(error(
-            "SETUP_DISCOVERY_BINDING",
-            "Saved host report must state authentication for the exact selected client, host ID, server name, and canonical cloud endpoint.",
-        ));
+    // Name the first binding that fails; never repeat supplied values.
+    let binding = if report.schema_version != SCHEMA_VERSION {
+        Some(
+            "The report's schema_version is not 1. Save the report again in the v1 HostToolDiscovery shape and import it.",
+        )
+    } else if report.client != selected.client {
+        Some(
+            "The report's client is not the selected client. Save discovery from the selected client's session, or select the client that produced the report.",
+        )
+    } else if report.host_id.as_deref() != selected.host_id.as_deref() {
+        Some(
+            "The report's host_id does not match the selection. External reports carry the selected host_id and named clients omit it; correct the report and import it again.",
+        )
+    } else if report.server_name != selected.server_name {
+        Some(
+            "The report's server_name is not the selected server name. Report the server under the name in the setup handoff, or select the name the host uses.",
+        )
+    } else if report.endpoint != selected.cloud.endpoint() {
+        Some(
+            "The report's endpoint is not the selected cloud's canonical endpoint. Report the exact endpoint named in the setup handoff, or select the cloud the server uses.",
+        )
+    } else if !report.authenticated {
+        Some(
+            "The report does not state authenticated: true. Sign in to the server in the host, then save discovery again and import it.",
+        )
+    } else if !is_digest(&raw_sha256) {
+        Some("Cannot fingerprint the saved report. Save it again and import it.")
+    } else if report.tools.len() > 4096 {
+        Some(
+            "The report lists more than 4096 tools. Save only the selected server's tools and import it again.",
+        )
+    } else {
+        None
+    };
+    if let Some(message) = binding {
+        return Err(error("SETUP_DISCOVERY_BINDING", message));
     }
     let expected_id = match &selected.registration {
         RegistrationMode::Cimd { metadata_url, .. } => Some(metadata_url.as_str()),
@@ -675,19 +743,23 @@ pub fn verify_discovery(
             "The host report contradicts the selected OAuth client identity.",
         ));
     }
-    if matches!(
-        selected.client,
-        ClientKind::ClaudeCode
-            | ClientKind::CopilotCli
-            | ClientKind::CopilotApp
-            | ClientKind::CopilotVscode
-    ) && (report.effective_oauth_client_id.as_deref() != expected_id
-        || !report
-            .effective_config_source
-            .as_deref()
-            .is_some_and(|source| {
-                !source.is_empty() && source.len() <= 256 && !source.chars().any(char::is_control)
-            }))
+    if !host_managed
+        && matches!(
+            selected.client,
+            ClientKind::ClaudeCode
+                | ClientKind::CopilotCli
+                | ClientKind::CopilotApp
+                | ClientKind::CopilotVscode
+        )
+        && (report.effective_oauth_client_id.as_deref() != expected_id
+            || !report
+                .effective_config_source
+                .as_deref()
+                .is_some_and(|source| {
+                    !source.is_empty()
+                        && source.len() <= 256
+                        && !source.chars().any(char::is_control)
+                }))
     {
         return Err(error(
             "SETUP_DISCOVERY_IDENTITY",
@@ -714,6 +786,7 @@ pub fn verify_discovery(
     }
     state.authentication_evidence = AuthenticationEvidence::SavedHostToolDiscovery;
     state.discovery_sha256 = Some(raw_sha256);
+    state.search_tool_available = Some(has_search_tool);
     state.phase = if has_search_tool {
         SetupPhase::ToolDiscoveryVerified
     } else {
@@ -743,7 +816,7 @@ pub fn build_plan(
         .selection
         .clone()
         .ok_or_else(|| error("SETUP_SELECTION", "Choose a client and cloud first."))?;
-    if !selection.client.is_native() {
+    if selection.host_managed() {
         return Err(error(
             "SETUP_HOST_MANAGED",
             "This agent uses its own MCP configuration. Configure and sign in there, then import a saved host tool-discovery report; no native plan is available.",
@@ -794,7 +867,17 @@ pub fn build_plan(
     {
         return Err(error(
             "SETUP_CAPABILITY",
-            "Installed client does not support the selected CIMD flow. VS Code requires stable 1.106.0 or later; Codex must advertise the CIMD flags. Update the client or explicitly choose manual registration; no DCR fallback is attempted.",
+            match selection.client {
+                ClientKind::ClaudeCode => {
+                    "Installed Claude Code does not support the CIMD flow; it requires stable 2.1.81 or later. Update it and detect again, or select host-managed to use a server already configured in Claude Code; no DCR fallback is attempted."
+                }
+                ClientKind::VsCode => {
+                    "Installed VS Code does not support the CIMD flow; it requires stable 1.106.0 or later. Update it and detect again, or select manual registration; no DCR fallback is attempted."
+                }
+                _ => {
+                    "Installed Codex does not advertise the CIMD flags. Update it and detect again, or select manual registration; no DCR fallback is attempted."
+                }
+            },
         ));
     }
     if selection.client.needs_executable()
@@ -868,7 +951,7 @@ pub fn build_plan(
             if operation == PlanOperation::Recover {
                 let origin = state.recovery_origin.as_ref().ok_or_else(|| error(
                     "SETUP_RECOVERY_ORIGIN",
-                    "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Existing or manual entries cannot be adopted.",
+                    "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Recovery cannot adopt an existing or manual entry; to use a server already configured in Codex, select host-managed.",
                 ))?;
                 if baseline.path != origin.baseline.path
                     || baseline.server != ExistingServer::Same
@@ -1010,8 +1093,11 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
             if let Some(s) = selected && let Some(url) = s.client.install_url() { next_actions.push(format!("Install {} from {}; then run cqlmatic setup again. No installer is run automatically.", s.client.label(), url)); }
         }
         SetupPhase::Selected | SetupPhase::ReviewRequired | SetupPhase::Cancelled => {
-            if let Some(s) = selected.filter(|s| !s.client.is_native()) {
-                next_actions.push(format!("Configure '{}' as an HTTP MCP server at {} in {}. Confirm the effective server and supported OAuth identity before connecting; do not fall back to DCR.", s.server_name, s.cloud.endpoint(), s.client.label()));
+            if let Some(s) = selected.filter(|s| s.host_managed() && s.client.is_native()) {
+                next_actions.push(format!("Setup uses the MCP server already configured in {} and changes nothing in that client's configuration. The selection names it '{}' at {}; if the server has another name in that client's tool names, or points at another cloud, select again with those.", s.client.label(), s.server_name, s.cloud.endpoint()));
+                next_actions.push(format!("Sign in to that server in {} if it is not signed in, then save a caller-supplied v1 HostToolDiscovery report for this client/server/endpoint and import it with cqlmatic setup; setup checks only that report and runs no query.", s.client.label()));
+            } else if let Some(s) = selected.filter(|s| s.host_managed()) {
+                next_actions.push(format!("Configure '{}' as an HTTP MCP server at {} in {}. Confirm the effective server and supported OAuth identity before connecting; do not fall back to DCR.", s.server_name, s.cloud.endpoint(), s.host_id.as_deref().unwrap_or(s.client.label())));
                 next_actions.push(host_setup_hint(s.client).into());
                 next_actions.push("Save a caller-supplied v1 HostToolDiscovery report for this host/server/endpoint and import it with cqlmatic setup; setup does not inspect host configuration or run a query.".into());
             } else if state.recovery_origin.is_some() {
@@ -1033,6 +1119,7 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
             next_actions.push("Paste the provided handoff into your selected host agent. In cqlmatic env inventory Settings, choose persistent Quick or Full discovery: Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can cost more time and model tokens. Confirm the target, window, finite budget and authorization before searches. Settings can switch to Full later without discarding saved evidence.".into());
             if let Some(s) = selected {
                 next_actions.push(skill_install_hint(s.client).into());
+                next_actions.push(capture_hook_hint(s));
             }
         }
         SetupPhase::AdvancedPending => next_actions.push("Advanced API-client mode remains pending. Configure the native client's approved service plugin in its protected UI. Use the minimum read scopes; setup never reads your credential reference, obtains tokens, or manages MCP transport.".into()),
@@ -1045,11 +1132,13 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
         }
         let identity_guidance = if s.client == ClientKind::External {
             "Inspect the effective server and confirm supported host-managed authentication. effective_oauth_client_id and effective_config_source are optional operator-supplied fields for external reports; include them only when known."
+        } else if s.host_managed() {
+            "Inspect the effective server in this host session and confirm it is signed in. effective_oauth_client_id and effective_config_source are optional operator-supplied fields for host-managed reports; include them only when known."
         } else {
             "Inspect the effective server and OAuth client ID in this host session. Claude/Copilot reports require effective_oauth_client_id and effective_config_source matching the selected session; those fields remain optional for legacy Codex/VS Code reports."
         };
         handoff = Some(format!(
-            "Continue CQLmatic setup in {} using MCP server '{}' at {}. {} {} Discover tools and save a v1 HostToolDiscovery report with client{}/server_name/endpoint/authenticated/tools for `cqlmatic setup` import; exact available falcon_search_ngsiem is required for verified discovery. Additional reported tools are advisory and their names do not establish read or write behavior. Reports are caller-supplied evidence, not independent transport or identity attestation. Run `cqlmatic env inventory --help`, then offer a persistent Quick or Full choice in Settings. At the beginning of each relevant MCP assistant session, read `cqlmatic status --json --brief` for bounded pending attempts, refresh_reminder and work-notice flags; obtain focused details only when needed. Use brief inventory action responses for routine bookkeeping. Automatic startup refresh is unavailable; do not prepare, dispatch or scout at session entry. Manual Refresh in `cqlmatic env inventory` or Settings prepares an action without executing MCP calls. When refresh_reminder.show_startup_notice is true, present the 30-day due hint with Run or Remind me in 30 days, then submit acknowledge-refresh-reminder with its exact cycle_sha256 and defer:false. Use defer:true only after the user chooses the 30-day deferral. Acknowledgement records delivery, not completed refresh. For user-requested manual refresh, require protected evidence that this exact host session enforces a finite search lifetime of 1–600 seconds; a client timeout or advertised default is insufficient. Do not repeatedly request automatic-startup capability evidence at each launch. Present separate concise new-work or actionable failure notices at a safe foreground point, then acknowledge the exact displayed notification snapshot or individual revisions. Status, brief reads and background imports do not acknowledge delivery. Preserve the confirmed view and unresolved attempts, and follow docs/MCP-COMPANION.md for dispatch, settlement, import and notifications. Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can consume substantial time and model tokens. For Quick, offer the chosen view (keeps its visibility boundary) or explicit search-all (widens the visible-source census), then sources-only (presence checks without field inventory) or sources + field samples (bounded field observations with other fields and parser reviews pending). Confirm cloud/CID, source IDs, exact target/view, absolute UTC window, finite query/time budgets and authorization before any search. Search-all requires separate explicit authorization for that target and window; never select or relay it automatically. Full scouting emits search-all regardless of the saved view; without that authorization use an authorized Quick or selected-source workflow and leave full-map coverage pending. Settings can switch to Full later without discarding saved evidence; Quick evidence alone does not establish Full completion. Use protected local output paths. You perform model reasoning and authorized read-only MCP calls; relay saved MCP results into CQLmatic's offline flow. A list-valued result means completed; result.error means it did not complete, regardless of isError. For refresh and capability settlement, use not-started for a recognized start rejection and timed-out for a hosted cutoff. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired once recorded_at is at least the retained provider lifetime later. Name the saved answer's SHA-256 and trace ID in evidence. For capability also submit the answer as result_file and keep the case unknown. A recognized final answer ends a format-3 MCP discovery attempt and pauses the run if it has active time left. A narrowed query is a different probe and cannot answer an outstanding attempt. Keep the checkpoint and assert cancellation only if true. After zero results, rerun without the selective filter or field and confirm a non-zero count before concluding no matches. Keep the original source, window and authorized limits; a non-zero control shows data exists there, so check the original field name and value next. After a hosted timeout, narrow the query or window and run again; the job cannot be checked later. Later query execution must retain the confirmed target and view. Registration and browser consent remain my steps. Do not run a live query merely to mark setup complete.",
+            "Continue CQLmatic setup in {} using MCP server '{}' at {}. {} {} Discover tools and save a v1 HostToolDiscovery report with client{}/server_name/endpoint/authenticated/tools for `cqlmatic setup` import (its schema is the host_tool_discovery property of `cqlmatic --schema setup`); exact available falcon_search_ngsiem is required for verified discovery. Additional reported tools are advisory and their names do not establish read or write behavior. Reports are caller-supplied evidence, not independent transport or identity attestation. Run `cqlmatic env inventory --help`, then offer a persistent Quick or Full choice in Settings. At the beginning of each relevant MCP assistant session, read `cqlmatic status --json --brief` for bounded pending attempts, refresh_reminder and work-notice flags; obtain focused details only when needed. Use brief inventory action responses for routine bookkeeping. Automatic startup refresh is unavailable; do not prepare, dispatch or scout at session entry. Manual Refresh in `cqlmatic env inventory` or Settings prepares an action without executing MCP calls. When refresh_reminder.show_startup_notice is true, present the 30-day due hint with Run or Remind me in 30 days, then submit acknowledge-refresh-reminder with its exact cycle_sha256 and defer:false. Use defer:true only after the user chooses the 30-day deferral. Acknowledgement records delivery, not completed refresh. For user-requested manual refresh, require protected evidence that this exact host session enforces a finite search lifetime of 1–600 seconds; a client timeout or advertised default is insufficient. Do not repeatedly request automatic-startup capability evidence at each launch. Present separate concise new-work or actionable failure notices at a safe foreground point, then acknowledge the exact displayed notification snapshot or individual revisions. Status, brief reads and background imports do not acknowledge delivery. Preserve the confirmed view and unresolved attempts, and follow docs/MCP-COMPANION.md for dispatch, settlement, import and notifications. Quick limits coverage to selected sources, window and depth; Full adds broader field and parser review and can consume substantial time and model tokens. For Quick, offer the chosen view (keeps its visibility boundary) or explicit search-all (widens the visible-source census), then sources-only (presence checks without field inventory) or sources + field samples (bounded field observations with other fields and parser reviews pending). Confirm cloud/CID, source IDs, exact target/view, absolute UTC window, finite query/time budgets and authorization before any search. Search-all requires separate explicit authorization for that target and window; never select or relay it automatically. Full scouting emits search-all regardless of the saved view; without that authorization use an authorized Quick or selected-source workflow and leave full-map coverage pending. Settings can switch to Full later without discarding saved evidence; Quick evidence alone does not establish Full completion. Use protected local output paths. You perform model reasoning and authorized read-only MCP calls; relay saved MCP results into CQLmatic's offline flow. Where a capture hook or pass-through is registered for this client, discovery results reach CQLmatic without your saving them: after each search, follow next-probe's next_action and save and submit a result only when it asks for one. A list-valued result means completed; result.error means it did not complete, regardless of isError. For refresh and capability settlement, use not-started for a recognized start rejection and timed-out for a hosted cutoff. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired once recorded_at is at least the retained provider lifetime later. Name the saved answer's SHA-256 and trace ID in evidence. For capability also submit the answer as result_file and keep the case unknown. A recognized final answer ends a format-3 MCP discovery attempt and pauses the run if it has active time left. A narrowed query is a different probe and cannot answer an outstanding attempt. Keep the checkpoint and assert cancellation only if true. After zero results, rerun without the selective filter or field and confirm a non-zero count before concluding no matches. Keep the original source, window and authorized limits; a non-zero control shows data exists there, so check the original field name and value next. After a hosted timeout, narrow the query or window and run again; the job cannot be checked later. Later query execution must retain the confirmed target and view. Registration and browser consent remain my steps. Do not run a live query merely to mark setup complete.",
             host_name,
             s.server_name,
             s.cloud.endpoint(),
@@ -1099,6 +1188,23 @@ fn skill_install_hint(client: ClientKind) -> &'static str {
         }
     }
 }
+/// The capture hook hands each search's result to CQLmatic, so the agent need not save it.
+fn capture_hook_hint(selection: &Selection) -> String {
+    let client = match selection.client {
+        ClientKind::Codex => "codex",
+        ClientKind::ClaudeCode => "claude-code",
+        ClientKind::CopilotCli => "copilot-cli",
+        ClientKind::CopilotApp => "copilot-app",
+        ClientKind::CopilotVscode => "copilot-vscode",
+        ClientKind::VsCode | ClientKind::External => {
+            return "To have the client hand search results to CQLmatic, so discovery results arrive without the agent saving them, see the capture hook table and the pass-through in docs/INVENTORY.md (Scrappy mode).".into();
+        }
+    };
+    format!(
+        "Let the client hand search results to CQLmatic, so discovery results arrive without the agent saving them: close the client, then run cqlmatic env capture --client {client} --server {} --install (add --state with the inventory state file if you use one). The server name must be the one in the client's tool names.",
+        selection.server_name
+    )
+}
 fn host_setup_hint(client: ClientKind) -> &'static str {
     match client {
         ClientKind::ClaudeCode => {
@@ -1124,10 +1230,19 @@ pub fn is_digest(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
+pub fn accepts_server_name(client: ClientKind, name: &str, host_managed: bool) -> bool {
+    identifier(name)
+        || host_managed
+            && client == ClientKind::ClaudeCode
+            && name.starts_with('_')
+            && identifier_bytes(name)
+}
+
 fn identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.as_bytes()[0].is_ascii_alphanumeric()
+    s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric) && identifier_bytes(s)
+}
+fn identifier_bytes(s: &str) -> bool {
+    s.len() <= 64
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
 }

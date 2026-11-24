@@ -1,0 +1,2 @@
+- Show inventory source IDs for compatible selectors in pack inspection and report filter matches and omitted records.
+- Label filtered full inspection views with the original pack's digest under `source_pack_digest`.
