@@ -391,12 +391,34 @@ fn prune_liveness() {
     );
     let receipt = Path::new(&run.receipt_path);
     fs::write(receipt, b"user receipt").unwrap();
+    let mut failed_preview = prune(true);
+    failed_preview["include_failed"] = json!(true);
+    let preview_unowned = ok(inventory.request(failed_preview.clone(), &[]));
+    assert_eq!(preview_unowned["action"]["reclaimable_bytes"], 0);
+    assert_eq!(preview_unowned["action"]["items"][0]["bytes"], 0);
+    assert!(
+        preview_unowned["action"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |warning| warning["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("receipt.json")
+                        && reason.contains("relay-state.json"))
+            ),
+        "{preview_unowned}"
+    );
     let mut failed = prune(false);
     failed["include_failed"] = json!(true);
     let applied = ok(inventory.request(failed, &[]));
+    assert_eq!(applied["action"]["reclaimed_bytes"], 0);
     assert_eq!(applied["action"]["partial_remove_count"], 1);
     assert_eq!(fs::read(receipt).unwrap(), b"user receipt");
     assert!(Path::new(&run.state_path).exists());
+    let preview_after = ok(inventory.request(failed_preview, &[]));
+    assert_eq!(preview_after["action"]["reclaimable_bytes"], 0);
+    assert_eq!(preview_after["action"]["items"][0]["bytes"], 0);
     let mut state = inventory.read();
     let boundary = InventoryCaptureBoundary {
         run: run.state_path.clone(),
@@ -741,6 +763,18 @@ fn prune_recovery() {
     let inventory_guard = storage::Writer::acquire(&inventory.state).unwrap();
     let refused = inventory.request(prune(false), &[]);
     assert!(String::from_utf8_lossy(&refused.stderr).contains("INVENTORY_PRUNE_BUSY"));
+    let brief_refused = inventory.request(prune(false), &["--brief"]);
+    assert!(!brief_refused.status.success());
+    let brief_err: Value = serde_json::from_slice(&brief_refused.stderr).unwrap();
+    assert_eq!(brief_err["code"], "INVENTORY_PRUNE_BUSY");
+    assert!(
+        brief_err["message"]
+            .as_str()
+            .unwrap()
+            .contains("Retry pruning")
+    );
+    assert!(brief_err["pointer"].is_null());
+    assert!(!String::from_utf8_lossy(&brief_refused.stderr).contains(old.to_str().unwrap()));
     drop(inventory_guard);
     let guard = storage::Writer::acquire(&old).unwrap();
     let before = fs::read(&inventory.state).unwrap();
@@ -787,6 +821,18 @@ fn prune_recovery() {
             let held = storage::Writer::acquire(Path::new(file)).unwrap();
             let refused = inventory.request(prune(false), &[]);
             assert!(String::from_utf8_lossy(&refused.stderr).contains("INVENTORY_PRUNE_BUSY"));
+            let brief_refused = inventory.request(prune(false), &["--brief"]);
+            assert!(!brief_refused.status.success());
+            let brief_err: Value = serde_json::from_slice(&brief_refused.stderr).unwrap();
+            assert_eq!(brief_err["code"], "INVENTORY_PRUNE_BUSY");
+            assert_eq!(brief_err["pointer"], "/discovery_runs/0");
+            assert!(
+                brief_err["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Retry pruning")
+            );
+            assert!(!String::from_utf8_lossy(&brief_refused.stderr).contains(file));
             assert!(inventory.read().discovery_runs[0].pruned_at.is_none());
             drop(held);
         }
@@ -833,10 +879,371 @@ fn prune_recovery() {
         state.packs.push(historical);
     }
     inventory.write(&state);
+    let preview = ok(inventory.request(prune(true), &[]));
+    assert_eq!(preview["action"]["eligible_count"], 69);
+    assert_eq!(preview["action"]["remaining_eligible"], 5);
+    let preview_items = preview["action"]["items"].as_array().unwrap();
+    assert_eq!(preview_items.len(), 64);
+    let preview_item_sum: u64 = preview_items
+        .iter()
+        .map(|item| item["bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(preview_item_sum, preview["action"]["reclaimable_bytes"]);
     let first = ok(inventory.request(prune(false), &[]));
     assert_eq!(first["action"]["marked_count"], 64);
     assert_eq!(first["action"]["remaining_eligible"], 5);
+    assert_eq!(first["action"]["items"].as_array().unwrap().len(), 64);
+    assert_eq!(
+        first["action"]["reclaimed_bytes"],
+        preview["action"]["reclaimable_bytes"]
+    );
     let second = ok(inventory.request(prune(false), &[]));
     assert_eq!(second["action"]["marked_count"], 5);
     assert_eq!(second["action"]["remaining_eligible"], 0);
+}
+
+#[test]
+fn prune_prioritizes_actionable_pending_cleanups_and_predecessor_bytes() {
+    // 68 pending directories with notes: removing a note or leaving a removable
+    // pack in the later directories must drain ahead of the first 64 blocked ones.
+    let inventory = Inventory::new();
+    let old = inventory.imports();
+    let pack_bytes = fs::metadata(&old).unwrap().len();
+    let mut state = inventory.read();
+    let key = cqlmatic::sha256_hex(inventory.state.to_str().unwrap().as_bytes());
+    let mut dirs = vec![old.parent().unwrap().to_path_buf()];
+    for index in 3..=69 {
+        let dir = inventory
+            .state
+            .parent()
+            .unwrap()
+            .join(format!("inventory-{}-import-{index}", &key[..12]));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("pack.json");
+        fs::copy(&old, &path).unwrap();
+        let mut historical = state.packs[0].clone();
+        historical.path = path.to_str().unwrap().into();
+        state.packs.push(historical);
+        dirs.push(dir);
+    }
+    inventory.write(&state);
+    for dir in &dirs {
+        fs::write(dir.join("analyst-note.txt"), b"keep").unwrap();
+    }
+    let first = ok(inventory.request(prune(false), &[]));
+    assert_eq!(first["action"]["marked_count"], 64);
+    assert_eq!(first["action"]["partial_remove_count"], 64);
+    let second = ok(inventory.request(prune(false), &[]));
+    assert_eq!(second["action"]["marked_count"], 4);
+    assert_eq!(second["action"]["partial_remove_count"], 64);
+    assert_eq!(second["action"]["pending_cleanup_count"], 68);
+
+    // Restore a removable pack in #66 (still carrying its note) and clear the note in #67.
+    assert!(!dirs[66].join("pack.json").exists());
+    // Use the exact bytes matching packs[0]'s digest by rebuilding pack 1.
+    let pack1_action = inventory.import_action(1);
+    let pack1_bytes = fs::read(pack1_action["pack_file"].as_str().unwrap()).unwrap();
+    fs::write(dirs[66].join("pack.json"), &pack1_bytes).unwrap();
+    fs::remove_file(dirs[67].join("analyst-note.txt")).unwrap();
+
+    let third = ok(inventory.request(prune(false), &[]));
+    assert_eq!(third["action"]["reclaimed_bytes"], pack1_bytes.len() as u64);
+    assert_eq!(third["action"]["removed_count"], 1);
+    assert_eq!(third["action"]["state_updated"], true);
+    assert_eq!(third["action"]["pending_cleanup_count"], 67);
+    assert!(!dirs[66].join("pack.json").exists());
+    assert!(dirs[66].join("analyst-note.txt").exists());
+    assert!(!dirs[67].exists());
+    assert!(pack_bytes > 0);
+
+    // A failed run with a staged predecessor pack and an unexpected receipt counts
+    // only the removable predecessor pack in preview and preserves receipt + relay.
+    let inventory = Inventory::new();
+    inventory.imports();
+    let run = inventory.prepare();
+    let reply = inventory.settle(0, 0);
+    assert_eq!(reply["status"]["discovery_runs"][0]["status"], "failed");
+    let predecessor = Path::new(&run.pack_path);
+    let predecessor_bytes = fs::metadata(predecessor).unwrap().len();
+    assert!(predecessor_bytes > 0);
+    let receipt = Path::new(&run.receipt_path);
+    fs::write(receipt, b"user receipt").unwrap();
+    let mut preview_req = prune(true);
+    preview_req["include_failed"] = json!(true);
+    let preview = ok(inventory.request(preview_req.clone(), &[]));
+    let run_item = preview["action"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["run_index"] == 0)
+        .unwrap();
+    assert_eq!(run_item["bytes"], predecessor_bytes);
+    assert!(
+        preview["action"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning["path"]
+                == Path::new(&run.state_path)
+                    .parent()
+                    .unwrap()
+                    .to_str()
+                    .unwrap())
+    );
+    let mut apply_req = prune(false);
+    apply_req["include_failed"] = json!(true);
+    let applied = ok(inventory.request(apply_req, &[]));
+    assert_eq!(
+        applied["action"]["reclaimed_bytes"],
+        preview["action"]["reclaimable_bytes"]
+    );
+    assert!(!predecessor.exists());
+    assert_eq!(fs::read(receipt).unwrap(), b"user receipt");
+    assert!(Path::new(&run.state_path).exists());
+    let follow_up = ok(inventory.request(preview_req, &[]));
+    assert_eq!(follow_up["action"]["reclaimable_bytes"], 0);
+}
+
+#[test]
+fn prune_preserves_mixed_case_sibling_when_volume_is_case_sensitive() {
+    let inventory = Inventory::new();
+    inventory.imports();
+    let probe_lower = inventory.root.join("case-probe");
+    let probe_upper = inventory.root.join("CASE-PROBE");
+    fs::write(&probe_lower, b"a").unwrap();
+    if probe_upper.exists() {
+        return;
+    }
+    let upper_state = inventory.state.with_file_name("STATE.JSON");
+    fs::copy(&inventory.state, &upper_state).unwrap();
+    let preview = ok(inventory.request(prune(true), &[]));
+    assert_eq!(preview["action"]["eligible_count"], 0);
+    fs::remove_file(&upper_state).unwrap();
+
+    fs::hard_link(&inventory.state, &upper_state).unwrap();
+    let applied = ok(inventory.request(prune(false), &[]));
+    assert_eq!(applied["action"]["marked_count"], 0);
+    assert_eq!(applied["action"]["state_updated"], false);
+    let binary = std::env::var_os("CQLMATIC_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_cqlmatic").into());
+    let sibling_status = Command::new(binary)
+        .args(["status", "--json", "--state"])
+        .arg(&upper_state)
+        .output()
+        .unwrap();
+    assert!(sibling_status.status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_interactive_preview_is_read_only_with_due_reminder_and_legacy_v3() {
+    let inventory = Inventory::new();
+    inventory.imports();
+    let mut state = inventory.read();
+    state.schema_version = 3;
+    state.created_at = "2025-01-01T00:00:00Z".into();
+    state.updated_at = "2025-01-01T00:00:00Z".into();
+    state.target.as_mut().unwrap().confirmed_at = "2025-01-01T00:00:00Z".into();
+    state.pending_inventory.clear();
+    state.refresh_reminder = None;
+    inventory.write(&state);
+    let lock = inventory.state.with_file_name(".state.json.lock");
+    let _ = fs::remove_file(&lock);
+    let before = fs::read(&inventory.state).unwrap();
+
+    let req_path = inventory.root.join("interactive-preview.json");
+    fs::write(
+        &req_path,
+        serde_json::to_vec(&json!({"schema_version":1,"action":{"kind":"prune","dry_run":true}}))
+            .unwrap(),
+    )
+    .unwrap();
+    let binary = std::env::var_os("CQLMATIC_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_cqlmatic").into());
+    let script = r#"
+import os, pty, select, subprocess, sys, time
+bin_path, state_path, req_path = sys.argv[1:4]
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    [bin_path, "env", "inventory", "--state", state_path],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True
+)
+os.close(slave)
+buf = b""
+sent_choice = False
+sent_req = False
+deadline = time.time() + 15
+while time.time() < deadline:
+    r, _, _ = select.select([master], [], [], 0.2)
+    if r:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+        if not sent_choice and b"Action [" in buf:
+            os.write(master, b"request\n")
+            sent_choice = True
+        elif sent_choice and not sent_req and b"Inventory request file" in buf:
+            os.write(master, (req_path + "\n").encode())
+            sent_req = True
+    if proc.poll() is not None and not r:
+        break
+if proc.poll() is None:
+    proc.terminate()
+rc = proc.wait(timeout=5)
+os.close(master)
+sys.stdout.buffer.write(buf)
+sys.exit(rc)
+"#;
+    let output = Command::new("python3")
+        .args(["-c", script])
+        .arg(&binary)
+        .arg(&inventory.state)
+        .arg(&req_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "interactive preview failed (rc={:?}):\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let transcript = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        transcript.contains("Inventory refresh is due"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("\"outcome\":\"preview\""),
+        "{transcript}"
+    );
+    assert_eq!(fs::read(&inventory.state).unwrap(), before);
+    assert!(!lock.exists());
+    assert_eq!(inventory.read().schema_version, 3);
+
+    // Non-preview interactive exit still acknowledges the shown due reminder.
+    let status_script = r#"
+import os, pty, select, subprocess, sys, time
+bin_path, state_path = sys.argv[1:3]
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    [bin_path, "env", "inventory", "--state", state_path],
+    stdin=slave, stdout=slave, stderr=slave, close_fds=True
+)
+os.close(slave)
+buf = b""
+sent = False
+deadline = time.time() + 15
+while time.time() < deadline:
+    r, _, _ = select.select([master], [], [], 0.2)
+    if r:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk
+        if not sent and b"Action [" in buf:
+            os.write(master, b"status\n")
+            sent = True
+    if proc.poll() is not None and not r:
+        break
+if proc.poll() is None:
+    proc.terminate()
+rc = proc.wait(timeout=5)
+os.close(master)
+sys.stdout.buffer.write(buf)
+sys.exit(rc)
+"#;
+    let status_out = Command::new("python3")
+        .args(["-c", status_script])
+        .arg(&binary)
+        .arg(&inventory.state)
+        .output()
+        .unwrap();
+    assert!(
+        status_out.status.success(),
+        "interactive status failed: {}",
+        String::from_utf8_lossy(&status_out.stdout)
+    );
+    assert!(inventory.read().refresh_reminder.is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn prune_drains_promoted_discovery_runs_under_constrained_descriptor_limit() {
+    let inventory = Inventory::new();
+    inventory.confirm();
+    for index in 0..32usize {
+        let day = 1 + (index / 24);
+        let hour = index % 24;
+        let end_day = 1 + ((index + 1) / 24);
+        let end_hour = (index + 1) % 24;
+        let action = json!({
+            "kind": "prepare-discovery",
+            "start": format!("2026-01-{day:02}T{hour:02}:00:00Z"),
+            "end": format!("2026-01-{end_day:02}T{end_hour:02}:00:00Z"),
+            "max_queries": 4,
+            "max_seconds": 600
+        });
+        ok(inventory.request(action, &[]));
+        let reply = inventory.settle(index, 10);
+        assert_eq!(
+            reply["status"]["discovery_runs"][index]["status"],
+            "complete"
+        );
+    }
+    let req_path = inventory.root.join("prune-apply.json");
+    fs::write(
+        &req_path,
+        serde_json::to_vec(&json!({"schema_version":1,"action":{"kind":"prune","dry_run":false}}))
+            .unwrap(),
+    )
+    .unwrap();
+    let binary = std::env::var_os("CQLMATIC_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_cqlmatic").into());
+    let script = r#"
+import resource, subprocess, sys
+limit = int(sys.argv[1])
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (min(limit, hard), hard))
+proc = subprocess.run(sys.argv[2:])
+sys.exit(proc.returncode)
+"#;
+    let run_limited = |limit: usize| {
+        Command::new("python3")
+            .args(["-c", script, &limit.to_string()])
+            .arg(&binary)
+            .args(["env", "inventory", "--json", "--state"])
+            .arg(&inventory.state)
+            .arg("--request")
+            .arg(&req_path)
+            .output()
+            .unwrap()
+    };
+    let first = ok(run_limited(80));
+    assert_eq!(first["action"]["eligible_count"], 31);
+    assert_eq!(first["action"]["marked_count"], 21);
+    assert_eq!(first["action"]["removed_count"], 21);
+    assert_eq!(first["action"]["remaining_eligible"], 10);
+    // Tighter limit forces adaptive uncommitted batch shrinking on descriptor exhaustion.
+    let second = ok(run_limited(32));
+    let second_marked = second["action"]["marked_count"].as_u64().unwrap();
+    assert!((1..10).contains(&second_marked), "{second}");
+    assert_eq!(second["action"]["removed_count"], second_marked);
+    assert_eq!(second["action"]["remaining_eligible"], 10 - second_marked);
+    loop {
+        let next = ok(run_limited(32));
+        if next["action"]["remaining_eligible"] == 0 {
+            assert_eq!(next["action"]["pending_cleanup_count"], 0);
+            break;
+        }
+    }
+    let active = inventory.read().active_pack.unwrap().path;
+    assert!(Path::new(&active).exists());
 }

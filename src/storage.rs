@@ -145,6 +145,23 @@ pub fn writer_lock_path(path: &Path) -> Result<PathBuf, Diagnostic> {
         .to_string_lossy();
     Ok(parent.join(format!(".{name}.lock")))
 }
+#[doc(hidden)]
+pub fn is_fd_exhausted(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(error.raw_os_error(), Some(23 | 24))
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(4)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 impl Writer {
     pub fn identity(&self) -> Result<PathBuf, Diagnostic> {
         path_identity(&self.path)
@@ -155,28 +172,43 @@ impl Writer {
     }
 
     pub fn acquire(path: &Path) -> Result<Self, Diagnostic> {
+        Self::acquire_with_fd_flag(path).map_err(|(error, _)| error)
+    }
+
+    #[doc(hidden)]
+    pub fn acquire_with_fd_flag(path: &Path) -> Result<Self, (Diagnostic, bool)> {
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| access_error("LOCAL_IO", "cannot be created", parent, &e))?;
+            fs::create_dir_all(parent).map_err(|e| {
+                let fd = is_fd_exhausted(&e);
+                (
+                    access_error("LOCAL_IO", "cannot be created", parent, &e),
+                    fd,
+                )
+            })?;
             #[cfg(unix)]
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-                .map_err(|e| io("Cannot protect pack directory", e))?;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                let fd = is_fd_exhausted(&e);
+                (io("Cannot protect pack directory", e), fd)
+            })?;
         }
         if fs::symlink_metadata(path).is_ok_and(|m| linked(&m) || !m.is_file()) {
-            return Err(Diagnostic::error(
-                "LOCAL_FILE_TYPE",
-                "Pack destination must not be a symlink or non-file.",
+            return Err((
+                Diagnostic::error(
+                    "LOCAL_FILE_TYPE",
+                    "Pack destination must not be a symlink or non-file.",
+                ),
+                false,
             ));
         }
-        let lock_path = writer_lock_path(path)?;
+        let lock_path = writer_lock_path(path).map_err(|e| (e, false))?;
         if fs::symlink_metadata(&lock_path).is_ok_and(|m| linked(&m) || !m.is_file()) {
-            return Err(Diagnostic::error(
-                "LOCAL_FILE_TYPE",
-                "Pack lock must be a regular file.",
+            return Err((
+                Diagnostic::error("LOCAL_FILE_TYPE", "Pack lock must be a regular file."),
+                false,
             ));
         }
         let mut options = OpenOptions::new();
@@ -191,13 +223,22 @@ impl Writer {
         }
         let open_lock = || {
             let lock = options.open(&lock_path).map_err(|e| {
-                access_error("LOCAL_IO", "cannot be locked for writing", &lock_path, &e)
+                let fd = is_fd_exhausted(&e);
+                (
+                    access_error("LOCAL_IO", "cannot be locked for writing", &lock_path, &e),
+                    fd,
+                )
             })?;
-            lock.try_lock().map_err(|_| Diagnostic::error(
-                "PACK_BUSY",
-                "Another writer holds this pack. Readers may continue using the committed snapshot.",
-            ))?;
-            Ok::<_, Diagnostic>(lock)
+            lock.try_lock().map_err(|_| {
+                (
+                    Diagnostic::error(
+                        "PACK_BUSY",
+                        "Another writer holds this pack. Readers may continue using the committed snapshot.",
+                    ),
+                    false,
+                )
+            })?;
+            Ok::<_, (Diagnostic, bool)>(lock)
         };
         #[cfg(windows)]
         let lock = open_lock()?;
@@ -206,20 +247,27 @@ impl Writer {
             let lock = open_lock()?;
             {
                 use std::os::unix::fs::MetadataExt;
-                let held = lock
-                    .metadata()
-                    .map_err(|e| io("Cannot inspect held lock", e))?;
+                let held = lock.metadata().map_err(|e| {
+                    let fd = is_fd_exhausted(&e);
+                    (io("Cannot inspect held lock", e), fd)
+                })?;
                 match fs::symlink_metadata(&lock_path) {
                     Ok(current) if (current.dev(), current.ino()) == (held.dev(), held.ino()) => {}
                     Ok(current) if current.is_file() && !linked(&current) => continue,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Ok(_) => {
-                        return Err(Diagnostic::error(
-                            "LOCAL_FILE_TYPE",
-                            "Pack lock must be a regular file.",
+                        return Err((
+                            Diagnostic::error(
+                                "LOCAL_FILE_TYPE",
+                                "Pack lock must be a regular file.",
+                            ),
+                            false,
                         ));
                     }
-                    Err(error) => return Err(io("Cannot inspect current lock", error)),
+                    Err(error) => {
+                        let fd = is_fd_exhausted(&error);
+                        return Err((io("Cannot inspect current lock", error), fd));
+                    }
                 }
             }
             break lock;

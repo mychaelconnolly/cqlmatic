@@ -353,6 +353,9 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ("SETUP_PROTECTION", "Cannot determine the current user account.") => {
             "Setup could not determine the current user account."
         }
+        ("INVENTORY_PRUNE_BUSY", _) => {
+            "Another writer holds the inventory or a retained snapshot. Retry pruning after it finishes."
+        }
         ("ENV_TENANT", _) => "The account binding is invalid.",
         ("ENV_VIEW", _) => "The search target is invalid.",
         (
@@ -635,7 +638,7 @@ fn snapshot_directory(
         .unwrap_or(Path::new("."));
     let key = cqlmatic::sha256_hex(absolute_path(path)?.as_bytes());
     let physical_parent = canonical(parent)?;
-    let fold_case = case_insensitive_entry(path) || case_insensitive_entry(&physical_parent);
+    let fold_case = directory_is_case_insensitive(&physical_parent);
     let reserved: BTreeSet<_> = recorded_inventory_paths(state)
         .filter_map(|path| normalized_directory(path, fold_case))
         .collect();
@@ -1937,6 +1940,8 @@ fn apply_request(
 }
 
 const PRUNE_BATCH: usize = 64;
+const PRUNE_HANDLE_BUDGET: usize = 64;
+const PRUNE_FD_HEADROOM: usize = 6;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PruneEntry {
@@ -1949,11 +1954,20 @@ struct PruneUnit {
     reference: Option<usize>,
     directory: PathBuf,
     pending: bool,
+    actionable: bool,
+    unowned_receipt: bool,
     date: time::OffsetDateTime,
     bytes: u64,
 }
 
 impl PruneUnit {
+    fn lock_handles(&self) -> usize {
+        match self.entry {
+            PruneEntry::Import(_) => 1,
+            PruneEntry::Run(_) => 3,
+        }
+    }
+
     fn update_markers(&self, state: &mut InventoryState, at: &str, pending: bool) {
         if let Some(index) = self.reference {
             let reference = &mut state.packs[index];
@@ -2001,26 +2015,63 @@ fn entry_name(path: &Path, fold_case: bool) -> std::ffi::OsString {
     }
 }
 
-// Probe an existing directory entry without writing. On a case-sensitive
-// filesystem a separately listed spelling remains a separate entry.
-fn case_insensitive_entry(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+fn toggle_ascii_case(name: &str) -> Option<String> {
+    let toggled: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_lowercase() {
+                ch.to_ascii_uppercase()
+            } else if ch.is_ascii_uppercase() {
+                ch.to_ascii_lowercase()
+            } else {
+                ch
+            }
+        })
+        .collect();
+    (toggled != name).then_some(toggled)
+}
+
+// Probe entries strictly inside `directory` without writing or inspecting
+// `directory`'s own parent filesystem, which may have different case rules.
+fn directory_is_case_insensitive(directory: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
         return false;
     };
-    let alternate = if name.to_uppercase() == name {
-        name.to_lowercase()
-    } else {
-        name.to_uppercase()
-    };
-    alternate != name
-        && path.with_file_name(&alternate).exists()
-        && path.parent().is_some_and(|parent| {
-            std::fs::read_dir(parent).is_ok_and(|entries| {
-                !entries
-                    .flatten()
-                    .any(|entry| entry.file_name() == alternate.as_str())
-            })
-        })
+    let names: Vec<std::ffi::OsString> = entries.flatten().map(|entry| entry.file_name()).collect();
+    let mut folded = BTreeSet::new();
+    for name in &names {
+        if !folded.insert(name.to_string_lossy().to_lowercase()) {
+            return false;
+        }
+    }
+    let exact: BTreeSet<&std::ffi::OsStr> =
+        names.iter().map(std::ffi::OsString::as_os_str).collect();
+    for name in &names {
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        let alternate = toggle_ascii_case(text).or_else(|| {
+            let upper = text.to_uppercase();
+            let alt = if upper == text {
+                text.to_lowercase()
+            } else {
+                upper
+            };
+            (alt != text).then_some(alt)
+        });
+        let Some(alternate) = alternate else {
+            continue;
+        };
+        if exact.contains(std::ffi::OsStr::new(&alternate)) {
+            return false;
+        }
+        match std::fs::symlink_metadata(directory.join(&alternate)) {
+            Ok(_) => return true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+            Err(_) => continue,
+        }
+    }
+    false
 }
 
 fn normalized_directory(path: &Path, fold_case: bool) -> Option<PathBuf> {
@@ -2050,6 +2101,7 @@ fn managed_prune_directory(
     owner: &Path,
     paths: &[(&str, &str)],
     label: &str,
+    fold_case: bool,
 ) -> Result<Option<PathBuf>, Diagnostic> {
     let Some(parent) = owner.parent() else {
         return Ok(None);
@@ -2097,17 +2149,17 @@ fn managed_prune_directory(
         return Ok(None);
     }
     let physical = parent.join(name);
-    Ok(direct_prune_directory(&physical).then_some(physical))
+    Ok(direct_prune_directory(&physical, fold_case).then_some(physical))
 }
 
-fn direct_prune_directory(physical: &Path) -> bool {
+fn direct_prune_directory(physical: &Path, fold_case: bool) -> bool {
     match std::fs::symlink_metadata(physical) {
         Ok(metadata) => {
             metadata.is_dir()
                 && !metadata.file_type().is_symlink()
                 && canonical(physical).is_ok_and(|resolved| {
                     resolved.parent() == physical.parent()
-                        && entry_name(&resolved, true) == entry_name(physical, true)
+                        && entry_name(&resolved, fold_case) == entry_name(physical, fold_case)
                 })
         }
         Err(error) => error.kind() == io::ErrorKind::NotFound,
@@ -2389,8 +2441,7 @@ struct PruneInventory<'a> {
 impl<'a> PruneInventory<'a> {
     fn new(state: &'a InventoryState, path: &'a Path, now: &'a str) -> Result<Self, Diagnostic> {
         let owner = storage::path_identity(path)?;
-        let fold_case =
-            case_insensitive_entry(&owner) || owner.parent().is_some_and(case_insensitive_entry);
+        let fold_case = owner.parent().is_some_and(directory_is_case_insensitive);
         let siblings = prune_siblings(&owner, fold_case)?;
         let mut directories = BTreeMap::<_, BTreeSet<_>>::new();
         let mut register = |path: &str, entry| {
@@ -2478,6 +2529,7 @@ impl<'a> PruneInventory<'a> {
                 &self.owner,
                 &[(&reference.path, "pack.json")],
                 "import",
+                self.fold_case,
             )?;
             if active || directory.is_none() {
                 kept.push(json!({"path":reference.path,"reason": if active {"active-inventory"} else {"unmanaged-path"}}));
@@ -2493,10 +2545,15 @@ impl<'a> PruneInventory<'a> {
                 reference: Some(index),
                 directory,
                 pending: reference.cleanup_pending,
+                actionable: true,
+                unowned_receipt: false,
                 date: environment::parse_time(&reference.imported_at)?,
                 bytes: 0,
             };
-            unit.bytes = self.verify(&unit)?.bytes();
+            let artifacts = self.verify(&unit)?;
+            unit.bytes = artifacts.bytes();
+            unit.unowned_receipt = artifacts.unowned_receipt;
+            unit.actionable = prune_unit_actionable(&unit, &artifacts);
             units.push(unit);
         }
         for (index, run) in state.discovery_runs.iter().enumerate() {
@@ -2514,6 +2571,7 @@ impl<'a> PruneInventory<'a> {
                     (&run.receipt_path, "receipt.json"),
                 ],
                 "discovery",
+                self.fold_case,
             )?;
             let (date, eligible, reference) = if run.cleanup_pending {
                 (
@@ -2567,10 +2625,15 @@ impl<'a> PruneInventory<'a> {
                 reference,
                 directory: directory.expect("managed directory checked"),
                 pending: run.cleanup_pending,
+                actionable: true,
+                unowned_receipt: false,
                 date,
                 bytes: 0,
             };
-            unit.bytes = self.verify(&unit)?.bytes();
+            let artifacts = self.verify(&unit)?;
+            unit.bytes = artifacts.bytes();
+            unit.unowned_receipt = artifacts.unowned_receipt;
+            unit.actionable = prune_unit_actionable(&unit, &artifacts);
             units.push(unit);
         }
         Ok(units)
@@ -2578,7 +2641,7 @@ impl<'a> PruneInventory<'a> {
 
     fn verify(&self, unit: &PruneUnit) -> Result<PruneArtifacts, Diagnostic> {
         let verify = || {
-            if !direct_prune_directory(&unit.directory) {
+            if !direct_prune_directory(&unit.directory, self.fold_case) {
                 return Err(fail("Managed snapshot directory changed during pruning."));
             }
             let paths = unit.paths();
@@ -2633,24 +2696,131 @@ struct PruneArtifacts {
 }
 
 impl PruneArtifacts {
+    fn removable_index(&self, index: usize) -> bool {
+        !self.unowned_receipt || index == 0
+    }
+
     fn bytes(&self) -> u64 {
         self.files
             .iter()
             .enumerate()
-            .filter(|(i, _)| *i != 1 || !self.unowned_receipt)
+            .filter(|(i, _)| self.removable_index(*i))
             .filter_map(|(_, (_, size))| *size)
             .sum()
     }
+
+    fn has_removable_file(&self) -> bool {
+        self.files
+            .iter()
+            .enumerate()
+            .any(|(i, (_, size))| self.removable_index(i) && size.is_some())
+    }
 }
 
-fn lock_prune_path(path: &Path) -> Result<Option<storage::Writer>, Diagnostic> {
+fn prune_unit_actionable(unit: &PruneUnit, artifacts: &PruneArtifacts) -> bool {
+    if !unit.pending {
+        return true;
+    }
+    if artifacts.has_removable_file() {
+        return true;
+    }
+    if unit.paths().iter().enumerate().any(|(i, path)| {
+        artifacts.removable_index(i)
+            && storage::writer_lock_path(path)
+                .ok()
+                .is_some_and(|lock| crate::setup_cli::private_input_exists(&lock).unwrap_or(false))
+    }) {
+        return true;
+    }
+    if artifacts.unowned_receipt {
+        return false;
+    }
+    match std::fs::read_dir(&unit.directory) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
+}
+
+fn select_prune_batch_len(units: &[PruneUnit]) -> usize {
+    let mut count = 0;
+    let mut handles = 0;
+    for unit in units.iter().take(PRUNE_BATCH) {
+        let needed = unit.lock_handles();
+        if count > 0 && handles + needed > PRUNE_HANDLE_BUDGET {
+            break;
+        }
+        handles += needed;
+        count += 1;
+    }
+    count
+}
+
+fn has_fd_headroom(path: &Path) -> bool {
+    let mut files = Vec::with_capacity(PRUNE_FD_HEADROOM);
+    for _ in 0..PRUNE_FD_HEADROOM {
+        match std::fs::File::open(path) {
+            Ok(file) => files.push(file),
+            Err(error) if storage::is_fd_exhausted(&error) => return false,
+            Err(_) => return true,
+        }
+    }
+    true
+}
+
+fn lock_prune_path(path: &Path) -> Result<Option<storage::Writer>, (Diagnostic, bool)> {
     let exists = crate::setup_cli::private_input_exists;
-    if exists(path)? || exists(&detached_path(path))? || exists(&storage::writer_lock_path(path)?)?
+    if exists(path).map_err(|e| (e, false))?
+        || exists(&detached_path(path)).map_err(|e| (e, false))?
+        || exists(&storage::writer_lock_path(path).map_err(|e| (e, false))?)
+            .map_err(|e| (e, false))?
     {
-        storage::Writer::acquire(path).map(Some)
+        storage::Writer::acquire_with_fd_flag(path).map(Some)
     } else {
         Ok(None)
     }
+}
+
+fn lock_prune_batch(
+    units: &[PruneUnit],
+    owner: &Path,
+) -> Result<Vec<Vec<Option<storage::Writer>>>, (Diagnostic, bool)> {
+    let mut guards: Vec<Vec<_>> = units
+        .iter()
+        .map(|unit| unit.paths().into_iter().map(|_| None).collect())
+        .collect();
+    let mut relay_locks: Vec<_> = units
+        .iter()
+        .enumerate()
+        .filter_map(|(position, unit)| match unit.entry {
+            PruneEntry::Run(index) => Some((index, position)),
+            PruneEntry::Import(_) => None,
+        })
+        .collect();
+    relay_locks.sort_unstable();
+    for (_, position) in relay_locks {
+        let unit = &units[position];
+        let path = &unit.paths()[2];
+        if !unit.pending && !crate::setup_cli::private_input_exists(path).map_err(|e| (e, false))? {
+            return Err((
+                unit.diagnostic(fail("Retained relay-state.json is missing.")),
+                false,
+            ));
+        }
+        guards[position][2] =
+            lock_prune_path(path).map_err(|(error, fd)| (unit.diagnostic(error), fd))?;
+    }
+    for (unit, guards) in units.iter().zip(&mut guards) {
+        for (path, guard) in unit.paths().iter().zip(guards).take(2) {
+            *guard = lock_prune_path(path).map_err(|(error, fd)| (unit.diagnostic(error), fd))?;
+        }
+    }
+    if units.len() > 1 && !has_fd_headroom(owner) {
+        return Err((
+            fail("Insufficient file descriptors to lock the prune batch."),
+            true,
+        ));
+    }
+    Ok(guards)
 }
 
 fn cleanup_prune_file(
@@ -2712,7 +2882,7 @@ fn cleanup_prune_unit(
     {
         if index == 1 && artifacts.unowned_receipt {
             return Err(fail(
-                "An unexpected receipt.json on a failed run was preserved.",
+                "An unexpected receipt.json on a failed run was preserved along with its relay-state.json.",
             ));
         }
         if index == 2 && size.is_some() {
@@ -2768,7 +2938,7 @@ fn prune_inventory(
     let mut state = load_existing(path)?
         .ok_or_else(|| fail("Pruning requires an existing inventory state."))?;
     let now = discovery::timestamp();
-    let pruning = PruneInventory::new(&state, path, &now)?;
+    let mut pruning = PruneInventory::new(&state, path, &now)?;
     let mut kept = Vec::new();
     let mut warnings: Vec<_> = pruning
         .siblings
@@ -2792,89 +2962,71 @@ fn prune_inventory(
             true
         }
     });
-    // Prioritize new retirements so a directory with a permanent leftover
-    // cannot prevent the next batch of historical snapshots from being marked.
+    // Prioritize new retirements, then actionable pending cleanups, ahead of
+    // pending directories blocked solely by preserved files.
     units.sort_by(|a, b| {
         a.pending
             .cmp(&b.pending)
+            .then_with(|| (a.pending && !a.actionable).cmp(&(b.pending && !b.actionable)))
             .then_with(|| a.date.cmp(&b.date))
             .then_with(|| a.directory.file_name().cmp(&b.directory.file_name()))
     });
-    let remaining_eligible = units
-        .iter()
-        .skip(PRUNE_BATCH)
-        .filter(|unit| !unit.pending)
-        .count();
     let eligible_count = units.iter().filter(|unit| !unit.pending).count();
-    let reclaimable: u64 = units.iter().take(PRUNE_BATCH).map(|unit| unit.bytes).sum();
+    units.truncate(select_prune_batch_len(&units));
+    let mut remaining_eligible =
+        eligible_count.saturating_sub(units.iter().filter(|unit| !unit.pending).count());
+    let mut reclaimable: u64 = units.iter().map(|unit| unit.bytes).sum();
     let mut reclaimed = 0;
     let mut retired = 0;
     let mut marked = 0;
     let mut cleanup = Vec::new();
     let mut updated = false;
     if let Some(writer) = &writer {
-        units.truncate(PRUNE_BATCH);
-        for unit in &units {
-            if !direct_prune_directory(&unit.directory) {
-                return Err(
-                    unit.diagnostic(fail("Managed snapshot directory changed during pruning."))
-                );
-            }
-        }
-        let mut guards: Vec<Vec<_>> = units
-            .iter()
-            .map(|unit| unit.paths().into_iter().map(|_| None).collect())
-            .collect();
-        let mut relay_locks: Vec<_> = units
-            .iter()
-            .enumerate()
-            .filter_map(|(position, unit)| match unit.entry {
-                PruneEntry::Run(index) => Some((index, position)),
-                PruneEntry::Import(_) => None,
-            })
-            .collect();
-        relay_locks.sort_unstable();
-        for (_, position) in relay_locks {
-            let unit = &units[position];
-            let path = &unit.paths()[2];
-            if !unit.pending && !crate::setup_cli::private_input_exists(path)? {
-                return Err(unit.diagnostic(fail("Retained relay-state.json is missing.")));
-            }
-            guards[position][2] = lock_prune_path(path).map_err(|error| unit.diagnostic(error))?;
-        }
-        for (unit, guards) in units.iter().zip(&mut guards) {
-            for (path, guard) in unit.paths().iter().zip(guards).take(2) {
-                *guard = lock_prune_path(path).map_err(|error| unit.diagnostic(error))?;
-            }
-        }
-        let siblings = prune_siblings(&pruning.owner, pruning.fold_case)?;
-        let pruning = PruneInventory {
-            siblings,
-            ..pruning
-        };
-        let verified = units
-            .iter()
-            .zip(&guards)
-            .map(|(unit, guards)| {
-                if pruning.protected(&unit.directory, unit.entry).is_some() {
-                    return Err(unit.diagnostic(fail(
-                        "A sibling inventory now protects this snapshot. Retry pruning.",
-                    )));
-                }
-                let artifacts = pruning.verify(unit)?;
-                if artifacts
-                    .files
-                    .iter()
-                    .zip(guards)
-                    .any(|((_, size), guard)| size.is_some() && guard.is_none())
-                {
+        let (guards, verified) = loop {
+            for unit in &units {
+                if !direct_prune_directory(&unit.directory, pruning.fold_case) {
                     return Err(
-                        unit.diagnostic(fail("Snapshot appeared after locking. Retry pruning."))
+                        unit.diagnostic(fail("Managed snapshot directory changed during pruning."))
                     );
                 }
-                Ok(artifacts)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            }
+            match lock_prune_batch(&units, &pruning.owner) {
+                Ok(guards) => {
+                    pruning.siblings = prune_siblings(&pruning.owner, pruning.fold_case)?;
+                    let verified = units
+                        .iter()
+                        .zip(&guards)
+                        .map(|(unit, guards)| {
+                            if pruning.protected(&unit.directory, unit.entry).is_some() {
+                                return Err(unit.diagnostic(fail(
+                                    "A sibling inventory now protects this snapshot. Retry pruning.",
+                                )));
+                            }
+                            let artifacts = pruning.verify(unit)?;
+                            if artifacts
+                                .files
+                                .iter()
+                                .zip(guards)
+                                .any(|((_, size), guard)| size.is_some() && guard.is_none())
+                            {
+                                return Err(unit.diagnostic(fail(
+                                    "Snapshot appeared after locking. Retry pruning.",
+                                )));
+                            }
+                            Ok(artifacts)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    break (guards, verified);
+                }
+                Err((_, true)) if units.len() > 1 => {
+                    units.truncate(units.len() / 2);
+                }
+                Err((error, _)) => return Err(error),
+            }
+        };
+        remaining_eligible =
+            eligible_count.saturating_sub(units.iter().filter(|unit| !unit.pending).count());
+        reclaimable = units.iter().map(|unit| unit.bytes).sum();
         marked = units.iter().filter(|unit| !unit.pending).count();
         if marked > 0 {
             upgrade_state(&mut state);
@@ -2902,6 +3054,15 @@ fn prune_inventory(
         if retired > 0 {
             commit_prune_state(writer, &mut state, &now)?;
             updated = true;
+        }
+    } else {
+        for unit in &units {
+            if unit.unowned_receipt {
+                warnings.push(json!({
+                    "path": unit.directory,
+                    "reason": "An unexpected receipt.json on a failed run will be preserved along with its relay-state.json."
+                }));
+            }
         }
     }
     let items: Vec<_> = units.iter().map(|unit| json!({
@@ -6194,26 +6355,30 @@ fn interactive(
     mut state: InventoryState,
     mut report: InventoryStatus,
 ) -> Result<i32, Diagnostic> {
-    if let Some(cycle_sha256) = report
+    let mut pending_reminder = report
         .refresh_reminder
         .as_ref()
         .filter(|r| r.show_startup_notice)
-        .map(|r| r.cycle_sha256.clone())
-    {
+        .map(|r| r.cycle_sha256.clone());
+    if pending_reminder.is_some() {
         refresh_notice()?;
-        match apply_and_store(
-            path,
-            InventoryAction::AcknowledgeRefreshReminder {
-                cycle_sha256,
-                defer: false,
-            },
-        ) {
-            Ok(_) => {}
-            Err(error) if error.code == "INVENTORY_REFRESH_REMINDER_STALE" => {}
-            Err(error) => return Err(error),
-        }
-        (state, report) = read_status(path)?;
     }
+    let acknowledge_reminder = |cycle_sha256: Option<String>| -> Result<(), Diagnostic> {
+        if let Some(cycle_sha256) = cycle_sha256 {
+            match apply_and_store(
+                path,
+                InventoryAction::AcknowledgeRefreshReminder {
+                    cycle_sha256,
+                    defer: false,
+                },
+            ) {
+                Ok(_) => {}
+                Err(error) if error.code == "INVENTORY_REFRESH_REMINDER_STALE" => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    };
     let notifications = state.inventory_notifications();
     if !notifications.is_empty() {
         warning(
@@ -6259,16 +6424,23 @@ fn interactive(
         if report.settings_attention { "*" } else { "" }
     ))?;
     if choice.is_empty() || choice == "status" {
+        acknowledge_reminder(pending_reminder.take())?;
         return Ok(0);
     }
     let action = match choice.as_str() {
         "capabilities" | "capabilities (optional)" => match capability_action(&state)? {
             Some(action) => action,
-            None => return Ok(0),
+            None => {
+                acknowledge_reminder(pending_reminder.take())?;
+                return Ok(0);
+            }
         },
         "refresh" | "refresh (due)" => match refresh_action(&report)? {
             Some(action) => action,
-            None => return Ok(0),
+            None => {
+                acknowledge_reminder(pending_reminder.take())?;
+                return Ok(0);
+            }
         },
         "settings" | "settings*" => settings_action(&state)?,
         "scout" => {
@@ -6373,6 +6545,9 @@ fn interactive(
         }
         _ => return Err(fail("Select an action from the displayed inventory menu.")),
     };
+    if !matches!(action, InventoryAction::Prune { dry_run: true, .. }) {
+        acknowledge_reminder(pending_reminder.take())?;
+    }
     let (report, extra) = apply_and_store(path, action)?;
     render(&report)?;
     if !extra.is_null() {
@@ -6398,6 +6573,76 @@ mod tests {
             state_path(Some(valid.clone())).unwrap(),
             std::path::absolute(valid).unwrap()
         );
+    }
+
+    #[test]
+    fn brief_prune_busy_retains_code_and_numeric_run_pointer() {
+        let state_busy = Diagnostic::error(
+            "INVENTORY_PRUNE_BUSY",
+            "The inventory writer is busy. Retry pruning after the writer finishes.",
+        );
+        let brief_state = brief_failure_for(&state_busy);
+        assert_eq!(brief_state.code, "INVENTORY_PRUNE_BUSY");
+        assert!(brief_state.message.contains("Retry pruning"));
+        assert!(brief_state.pointer.is_none());
+
+        let mut run_busy = Diagnostic::error(
+            "INVENTORY_PRUNE_BUSY",
+            "An inventory snapshot writer is busy. Retry pruning after the writer finishes.",
+        );
+        run_busy.pointer = Some("/discovery_runs/2".into());
+        let brief_run = brief_failure_for(&run_busy);
+        assert_eq!(brief_run.code, "INVENTORY_PRUNE_BUSY");
+        assert!(brief_run.message.contains("Retry pruning"));
+        assert_eq!(brief_run.pointer.as_deref(), Some("/discovery_runs/2"));
+    }
+
+    #[test]
+    fn case_sensitive_sibling_scan_inspects_alternate_case_names() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "cqlmatic-case-sibling-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let pack_dir = root.join("inventory-000000000000-import-1");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        let pack_path = pack_dir.join("pack.json");
+        let mut state = InventoryState::new("2026-01-02T00:00:00Z").unwrap();
+        let reference = PackReference {
+            pruned_at: None,
+            cleanup_pending: false,
+            path: pack_path.to_str().unwrap().into(),
+            content_digest: "a".repeat(64),
+            input_content_digest: None,
+            imported_at: "2026-01-02T00:00:00Z".into(),
+            discovery_run: None,
+        };
+        state.active_pack = Some(reference.clone());
+        state.packs.push(reference);
+        let sibling = root.join("STATE.JSON");
+        std::fs::write(&sibling, serde_json::to_vec(&state).unwrap()).unwrap();
+        // With fold_case = false, an entry named "STATE.JSON" is never excluded as self for "state.json".
+        let owner = root.join("state.json");
+        let siblings = prune_siblings(&owner, false).unwrap();
+        assert!(
+            siblings.indeterminate.is_empty(),
+            "{:?}",
+            siblings.indeterminate
+        );
+        assert!(
+            siblings
+                .directories
+                .contains(&normalized_directory(&pack_path, false).unwrap())
+        );
+        assert_eq!(
+            toggle_ascii_case("state.json").as_deref(),
+            Some("STATE.JSON")
+        );
+        assert_eq!(toggle_ascii_case("1234"), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
