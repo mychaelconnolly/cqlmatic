@@ -37,8 +37,24 @@ def compare(case, baseline, candidate, scratch):
     args = case["args"]
     if args[0] not in ("check", "generate") or "--json" not in args:
         raise ValueError(f"expected JSON check or generate: {args!r}")
-    before = execute(baseline, args, scratch)
-    after = execute(candidate, args, scratch)
+    with tempfile.TemporaryDirectory(dir=scratch) as detached:
+        args = list(args)
+        if "--inventory-state" in args:
+            index = args.index("--inventory-state") + 1
+            template = Path(args[index])
+            state = Path(detached) / "inventory" / template.name
+            state.parent.mkdir(mode=0o700)
+            args[index] = str(state)
+            original = template.read_bytes()
+        else:
+            state = None
+        outputs = []
+        for binary in (baseline, candidate):
+            if state is not None:
+                state.write_bytes(original)
+                state.chmod(0o600)
+            outputs.append(execute(binary, args, detached))
+        before, after = outputs
     expected = case.get("difference")
     if expected is None and before == after:
         return "identical", None
@@ -48,7 +64,7 @@ def compare(case, baseline, candidate, scratch):
         return expected["category"], None
     return "unexpected", {
         "name": case["name"],
-        "args": args,
+        "args": case["args"],
         "baseline": signature(before),
         "candidate": signature(after),
         "before": [part.decode(errors="replace") for part in before[1:]],

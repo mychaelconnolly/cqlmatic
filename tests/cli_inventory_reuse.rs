@@ -1109,6 +1109,13 @@ fn default_unconfirmed_scout_leaves_offline_query_commands_unchanged() {
     scout(json!({"kind":"import-scout","result_file":scout_result,
         "arguments":plan["action"]["arguments"],"retrieved_at":"2026-01-02T00:00:00Z"}));
     compare("imported");
+    scout(json!({"kind":"set-discovery-mode","mode":"quick"}));
+    compare("mode changed");
+    scout(
+        json!({"kind":"record-failure","stage":"scout","source_id":null,
+        "message":"Synthetic search did not complete","recorded_at":"2026-01-02T01:00:00Z"}),
+    );
+    compare("failure recorded");
 }
 
 #[test]

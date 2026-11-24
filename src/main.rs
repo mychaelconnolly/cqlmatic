@@ -573,6 +573,9 @@ fn select_inventory(
         }
         Err(d) => return Err(d),
     };
+    if selected_path.is_none() && state.target.is_none() {
+        return Ok((None, false));
+    }
     if state.active_pack.is_none() && !state.packs.is_empty() {
         return Err(input_error(
             "Inventory has retained packs but no active pack for evidence checks.",
@@ -582,8 +585,8 @@ fn select_inventory(
         if !state.unverified_leads.is_empty()
             || !state.query_observations.is_empty()
             || !state.captured_observations.is_empty()
-            || (selected_path.is_some()
-                && (state.scout_plan.is_some() || !state.scouting.is_empty()))
+            || state.scout_plan.is_some()
+            || !state.scouting.is_empty()
             || (state.scouting.is_empty() && !state.sources.is_empty())
             || state.sources.iter().any(|source| {
                 source.expected || source.review.is_some() || source.binding.is_some()
