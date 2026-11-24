@@ -377,6 +377,7 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
             "No new probe can start; settle the outstanding attempt or resume the paused run first.",
         ) => "Discovery cannot start another probe.",
         ("DISCOVERY_CLEANUP_PENDING", _) => "Discovery cleanup is pending.",
+        _ if code != "INVENTORY_INPUT" => return answer_reason(code),
         _ => return None,
     })
 }
@@ -830,9 +831,11 @@ fn status_brief(
     session_id: Option<&str>,
 ) -> Value {
     let mut brief = inventory::brief(report, session_id);
-    if let Some(index) = status_row_limit(state) {
-        brief["discovery_row_limit"] =
-            json!({"run_index":index,"code":"SEARCH_ROW_LIMIT","message":ROW_LIMIT_REASON});
+    if let Some((index, next_action)) = status_row_limit(state) {
+        brief["discovery_row_limit"] = json!({
+            "run_index":index,"code":"SEARCH_ROW_LIMIT","message":ROW_LIMIT_REASON,
+            "next_action":next_action
+        });
     }
     let runs = &state.discovery_runs;
     if let Some(index) = runs.iter().enumerate().rev().find_map(|(index, run)| {
@@ -867,18 +870,20 @@ fn retained_row_limit(relay: &mcp::State) -> bool {
         || mcp::ended_at_row_limit(relay)
 }
 
-fn status_row_limit(state: &InventoryState) -> Option<usize> {
+fn status_row_limit(state: &InventoryState) -> Option<(usize, &'static str)> {
     let index = state.discovery_runs.len().checked_sub(1)?;
     let run = &state.discovery_runs[index];
-    (matches!(run.status.as_str(), "paused" | "failed")
-        && inspect_selected_run(state, index).is_ok_and(|relay| retained_row_limit(&relay)))
-    .then_some(index)
+    if !matches!(run.status.as_str(), "paused" | "failed") {
+        return None;
+    }
+    let relay = inspect_selected_run(state, index).ok()?;
+    retained_row_limit(&relay).then(|| (index, retained_row_limit_action(&relay)))
 }
 
 fn note_status_row_limit(state: &InventoryState, report: &mut InventoryStatus) {
-    if let Some(index) = status_row_limit(state) {
+    if let Some((index, next_action)) = status_row_limit(state) {
         report.next_actions.push(format!(
-            "Discovery run {index}. {ROW_LIMIT_REASON} {FULL_STEP}"
+            "Discovery run {index}. {ROW_LIMIT_REASON} {next_action}"
         ));
     }
 }
@@ -1021,6 +1026,7 @@ struct NextProbeRun {
     checkpoint: storage::Writer,
     refusal: Option<Value>,
     predecessor_error: Option<Diagnostic>,
+    paused_action: Option<String>,
 }
 
 fn inspect_next_probe_run(
@@ -1054,6 +1060,23 @@ fn inspect_next_probe_run(
     } else {
         None
     };
+    let paused_action = (phase == "paused").then(|| {
+        let now = discovery::timestamp();
+        if let Err(blocker) = check_retained_searches(&state, None, Some(index), &now) {
+            if let Some(other) = blocker.pointer.as_deref()
+                .and_then(|pointer| pointer.strip_prefix("/discovery_runs/"))
+                .and_then(|index| index.parse::<usize>().ok())
+            {
+                format!("Inspect discovery run_index={other} and resolve its blocker before resuming this run.")
+            } else {
+                FULL_STEP.to_owned()
+            }
+        } else if !mcp::has_discovery_work_after_resume(&relay) {
+            query_budget_action(false, relay.request.max_queries).to_owned()
+        } else {
+            format!("Submit resume-discovery with run_index={index} to continue this run.")
+        }
+    });
     Ok(NextProbeRun {
         index,
         phase,
@@ -1061,6 +1084,7 @@ fn inspect_next_probe_run(
         checkpoint,
         refusal,
         predecessor_error,
+        paused_action,
     })
 }
 
@@ -1083,6 +1107,17 @@ fn row_limit_action(legacy: bool, expired: bool) -> &'static str {
     } else {
         ROW_LIMIT_ACTION
     }
+}
+
+fn retained_row_limit_action(relay: &mcp::State) -> &'static str {
+    row_limit_action(
+        !mcp::is_resumable(relay),
+        relay
+            .failure
+            .as_ref()
+            .is_some_and(|d| d.code == "MCP_DEADLINE")
+            || mcp::time_limit_passed(relay, &discovery::timestamp()),
+    )
 }
 
 fn next_probe(
@@ -1113,10 +1148,8 @@ fn next_probe(
             .is_some_and(|answer| answer.outcome == "complete")
     };
     // An answer for a probe that is already answered changes nothing; the run carries on.
-    let answer = answer.filter(|answer| {
-        !matches!(run.phase.as_str(), "failed" | "complete" | "superseded")
-            && !complete(&run.relay, &answer.probe_id)
-    });
+    let answer =
+        answer.filter(|answer| run.phase != "failed" && !complete(&run.relay, &answer.probe_id));
     let (settled, mut diagnostics) = if let Some(answer) = answer {
         let probe_id = answer.probe_id.clone();
         let already_answered = run.relay.answers.contains_key(&probe_id);
@@ -1182,6 +1215,7 @@ fn next_probe(
     let legacy = !mcp::is_resumable(&run.relay);
     let query_limit = run.relay.request.max_queries;
     let predecessor_error = run.predecessor_error.take();
+    let paused_action = run.paused_action.take();
     if phase == "cleanup-pending" {
         for diagnostic in cleanup_diagnostics(&run.relay, diagnostics.is_empty()) {
             if !diagnostics.contains(&diagnostic) {
@@ -1262,11 +1296,11 @@ fn next_probe(
         let (diagnostic, guidance) = relay_failure(&failure, legacy, query_limit);
         diagnostics.retain(|d| d["code"] != diagnostic["code"]);
         diagnostics.insert(0, diagnostic);
-        if row_limited && failure.code == "MCP_DEADLINE" && !legacy {
+        if row_limited && failure.code == "MCP_DEADLINE" {
             if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
                 diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
             }
-            ROW_LIMIT_DEADLINE_ACTION.to_owned()
+            row_limit_action(legacy, true).to_owned()
         } else {
             guidance.to_owned()
         }
@@ -1293,6 +1327,10 @@ fn next_probe(
         .to_owned()
     } else if stale_predecessor {
         "Pause this run, then prepare discovery again from the current inventory.".to_owned()
+    } else if phase == "paused"
+        && let Some(action) = paused_action
+    {
+        action
     } else {
         if diagnostics.is_empty() {
             let code = match phase {
@@ -1406,7 +1444,7 @@ fn next_probe_guidance(
         ),
         "complete" => format!("run_index={index} is complete."),
         "needs-probes" if expired && outstanding => format!(
-            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If that search already ran, submit the saved result as answer with run_index={index} to close the attempt. If it never started, run the exact reserved search once and submit its result to close the attempt. Then prepare a new run."
+            "The time limit of run_index={index} has passed, so its reserved probe is not handed out again. If the search ran, submit its saved original result as answer with run_index={index}. If it never started, run the exact reserved search once and submit its result. Once settlement is confirmed, prepare a new run."
         ),
         "needs-probes" if reservation_failed => FULL_STEP.to_owned(),
         "needs-probes" if refused => {
@@ -1419,7 +1457,6 @@ fn next_probe_guidance(
                 "The answer was not accepted. Submit next-probe with run_index={index} and no answer to {next}."
             )
         }
-        "paused" => format!("Submit resume-discovery with run_index={index} to continue this run."),
         "activation-blocked" | "activating" | "activated" =>
             "Pack activation is pending. Submit discovery-step with the same run_index and answers: [] to retry activation without another search.".to_owned(),
         _ => FULL_STEP.to_owned(),
@@ -1456,6 +1493,16 @@ fn conflicted_source_id(relay: &mcp::State, error: &Diagnostic) -> Option<String
     }))
 }
 
+fn query_budget_action(legacy: bool, query_limit: u32) -> &'static str {
+    if legacy {
+        FULL_STEP
+    } else if query_limit < 1000 {
+        "Prepare a new run with a larger max_queries for the full selected scope."
+    } else {
+        "Prepare a new run with fewer measurements per run."
+    }
+}
+
 fn relay_failure(error: &Diagnostic, legacy: bool, query_limit: u32) -> (Value, &'static str) {
     let (code, reason, next) = match (error.code.as_str(), error.message.as_str()) {
         (
@@ -1466,13 +1513,7 @@ fn relay_failure(error: &Diagnostic, legacy: bool, query_limit: u32) -> (Value, 
         ) => (
             "DISCOVERY_EVIDENCE",
             "Discovery search budget exhausted.",
-            if legacy {
-                FULL_STEP
-            } else if query_limit < 1000 {
-                "Prepare a new run with a larger max_queries for the full selected scope."
-            } else {
-                "Prepare a new run with fewer measurements per run."
-            },
+            query_budget_action(legacy, query_limit),
         ),
         ("PACK_INTEGRITY", _) if selector_conflict(error).is_some() => (
             "PACK_INTEGRITY",
@@ -1822,26 +1863,30 @@ fn apply_locked(
                 && !answers.is_empty()
                 && matches!(run.status.as_str(), "complete" | "superseded" | "failed")
             {
-                let diagnostic = if answers
+                let (code, message) = if answers
                     .iter()
-                    .all(|answer| relay.answers.contains_key(&answer.probe_id))
+                    .any(|answer| relay.answers.contains_key(&answer.probe_id))
                 {
-                    Diagnostic::error("MCP_ALREADY_ANSWERED", "This probe was already answered.")
-                } else if run.status == "superseded" {
-                    Diagnostic::error(
-                        "DISCOVERY_SUPERSEDED",
-                        "Newer inventory evidence superseded this run. Prepare discovery against the current inventory.",
-                    )
+                    ("MCP_ALREADY_ANSWERED", "This probe was already answered.")
+                } else if mcp::is_resumable(&relay) {
+                    ("DISCOVERY_PHASE", "This discovery run is finished.")
                 } else {
-                    Diagnostic::error(
-                        "DISCOVERY_PHASE",
-                        "This discovery run is finished. Prepare a new run for more searches.",
+                    (
+                        "MCP_UNKNOWN_PROBE",
+                        "No new probes can be answered in this state.",
                     )
                 };
+                let mut diagnostics = vec![Diagnostic::error(code, message)];
+                if run.status == "superseded" {
+                    diagnostics.push(Diagnostic::error(
+                        "DISCOVERY_SUPERSEDED",
+                        "Newer inventory evidence superseded this run. Prepare discovery against the current inventory.",
+                    ));
+                }
                 let report = inventory::assess_at(&state, &packs(&state)?, &now)?;
                 return Ok((
                     report,
-                    json!({"run_index":index,"status":"incomplete","diagnostics":[diagnostic]}),
+                    json!({"run_index":index,"status":"incomplete","run_status":run.status,"diagnostics":diagnostics}),
                     state,
                 ));
             }
@@ -1930,13 +1975,6 @@ fn apply_locked(
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
         }
-        if extra["relay"]["status"] == "needs-probes"
-            && let Some(index) = extra["run_index"].as_u64()
-        {
-            extra["next_action"] = json!(format!(
-                "Use run_index {index} for each dispatch-discovery and discovery-step action. Reserve the exact probe before one MCP call, save its entire result, then submit its probe_id and result_file; use discovery-step with answers=[] to poll this run."
-            ));
-        }
         state.validate()?;
         let loaded = packs(&state)?;
         let mut report = inventory::assess_at(&state, &loaded, &now)?;
@@ -1975,6 +2013,51 @@ fn apply_locked(
     })()
 }
 
+#[derive(Clone, Copy)]
+enum DiscoveryStepAdvice {
+    Settle,
+    LegacyFrontier,
+    Reserve,
+}
+
+impl DiscoveryStepAdvice {
+    const ALL: [Self; 3] = [Self::Settle, Self::LegacyFrontier, Self::Reserve];
+
+    fn message(self, index: usize) -> String {
+        match self {
+            Self::Settle => format!(
+                "Submit the saved original result for the outstanding probe as a discovery-step answer with run_index={index}. Confirm settlement before starting another search."
+            ),
+            Self::LegacyFrontier => format!(
+                "Read the full discovery-step output for run_index={index} for the exact arguments of the listed probes. Submit their saved results as discovery-step answers."
+            ),
+            Self::Reserve => format!(
+                "Submit next-probe with run_index={index} to reserve the next probe, or use dispatch-discovery with a probe_id from the full step output."
+            ),
+        }
+    }
+}
+
+fn discovery_step_advice(
+    index: usize,
+    legacy: bool,
+    outstanding: bool,
+    output: &mcp::StepOutput,
+) -> Option<String> {
+    let advice = if outstanding {
+        DiscoveryStepAdvice::Settle
+    } else if output.status != "needs-probes" {
+        return None;
+    } else if output.probes.is_empty() {
+        return Some(FULL_STEP.to_owned());
+    } else if legacy {
+        DiscoveryStepAdvice::LegacyFrontier
+    } else {
+        DiscoveryStepAdvice::Reserve
+    };
+    Some(advice.message(index))
+}
+
 fn action_summary(action: &Value) -> Value {
     if action.is_null() {
         return Value::Null;
@@ -1987,17 +2070,10 @@ fn action_summary(action: &Value) -> Value {
                 json!(probes.as_array().map_or(0, Vec::len)),
             );
         }
-        if relay.get("status").and_then(Value::as_str) == Some("needs-probes") {
-            let selection = action["run_index"]
-                .as_u64()
-                .map(|index| format!(" with run_index={index}"))
-                .unwrap_or_default();
-            compact["next_action"] = json!(format!(
-                "Submit next-probe{selection} to receive the next probe with its exact arguments."
-            ));
-        } else if !relay
-            .get("diagnostics")
-            .is_some_and(|d| d.as_array().is_some_and(|d| !d.is_empty()))
+        if relay.get("status").and_then(Value::as_str) != Some("needs-probes")
+            && !relay
+                .get("diagnostics")
+                .is_some_and(|d| d.as_array().is_some_and(|d| !d.is_empty()))
             && let Some(compact) = compact.as_object_mut()
         {
             compact.remove("next_action");
@@ -2030,6 +2106,19 @@ fn action_brief(action: &Value) -> Value {
         })
     {
         compact["outcome"] = json!(status);
+    }
+    if let Some(status @ ("complete" | "superseded" | "failed")) = action["run_status"].as_str() {
+        compact["run_status"] = json!(status);
+    }
+    if action.get("relay").is_none()
+        && let Some(refusals) = action["diagnostics"].as_array()
+    {
+        let diagnostics: Vec<_> = refusals
+            .iter()
+            .filter_map(|value| serde_json::from_value::<Diagnostic>(value.clone()).ok())
+            .map(|diagnostic| brief_failure_for(&diagnostic))
+            .collect();
+        compact["diagnostics"] = json!(diagnostics);
     }
     if matches!(
         action["relay"]["status"].as_str(),
@@ -2126,16 +2215,22 @@ fn action_brief(action: &Value) -> Value {
     }
     if let Some(probes) = action["relay"]["probes"].as_array() {
         compact["pending_probe_count"] = json!(probes.len());
-        // A brief response carries no probe arguments; say how to get them.
-        if !probes.is_empty() && action["relay"]["status"] == "needs-probes" {
-            let selection = action["run_index"]
-                .as_u64()
-                .map(|index| format!(" with run_index={index}"))
-                .unwrap_or_default();
-            compact["next_action"] = json!(format!(
-                "Submit next-probe{selection} to receive the next probe with its exact arguments."
-            ));
-        }
+    }
+    if matches!(
+        action["relay"]["status"].as_str(),
+        Some("needs-probes" | "cleanup-pending" | "cancel-requested")
+    ) && let Some(next) = action["next_action"].as_str()
+    {
+        // Only project fixed instructions parameterized by the selected run's numeric index.
+        let approved = action["run_index"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .is_some_and(|index| {
+                DiscoveryStepAdvice::ALL
+                    .into_iter()
+                    .any(|advice| advice.message(index) == next)
+            });
+        compact["next_action"] = json!(if approved { next } else { FULL_STEP });
     }
     // The cost figures are counts, so they fit the brief budget whatever else the action holds.
     let cost = &action["relay"]["cost"];
@@ -3400,8 +3495,10 @@ fn apply(
                 mode: state.discovery_mode,
                 quick_depth: state.quick_depth,
             });
+            let index = state.discovery_runs.len() - 1;
+            let advice = discovery_step_advice(index, false, false, &output);
             Ok(
-                json!({"run_index":state.discovery_runs.len()-1,"warning":DISCOVERY_WARNING,"relay":output,"next_action":"Before each MCP call, submit dispatch-discovery with its probe_id. Relay that probe through the existing CrowdStrike MCP, save the entire result, then submit discovery-step with probe_id and result_file. The CLI does not implement MCP OAuth or internal model calls."}),
+                json!({"run_index":index,"warning":DISCOVERY_WARNING,"relay":output,"next_action":advice}),
             )
         }
         InventoryAction::DiscoveryStep { answers, run_index } => {
@@ -3526,22 +3623,27 @@ fn apply(
                                     Diagnostic::error("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON),
                                 );
                             }
-                            let mut reply = json!({"relay":output});
-                            if limited {
-                                reply["next_action"] = json!(row_limit_action(
-                                    !mcp::is_resumable(&relay),
-                                    mcp::time_limit_passed(&relay, now)
-                                        || relay
-                                            .failure
-                                            .as_ref()
-                                            .is_some_and(|d| d.code == "MCP_DEADLINE"),
-                                ));
+                            let advice = if limited {
+                                Some(retained_row_limit_action(&relay).to_owned())
                             } else if !mcp::is_resumable(&relay)
                                 && let Some(failure) = &relay.failure
                             {
-                                reply["next_action"] = json!(
-                                    relay_failure(failure, true, relay.request.max_queries).1
-                                );
+                                Some(
+                                    relay_failure(failure, true, relay.request.max_queries)
+                                        .1
+                                        .to_owned(),
+                                )
+                            } else {
+                                discovery_step_advice(
+                                    run_index,
+                                    !mcp::is_resumable(&relay),
+                                    mcp::has_in_flight(&relay),
+                                    &output,
+                                )
+                            };
+                            let mut reply = json!({"relay":output});
+                            if let Some(advice) = advice {
+                                reply["next_action"] = json!(advice);
                             }
                             if let Some(id) = source_id {
                                 reply["source_id"] = json!(id);
@@ -3597,7 +3699,8 @@ fn apply(
             run.answered = output.answered;
             run.elapsed_seconds = resumable_elapsed(&run.state_path)
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
-            Ok(json!({"relay":output,"executes_searches":false}))
+            let advice = discovery_step_advice(run_index, false, true, &output);
+            Ok(json!({"relay":output,"next_action":advice,"executes_searches":false}))
         }
         InventoryAction::PauseDiscovery { run_index } => {
             let run_index = discovery_run_index(state, run_index)?;
@@ -3640,7 +3743,13 @@ fn apply(
                 Some(diagnostic) => {
                     json!({"status":"incomplete","diagnostics":[diagnostic],"relay":output,"executes_searches":false})
                 }
-                None => json!({"relay":output,"executes_searches":false}),
+                None => {
+                    let mut reply = json!({"relay":output,"executes_searches":false});
+                    if let Some(advice) = discovery_step_advice(run_index, false, false, &output) {
+                        reply["next_action"] = json!(advice);
+                    }
+                    reply
+                }
             })
         }
         InventoryAction::ImportPack { pack_file } => {
@@ -4878,10 +4987,7 @@ mod tests {
         assert_eq!(value["status"]["references"], json!([]));
         assert_eq!(value["action"]["outcome"], "needs-probes");
         assert_eq!(value["action"]["pending_probe_count"], 1);
-        assert_eq!(
-            value["action"]["next_action"],
-            "Submit next-probe with run_index=3 to receive the next probe with its exact arguments."
-        );
+        assert_eq!(value["action"]["next_action"], FULL_STEP);
         assert!(
             action_brief(&json!({"relay":{"status":"complete","probes":[]}}))
                 .get("next_action")

@@ -1214,7 +1214,7 @@ pub fn step_resumable(
                             current_output(&state)?
                         }
                     };
-                    output.diagnostics.insert(0, Diagnostic::warning("DISCOVERY_ATTEMPT_ENDED", format!("Discovery attempt ended as {outcome}; its allowance remains charged. Resume explicitly before dispatching again.")));
+                    output.diagnostics.insert(0, Diagnostic::warning("DISCOVERY_ATTEMPT_ENDED", format!("Discovery attempt ended as {outcome}. Its allowance remains charged.")));
                     output.diagnostics.insert(0, d);
                     return Ok(output);
                 }

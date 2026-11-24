@@ -785,10 +785,10 @@ const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 mod session;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
-    ended_at_row_limit, has_in_flight, init_inventory_resumable, init_resumable,
-    inspect_inventory_owner, inventory_probe, is_resumable, outstanding_probe_id,
-    outstanding_refusal, pause, recover_native_cleanup, resumable_info, resumable_request, resume,
-    resume_inventory, run_native, settle_cancelled, step_resumable, time_limit_passed,
+    has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
+    inventory_probe, is_resumable, outstanding_probe_id, outstanding_refusal, pause,
+    recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
+    run_native, settle_cancelled, step_resumable, time_limit_passed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -993,6 +993,23 @@ fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, 
         answer.extended_result_framing,
     ))
 }
+/// Report the ceiling independently of the recorded failure verdict.
+pub fn ended_at_row_limit(state: &State) -> bool {
+    if state.session.is_some() {
+        return session::ended_at_row_limit(state);
+    }
+    state.status == "failed"
+        && state
+            .failure
+            .as_ref()
+            .is_some_and(|d| d.code == "MCP_DEADLINE")
+        && state.answers.values().any(|answer| {
+            answer.outcome == "failed"
+                && normalized_answer(answer)
+                    .is_ok_and(|result| result.is_ok_and(|result| result.rows.len() >= 10_000))
+        })
+}
+
 fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
     capture_bytes(&answer.raw_hex, &answer.raw_sha256)
 }
@@ -1931,6 +1948,31 @@ fn activation_checkpoint(_stage: &str) -> Result<(), Diagnostic> {
     }
     Ok(())
 }
+fn replay_mcp(state: &State, remaining: Duration) -> (Option<Pack>, DiscoverReport) {
+    let mut replay = ReplayBackend::new(&state.answers);
+    discovery::execute_with_policy(
+        &state.request,
+        &mut replay,
+        Origin::Mcp,
+        remaining,
+        state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.sparse_fieldset_fallback),
+    )
+}
+
+/// A paused relay may still activate after its final allowed search was accepted.
+pub fn has_discovery_work_after_resume(state: &State) -> bool {
+    state.session.as_ref().is_some_and(|session| {
+        session.attempts_len() < state.request.max_queries as usize
+            || (session.transport == Transport::Mcp
+                && replay_mcp(state, Duration::from_secs(state.request.max_seconds))
+                    .0
+                    .is_some())
+    })
+}
+
 fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Diagnostic> {
     if state.status == "activated" {
         if let Err(d) = writer.confirm_durable() {
@@ -1962,17 +2004,7 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
             Err(d) => return fail_state(writer, state, d),
         }
     };
-    let mut replay = ReplayBackend::new(&state.answers);
-    let (candidate, report) = discovery::execute_with_policy(
-        &state.request,
-        &mut replay,
-        Origin::Mcp,
-        remaining,
-        state
-            .session
-            .as_ref()
-            .is_some_and(|session| session.sparse_fieldset_fallback),
-    );
+    let (candidate, report) = replay_mcp(state, remaining);
     if let Some(candidate) = candidate {
         return activate(writer, state, candidate, report);
     }
