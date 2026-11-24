@@ -3,14 +3,14 @@ use clap::Args;
 use cqlmatic::{
     contracts::{Diagnostic, Severity},
     discovery,
-    environment::Pack,
+    environment::{self, Pack},
     inventory::{self, *},
     mcp, network, storage,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -192,8 +192,20 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
     failure
 }
 
+const INCOMPATIBLE_SELECTOR_PREFIX: &str =
+    "Retained selectors are incompatible with repo/type discovery.";
+const FUTURE_PREDECESSOR_PREFIX: &str = "The retained pack is dated in the future.";
+const STALE_SOURCE_PREFIX: &str = "Selected sources require a window after the retained pack date.";
+
 fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
     Some(match (code, message) {
+        ("INVENTORY_INPUT", msg) if msg.starts_with(INCOMPATIBLE_SELECTOR_PREFIX) => {
+            INCOMPATIBLE_SELECTOR_PREFIX
+        }
+        ("INVENTORY_INPUT", msg) if msg.starts_with(FUTURE_PREDECESSOR_PREFIX) => {
+            FUTURE_PREDECESSOR_PREFIX
+        }
+        ("INVENTORY_INPUT", msg) if msg.starts_with(STALE_SOURCE_PREFIX) => STALE_SOURCE_PREFIX,
         ("INVENTORY_INPUT", message)
             if message.starts_with("Unknown inventory action kind ")
                 || message.starts_with("Inventory input has an unknown field ") =>
@@ -786,9 +798,24 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         .flatten()
         .collect::<Vec<_>>()
         .join(" ");
+        let mut restrictions = String::new();
+        if let Some(retained) = &source.retained_restrictions {
+            restrictions.push_str("; retained");
+            if let Some(sourcetype) = &retained.sourcetype {
+                restrictions.push_str(&format!(" sourcetype={sourcetype:?}"));
+            }
+            if let Some(event_family) = &retained.event_family {
+                restrictions.push_str(&format!(" event_family={event_family:?}"));
+            }
+            restrictions.push_str(if retained.discovery_compatible {
+                " (discovery-compatible)"
+            } else {
+                " (discovery-incompatible)"
+            });
+        }
         writeln!(
             out,
-            "{} [{selectors}]: {}; parser {}; measurements {}; observed {} / {} fields",
+            "{} [{selectors}]: {}; parser {}; measurements {}; observed {} / {} fields{restrictions}",
             source.source_id,
             source.status,
             source.parser,
@@ -1977,10 +2004,11 @@ fn apply_locked(
                     "Reconcile the unresolved refresh before resuming discovery.",
                 ));
             }
-            for (index, relay) in relay_guards.iter().enumerate() {
-                mcp::bind_inventory_owner(relay, writer)
-                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
-            }
+        }
+        let prepared = preflight_prepare_discovery(&state, &action, &now)?;
+        for (index, relay) in relay_guards.iter().enumerate() {
+            mcp::bind_inventory_owner(relay, writer)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
         }
         if state.schema_version < STATE_VERSION {
             state.field_evidence_schema_version = Some(state.schema_version);
@@ -2018,15 +2046,19 @@ fn apply_locked(
                 }));
             }
         }
-        let mut extra = apply(
-            path,
-            &mut state,
-            action,
-            &now,
-            boundary,
-            writer,
-            &relay_guards,
-        )?;
+        let mut extra = if let Some(prepared) = prepared {
+            prepare_discovery(path, &mut state, prepared, writer)?
+        } else {
+            apply(
+                path,
+                &mut state,
+                action,
+                &now,
+                boundary,
+                writer,
+                &relay_guards,
+            )?
+        };
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
         }
@@ -2945,6 +2977,196 @@ fn preflight_foreign_run(
     Ok(earlier_ended)
 }
 
+fn incompatible_selector_message(
+    incompatible: &[String],
+    compatible_expected_ids: &[&str],
+) -> String {
+    let advice = if compatible_expected_ids.is_empty() {
+        "No expected source is compatible with repo/type discovery. Leave the incompatible sources out of the confirmed target.".to_owned()
+    } else {
+        format!(
+            "Resubmit with source_ids limited to compatible expected sources ({}) and remove population_fields entries for the excluded sources.",
+            compatible_expected_ids.join(", ")
+        )
+    };
+    // Selector remediation advice can be appended here when supported.
+    format!(
+        "{INCOMPATIBLE_SELECTOR_PREFIX} {}. {advice}",
+        incompatible.join("; ")
+    )
+}
+
+struct PreparedDiscovery {
+    request: discovery::DiscoverRequest,
+    prior: Option<Pack>,
+}
+
+fn preflight_prepare_discovery(
+    state: &InventoryState,
+    action: &InventoryAction,
+    now: &str,
+) -> Result<Option<PreparedDiscovery>, Diagnostic> {
+    let InventoryAction::PrepareDiscovery {
+        start,
+        end,
+        source_ids,
+        value_fields,
+        kind_fields,
+        population_fields,
+        max_queries,
+        max_seconds,
+    } = action
+    else {
+        return Ok(None);
+    };
+    if state.refresh_blocked() {
+        return Err(fail(
+            "Reconcile the unresolved refresh before preparing a new discovery run.",
+        ));
+    }
+    let request = state.discovery_request(
+        start.clone(),
+        end.clone(),
+        source_ids,
+        value_fields.clone(),
+        kind_fields.clone(),
+        population_fields.clone(),
+        *max_queries,
+        *max_seconds,
+    )?;
+    let prior = cumulative_pack(state)?;
+    check_retained_searches(state, Some(&request), None, now)?;
+    let Some(prior) = prior else {
+        return Ok(Some(PreparedDiscovery {
+            request,
+            prior: None,
+        }));
+    };
+    let created = environment::parse_time(&prior.created_at)?;
+    if created > environment::parse_time(now)? {
+        return Err(fail(&format!(
+            "{FUTURE_PREDECESSOR_PREFIX} Discovery can activate after {}.",
+            prior.created_at
+        )));
+    }
+
+    let mut retained = BTreeMap::new();
+    for record in &prior.data.sources {
+        let source = environment::source(record)?;
+        if let Some(s) = &source.selectors {
+            retained.insert((s.repo.clone(), s.type_.clone()), source);
+        }
+    }
+    let mut incompatible = Vec::new();
+    let mut compatible_expected_ids = Vec::new();
+    let mut selected = Vec::new();
+    for source in state.sources.iter().filter(|s| s.expected) {
+        let is_selected = request.sources.contains(&source.selectors);
+        let key = (
+            source.selectors.repo.clone(),
+            source.selectors.type_.clone(),
+        );
+        let record = retained.get(&key);
+        if let Some(record) = record
+            && let Some(selectors) = &record.selectors
+            && !environment::discovery_compatible_restrictions(selectors)
+        {
+            if is_selected {
+                let (family, sourcetype) = environment::effective_restrictions(selectors);
+                let restrictions = [
+                    sourcetype.map(|value| format!("sourcetype={value:?}")),
+                    family.map(|value| format!("event_family={value:?}")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", ");
+                incompatible.push(format!(
+                    "source {:?}, retained record {:?} ({restrictions})",
+                    source.id, record.id
+                ));
+            }
+        } else {
+            compatible_expected_ids.push(source.id.as_str());
+            if is_selected && let Some(record) = record {
+                selected.push((&source.id, record));
+            }
+        }
+    }
+    if !incompatible.is_empty() {
+        return Err(fail(&incompatible_selector_message(
+            &incompatible,
+            &compatible_expected_ids,
+        )));
+    }
+
+    if environment::parse_time(&request.start)? <= created {
+        let blocked: Vec<_> = selected
+            .iter()
+            .filter(|(_, record)| {
+                record.inventory_status == "stale"
+                    || environment::linked_stale(&prior, &record.provenance_ids)
+                    || (record.evidence.as_ref().and_then(|e| e.observed) == Some(false)
+                        && environment::source_measurement(&prior, record).is_none())
+            })
+            .map(|(id, record)| format!("source {id:?}, retained record {:?}", record.id))
+            .collect();
+        if !blocked.is_empty() {
+            return Err(fail(&format!(
+                "{STALE_SOURCE_PREFIX} {}. Use a window starting strictly after {}.",
+                blocked.join("; "),
+                prior.created_at
+            )));
+        }
+    }
+    Ok(Some(PreparedDiscovery {
+        request,
+        prior: Some(prior),
+    }))
+}
+
+fn prepare_discovery(
+    path: &Path,
+    state: &mut InventoryState,
+    PreparedDiscovery { request, prior }: PreparedDiscovery,
+    owner: &storage::Writer,
+) -> Result<Value, Diagnostic> {
+    let run_dir = snapshot_directory(path, "discovery", state.discovery_runs.len() + 1)?;
+    let relay = run_dir.join("relay-state.json");
+    let pack = run_dir.join("pack.json");
+    let receipt = run_dir.join("receipt.json");
+    if let Some(prior) = prior {
+        let bytes = cumulative_pack_bytes(&prior)?;
+        storage::Writer::acquire(&pack)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
+    }
+    let selected: Vec<_> = state
+        .sources
+        .iter()
+        .filter(|s| request.sources.contains(&s.selectors))
+        .map(|s| s.id.clone())
+        .collect();
+    let output = mcp::init_inventory_resumable(request.clone(), &relay, &pack, &receipt, owner)?;
+    state.discovery_runs.push(DiscoveryRun {
+        state_path: absolute_path(&relay)?,
+        pack_path: absolute_path(&pack)?,
+        receipt_path: absolute_path(&receipt)?,
+        start: request.start,
+        end: request.end,
+        source_ids: selected,
+        value_fields: request.value_fields,
+        max_queries: request.max_queries,
+        max_seconds: request.max_seconds,
+        answered: output.answered,
+        elapsed_seconds: 0.0,
+        status: output.status.into(),
+        mode: state.discovery_mode,
+        quick_depth: state.quick_depth,
+    });
+    let index = state.discovery_runs.len() - 1;
+    let advice = discovery_step_advice(index, false, false, &output);
+    Ok(json!({"run_index":index,"warning":DISCOVERY_WARNING,"relay":output,"next_action":advice}))
+}
+
 fn check_retained_searches(
     state: &InventoryState,
     request: Option<&discovery::DiscoverRequest>,
@@ -3539,70 +3761,8 @@ fn apply(
             });
             Ok(Value::Null)
         }
-        InventoryAction::PrepareDiscovery {
-            start,
-            end,
-            source_ids,
-            value_fields,
-            kind_fields,
-            population_fields,
-            max_queries,
-            max_seconds,
-        } => {
-            if state.refresh_blocked() {
-                return Err(fail(
-                    "Reconcile the unresolved refresh before preparing a new discovery run.",
-                ));
-            }
-            let request = state.discovery_request(
-                start,
-                end,
-                &source_ids,
-                value_fields,
-                kind_fields,
-                population_fields,
-                max_queries,
-                max_seconds,
-            )?;
-            check_retained_searches(state, Some(&request), None, now)?;
-            let prior = cumulative_pack(state)?;
-            let run_dir = snapshot_directory(path, "discovery", state.discovery_runs.len() + 1)?;
-            let relay = run_dir.join("relay-state.json");
-            let pack = run_dir.join("pack.json");
-            let receipt = run_dir.join("receipt.json");
-            if let Some(prior) = prior {
-                let bytes = cumulative_pack_bytes(&prior)?;
-                storage::Writer::acquire(&pack)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
-            }
-            let selected: Vec<_> = state
-                .sources
-                .iter()
-                .filter(|s| request.sources.contains(&s.selectors))
-                .map(|s| s.id.clone())
-                .collect();
-            let output =
-                mcp::init_inventory_resumable(request.clone(), &relay, &pack, &receipt, owner)?;
-            state.discovery_runs.push(DiscoveryRun {
-                state_path: absolute_path(&relay)?,
-                pack_path: absolute_path(&pack)?,
-                receipt_path: absolute_path(&receipt)?,
-                start: request.start,
-                end: request.end,
-                source_ids: selected,
-                value_fields: request.value_fields,
-                max_queries,
-                max_seconds,
-                answered: output.answered,
-                elapsed_seconds: 0.0,
-                status: output.status.into(),
-                mode: state.discovery_mode,
-                quick_depth: state.quick_depth,
-            });
-            let index = state.discovery_runs.len() - 1;
-            let advice = discovery_step_advice(index, false, false, &output);
-            Ok(
-                json!({"run_index":index,"warning":DISCOVERY_WARNING,"relay":output,"next_action":advice}),
-            )
+        InventoryAction::PrepareDiscovery { .. } => {
+            unreachable!("handled before applying other actions")
         }
         InventoryAction::DiscoveryStep { answers, run_index } => {
             let run_index = discovery_run_index(state, run_index)?;

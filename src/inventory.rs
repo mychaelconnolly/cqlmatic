@@ -1016,10 +1016,23 @@ pub struct FieldStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+pub struct SourceRestrictions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sourcetype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_family: Option<String>,
+    pub discovery_compatible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SourceStatus {
     pub source_id: String,
     pub expected: bool,
     pub selectors: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_restrictions: Option<SourceRestrictions>,
     pub scouted_events: Option<u64>,
     pub review: Option<SourceReview>,
     pub binding: Option<ParserBinding>,
@@ -1470,12 +1483,18 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "settings_attention":status.settings_attention,
         "refresh_attempts":status.refresh_attempts,
         "pending_inventory":status.pending_inventory,
-        "sources":status.sources.iter().map(|source| json!({"source_id":source.source_id,"selectors":source.selectors,
+        "sources":status.sources.iter().map(|source| {
+            let mut row = json!({"source_id":source.source_id,"selectors":source.selectors,
             "expected":source.expected,"status":source.status,"interpretation":source.interpretation,"parser":source.parser,
             "measurements":source.measurements,"observation":source.observation,"scouted_events":source.scouted_events,
             "fields":{"total":source.fields.len(),"declared":source.fields.iter().filter(|f|f.declared).count(),
                 "observed":source.fields.iter().filter(|f|f.observed).count(),"measured":source.fields.iter().filter(|f|f.measured).count(),
-                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).collect::<Vec<_>>(),
+                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions});
+            if let Some(restrictions) = &source.retained_restrictions {
+                row["retained_restrictions"] = json!(restrictions);
+            }
+            row
+        }).collect::<Vec<_>>(),
         "active_pack":status.active_pack,"covered_queries_usable":status.covered_queries_usable,"next_actions":status.next_actions
     })
 }
@@ -4429,6 +4448,7 @@ fn assess_source(
     let mut fields = BTreeMap::<String, FieldStatus>::new();
     let mut record_kinds = Vec::new();
     let mut observed_source = false;
+    let mut retained_restrictions = None;
     let mut parser_status = Progress::Pending;
     if let Some(binding) = &source.binding {
         match binding {
@@ -4498,6 +4518,15 @@ fn assess_source(
         else {
             continue;
         };
+        retained_restrictions = pack_source
+            .selectors
+            .as_ref()
+            .filter(|s| s.sourcetype.is_some() || s.event_family.is_some())
+            .map(|s| SourceRestrictions {
+                sourcetype: s.sourcetype.clone(),
+                event_family: s.event_family.clone(),
+                discovery_compatible: environment::discovery_compatible_restrictions(s),
+            });
         observed_source = pack_source
             .evidence
             .as_ref()
@@ -4652,6 +4681,7 @@ fn assess_source(
         source_id: source.id.clone(),
         expected: source.expected,
         selectors: source.selectors.clone(),
+        retained_restrictions,
         scouted_events: source.scouted_events,
         review: source.review.clone(),
         binding: source.binding.clone(),
