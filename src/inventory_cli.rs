@@ -1938,6 +1938,18 @@ fn preflight_foreign_run(
     Ok(earlier_ended)
 }
 
+const CAPABILITY_HELD_ELSEWHERE: &str = "A retained capability checkpoint for this host session can still dispatch a requested case, so preparing it again would renew its allowance. Use that checkpoint's run_id and execution_context_id from status, resuming it first if it is paused.";
+
+/// Names the capability action that settles an outstanding attempt; inventory reconcile does not.
+fn check_capability_attempts_settled(state: &InventoryState) -> Result<(), Diagnostic> {
+    if state.capability_blocked() {
+        return Err(fail(
+            "A capability attempt is unresolved. Submit its terminal settlement with submit-capability before another inventory search; status marks its checkpoint termination_pending.",
+        ));
+    }
+    Ok(())
+}
+
 fn check_retained_searches(
     state: &InventoryState,
     request: Option<&discovery::DiscoverRequest>,
@@ -2058,28 +2070,35 @@ fn apply(
                     "Reconcile the outstanding refresh before optional capability checks.",
                 ));
             }
+            check_capability_attempts_settled(state)?;
             check_retained_searches(state, None, None, now)?;
+            // An allowance is never renewed: a case a retained run in this host session can still
+            // dispatch is not prepared again under any execution context.
+            let mut held_elsewhere = false;
+            let mut active = false;
             for previous in &state.capability_runs {
-                if previous.execution_context_id == execution_context_id
-                    && previous.session_id == session_id
-                    && previous.matches_current_cases()
-                    && previous.attempts.len() < previous.max_queries as usize
-                    && previous.allowance_covers_search(now)?
-                    && previous.status().cases.iter().any(|case| {
-                        case.last_outcome != Some(cqlmatic::capability::CapabilityOutcome::Verified)
-                    })
-                {
-                    if case_ids.iter().any(|case| previous.case_ids.contains(case)) {
+                if previous.session_id != session_id || !previous.can_dispatch_again(now)? {
+                    continue;
+                }
+                let holds = case_ids.iter().any(|case| previous.holds_current(*case));
+                if previous.execution_context_id == execution_context_id {
+                    if holds {
                         return Err(fail(
                             "Resume the retained capability checkpoint with its original remaining allowance.",
                         ));
                     }
-                    if !previous.paused() {
-                        return Err(fail(
-                            "A retained capability checkpoint for this execution context and session can still dispatch. Pause it with pause-capabilities before preparing cases it does not hold.",
-                        ));
-                    }
+                    active |= !previous.paused();
+                } else {
+                    held_elsewhere |= holds;
                 }
+            }
+            if held_elsewhere {
+                return Err(fail(CAPABILITY_HELD_ELSEWHERE));
+            }
+            if active {
+                return Err(fail(
+                    "A retained capability checkpoint for this execution context and session can still dispatch. Pause it with pause-capabilities before preparing cases it does not hold.",
+                ));
             }
             distinct_from_state(path, Path::new(&host_evidence_file))?;
             let raw = observation_input(Path::new(&host_evidence_file), 64 * 1024)?;
@@ -2116,6 +2135,7 @@ fn apply(
                     "Reconcile the outstanding refresh before a capability search.",
                 ));
             }
+            check_capability_attempts_settled(state)?;
             check_retained_searches(state, None, None, now)?;
             let bytes = serde_json::to_vec_pretty(state)
                 .map_err(|_| fail("Cannot preflight capability capture capacity."))?;
@@ -2126,12 +2146,41 @@ fn apply(
                     "Inventory has insufficient protected capacity for a complete capability result and settlement; no dispatch was reserved.",
                 ));
             }
-            let run = state
+            let index = state
                 .capability_runs
-                .iter_mut()
-                .find(|run| run.id == run_id)
+                .iter()
+                .position(|run| run.id == run_id)
                 .ok_or_else(|| fail("Unknown capability checkpoint."))?;
-            let attempt = run.dispatch(case_id, &execution_context_id, &session_id, now)?;
+            if state.capability_runs[index]
+                .dispatch_refusal(case_id, &execution_context_id, &session_id, now)?
+                .is_some_and(|refusal| refusal.leads_to_preparation())
+            {
+                // Point to the retained run that a new preparation would be refused for.
+                let mut active = false;
+                for (other_index, other) in state.capability_runs.iter().enumerate() {
+                    if other_index == index
+                        || other.session_id != session_id
+                        || !other.can_dispatch_again(now)?
+                    {
+                        continue;
+                    }
+                    if other.holds_current(case_id) {
+                        return Err(fail(CAPABILITY_HELD_ELSEWHERE));
+                    }
+                    active |= other.execution_context_id == execution_context_id && !other.paused();
+                }
+                if active {
+                    return Err(fail(
+                        "Another capability checkpoint for this execution context and session is active. Pause it with pause-capabilities, then use prepare-capabilities for this case.",
+                    ));
+                }
+            }
+            let attempt = state.capability_runs[index].dispatch(
+                case_id,
+                &execution_context_id,
+                &session_id,
+                now,
+            )?;
             Ok(
                 json!({"run_id":run_id,"attempt_id":attempt.reservation.id,"case_id":case_id,
                 "case_revision":attempt.case_revision,"query_sha256":attempt.query_sha256,
@@ -2192,12 +2241,29 @@ fn apply(
                     "Reconcile the outstanding refresh before resuming capability checks.",
                 ));
             }
+            check_capability_attempts_settled(state)?;
             check_retained_searches(state, None, None, now)?;
-            let run = state
+            let index = state
                 .capability_runs
-                .iter_mut()
-                .find(|run| run.id == run_id)
+                .iter()
+                .position(|run| run.id == run_id)
                 .ok_or_else(|| fail("Unknown capability checkpoint."))?;
+            let target = &state.capability_runs[index];
+            if target.paused() && target.can_dispatch_again(now)? {
+                for (other_index, other) in state.capability_runs.iter().enumerate() {
+                    if other_index != index
+                        && other.execution_context_id == target.execution_context_id
+                        && other.session_id == target.session_id
+                        && !other.paused()
+                        && other.can_dispatch_again(now)?
+                    {
+                        return Err(fail(
+                            "Another capability checkpoint for this execution context and session is active. Pause it with pause-capabilities before resuming this one.",
+                        ));
+                    }
+                }
+            }
+            let run = &mut state.capability_runs[index];
             run.resume(&execution_context_id, now)?;
             Ok(json!({"capability":run.status(),"executes_searches":false}))
         }
