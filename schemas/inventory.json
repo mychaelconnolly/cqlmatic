@@ -1692,6 +1692,10 @@
             }
           ]
         },
+        "scout_plan_pending": {
+          "description": "Set when a scout plan is prepared and cleared when a reply to it is imported.",
+          "type": "boolean"
+        },
         "scouting": {
           "type": "array",
           "items": {

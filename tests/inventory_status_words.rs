@@ -554,6 +554,7 @@ fn state_written_by_the_previous_release_keeps_its_reconciliation() {
     .unwrap();
     let full = status_json(&dir.0, &[]);
     assert_eq!(full["reconciliation"], "done", "{full}");
+    assert_eq!(full["completion_detail"]["scout_awaiting_capture"], false);
     assert_eq!(
         full["completion_detail"]["evidence_reviewed_at"],
         "2026-01-02T00:00:00Z"
@@ -722,6 +723,7 @@ fn brief_with_every_notice_and_the_largest_counts_stays_within_the_bound() {
     for retained in [
         RetainedRun::Settle(usize::MAX),
         RetainedRun::Unreadable(usize::MAX),
+        RetainedRun::ProducerMismatch(usize::MAX),
     ] {
         let mut advised = assess_at(&state, &[], NOW).unwrap();
         advise(&state, &mut advised, Some(retained));
@@ -774,6 +776,9 @@ fn advice(dir: &Path, command: &str) -> String {
     let full = call(dir, reconcile());
     let next = full["action"]["next_action"].as_str().unwrap();
     assert!(next.contains(command), "expected {command}: {next}");
+    let summary: Value =
+        serde_json::from_slice(&success(inventory(dir, reconcile(), &["--summary"]))).unwrap();
+    assert_eq!(summary["action"]["next_action"], next, "{summary}");
     let brief = brief_call(dir, reconcile());
     assert_eq!(brief["action"]["next_action"], next);
     // The brief envelope carries the step once, in the action.
@@ -862,6 +867,7 @@ fn reconcile_replaces_scouts_that_the_current_mode_cannot_import() {
         );
         let next = advice(&dir.0, "prepare-scout");
         assert!(!next.contains("import-scout"), "{next}");
+        assert!(next.starts_with("Use prepare-scout"), "{next}");
         let plan = call(&dir.0, prepare(!starts_quick));
         assert_eq!(
             plan["action"]["arguments"]["repository"],
@@ -1250,12 +1256,18 @@ fn actions(dir: &Path) -> Vec<String> {
 
 /// No listed action prepares or relays another search.
 fn no_new_search(dir: &Path) {
-    for action in actions(dir) {
+    no_search_after(dir, 0);
+}
+
+/// No action after the first `skip` prepares or relays another search.
+fn no_search_after(dir: &Path, skip: usize) {
+    for action in actions(dir).into_iter().skip(skip) {
         for search in [
             "Prepare scouting",
             "prepare-scout",
             "prepare-discovery",
             "census qualifies",
+            "run the exact plan once",
         ] {
             assert!(!action.contains(search), "{search}: {action}");
         }
@@ -1278,7 +1290,8 @@ fn status_imports_a_saved_scout_response_before_any_new_search() {
         );
         let next = agreed(&dir.0, "import-scout");
         assert!(next.starts_with("Import any saved response"), "{next}");
-        no_new_search(&dir.0);
+        // Only the import step itself mentions running its exact plan.
+        no_search_after(&dir.0, 1);
         let imported = call(&dir.0, scout_import(&dir.0, &plan, census(1)));
         assert_eq!(
             imported["status"]["completion_detail"]["scout_awaiting_capture"],
@@ -1365,6 +1378,9 @@ fn a_missing_checkpoint_is_restored_before_it_can_be_settled() {
     }
     let brief = String::from_utf8(status(&dir.0, &["--json", "--brief"])).unwrap();
     assert!(!brief.contains(checkpoint.to_str().unwrap()), "{brief}");
+    // Separator-independent: JSON escapes a Windows path's backslashes.
+    let name = checkpoint.file_name().unwrap().to_str().unwrap();
+    assert!(!brief.contains(name), "{name} in {brief}");
     let failed = inventory(&dir.0, json!({"kind":"pause-discovery","run_index":0}), &[]);
     assert_eq!(failed.status.code(), Some(2));
 
@@ -1734,4 +1750,287 @@ fn a_compatible_scout_stays_importable_across_a_mode_switch() {
             false
         );
     }
+}
+
+#[test]
+fn a_pending_scout_never_invites_a_search_while_a_discovery_run_blocks() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            false,
+        ),
+    );
+    let started = call(&dir.0, discovery_request(false));
+    let probe = &started["action"]["relay"]["probes"][0]["probe_id"];
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","probe_id":probe}),
+    );
+    // A compatible scout, then one the current mode cannot import.
+    for mode in ["full", "quick"] {
+        call(&dir.0, json!({"kind":"set-discovery-mode","mode":mode}));
+        let next = agreed(&dir.0, "discovery-step with run_index 0");
+        assert!(next.contains("pause-discovery with run_index 0"), "{next}");
+        no_new_search(&dir.0);
+        let status = status_json(&dir.0, &[]);
+        assert_eq!(status["completion_detail"]["scout_awaiting_capture"], true);
+    }
+}
+
+#[test]
+fn reconcile_comes_before_optional_broader_work_in_quick_and_selected_scopes() {
+    let reconcile_first = |dir: &Path| {
+        let full = status_json(dir, &[]);
+        let first = full["next_actions"][0].as_str().unwrap().to_owned();
+        assert!(first.starts_with("Reconcile"), "{full}");
+        assert_eq!(full["completion_detail"]["next_action"], first);
+        assert_eq!(
+            status_json(dir, &["--brief"])["completion_detail"]["next_action"],
+            first
+        );
+        actions(dir)
+    };
+
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, json!({"kind":"set-discovery-mode","mode":"quick"}));
+    let progress = call(&dir.0, discovery_request(false));
+    complete_discovery(&dir.0, progress, None);
+    let all = reconcile_first(&dir.0);
+    for optional in [
+        "interpretation review",
+        "parser catalog",
+        "parser-not-applicable",
+    ] {
+        let action = all.iter().find(|a| a.contains(optional)).unwrap();
+        assert!(action.starts_with("Full discovery: "), "{all:?}");
+    }
+    assert_eq!(
+        call(&dir.0, reconcile())["status"]["quick_scope_complete"],
+        true
+    );
+
+    let dir = Temp::new();
+    let confirmed = confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let source = &confirmed["status"]["sources"][0]["source_id"];
+    let progress = call(&dir.0, discovery_request(false));
+    complete_discovery(&dir.0, progress, None);
+    review(&dir.0, source);
+    native_parser(&dir.0, source);
+    let all = reconcile_first(&dir.0);
+    assert_eq!(status_json(&dir.0, &[])["selected_scope_complete"], false);
+    for optional in ["parser catalog", "Prepare scouting"] {
+        let action = all.iter().find(|a| a.contains(optional)).unwrap();
+        assert!(action.starts_with("Full-environment map: "), "{all:?}");
+    }
+    assert!(
+        !all.iter().any(|a| a.contains("selected scope is complete")),
+        "{all:?}"
+    );
+    assert_eq!(
+        call(&dir.0, reconcile())["status"]["selected_scope_complete"],
+        true
+    );
+}
+
+#[test]
+fn preparing_the_same_scout_again_awaits_its_fresh_reply() {
+    let dir = Temp::new();
+    full_inventory(&dir.0, invalid_census(0), true, None);
+    let status = &call(&dir.0, reconcile())["status"];
+    assert_eq!(status["completion_detail"]["scout_awaiting_capture"], false);
+    assert!(
+        census_warnings(status)[0].contains("fresh capture"),
+        "{status}"
+    );
+    // The exact arguments of the saved, invalid capture.
+    let plan_request = || {
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            false,
+        )
+    };
+    let plan = call(&dir.0, plan_request());
+    assert_eq!(
+        plan["status"]["completion_detail"]["scout_awaiting_capture"],
+        true
+    );
+    let next = agreed(&dir.0, "import-scout");
+    assert!(next.starts_with("Import any saved response"), "{next}");
+    let fresh = scout_import(&dir.0, &plan, census(1));
+    let imported = call(&dir.0, fresh.clone());
+    assert_eq!(
+        imported["status"]["completion_detail"]["scout_awaiting_capture"],
+        false
+    );
+    assert_eq!(
+        call(&dir.0, reconcile())["status"]["full_map_complete"],
+        true
+    );
+    // Importing the same reply again changes nothing.
+    let replayed = call(&dir.0, fresh.clone());
+    assert_eq!(
+        replayed["status"]["completion_detail"]["scout_awaiting_capture"],
+        false
+    );
+    assert_eq!(replayed["status"]["full_map_complete"], true);
+    // Preparing the plan once more awaits a reply; importing that same reply settles it.
+    let again = call(&dir.0, plan_request());
+    assert_eq!(
+        again["status"]["completion_detail"]["scout_awaiting_capture"],
+        true
+    );
+    let replayed = call(&dir.0, fresh);
+    assert_eq!(
+        replayed["status"]["completion_detail"]["scout_awaiting_capture"],
+        false
+    );
+}
+
+#[test]
+fn a_run_written_by_another_release_is_settled_with_that_release() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, discovery_request(false));
+    let checkpoint = PathBuf::from(
+        status_json(&dir.0, &[])["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let current = fs::read(&checkpoint).unwrap();
+    let mut earlier: Value = serde_json::from_slice(&current).unwrap();
+    earlier["producer_version"] = json!("0.1.12");
+    fs::write(&checkpoint, serde_json::to_vec(&earlier).unwrap()).unwrap();
+
+    let next = agreed(&dir.0, "run_index 0");
+    assert!(next.contains("producing release"), "{next}");
+    for command in ["discovery-step", "pause-discovery"] {
+        assert!(!next.contains(command), "{next}");
+    }
+    no_new_search(&dir.0);
+    let brief = status_json(&dir.0, &["--brief"]);
+    assert_eq!(
+        brief["refresh"]["blocker"],
+        "recorded-discovery-recovery-required"
+    );
+    let refused = inventory(&dir.0, json!({"kind":"pause-discovery","run_index":0}), &[]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("MCP_STATE_PRODUCER"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+
+    fs::write(&checkpoint, current).unwrap();
+    agreed(&dir.0, "pause-discovery with run_index 0");
+}
+
+#[test]
+fn a_later_run_that_blocks_is_named_by_its_own_index() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, discovery_request(false));
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let second = call(
+        &dir.0,
+        discovery_window("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+    );
+    assert_eq!(second["action"]["run_index"], 1, "{second}");
+    let probe = &second["action"]["relay"]["probes"][0]["probe_id"];
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","run_index":1,"probe_id":probe}),
+    );
+    let next = agreed(&dir.0, "discovery-step with run_index 1");
+    assert!(!next.contains("run_index 0"), "{next}");
+}
+
+#[test]
+fn a_corrupt_or_swapped_checkpoint_is_restored_not_settled() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, discovery_request(false));
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    call(
+        &dir.0,
+        discovery_window("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+    );
+    let runs = status_json(&dir.0, &[])["discovery_runs"].clone();
+    let first = PathBuf::from(runs[0]["state_path"].as_str().unwrap());
+    let second = PathBuf::from(runs[1]["state_path"].as_str().unwrap());
+    let original = fs::read(&first).unwrap();
+    for replacement in [b"{\"format\":".to_vec(), fs::read(&second).unwrap()] {
+        fs::write(&first, replacement).unwrap();
+        let next = agreed(&dir.0, "run_index 0");
+        assert!(next.contains("missing or cannot be read"), "{next}");
+        assert!(!next.contains("discovery-step"), "{next}");
+    }
+    fs::write(&first, original).unwrap();
+    agreed(&dir.0, "discovery-step with run_index 1");
+}
+
+#[test]
+fn brief_refresh_availability_follows_a_missing_paused_checkpoint() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, discovery_request(false));
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let checkpoint = PathBuf::from(
+        status_json(&dir.0, &[])["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let blocker = |dir: &Path| status_json(dir, &["--brief"])["refresh"]["blocker"].clone();
+    assert_eq!(blocker(&dir.0), "manual-refresh-available");
+    let held = dir.0.join("held-checkpoint.json");
+    fs::rename(&checkpoint, &held).unwrap();
+    assert_eq!(blocker(&dir.0), "recorded-discovery-recovery-required");
+    agreed(&dir.0, "run_index 0");
+    fs::rename(&held, &checkpoint).unwrap();
+    assert_eq!(blocker(&dir.0), "manual-refresh-available");
+}
+
+#[test]
+fn an_empty_full_environment_census_says_a_source_is_needed() {
+    let dir = Temp::new();
+    confirm(&dir.0, "full-environment", json!([]));
+    let plan = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            false,
+        ),
+    );
+    call(&dir.0, scout_import(&dir.0, &plan, census(0)));
+    empty_catalog(&dir.0);
+    let status = &call(&dir.0, reconcile())["status"];
+    assert_eq!(status["full_map_complete"], false, "{status}");
+    assert_eq!(status["reconciliation"], "done");
+    let next = agreed(&dir.0, "at least one source");
+    assert!(next.contains("confirm-target"), "{next}");
+}
+
+#[test]
+fn brief_discovery_actions_keep_the_status_next_step() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let started = brief_call(&dir.0, discovery_request(false));
+    let step = started["status"]["completion_detail"]["next_action"]
+        .as_str()
+        .unwrap();
+    assert!(step.contains("run_index 0"), "{started}");
+    assert_eq!(
+        status_json(&dir.0, &["--brief"])["completion_detail"]["next_action"],
+        step
+    );
+    assert!(started["action"]["next_action"].is_string(), "{started}");
 }

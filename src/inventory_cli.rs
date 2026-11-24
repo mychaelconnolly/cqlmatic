@@ -654,13 +654,15 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         | InventoryAction::DispatchRefresh { session_id, .. } => Some(session_id.clone()),
         _ => None,
     };
+    let is_reconcile = matches!(request.action, InventoryAction::Reconcile { .. });
     let (report, extra) = apply_and_store(&path, request.action)?;
     if args.json {
         if args.brief {
             let action = action_brief(&extra);
             let mut status = inventory::brief(&report, session_id.as_deref());
             // A reconcile action carries the same next step, so the brief keeps one copy.
-            if action.get("next_action").is_some()
+            if is_reconcile
+                && action.get("next_action").is_some()
                 && let Some(detail) = status["completion_detail"].as_object_mut()
             {
                 detail.remove("next_action");
@@ -1294,13 +1296,18 @@ fn retained_blocker(state: &InventoryState, now: &str) -> Option<inventory::Reta
         .ok()?;
     let run = state.discovery_runs.get(index)?;
     let path = Path::new(&run.state_path);
-    let readable = crate::setup_cli::private_input_exists(path).unwrap_or(false)
-        && mcp::inspect_state(path)
-            .is_ok_and(|relay| verify_run_reference(state, run, &relay).is_ok());
-    Some(if readable {
-        inventory::RetainedRun::Settle(index)
-    } else {
-        inventory::RetainedRun::Unreadable(index)
+    let relay = crate::setup_cli::private_input_exists(path)
+        .unwrap_or(false)
+        .then(|| mcp::inspect_state(path).ok())
+        .flatten()
+        .filter(|relay| verify_run_reference(state, run, relay).is_ok());
+    Some(match relay {
+        None => inventory::RetainedRun::Unreadable(index),
+        // Continuing or pausing the run needs the release that wrote its checkpoint.
+        Some(relay) if mcp::require_current_producer(&relay).is_err() => {
+            inventory::RetainedRun::ProducerMismatch(index)
+        }
+        Some(_) => inventory::RetainedRun::Settle(index),
     })
 }
 
