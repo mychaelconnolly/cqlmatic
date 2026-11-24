@@ -3017,7 +3017,6 @@ fn ground(
     let lenient = !context.require_observed;
     let compare = lenient && !in_selector;
     let pack_sources: Vec<_> = pack
-        .filter(|_| lenient)
         .iter()
         .flat_map(|p| &p.data.sources)
         .filter_map(|v| environment::source(v).ok())
@@ -3110,7 +3109,7 @@ fn ground(
             continue;
         }
         let mut selected = Vec::new();
-        if lenient && pack.is_some() && r.origin == Origin::Deployment {
+        if pack.is_some() && r.origin == Origin::Deployment {
             selected = pack_sources
                 .iter()
                 .filter(|source| {
@@ -3155,8 +3154,15 @@ fn ground(
             record_basis(&mut g, key, "language-built-in".into());
             continue;
         }
+        let mut winning_namespace = None;
         if let Some(evidence) = evidence {
-            match query_observation_basis(&r, &evidence_packs, evidence) {
+            match query_observation_basis(
+                &r,
+                &evidence_packs,
+                evidence,
+                !lenient,
+                &mut winning_namespace,
+            ) {
                 Ok(Some(basis)) => {
                     query_observed = true;
                     record_basis(&mut g, key, basis);
@@ -3189,26 +3195,61 @@ fn ground(
             continue;
         };
         let decoded_p = decoded_of(p);
-        let sources = decoded_p
-            .sources
-            .iter()
-            .filter(|source| source_matches_requirement(source, &r))
-            .collect::<Vec<_>>();
-        let matches = decoded_p
+        let mut matches = decoded_p
             .fields
             .iter()
             .filter(|f| {
                 field_matches_requirement(f, &r)
-                    && sources.iter().any(|s| s.id == f.source_id)
                     && (!r.array || f.is_array == Some(true) || f.data_type == "array")
             })
+            .filter_map(|f| {
+                decoded_p
+                    .sources
+                    .iter()
+                    .find(|s| s.id == f.source_id && source_matches_requirement(s, &r))
+                    .map(|source| {
+                        (
+                            f,
+                            source
+                                .selectors
+                                .as_ref()
+                                .expect("matching source has selectors"),
+                            source,
+                        )
+                    })
+            })
             .collect::<Vec<_>>();
-        if matches.len() == 1 {
-            let f = &matches[0];
-            let source = sources
-                .iter()
-                .find(|s| s.id == f.source_id)
-                .expect("matched field belongs to a selected source");
+        let sole_match = match matches.as_slice() {
+            [candidate] => Some(*candidate),
+            _ => None,
+        };
+        let mut ambiguity = None;
+        if !lenient {
+            matches.retain(|(_, selectors, _)| {
+                !event_family_mismatch(selectors, &r)
+                    && winning_namespace.is_none_or(|winner| winner == field_namespace(selectors))
+            });
+            if matches.len() > 1 {
+                let namespaces = matches
+                    .iter()
+                    .map(|(_, selectors, _)| field_namespace(selectors))
+                    .collect();
+                match resolve_field_namespace(&namespaces, &r.scope) {
+                    Ok(Some(winner)) => {
+                        matches.retain(|(_, selectors, _)| winner == field_namespace(selectors))
+                    }
+                    Err(basis) => ambiguity = Some(basis),
+                    Ok(None) => {}
+                }
+            }
+        }
+        let candidate = match matches.as_slice() {
+            [candidate] => Some((*candidate, true)),
+            // A nonmatching namespace can still report an unambiguous negative.
+            [] => sole_match.map(|candidate| (candidate, false)),
+            _ => None,
+        };
+        if let Some(((f, _, source), eligible)) = candidate {
             let historical = f.refresh_status.as_deref() == Some("not-reobserved");
             let field_observed = f
                 .coverage
@@ -3256,6 +3297,27 @@ fn ground(
                 "source marked stale".into()
             } else if stale {
                 "observation evidence marked stale".into()
+            } else if observed && !eligible {
+                let active_has_winner = winning_namespace.is_some_and(|winner| {
+                    evidence
+                        .and_then(|e| e.active_pack)
+                        .filter(|active| active.content_digest != p.content_digest)
+                        .map(decoded_of)
+                        .is_some_and(|active| {
+                            active.sources.iter().any(|source| {
+                                source.selectors.as_ref().map(field_namespace) == Some(winner)
+                                    && active.fields.iter().any(|field| {
+                                        field.source_id == source.id
+                                            && field_matches_requirement(field, &r)
+                                    })
+                            })
+                        })
+                });
+                if active_has_winner {
+                    "The selected pack measures this field at a different scope. See the field record at the query's scope in the inventory's active pack.".into()
+                } else {
+                    "query-supplied; not measured in selected pack".into()
+                }
             } else if accepted_partial {
                 let mut details = Vec::new();
                 if field_evidence != Observation::Qualified {
@@ -3301,7 +3363,7 @@ fn ground(
             if context.require_observed {
                 if stale {
                     g.stale.push(key);
-                } else if !observed {
+                } else if !observed || !eligible {
                     g.missing.push(key);
                 }
             }
@@ -3310,11 +3372,10 @@ fn ground(
                 &mut g,
                 key.clone(),
                 if matches.len() > 1 {
-                    "multiple source-specific observations; not interchangeable"
+                    ambiguity.unwrap_or_else(|| AMBIGUOUS_FIELD.into())
                 } else {
-                    "query-supplied; not measured in selected pack"
-                }
-                .into(),
+                    "query-supplied; not measured in selected pack".into()
+                },
             );
             if context.require_observed {
                 g.missing.push(key);
@@ -3593,6 +3654,90 @@ fn map_gap<'a>(
     }
 }
 
+const AMBIGUOUS_FIELD: &str = "multiple source-specific observations; not interchangeable";
+
+type FieldNamespace<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+
+fn field_namespace(selectors: &environment::Selectors) -> FieldNamespace<'_> {
+    (
+        selectors.repo.as_deref(),
+        selectors.type_.as_deref(),
+        selectors.event_family.as_deref(),
+        selectors.sourcetype.as_deref(),
+    )
+}
+
+fn exact_namespace((repo, kind, event, sourcetype): FieldNamespace<'_>, scope: &Scope) -> bool {
+    repo == scope.repo.as_deref()
+        && kind == scope.type_.as_deref()
+        && event.is_none()
+        && (sourcetype.is_none() || sourcetype == kind)
+}
+
+fn resolve_field_namespace<'a>(
+    namespaces: &BTreeSet<FieldNamespace<'a>>,
+    scope: &Scope,
+) -> Result<Option<FieldNamespace<'a>>, String> {
+    if namespaces.len() < 2 {
+        return Ok(None);
+    }
+    let mut exact = namespaces
+        .iter()
+        .copied()
+        .filter(|&namespace| exact_namespace(namespace, scope));
+    let multiple_exact = match (exact.next(), exact.next()) {
+        (Some(winner), None) => return Ok(Some(winner)),
+        (Some(_), Some(_)) => true,
+        _ => false,
+    };
+    let &(repo, kind, event, _) = namespaces.first().expect("competing namespaces");
+    let next_action = if namespaces
+        .iter()
+        .all(|&(r, k, e, _)| (r, k, e) == (repo, kind, event))
+    {
+        "Select the intended snapshot, or measure the field at the query's own scope."
+    } else if multiple_exact {
+        "Select the snapshot you intend, or update the other."
+    } else {
+        "Narrow the query to one of these selectors, or measure the field at the query's own scope."
+    };
+    let labels = namespaces
+        .iter()
+        .map(|&(repo, kind, event, sourcetype)| {
+            let label = [
+                ("#repo", repo),
+                ("#type", kind),
+                ("#event_simpleName", event),
+                ("@sourcetype", sourcetype),
+            ]
+            .into_iter()
+            .filter_map(|(field, value)| value.map(|value| format!("{field}={}", quote(value))))
+            .collect::<Vec<_>>()
+            .join(" ");
+            if label.is_empty() {
+                "unscoped".into()
+            } else {
+                label
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!("{AMBIGUOUS_FIELD} ({labels}). {next_action}"))
+}
+
+fn event_family_mismatch(selectors: &environment::Selectors, r: &Requirement) -> bool {
+    selectors
+        .event_family
+        .as_ref()
+        .zip(r.scope.event.as_ref())
+        .is_some_and(|(family, event)| family != event)
+}
+
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {
     source.selectors.as_ref().is_some_and(|selectors| {
         r.scope
@@ -3658,10 +3803,12 @@ impl<'a> DecodedPack<'a> {
     }
 }
 
-fn query_observation_basis(
+fn query_observation_basis<'a>(
     r: &Requirement,
-    packs: &[&DecodedPack<'_>],
+    packs: &[&'a DecodedPack<'_>],
     evidence: GroundingEvidence<'_>,
+    strict: bool,
+    winning_namespace: &mut Option<FieldNamespace<'a>>,
 ) -> Result<Option<String>, String> {
     let mut namespaces = BTreeSet::new();
     let mut contradictions = Vec::new();
@@ -3693,13 +3840,9 @@ fn query_observation_basis(
             if !source_fields.is_empty()
                 && source_matches_requirement(source, r)
                 && let Some(selectors) = &source.selectors
+                && (!strict || !event_family_mismatch(selectors, r))
             {
-                namespaces.insert((
-                    selectors.repo.clone(),
-                    selectors.type_.clone(),
-                    selectors.event_family.clone(),
-                    selectors.sourcetype.clone(),
-                ));
+                namespaces.insert(field_namespace(selectors));
             }
             let source_evidence = observation(pack, &source.provenance_ids);
             let source_negative = source.inventory_status == "stale"
@@ -3758,8 +3901,10 @@ fn query_observation_basis(
             contradictions.push((pack, provenance_ids, windows, snapshot_bound));
         }
     }
-    if namespaces.len() > 1 {
-        return Err("multiple source-specific observations; not interchangeable".into());
+    if strict {
+        *winning_namespace = resolve_field_namespace(&namespaces, &r.scope)?;
+    } else if namespaces.len() > 1 {
+        return Err(AMBIGUOUS_FIELD.into());
     }
     let source_id = crate::discovery::source_id(&r.scope);
     let mut matching = false;

@@ -1,0 +1,1 @@
+- `cqlmatic --schema setup` includes the saved host tool-discovery report that `import-discovery` reads, as the `host_tool_discovery` property. The setup guide and handoff point to it. A test now parses every file under `examples/` as the contract its name maps to and fails for a file with no mapping.

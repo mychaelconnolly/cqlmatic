@@ -1,0 +1,1 @@
+- Keep offline checking, generation and assessment available while the default inventory is scouting before target confirmation.

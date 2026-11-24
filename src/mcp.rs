@@ -3,7 +3,7 @@
 use std::{collections::HashSet, fmt};
 
 use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
     contracts::Diagnostic,
@@ -23,24 +23,59 @@ pub struct Normalized {
 }
 
 pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
-    normalize_classified(raw, true)
+    normalize_framed(raw, true)
+}
+
+pub(crate) fn normalize_framed(raw: &[u8], extended: bool) -> Result<Normalized, Diagnostic> {
+    normalize_classified(raw, true, ResultFraming::saved(extended, false))
+}
+
+/// Normalize a newly delivered discovery response, comparing framing copies exactly.
+pub fn normalize_fresh(raw: &[u8]) -> Result<Normalized, Diagnostic> {
+    normalize_classified(raw, true, ResultFraming::Exact)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultFraming {
+    Original,
+    Extended,
+    Exact,
+}
+
+impl ResultFraming {
+    fn saved(extended: bool, exact: bool) -> Self {
+        match (extended, exact) {
+            (_, true) => Self::Exact,
+            (true, false) => Self::Extended,
+            (false, false) => Self::Original,
+        }
+    }
 }
 
 // `hosted` classifies an error object inside `result`; without it such an answer is a shape error.
-fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
-    if raw.len() > MAX_RESULT_BYTES {
-        return Err(Diagnostic::error(
-            "MCP_TOO_LARGE",
-            "MCP search result exceeds the maximum size",
-        ));
-    }
-
-    let value = parse_repeated_json(raw, "MCP search result must be valid UTF-8 JSON")?;
+fn normalize_classified(
+    raw: &[u8],
+    hosted: bool,
+    framing: ResultFraming,
+) -> Result<Normalized, Diagnostic> {
+    let frame = decode_frame(raw, framing)?;
+    let value = frame.value;
     let object = value
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
     let body = if object.contains_key("content") {
-        parse_envelope(object, hosted)?
+        let source = BodySource::outer(frame.rpc);
+        let envelope =
+            if framing == ResultFraming::Exact && object.contains_key("structuredContent") {
+                Some(
+                    source
+                        .exact_value(raw)
+                        .ok_or_else(|| shape("Invalid MCP text envelope"))?,
+                )
+            } else {
+                None
+            };
+        parse_envelope(object, hosted, envelope)?
     } else {
         value
     };
@@ -48,7 +83,11 @@ fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnost
     parse_result(body, raw, hosted)
 }
 
-fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
+fn parse_envelope(
+    object: &Map<String, Value>,
+    hosted: bool,
+    envelope: Option<&RawValue>,
+) -> Result<Value, Diagnostic> {
     // structuredContent is optional; when present it must equal the parsed text payload.
     if object
         .keys()
@@ -84,16 +123,16 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
                 return Err(shape("Nested MCP text envelopes are not supported"));
             }
             if hosted && inner.get("result").is_some_and(Value::is_object) {
-                if object
-                    .get("structuredContent")
-                    .is_some_and(|value| value != &Value::Object(inner.clone()))
-                {
+                let body = Value::Object(inner);
+                if !matching_structured_content(object, &body, text, envelope) {
                     return Err(shape(
                         "MCP structuredContent does not match the text content",
                     ));
                 }
-                return Err(hosted_result_error(&inner)
-                    .unwrap_or_else(|| shape("MCP search result must have a result array")));
+                return Err(
+                    hosted_result_error(body.as_object().expect("inner is an object"))
+                        .unwrap_or_else(|| shape("MCP search result must have a result array")),
+                );
             }
         }
         if has_deadline(text) {
@@ -121,14 +160,126 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
     if inner.contains_key("content") || inner.contains_key("isError") {
         return Err(shape("Nested MCP text envelopes are not supported"));
     }
-    if let Some(structured) = object.get("structuredContent")
-        && *structured != body
-    {
+    if !matching_structured_content(object, &body, text, envelope) {
         return Err(shape(
             "MCP structuredContent does not match the text content",
         ));
     }
     Ok(body)
+}
+
+fn matching_structured_content(
+    object: &Map<String, Value>,
+    body: &Value,
+    text: &str,
+    envelope: Option<&RawValue>,
+) -> bool {
+    object.get("structuredContent").is_none_or(|structured| {
+        if let Some(envelope) = envelope {
+            raw_field(envelope, "structuredContent")
+                .zip(first_raw_value(text.as_bytes()))
+                .is_some_and(|(left, right)| exact_json_equal(left, right))
+        } else {
+            structured == body
+        }
+    })
+}
+
+fn is_single_text_block(value: &Value) -> bool {
+    let Some([item]) = value.as_array().map(Vec::as_slice) else {
+        return false;
+    };
+    item.as_object().is_some_and(|item| {
+        item.get("type").and_then(Value::as_str) == Some("text")
+            && item.get("text").is_some_and(Value::is_string)
+            && item
+                .keys()
+                .all(|key| matches!(key.as_str(), "type" | "text" | "_meta" | "annotations"))
+            && ["_meta", "annotations"]
+                .iter()
+                .all(|key| item.get(*key).is_none_or(|v| v.is_null() || v.is_object()))
+    })
+}
+
+struct DecodedFrame {
+    value: Value,
+    changed: bool,
+    rpc: bool,
+}
+
+// Strip only framing metadata. The original bytes are still the evidence.
+fn decode_frame(raw: &[u8], framing: ResultFraming) -> Result<DecodedFrame, Diagnostic> {
+    let extended = framing != ResultFraming::Original;
+    let mut value = parse_result_json(raw, framing)?;
+    let mut changed = extended && raw.starts_with(b"\xef\xbb\xbf");
+    if !extended {
+        return Ok(DecodedFrame {
+            value,
+            changed,
+            rpc: false,
+        });
+    }
+    let mut rpc = false;
+    if let Some(wrapper) = value.as_object_mut()
+        && wrapper.len() == 3
+        && wrapper
+            .get("jsonrpc")
+            .is_some_and(|version| version == "2.0")
+        && wrapper
+            .get("id")
+            .is_some_and(|id| id.is_number() || id.is_string() || id.is_null())
+        && wrapper
+            .get("result")
+            .and_then(Value::as_object)
+            .is_some_and(|inner| {
+                inner.get("content").is_some_and(is_single_text_block)
+                    || inner.contains_key("result")
+            })
+    {
+        value = wrapper.remove("result").expect("Result object was checked");
+        changed = true;
+        rpc = true;
+    }
+    if value.is_array() && is_single_text_block(&value) {
+        value = Value::Object(Map::from_iter([("content".into(), value)]));
+        changed = true;
+    }
+    if let Some(object) = value.as_object_mut()
+        && object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "content" | "isError" | "structuredContent" | "_meta"
+            )
+        })
+        && object
+            .get("_meta")
+            .is_none_or(|v| v.is_null() || v.is_object())
+        && object.get("isError").is_none_or(Value::is_boolean)
+        && object.get("content").is_some_and(is_single_text_block)
+    {
+        changed |= object.remove("_meta").is_some();
+        if object.get("structuredContent").is_some_and(Value::is_null) {
+            object.remove("structuredContent");
+            changed = true;
+        }
+        let item = object
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+            .and_then(|items| items.first_mut())
+            .and_then(Value::as_object_mut)
+            .expect("The single text block was checked");
+        changed |= item.remove("_meta").is_some();
+        changed |= item.remove("annotations").is_some();
+    }
+    Ok(DecodedFrame {
+        value,
+        changed,
+        rpc,
+    })
+}
+
+pub(crate) fn uses_extended_framing(raw: &[u8]) -> bool {
+    decode_frame(raw, ResultFraming::Extended).is_ok_and(|frame| frame.changed)
 }
 
 fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
@@ -229,13 +380,18 @@ fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Di
 
 /// Recognize the hosted search tool's final error answer from its exact decoded shape.
 pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
-    hosted_body_ending(hosted_answer_body(raw)?.as_object()?)
+    hosted_attempt_ending_framed(raw, true)
 }
 
-pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
-    let Some(value) = hosted_answer_body(raw) else {
-        return false;
-    };
+pub(crate) fn hosted_attempt_ending_framed(raw: &[u8], extended: bool) -> Option<&'static str> {
+    hosted_attempt_ending_with_framing(raw, ResultFraming::saved(extended, false))
+}
+
+fn hosted_attempt_ending_with_framing(raw: &[u8], framing: ResultFraming) -> Option<&'static str> {
+    hosted_body_ending(hosted_answer_body(raw, framing)?.as_object()?)
+}
+
+pub(crate) fn hosted_answer_identifies_call(value: &Value) -> bool {
     value
         .get("trace_id")
         .and_then(Value::as_str)
@@ -245,11 +401,99 @@ pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
             .is_some_and(|body| hosted_body_ending(body) == Some("timed-out"))
 }
 
-fn hosted_answer_body(raw: &[u8]) -> Option<Value> {
-    if raw.len() > MAX_RESULT_BYTES {
-        return None;
+fn identifies_measurement(body: &Value) -> bool {
+    let has_job_id = ["metadata", "metaData"]
+        .iter()
+        .filter_map(|key| body.get(key))
+        .any(|metadata| {
+            ["job_id", "jobId"]
+                .iter()
+                .filter_map(|key| metadata.get(key).and_then(Value::as_str))
+                .any(|id| !id.is_empty())
+        });
+    hosted_answer_identifies_call(body) || has_job_id
+        // A different numeric spelling can match a retained cutoff. Only the strict
+        // hosted outcome decoder may settle an attempt.
+        || body.as_object().and_then(hosted_error_result).and_then(hosted_timeout_seconds).is_some_and(Value::is_number)
+}
+
+/// Compare a fresh identified result against retained captures without changing replay.
+fn verify_fresh_result(
+    raw: &[u8],
+    is_reused: impl FnOnce(&str, Option<&RawValue>) -> bool,
+) -> Result<(), Diagnostic> {
+    if let Some((body, source)) = decode_hosted_answer(raw, ResultFraming::Exact)
+        && identifies_measurement(&body)
+        && is_reused(&sha256_hex(raw), source.exact_value(raw))
+    {
+        return Err(Diagnostic::error(
+            "MCP_RESULT_REUSED",
+            "This answer was already retained by an earlier attempt.",
+        ));
     }
-    let mut value = parse_repeated_json(raw, "Invalid hosted answer").ok()?;
+    Ok(())
+}
+
+fn matches_retained_measurement(
+    raw_hex: &str,
+    hash: &str,
+    fresh_hash: &str,
+    fresh: Option<&RawValue>,
+) -> bool {
+    hash == fresh_hash
+        || fresh.is_some_and(|fresh| {
+            capture_bytes(raw_hex, hash).is_ok_and(|raw| {
+                decode_hosted_answer(&raw, ResultFraming::Exact).is_some_and(|(_, source)| {
+                    source
+                        .exact_value(&raw)
+                        .is_some_and(|prior| exact_json_equal(prior, fresh))
+                })
+            })
+        })
+}
+
+enum BodySource {
+    Bare,
+    Rpc,
+    Text(String),
+}
+
+impl BodySource {
+    fn outer(rpc: bool) -> Self {
+        if rpc { Self::Rpc } else { Self::Bare }
+    }
+
+    fn exact_value<'a>(&'a self, raw: &'a [u8]) -> Option<&'a RawValue> {
+        let bare = || first_raw_value(raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw));
+        match self {
+            Self::Bare => bare(),
+            Self::Rpc => raw_field(bare()?, "result"),
+            Self::Text(text) => first_raw_value(text.as_bytes()),
+        }
+    }
+}
+
+fn raw_field<'a>(object: &'a RawValue, key: &str) -> Option<&'a RawValue> {
+    serde_json::from_str::<BTreeMap<String, &RawValue>>(object.get())
+        .ok()?
+        .get(key)
+        .copied()
+}
+
+fn first_raw_value(raw: &[u8]) -> Option<&RawValue> {
+    serde_json::Deserializer::from_slice(raw)
+        .into_iter::<&RawValue>()
+        .next()?
+        .ok()
+}
+
+fn hosted_answer_body(raw: &[u8], framing: ResultFraming) -> Option<Value> {
+    decode_hosted_answer(raw, framing).map(|(body, _)| body)
+}
+
+fn decode_hosted_answer(raw: &[u8], framing: ResultFraming) -> Option<(Value, BodySource)> {
+    let DecodedFrame { mut value, rpc, .. } = decode_frame(raw, framing).ok()?;
+    let source = BodySource::outer(rpc);
     if value.as_object()?.contains_key("content") {
         let object = value.as_object()?;
         if object
@@ -267,20 +511,121 @@ fn hosted_answer_body(raw: &[u8]) -> Option<Value> {
         if item.len() != 2 || item.get("type")?.as_str()? != "text" {
             return None;
         }
-        let body = parse_repeated_json(
-            item.get("text")?.as_str()?.as_bytes(),
-            "Invalid hosted answer",
-        )
-        .ok()?;
-        if object.get("structuredContent").is_some_and(|v| *v != body) {
+        let text = item.get("text")?.as_str()?;
+        let exact = framing == ResultFraming::Exact;
+        let body = parse_repeated_json(text.as_bytes(), "Invalid hosted answer", exact).ok()?;
+        let envelope = if exact && object.contains_key("structuredContent") {
+            Some(source.exact_value(raw)?)
+        } else {
+            None
+        };
+        if !matching_structured_content(object, &body, text, envelope) {
             return None;
         }
-        value = body;
+        let Value::String(text) = value["content"][0]["text"].take() else {
+            unreachable!("the text block was checked");
+        };
+        return Some((body, BodySource::Text(text)));
     }
-    Some(value)
+    Some((value, source))
 }
 
-fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
+// The captures have already passed JSON and framing validation. Read number tokens from
+// that same body so comparison never rounds a decimal or converts a large integer to f64.
+fn exact_json_equal(left: &RawValue, right: &RawValue) -> bool {
+    let (left, right) = (left.get(), right.get());
+    if left == right {
+        return true;
+    }
+    match (left.as_bytes()[0], right.as_bytes()[0]) {
+        (b'{', b'{') => {
+            let Ok(left) = serde_json::from_str::<BTreeMap<String, &RawValue>>(left) else {
+                return false;
+            };
+            let Ok(right) = serde_json::from_str::<BTreeMap<String, &RawValue>>(right) else {
+                return false;
+            };
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|((lk, lv), (rk, rv))| lk == rk && exact_json_equal(lv, rv))
+        }
+        (b'[', b'[') => {
+            let Ok(left) = serde_json::from_str::<Vec<&RawValue>>(left) else {
+                return false;
+            };
+            let Ok(right) = serde_json::from_str::<Vec<&RawValue>>(right) else {
+                return false;
+            };
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(l, r)| exact_json_equal(l, r))
+        }
+        (b'"', b'"') => {
+            serde_json::from_str::<String>(left).ok() == serde_json::from_str::<String>(right).ok()
+        }
+        (b'-' | b'0'..=b'9', b'-' | b'0'..=b'9') => decimal_parts(left) == decimal_parts(right),
+        _ => false,
+    }
+}
+
+fn decimal_parts(token: &str) -> (bool, String, String) {
+    let unsigned = token.strip_prefix('-').unwrap_or(token);
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{integer}{fraction}");
+    let significant = digits.trim_matches('0');
+    if significant.is_empty() {
+        return (false, String::new(), String::new());
+    }
+    let trailing = digits.len() - digits.trim_end_matches('0').len();
+    let shift = trailing as i64 - fraction.len() as i64;
+    (
+        unsigned != token,
+        significant.into(),
+        shift_exponent(exponent, shift),
+    )
+}
+
+fn shift_exponent(exponent: &str, shift: i64) -> String {
+    let unsigned = exponent
+        .trim_start_matches(['+', '-'])
+        .trim_start_matches('0');
+    let negative = exponent.starts_with('-');
+    let magnitude = if unsigned.is_empty() { "0" } else { unsigned };
+    let signed_shift = if negative { -shift } else { shift };
+    if let Ok(value) = magnitude.parse::<i128>()
+        && let Some(value) = value.checked_add(i128::from(signed_shift))
+    {
+        return (if negative { -value } else { value }).to_string();
+    }
+
+    // A very large exponent can still parse as an underflowing JSON number.
+    // Its sign cannot change because the adjustment is bounded by the capture length.
+    let mut carry = signed_shift;
+    let mut digits = Vec::with_capacity(magnitude.len() + 1);
+    for digit in magnitude.bytes().rev() {
+        let sum = i64::from(digit - b'0') + carry;
+        digits.push(b'0' + sum.rem_euclid(10) as u8);
+        carry = sum.div_euclid(10);
+    }
+    if carry > 0 {
+        digits.push(b'1');
+    }
+    while digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+    if negative {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    String::from_utf8(digits).expect("exponent contains only ASCII digits and sign")
+}
+
+fn hosted_error_result(object: &Map<String, Value>) -> Option<&Map<String, Value>> {
     if object
         .keys()
         .any(|k| !matches!(k.as_str(), "result" | "trace_id"))
@@ -288,7 +633,10 @@ fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
     {
         return None;
     }
-    let result = object.get("result")?.as_object()?;
+    object.get("result")?.as_object()
+}
+
+fn hosted_timeout_seconds(result: &Map<String, Value>) -> Option<&Value> {
     let text = result.get("error")?.as_str()?;
     let details = result.get("details")?.as_object()?;
     if result.len() == 3
@@ -297,14 +645,23 @@ fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
         && details.len() == 2
     {
         let id = details.get("job_id")?.as_str()?;
-        if !id.is_empty()
-            && id.chars().count() <= 256
-            && !id.chars().any(char::is_control)
-            && details.get("timeout_seconds")?.as_u64()? >= 1
-        {
-            return Some("timed-out");
+        if !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control) {
+            return details.get("timeout_seconds");
         }
     }
+    None
+}
+
+fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
+    let result = hosted_error_result(object)?;
+    if hosted_timeout_seconds(result)
+        .and_then(Value::as_u64)
+        .is_some_and(|seconds| seconds >= 1)
+    {
+        return Some("timed-out");
+    }
+    let text = result.get("error")?.as_str()?;
+    let details = result.get("details")?.as_object()?;
     if result.len() != 2 || details.len() != 2 || !details.get("body")?.is_object() {
         return None;
     }
@@ -368,19 +725,31 @@ fn shape(message: &str) -> Diagnostic {
 /// (see `parse_repeated_json`). Callers that keep the value (for example `assess`) must still pass it
 /// through [`normalize`] before trusting it.
 pub fn parse_saved_result(raw: &[u8]) -> Result<Value, Diagnostic> {
+    parse_result_json(raw, ResultFraming::Extended)
+}
+
+fn parse_result_json(raw: &[u8], framing: ResultFraming) -> Result<Value, Diagnostic> {
     if raw.len() > MAX_RESULT_BYTES {
         return Err(Diagnostic::error(
             "MCP_TOO_LARGE",
             "MCP search result exceeds the maximum size",
         ));
     }
-    parse_repeated_json(raw, "MCP search result must be valid UTF-8 JSON")
+    parse_repeated_json(
+        if framing != ResultFraming::Original {
+            raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw)
+        } else {
+            raw
+        },
+        "MCP search result must be valid UTF-8 JSON",
+        framing == ResultFraming::Exact,
+    )
 }
 
 /// Agent hosts can render one MCP result more than once (GitHub Copilot CLI shows the text content
 /// followed by the identical structuredContent). Accept whitespace-separated repeats only when every
 /// copy is identical; any difference, or any copy failing the duplicate-key check, fails closed.
-fn parse_repeated_json(raw: &[u8], message: &str) -> Result<Value, Diagnostic> {
+fn parse_repeated_json(raw: &[u8], message: &str, exact: bool) -> Result<Value, Diagnostic> {
     let mut stream = serde_json::Deserializer::from_slice(raw).into_iter::<serde::de::IgnoredAny>();
     let mut spans = Vec::new();
     let mut start = 0;
@@ -390,12 +759,19 @@ fn parse_repeated_json(raw: &[u8], message: &str) -> Result<Value, Diagnostic> {
         spans.push((start, end));
         start = end;
     }
-    let mut copies = spans
-        .into_iter()
-        .map(|(from, to)| parse_unique_json(&raw[from..to], message));
-    let first = copies.next().ok_or_else(|| shape(message))??;
-    for copy in copies {
-        if copy? != first {
+    let mut copies = spans.into_iter().map(|(from, to)| &raw[from..to]);
+    let first_raw = copies.next().ok_or_else(|| shape(message))?;
+    let first = parse_unique_json(first_raw, message)?;
+    for raw in copies {
+        let copy = parse_unique_json(raw, message)?;
+        let matches = if exact {
+            first_raw_value(first_raw)
+                .zip(first_raw_value(raw))
+                .is_some_and(|(left, right)| exact_json_equal(left, right))
+        } else {
+            copy == first
+        };
+        if !matches {
             return Err(shape("MCP search result repeats with different content"));
         }
     }
@@ -491,12 +867,13 @@ const DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 
 #[path = "discovery_session.rs"]
 mod session;
+pub use session::has_search_allowance;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
     has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
-    inventory_probe, is_resumable, outstanding_probe_id, pause, recover_native_cleanup,
-    resumable_info, resumable_request, resume, resume_inventory, run_native, settle_cancelled,
-    step_resumable, time_limit_passed,
+    inspect_inventory_owner_path, inventory_probe, is_resumable, outstanding_probe_id,
+    outstanding_refusal, pause, recover_native_cleanup, resumable_info, resumable_request, resume,
+    resume_inventory, run_native, settle_cancelled, step_resumable, time_limit_passed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +888,14 @@ struct ActivationIntent {
     receipt_sha256: String,
 }
 
+/// The frozen starting pack, including an explicitly absent predecessor.
+pub fn activation_predecessor(state: &State) -> Option<Option<&str>> {
+    state
+        .activation
+        .as_ref()
+        .map(|intent| intent.predecessor_pack_sha256.as_deref())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Answer {
@@ -521,6 +906,10 @@ pub struct Answer {
     pub outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact_result_framing: bool,
     pub raw_hex: String,
     pub raw_sha256: String,
     pub ingested_at: String,
@@ -694,8 +1083,29 @@ fn raw_hex(raw: &[u8]) -> String {
     encoded
 }
 fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, Diagnostic> {
-    Ok(normalize(&answer_bytes(answer)?))
+    Ok(normalize_classified(
+        &answer_bytes(answer)?,
+        true,
+        ResultFraming::saved(answer.extended_result_framing, answer.exact_result_framing),
+    ))
 }
+/// Report the ceiling independently of the recorded failure verdict.
+pub fn ended_at_row_limit(state: &State) -> bool {
+    if state.session.is_some() {
+        return session::ended_at_row_limit(state);
+    }
+    state.status == "failed"
+        && state
+            .failure
+            .as_ref()
+            .is_some_and(|d| d.code == "MCP_DEADLINE")
+        && state.answers.values().any(|answer| {
+            answer.outcome == "failed"
+                && normalized_answer(answer)
+                    .is_ok_and(|result| result.is_ok_and(|result| result.rows.len() >= 10_000))
+        })
+}
+
 fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
     capture_bytes(&answer.raw_hex, &answer.raw_sha256)
 }
@@ -726,7 +1136,8 @@ fn earlier_hosted_diagnostic(producer: &str, raw: &[u8], saved: &Diagnostic) -> 
         producer,
         "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
     ) && producer != env!("CARGO_PKG_VERSION")
-        && normalize_classified(raw, false).is_err_and(|earlier| same_diagnostic(saved, &earlier))
+        && normalize_classified(raw, false, ResultFraming::Original)
+            .is_err_and(|earlier| same_diagnostic(saved, &earlier))
 }
 fn same_diagnostic(a: &Diagnostic, b: &Diagnostic) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
@@ -962,6 +1373,24 @@ pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
     inspect_state_for_producer(path, env!("CARGO_PKG_VERSION"))
 }
 fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diagnostic> {
+    inspect_checkpoint(path, producer, None)
+}
+
+/// Verify a marked run's surviving activation artifacts. The inventory cleaner
+/// supplies the verified live or detached paths, which may now be absent.
+pub fn inspect_prune_leftovers(
+    path: &Path,
+    pack: &Path,
+    receipt: &Path,
+) -> Result<State, Diagnostic> {
+    inspect_checkpoint(path, env!("CARGO_PKG_VERSION"), Some((pack, receipt)))
+}
+
+fn inspect_checkpoint(
+    path: &Path,
+    producer: &str,
+    leftovers: Option<(&Path, &Path)>,
+) -> Result<State, Diagnostic> {
     let bytes = storage::read_bytes(path, MAX_PACK_BYTES)?;
     let header: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
@@ -1046,11 +1475,16 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
     if state.status == "activated" {
         let expected = state.pack_sha256.as_deref().ok_or_else(tampered)?;
         let intent = state.activation.as_ref().ok_or_else(tampered)?;
-        let committed = storage::read_bytes(&state.pack, MAX_PACK_BYTES).map_err(|_| tampered())?;
-        if expected != sha256_hex(&committed)
-            || expected != intent.pack_sha256
-            || storage::read_bytes(&state.receipt, MAX_PACK_BYTES)
-                .map_or(true, |bytes| bytes != intent.receipt_bytes.as_bytes())
+        let (pack, receipt) = match leftovers {
+            Some((pack, receipt)) => (optional_bytes(pack)?, optional_bytes(receipt)?),
+            None => (
+                Some(storage::read_bytes(&state.pack, MAX_PACK_BYTES).map_err(|_| tampered())?),
+                Some(storage::read_bytes(&state.receipt, MAX_PACK_BYTES).map_err(|_| tampered())?),
+            ),
+        };
+        if expected != intent.pack_sha256
+            || pack.is_some_and(|committed| expected != sha256_hex(&committed))
+            || receipt.is_some_and(|committed| committed != intent.receipt_bytes.as_bytes())
             || state.failure.is_some()
         {
             return Err(tampered());
@@ -1381,11 +1815,11 @@ fn activate(
         );
     }
     let merged = match old {
-        Some(old) => environment::merge(&old, &candidate),
-        None => Ok(candidate),
+        Some(old) => environment::merge_with_notices(&old, &candidate),
+        None => environment::validate_incoming_fields(&candidate).map(|()| (candidate, Vec::new())),
     };
-    let merged = match merged {
-        Ok(pack) => pack,
+    let (merged, notices) = match merged {
+        Ok(merged) => merged,
         Err(d) => return fail_state(writer, state, d),
     };
     let receipt_writer = match storage::Writer::acquire(&state.receipt) {
@@ -1409,6 +1843,7 @@ fn activate(
     }
     let predecessor = optional_bytes(&state.pack)?.map(|bytes| sha256_hex(&bytes));
     report.active_pack_updated = true;
+    report.diagnostics.extend(notices.iter().cloned());
     let mut receipt = serde_json::to_value(&report)
         .map_err(|_| Diagnostic::error("LOCAL_SERIALIZATION", "Cannot serialize MCP receipt."))?;
     receipt["mode"] = json!(if state
@@ -1520,6 +1955,94 @@ fn recover_activation(
     }
     finish_activation(writer, &pack_writer, &receipt_writer, state)
 }
+pub const ACTIVATION_PACK_CONFLICT: &str = "Active pack differs from both the frozen predecessor and activation target. No files were replaced on this attempt; prior activation outcome is unknown.";
+pub const ACTIVATION_RECEIPT_CONFLICT: &str =
+    "Receipt differs from the frozen activation receipt. No files were replaced on this attempt.";
+pub const ACTIVATION_RECEIPT_BEFORE_PACK: &str = "Receipt exists before its frozen pack target. No files were replaced on this attempt; prior activation outcome is unknown.";
+
+fn activation_artifacts(
+    state: &State,
+    intent: &ActivationIntent,
+) -> Result<(bool, bool), Diagnostic> {
+    let current_pack = optional_bytes(&state.pack)?;
+    let current_hash = current_pack.as_ref().map(|bytes| sha256_hex(bytes));
+    let target_visible = current_hash.as_deref() == Some(intent.pack_sha256.as_str());
+    if !target_visible && current_hash != intent.predecessor_pack_sha256 {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            ACTIVATION_PACK_CONFLICT,
+        ));
+    }
+    let receipt = optional_bytes(&state.receipt)?;
+    if receipt
+        .as_ref()
+        .is_some_and(|bytes| bytes != intent.receipt_bytes.as_bytes())
+    {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            ACTIVATION_RECEIPT_CONFLICT,
+        ));
+    }
+    if receipt.is_some() && !target_visible {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            ACTIVATION_RECEIPT_BEFORE_PACK,
+        ));
+    }
+    Ok((target_visible, receipt.is_some()))
+}
+
+/// Verify that the on-disk pack and receipt agree with the frozen activation, or that an
+/// activation-blocked run without frozen intent has no stale receipt blocking recovery.
+pub fn inspect_activation_artifacts(state: &State) -> Result<(), Diagnostic> {
+    if state.status == "activation-blocked" && state.activation.is_none() {
+        if optional_bytes(&state.receipt)?.is_some() {
+            return Err(Diagnostic::error(
+                "LOCAL_IO",
+                "MCP receipt path must remain absent before activation.",
+            ));
+        }
+        return Ok(());
+    }
+    let intent = state.activation.as_ref().ok_or_else(tampered)?;
+    if let Some(session) = &state.session
+        && intent.predecessor_pack_sha256 != session.predecessor_sha256
+    {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            "Frozen activation predecessor disagrees with the bound session predecessor.",
+        ));
+    }
+    activation_artifacts(state, intent).map(|_| ())
+}
+
+/// Report a current conflict with the frozen activation artifacts without attempting promotion.
+pub fn pending_activation_conflict(state: &State) -> Option<Diagnostic> {
+    if state.status != "activating" {
+        return None;
+    }
+    activation_artifacts(state, state.activation.as_ref()?)
+        .err()
+        .filter(|error| error.code == "MCP_ACTIVATION_CONFLICT")
+}
+
+fn receipt_notices(state: &State) -> Vec<Diagnostic> {
+    let Some(intent) = state.activation.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(receipt) = serde_json::from_str::<Value>(&intent.receipt_bytes) else {
+        return Vec::new();
+    };
+    receipt
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| serde_json::from_value::<Diagnostic>(item.clone()).ok())
+        .filter(|diagnostic| diagnostic.code == "FIELD_MEASUREMENT_NOT_APPLIED")
+        .collect()
+}
+
 fn finish_activation(
     writer: &storage::Writer,
     pack_writer: &storage::Writer,
@@ -1528,31 +2051,13 @@ fn finish_activation(
 ) -> Result<StepOutput, Diagnostic> {
     let completed_bytes = completed_state_bytes(state)?;
     let intent = state.activation.as_ref().ok_or_else(tampered)?;
-    let current_pack = optional_bytes(&state.pack)?;
-    let current_hash = current_pack.as_ref().map(|bytes| sha256_hex(bytes));
-    let target_visible = current_hash.as_deref() == Some(intent.pack_sha256.as_str());
-    if !target_visible && current_hash != intent.predecessor_pack_sha256 {
-        return Ok(activation_conflict(
-            state,
-            "Active pack differs from both the frozen predecessor and activation target. No files were replaced on this attempt; prior activation outcome is unknown.",
-        ));
-    }
-    let receipt = optional_bytes(&state.receipt)?;
-    if receipt
-        .as_ref()
-        .is_some_and(|bytes| bytes != intent.receipt_bytes.as_bytes())
-    {
-        return Ok(activation_conflict(
-            state,
-            "Receipt differs from the frozen activation receipt. No files were replaced on this attempt.",
-        ));
-    }
-    if receipt.is_some() && !target_visible {
-        return Ok(activation_conflict(
-            state,
-            "Receipt exists before its frozen pack target. No files were replaced on this attempt; prior activation outcome is unknown.",
-        ));
-    }
+    let (target_visible, receipt_exists) = match activation_artifacts(state, intent) {
+        Ok(status) => status,
+        Err(d) if d.code == "MCP_ACTIVATION_CONFLICT" => {
+            return Ok(activation_conflict(state, &d.message));
+        }
+        Err(d) => return Err(d),
+    };
     activation_checkpoint("before-pack")?;
     let committed = if target_visible {
         pack_writer.confirm_durable()
@@ -1564,7 +2069,7 @@ fn finish_activation(
     }
     activation_checkpoint("after-pack")?;
     activation_checkpoint("before-receipt")?;
-    let committed = if receipt.is_some() {
+    let committed = if receipt_exists {
         receipt_writer.confirm_durable()
     } else {
         receipt_writer.commit_frozen_bytes(intent.receipt_bytes.as_bytes(), MAX_PACK_BYTES)
@@ -1580,7 +2085,13 @@ fn finish_activation(
         return Ok(activation_blocked(state, d));
     }
     activation_checkpoint("after-activated")?;
-    Ok(progress(state, "complete", vec![], true, vec![]))
+    Ok(progress(
+        state,
+        "complete",
+        vec![],
+        true,
+        receipt_notices(state),
+    ))
 }
 
 #[cfg(test)]
@@ -1604,12 +2115,43 @@ fn activation_checkpoint(_stage: &str) -> Result<(), Diagnostic> {
     }
     Ok(())
 }
+fn replay_mcp(state: &State, remaining: Duration) -> (Option<Pack>, DiscoverReport) {
+    let mut replay = ReplayBackend::new(&state.answers);
+    discovery::execute_with_policy(
+        &state.request,
+        &mut replay,
+        Origin::Mcp,
+        remaining,
+        state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.sparse_fieldset_fallback),
+    )
+}
+
+/// A paused relay may still activate after its final allowed search was accepted.
+pub fn has_discovery_work_after_resume(state: &State) -> bool {
+    state.session.as_ref().is_some_and(|session| {
+        session.attempts_len() < state.request.max_queries as usize
+            || (session.transport == Transport::Mcp
+                && replay_mcp(state, Duration::from_secs(state.request.max_seconds))
+                    .0
+                    .is_some())
+    })
+}
+
 fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Diagnostic> {
     if state.status == "activated" {
         if let Err(d) = writer.confirm_durable() {
             return Ok(activation_blocked(state, d));
         }
-        return Ok(progress(state, "complete", vec![], true, vec![]));
+        return Ok(progress(
+            state,
+            "complete",
+            vec![],
+            true,
+            receipt_notices(state),
+        ));
     }
     if state.status == "activating" {
         return recover_activation(writer, state);
@@ -1635,17 +2177,7 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
             Err(d) => return fail_state(writer, state, d),
         }
     };
-    let mut replay = ReplayBackend::new(&state.answers);
-    let (candidate, report) = discovery::execute_with_policy(
-        &state.request,
-        &mut replay,
-        Origin::Mcp,
-        remaining,
-        state
-            .session
-            .as_ref()
-            .is_some_and(|session| session.sparse_fieldset_fallback),
-    );
+    let (candidate, report) = replay_mcp(state, remaining);
     if let Some(candidate) = candidate {
         return activate(writer, state, candidate, report);
     }
@@ -1729,8 +2261,15 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
         let raw = storage::read_bytes(path, MAX_CAPTURE_BYTES as u64)?;
         let ingested_at = discovery::timestamp();
         let remaining = elapsed(&state, &ingested_at);
+        let extended = uses_extended_framing(&raw);
+        verify_fresh_result(&raw, |hash, body| {
+            state.answers.values().any(|answer| {
+                answer.outcome == "complete"
+                    && matches_retained_measurement(&answer.raw_hex, &answer.raw_sha256, hash, body)
+            })
+        })?;
         let normalized = remaining.and_then(|_| {
-            normalize(&raw).and_then(|value| {
+            normalize_fresh(&raw).and_then(|value| {
                 if value.rows.len() >= 10_000 {
                     Err(Diagnostic::error(
                         "SEARCH_ROW_LIMIT",
@@ -1755,6 +2294,8 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
                 repository: state.request.environment.view.clone(),
                 outcome,
                 trace_id,
+                extended_result_framing: extended,
+                exact_result_framing: true,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
                 ingested_at,
@@ -1852,7 +2393,9 @@ mod recovery_tests {
                 .enumerate()
                 .map(|(i, probe)| {
                     let path = run.directory.join(format!("answer-{i}.json"));
-                    fs::write(&path, fixture(probe)).unwrap();
+                    let mut response: Value = serde_json::from_str(fixture(probe)).unwrap();
+                    response.as_object_mut().unwrap().remove("trace_id");
+                    fs::write(&path, serde_json::to_vec(&response).unwrap()).unwrap();
                     (probe["probe_id"].as_str().unwrap().to_string(), path)
                 })
                 .collect::<Vec<_>>();
@@ -1910,6 +2453,91 @@ mod recovery_tests {
             sha256_hex(&fs::read(&run.receipt).unwrap()),
             intent.receipt_sha256
         );
+    }
+
+    #[test]
+    fn saved_result_frames_preserve_rows_and_raw_hash_and_refuse_invalid_bodies() {
+        let body = json!({"result":[{"events":10}]});
+        let expected = normalize(&serde_json::to_vec(&body).unwrap()).unwrap().rows;
+        for (payload, code) in [
+            (body, None),
+            (
+                json!({"result":[{"events":10}],"partial":true}),
+                Some("MCP_INCOMPLETE"),
+            ),
+            (json!({"result":[7]}), Some("MCP_SHAPE")),
+            (
+                json!({"result":{"error":"Synthetic result failure"}}),
+                Some("MCP_TOOL_ERROR"),
+            ),
+        ] {
+            let item = json!({"type":"text","text":payload.to_string()});
+            let frames = [
+                json!({"content":[item], "_meta":{"progressToken":3}}),
+                json!({"jsonrpc":"2.0","id":1,"result":{"content":[item]}}),
+                json!([item]),
+                json!({"content":[{"type":"text","text":payload.to_string(),
+                    "annotations":{"audience":["assistant"]}}]}),
+                json!({"content":[{"type":"text","text":payload.to_string(),"_meta":{}}]}),
+                json!({"content":[{"type":"text","text":payload.to_string(),
+                    "annotations":null,"_meta":null}],"_meta":null,"structuredContent":null}),
+            ];
+            let mut bom = b"\xef\xbb\xbf".to_vec();
+            bom.extend(serde_json::to_vec(&payload).unwrap());
+            for raw in frames
+                .into_iter()
+                .map(|frame| frame.to_string().into_bytes())
+                .chain([bom])
+            {
+                assert!(uses_extended_framing(&raw));
+                assert_eq!(normalize_framed(&raw, false).unwrap_err().code, "MCP_SHAPE");
+                match code {
+                    Some(code) => assert_eq!(normalize(&raw).unwrap_err().code, code),
+                    None => {
+                        let normalized = normalize(&raw).unwrap();
+                        assert_eq!(normalized.rows, expected);
+                        assert_eq!(normalized.raw_sha256, sha256_hex(&raw));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrecognized_framings_keep_the_original_rejection() {
+        let item = json!({"type":"text","text":"{}"});
+        for input in [
+            json!([]),
+            json!([item, item]),
+            json!([{"type":"image","data":"eA==","mimeType":"image/png"}]),
+            json!({"content":[{"type":"text","text":"{}","_meta":true}],"_meta":{}}),
+        ] {
+            let raw = input.to_string();
+            let raw = raw.as_bytes();
+            assert!(!uses_extended_framing(raw));
+            assert!(same_diagnostic(
+                &normalize(raw).unwrap_err(),
+                &normalize_framed(raw, false).unwrap_err()
+            ));
+        }
+    }
+
+    #[test]
+    fn json_rpc_errors_use_the_original_error_classification() {
+        for (message, code) in [
+            ("Server failure", "MCP_TOOL_ERROR"),
+            ("Request timed out", "MCP_DEADLINE"),
+        ] {
+            let raw = json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":message}})
+                .to_string();
+            let saved = normalize_framed(raw.as_bytes(), false).unwrap_err();
+            assert!(!uses_extended_framing(raw.as_bytes()));
+            assert_eq!(saved.code, code);
+            assert!(same_diagnostic(
+                &saved,
+                &normalize(raw.as_bytes()).unwrap_err()
+            ));
+        }
     }
 
     #[test]
@@ -2304,6 +2932,8 @@ mod recovery_tests {
             )
             .unwrap();
         inventory.discovery_runs.push(DiscoveryRun {
+            pruned_at: None,
+            cleanup_pending: false,
             state_path: run.state.to_str().unwrap().into(),
             pack_path: run.pack.to_str().unwrap().into(),
             receipt_path: run.receipt.to_str().unwrap().into(),

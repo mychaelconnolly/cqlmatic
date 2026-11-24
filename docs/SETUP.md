@@ -56,23 +56,68 @@ Select a named host with `cimd` for Claude Code or `manual` for a host requiring
 
 For another capable agent choose `external` with `registration: {"mode":"host-managed"}` and a short `host_id`. CQLmatic tracks the host and binds its report, but cannot safely write an unknown configuration format. The execution host must run CQLmatic, access protected local files, connect to the authorized MCP endpoint, and save exact MCP results. Remote sessions qualify only when those capabilities exist there. Confirm supported host-managed authentication before importing a report. External reports may omit `effective_oauth_client_id` and `effective_config_source`; include those operator-supplied fields only when known. The next actions include the selected host ID for exact report binding. Keep configuration, tokens and reports private.
 
+### Use a server the client already has
+
+If the CrowdStrike MCP server is already configured in a named client, select the client and the server name as it appears in its tool names. Host-managed setup runs no client commands and leaves the client's configuration as it is. In the wizard, choose `host-managed`. For a structured request, replace `CLIENT`, `CLOUD` and `SERVER` in this example.
+
+```json
+{
+  "schema_version": 1,
+  "action": {
+    "type": "select",
+    "selection": {
+      "client": "CLIENT",
+      "cloud": "CLOUD",
+      "server_name": "SERVER",
+      "registration": {"mode": "host-managed"}
+    }
+  }
+}
+```
+
+Sign in through the client if needed. Save the host report with the same `CLIENT` and `SERVER`. Use the canonical URL for `CLOUD` as `ENDPOINT` and set `authenticated` and the tool's `available` to true when the client confirms them.
+
+```json
+{
+  "schema_version": 1,
+  "client": "CLIENT",
+  "server_name": "SERVER",
+  "endpoint": "ENDPOINT",
+  "authenticated": true,
+  "tools": [{"name": "falcon_search_ngsiem", "available": true}]
+}
+```
+
+Import the report through setup. The binding uses the selected client, server name and endpoint. The host report may omit `effective_oauth_client_id` and `effective_config_source`.
+
+The `select` notice lists matching entries from files it can read. It identifies skipped files and names that need inspection because they are disabled, invalid or could be overridden. Check the effective server in the client when the notice gives a reason to inspect it.
+
+| Client | Files the `select` notice reads |
+| --- | --- |
+| Claude Code (`claude-code`) | `.claude.json` user and local-scope entries, workspace `.mcp.json`. An existing server alias can start with an underscore. See the [example selection](../examples/setup/select-adopt-claude.request.json) and [report](../examples/setup/tool-discovery-adopt-claude.json). |
+| Copilot CLI, app, VS Code Copilot harness (`copilot-cli`, `copilot-app`, `copilot-vscode`) | The Copilot user file, workspace `.mcp.json` and `.github/mcp.json`. |
+| VS Code Local harness (`vs-code`) | User `mcp.json`. |
+| Codex (`codex`) | Listing servers requires a client command, so setup uses the supplied name. If a native preview refuses to reuse an entry because its registration cannot be confirmed, the message advises selecting `host-managed` with the selected server name. |
+
+A native `preview` that would add a server or that refuses a collision can recommend usable servers already at the endpoint. The wizard asks for the registration mode before offering a usable alias from the inspected configuration. If the fallback name `cs-mcp` is already configured and unsuitable for the selection, enter a different name. A Copilot server whose tool allowlist excludes search is listed for inspection.
+
 ## Permissions and verification
 
 For user OAuth, assign the appropriate CrowdStrike MCP role (for example `CrowdStrikeMCPUserReadOnly`) and underlying Falcon roles for the tools you need. An MCP role alone does not grant access to all telemetry. Tenant/member scope, consent, network policies, and selected tools also affect visibility. Prefer read-only access.
 
 Setup distinguishes:
 
-- **Configured:** a named native adapter observed its expected local entry, or an imported `external` report states a connected server. This does not prove that a running session selected that entry.
+- **Configured:** a named native adapter observed its expected local entry, or an imported host-managed report states a connected server. This does not prove that a running session selected that entry.
 - **Authenticated:** a bound saved report states that the chosen host authenticated. New Claude/Copilot reports must also state the selected session's effective OAuth client ID and configuration source; both remain caller-supplied evidence. User confirmation alone leaves verification pending.
 - **Tool discovery verified:** a bound authenticated report includes exact available `falcon_search_ngsiem`. This is caller-supplied evidence with a recorded hash, not an independent transport, OAuth, permission or telemetry check.
 
-After consent, ask the chosen host to refresh its MCP tools and save its tool-discovery report using the bundled schema/examples. Import that report through setup. A configured server may still need authentication or a client restart. An `external` report is accepted without local configuration inspection. For named native hosts, setup checks that the selected entry remains present; Claude and Copilot checks fingerprint that entry rather than unrelated settings in the same file.
+After consent, ask the chosen host to refresh its MCP tools and save its tool-discovery report in the shape of the `host_tool_discovery` property of `cqlmatic --schema setup`; the examples below are synthetic instances. Import that report through setup. A configured server may still need authentication or a client restart. A host-managed report, for `external` or a named client, is accepted without local configuration inspection. For named native hosts, setup checks that the selected entry remains present; Claude and Copilot checks fingerprint that entry rather than unrelated settings in the same file.
 
 Native commands may open a browser. Some Codex versions start OAuth during server registration; review that side effect in the preview. Applying a plan containing an interactive command requires a terminal and non-JSON mode. Applying that plan with `--json`, or without a terminal, returns the global `SETUP_INTERACTIVE_REQUIRED` error and exit 2 before running the command; it does not produce a successful pending setup result. Noninteractive commands can be applied through JSON requests when the adapter emits them.
 
-Unrelated configuration is preserved. Copilot's existing user file is never rewritten by setup; its selected entry can still be verified after a host-side addition. Creating a new Copilot file stages it in protected setup storage and requires the storage and Copilot user file to be on the same volume for atomic activation. Otherwise create the entry through Copilot and preview again. Name collisions, changed config fingerprints/executables, or stale previews require a fresh preview. Backups and state are local; CQLmatic's setup contract accepts no client secret. The native client stores its OAuth material according to its own security model.
+Unrelated configuration is preserved. Setup reads client MCP files that contain comments or trailing commas. When a native add would have VS Code or Claude Code rewrite such a file, preview refuses with `SETUP_NATIVE_CONFIG` and changes nothing: add the server in the client and preview again, or select `host-managed`. Copilot's existing user file is never rewritten by setup; its selected entry can still be verified after a host-side addition. Creating a new Copilot file stages it in protected setup storage and requires the storage and Copilot user file to be on the same volume for atomic activation. Otherwise create the entry through Copilot and preview again. Name collisions, changed config fingerprints/executables, or stale previews require a fresh preview. Backups and state are local; CQLmatic's setup contract accepts no client secret. The native client stores its OAuth material according to its own security model.
 
-Codex's native list/get output may hide OAuth registration details. An existing matching URL alone is insufficient to reuse a registration: setup requires matching local provenance from its own reviewed registration, or leaves the step pending with guidance. It does not overwrite the existing server. For manual Codex reauthentication, versions without a client-ID option on `mcp login` require the native guided flow; CQLmatic does not assume an ID selected for registration applies to every later login. These checks do not prevent inventory through an already authorized MCP client.
+Codex's native list/get output may hide OAuth registration details. An existing matching URL alone is insufficient to reuse a registration: setup requires matching local provenance from its own reviewed registration, or leaves the step pending with guidance. It does not overwrite the existing server. For manual Codex reauthentication, versions without a client-ID option on `mcp login` require the native guided flow; CQLmatic does not assume an ID selected for registration applies to every later login. These checks do not prevent inventory through an already authorized MCP client; to use such a server, select `host-managed`.
 
 ## Actions and resumable state
 
@@ -82,11 +127,11 @@ Each strict v1 request contains `schema_version: 1`, optional `id`, and `action.
 | --- | --- |
 | `status` | No action fields. Reports saved state through the request path. Unlike no-request `setup --json`, a status **request** uses the protected writer path and can create/save state. |
 | `detect` | No action fields. Probes Codex CLI, VS Code Local and Claude Code and records executable/capability fingerprints. A failed client probe or fingerprint does not discard other detected clients. Copilot configuration needs no executable probe. Installs nothing and does not demote `external`. |
-| `select` | `selection` contains `client` (`codex`, `vs-code`, `claude-code`, `copilot-cli`, `copilot-app`, `copilot-vscode`, or `external`), `cloud` (`us1`, `us2`, `eu1`), `server_name`, and `registration`. `external` alone requires `host_id` (1–64 ASCII identifier). Clears the prior plan, configuration assertion, and authentication/discovery evidence. |
-| `preview` | Named native adapters only. `operation` is `configure`, `authenticate`, or the narrowly scoped `recover` flow below. Inspects the current baseline and derives the command or new Copilot file creation, backup, and confirmation hash without connecting. An existing Copilot file without the selected entry returns `SETUP_EXISTING_CONFIG` for host-side addition. |
-| `apply` | Named native adapters only. `confirmation_sha256` must match the reviewed preview. Rechecks executable/capabilities where needed and configuration before the command or atomic write. |
-| `confirm-authentication` | Named native adapters only. Requires configured state; records user confirmation and remains `authentication-required`. |
-| `import-discovery` | `file` points to a saved strict host report. Named native adapters recheck the selected entry; `external` binds the report without local configuration inspection. |
+| `select` | `selection` contains `client` (`codex`, `vs-code`, `claude-code`, `copilot-cli`, `copilot-app`, `copilot-vscode`, or `external`), `cloud` (`us1`, `us2`, `eu1`), `server_name`, and `registration`. `external` alone requires `host_id` (1–64 ASCII identifier). A changed selection clears the prior plan, configuration assertion, and authentication/discovery evidence. Submitting the current selection again keeps any configuration assertion and saved report evidence and restores the corresponding phase after cancellation. |
+| `preview` | Named native adapters only, not `host-managed`. `operation` is `configure`, `authenticate`, or the narrowly scoped `recover` flow below. Inspects the current baseline and derives the command or new Copilot file creation, backup, and confirmation hash without connecting. An existing Copilot file without the selected entry returns `SETUP_EXISTING_CONFIG` for host-side addition. |
+| `apply` | Named native adapters only, not `host-managed`. `confirmation_sha256` must match the reviewed preview. Rechecks executable/capabilities where needed and configuration before the command or atomic write. |
+| `confirm-authentication` | Named native adapters only, not `host-managed`. Requires configured state; records user confirmation and remains `authentication-required`. |
+| `import-discovery` | `file` points to a saved strict host report. Named native adapters recheck the selected entry. All `host-managed` selections bind the report without local configuration inspection. |
 | `acknowledge-pending` | `confirmation_sha256` identifies the pending plan inspected by the operator. Rechecks protected success provenance, or preserves eligible uncertain CIMD addition context for a fresh recovery preview. Does not run add or login. |
 | `cancel` | No action fields. Saves progress and invalidates an ordinary preview; an unresolved `command-pending` phase remains pending. |
 
@@ -95,13 +140,13 @@ Registration input is one of:
 - `cimd`: exact published `metadata_url` and `allowlist_confirmed: true`. Claude Code's accepted identity is `https://claude.ai/oauth/claude-code-client-metadata`; this is an operator confirmation, not a local allowlist probe. Existing Codex/VS Code CIMD selections remain readable and can be used only with separate confirmation of current Falcon allowlisting; manual registration is the supported default for those hosts.
 - `manual`: nonsecret `client_id` and expected `callback_url` (HTTPS or HTTP loopback, without credentials/fragments). The callback is recorded and shown in preview, not configured by these adapters. Confirm the host's actual callback and Falcon registration; secrets go only through the host's protected flow. Claude Code's native adapter uses CIMD instead.
 - `api-client`: absolute `credentials_file` reference. Setup records the path without reading it; this selection remains `advanced-pending` with native service/plugin guidance.
-- `host-managed`: no credential fields. Available only for `external`; native setup actions are unavailable.
+- `host-managed`: no credential fields. Required for `external`. For a named client it uses the server already configured there: setup runs no client command, changes nothing in its configuration and verifies only the saved report. Native setup actions are unavailable.
 
-`server_name` and external `host_id` are 1–64 character ASCII identifiers using letters, digits, underscores or hyphens, starting with a letter or digit. `external` and the Copilot surfaces move to `selected` without executable detection. Codex, VS Code Local and Claude Code can enter `installation-required` when their executable is missing. Service mode remains `advanced-pending`. Missing capabilities and unsafe reuse require guided action; they never trigger a setup-managed DCR fallback.
+`server_name` and external `host_id` are 1–64 character ASCII identifiers using letters, digits, underscores or hyphens, starting with a letter or digit. With Claude Code and `host-managed` registration, `server_name` can also start with an underscore. `external`, the Copilot surfaces and any `host-managed` selection move to `selected` without executable detection, and `detect` does not move a `host-managed` selection to `installation-required`. Otherwise Codex, VS Code Local and Claude Code can enter `installation-required` when their executable is missing. Service mode remains `advanced-pending`. Missing capabilities and unsafe reuse require guided action; they never trigger a setup-managed DCR fallback.
 
 A normal native path is `new` → `selected` → `review-required` → `command-pending` → `authentication-required`, followed by importing a matching report into `authenticated` or `tool-discovery-verified`. Missing installation, service mode, cancellation, and incomplete native work have separate phases. `authenticated` is reached by a matching saved authenticated report lacking the required available search tool; user confirmation alone does not reach it. Setup returns exit 0 only in `tool-discovery-verified`, exit 1 for other ordinary phases, and exit 2 for global input/I/O/action errors. A successful detect, selection, or preview therefore normally exits 1.
 
-The `external` path is `new` → `selected` → `authenticated` or `tool-discovery-verified` after importing a report. If the host cannot complete supported registration and sign-in, it stays `selected`. A valid report without the search tool remains `authenticated` with exit 1; a malformed or mismatched report is rejected without changing saved state. Existing v1 Codex/VS Code native state remains readable; older binaries may reject new selections, so use a separate `--state` path per host workflow.
+The `host-managed` path, for `external` or a named client, is `new` → `selected` → `authenticated` or `tool-discovery-verified` after importing a report. If the host cannot complete supported registration and sign-in, it stays `selected`. A valid report without the search tool remains `authenticated` with exit 1; a malformed or mismatched report is rejected without changing saved state. Existing v1 Codex/VS Code native state remains readable; older binaries may reject new selections, so use a separate `--state` path per host workflow.
 
 ## Preview, apply, and interrupted commands
 
@@ -125,9 +170,9 @@ Successful recovery records completed native CIMD login provenance, rather than 
 
 ## Saved host tool-discovery report
 
-After host sign-in/consent, ask the selected agent to discover available tools and save a report matching the [Codex/VS Code](../examples/setup/tool-discovery.json), [Claude](../examples/setup/tool-discovery-claude.json), [Copilot](../examples/setup/tool-discovery-copilot.json), or [external](../examples/setup/tool-discovery-host.json) synthetic shape. It contains `schema_version`, `client`, `server_name`, canonical `endpoint`, `authenticated`, and `tools` with exact `name` and `available` values. New Claude/Copilot reports also require `effective_oauth_client_id` matching the selected identity and a nonempty `effective_config_source` observed in the selected host session. Codex/VS Code legacy reports may omit those fields, but a supplied effective client ID must not contradict the selection. `external` requires the selected `host_id`; named hosts omit it. The report must match the selected client/host ID/server/cloud endpoint and contain no duplicate tool names. Exact available `falcon_search_ngsiem` reaches `tool-discovery-verified`.
+After host sign-in/consent, ask the selected agent to discover available tools and save a report matching the [Codex/VS Code](../examples/setup/tool-discovery.json), [Claude](../examples/setup/tool-discovery-claude.json), [Copilot](../examples/setup/tool-discovery-copilot.json), or [external](../examples/setup/tool-discovery-host.json) synthetic shape. Its schema is the `host_tool_discovery` property of `cqlmatic --schema setup`. It contains `schema_version`, `client`, `server_name`, canonical `endpoint`, `authenticated`, and `tools` with exact `name` and `available` values. New Claude/Copilot reports for native registration also require `effective_oauth_client_id` matching the selected identity and a nonempty `effective_config_source` observed in the selected host session; `host-managed` reports may omit both. Codex/VS Code legacy reports may omit those fields, but a supplied effective client ID must not contradict the selection. `external` requires the selected `host_id`; named hosts omit it. The report must match the selected client/host ID/server/cloud endpoint and contain no duplicate tool names. Exact available `falcon_search_ngsiem` reaches `tool-discovery-verified`.
 
-Import records the saved bytes' SHA-256 and `saved-host-tool-discovery` authentication evidence. A valid authenticated report without the exact available tool reaches `authenticated` and exits 1. For `external`, import also marks `configured: true` with no local configuration fingerprint; this means only that the report asserts a connected server. All reports, including their effective-identity fields, are caller-supplied evidence rather than independent proof of transport, OAuth, permission, telemetry or completeness. Keep actual reports private; never import bundled synthetic reports as real evidence. Use the handoff to continue into [inventory](INVENTORY.md).
+Import records the saved bytes' SHA-256 and `saved-host-tool-discovery` authentication evidence. A valid authenticated report without the exact available tool reaches `authenticated` and exits 1. For a `host-managed` selection, import also marks `configured: true` with no local configuration fingerprint; this means only that the report asserts a connected server. All reports, including their effective-identity fields, are caller-supplied evidence rather than independent proof of transport, OAuth, permission, telemetry or completeness. Keep actual reports private; never import bundled synthetic reports as real evidence. Use the handoff to continue into [inventory](INVENTORY.md).
 
 Additional available tools produce an advisory to review host permissions and restrict unneeded tools. Their names do not establish read or write behavior, and their presence does not change whether the exact search tool satisfies setup discovery.
 
@@ -173,7 +218,7 @@ In Claude Code and Codex, CQLmatic can check every NG-SIEM search the agent make
 cqlmatic env capture --client claude-code --server SERVER --install
 ```
 
-Use `--client codex` for Codex, and spell `SERVER` as in the [capture hook table](INVENTORY.md#scrappy-mode-capture-the-agents-searches). The command writes two entries into the client's settings that run the same command: the capture hook after each search, and the guard before it. Codex asks you to review and trust the new hooks with `/hooks`.
+Use `--client codex` for Codex, and spell `SERVER` as in the [capture hook table](INVENTORY.md#scrappy-mode-capture-the-agents-searches). A verified setup for Claude Code, Codex or a Copilot client names this command, with the selected server name, in its next actions. The command writes two entries into the client's settings that run the same command: the capture hook after each search, and the guard before it. Codex asks you to review and trust the new hooks with `/hooks`.
 
 The guard checks the call's `query_string` and tells the agent what check found. It never stops a search: no answer makes a permission decision, so the client goes on with the call as it would without the hook, including its own approval of it.
 
@@ -189,13 +234,15 @@ The guard uses the inventory's map only when the call's `repository` is the map'
 
 The registered command ends with exit status 0 and prints nothing when CQLmatic cannot answer: when the program is missing, when an older copy at that path rejects the arguments, or when the shell cannot parse a `--program` prefix. On macOS and Linux it also prints nothing when a `--program` prefix prints a line and then fails to start its program, and a login shell that exits at the first failing command, such as zsh with `setopt ERR_EXIT` or bash with `set -e`, does not change the exit status. The client then goes on with the call as if no hook were registered. Claude Code's guard entry also sets `"onFailure": "continue"`, so a guard that fails or runs past its 5-second `timeout` lets the call go ahead there. A `--program` prefix must print nothing to standard output when it succeeds, or the client drops the guard's note; for an npm script, use `npm --silent run NAME --`.
 
-Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer leaves exactly the chosen entries for this program, client, server and state, and keeps the rest of the settings file's content and formatting. It keeps one copy of an entry that appears several times. Its report gives each hook's result in `hooks`: `present`, `added`, `removed`, `absent`, or `manual` when the chosen state needs a change by hand. An entry that runs the same command but differs from what this installation writes, and one that a copy of CQLmatic in another folder wrote for the same client, server and state, are listed in `next_actions` with their commands and left in place.
+Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer recognizes the exact generated commands for the chosen client, server and state. When the launcher changes, it can also recognize literal CQLmatic executables, `npx cqlmatic` with an optional version, and `node` running `cqlmatic.cjs`. Use the same `--program` value to manage a hook installed with a custom launcher such as an npm script. If the installer detects a related command it cannot confirm, it leaves it in place and reports `manual`. Remove any separately added capture commands, including commands you retyped in a pipeline, to avoid capturing each search twice.
+
+The installer retains distinct custom matchers and keeps one recognized entry per matcher for this client, server and state. It preserves the settings for each retained handler, such as its timeout. `--hooks none` removes recognized entries, including when you use a directory alias for the same state file. The report gives each hook's result as `present`, `added`, `removed`, `absent`, or `manual`. Its last next action names the search tool the hook records. If the client spells the server differently, install again with that spelling.
 
 ```sh
 cqlmatic env capture --client claude-code --server SERVER --install --hooks capture
 ```
 
-Close the client before you install, switch or remove the hooks: a settings change the client saves during the installation can be lost. Upgrading CQLmatic changes no settings, so run the install command again after an upgrade. It replaces the capture entry that 0.1.10 wrote for the same program, server and state, and adds the guard. Before you go back to an earlier release, remove both hooks with this release's `--hooks none`, then install with the earlier one.
+Close the client before you install, switch or remove the hooks: a settings change the client saves during the installation can be lost. Upgrading CQLmatic changes no settings, so run the install command again after an upgrade. It replaces the entries an earlier copy wrote for the same client, server and state, from any folder, and the capture entry that 0.1.10 wrote for the same program, server and state, and adds the guard. Before you go back to an earlier release, remove both hooks with this release's `--hooks none`, then install with the earlier one.
 
 The client keeps one settings file. Each installation adds hooks for its server name there, so the hooks of two environments with the same server name all run on every search. To keep several environments apart on one machine, give each its own client profile, through `CLAUDE_CONFIG_DIR` for Claude Code or `CODEX_HOME` for Codex, and install into each profile with that environment's `--state`.
 

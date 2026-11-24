@@ -462,6 +462,9 @@
           "format": "uint",
           "minimum": 0
         },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "elapsed_seconds": {
           "type": "number",
           "format": "double"
@@ -485,6 +488,12 @@
         },
         "pack_path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "quick_depth": {
           "$ref": "#/$defs/QuickDepth",
@@ -588,6 +597,13 @@
         "fields"
       ]
     },
+    "ImportPackMode": {
+      "type": "string",
+      "enum": [
+        "append",
+        "update"
+      ]
+    },
     "InventoryAction": {
       "oneOf": [
         {
@@ -601,6 +617,34 @@
           "additionalProperties": false,
           "required": [
             "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dry_run": {
+              "type": "boolean"
+            },
+            "include_failed": {
+              "type": "boolean",
+              "default": false
+            },
+            "keep_last": {
+              "type": "integer",
+              "format": "uint",
+              "default": 0,
+              "maximum": 1000,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "prune"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "dry_run"
           ]
         },
         {
@@ -1526,8 +1570,16 @@
               "type": "string",
               "const": "import-pack"
             },
+            "mode": {
+              "$ref": "#/$defs/ImportPackMode",
+              "default": "append"
+            },
             "pack_file": {
               "type": "string"
+            },
+            "supersede_runs": {
+              "type": "boolean",
+              "default": false
             }
           },
           "additionalProperties": false,
@@ -2835,6 +2887,9 @@
     "PackReference": {
       "type": "object",
       "properties": {
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "content_digest": {
           "type": "string"
         },
@@ -2847,8 +2902,20 @@
         "imported_at": {
           "type": "string"
         },
+        "input_content_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -3278,6 +3345,9 @@
     "RawSnapshot": {
       "type": "object",
       "properties": {
+        "extended_result_framing": {
+          "type": "boolean"
+        },
         "raw_hex": {
           "type": "string"
         },

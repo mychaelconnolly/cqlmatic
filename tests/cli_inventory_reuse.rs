@@ -85,6 +85,19 @@ impl Temp {
         assert_eq!(rows.len(), 1);
         (code, rows.remove(0))
     }
+
+    fn document(&self, args: &[&str]) -> (i32, Value) {
+        let output = self.binary().args(args).output().unwrap();
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            output.status.code().unwrap(),
+            serde_json::from_slice(&output.stdout).unwrap(),
+        )
+    }
 }
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -159,8 +172,11 @@ fn state(mode: DiscoveryMode) -> InventoryState {
 
 fn attach(state: &mut InventoryState, path: &Path, digest: String) {
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: path.to_string_lossy().into_owned(),
         content_digest: digest,
+        input_content_digest: None,
         imported_at: "2026-01-03T00:00:00Z".into(),
         discovery_run: None,
     };
@@ -854,7 +870,7 @@ fn oversized_default_inventory_cannot_be_ignored_for_an_explicit_pack() {
 }
 
 #[test]
-fn unconfirmed_preferences_are_benign_only_without_evidence() {
+fn unconfirmed_inventory_is_ignored_at_the_default_location() {
     let dir = Temp::new();
     let path = dir.default_state();
     for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
@@ -871,6 +887,14 @@ fn unconfirmed_preferences_are_benign_only_without_evidence() {
     contradictory.refresh_reminder = None;
     save_state(&path, &contradictory);
     let (code, result) = dir.one(&["check", "count()", "--json"]);
+    assert_eq!(code, 0, "{result}");
+    let (code, result) = dir.one(&[
+        "check",
+        "count()",
+        "--json",
+        "--inventory-state",
+        path.to_str().unwrap(),
+    ]);
     assert_eq!(code, 1, "{result}");
     assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
 }
@@ -1011,4 +1035,467 @@ fn assessment_does_not_turn_the_query_ledger_into_population_rates() {
     assert!(!finding(&rows[0], "RESULT_KEY_COVERAGE"));
     assert_inventory_target_message(&rows[0], "findings", DiscoveryMode::Full);
     assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
+fn default_unconfirmed_scout_leaves_offline_query_commands_unchanged() {
+    let temp = Temp::new();
+    let query = "#repo=sample user=* | count()";
+    let query_file = temp.0.join("query.cql");
+    let result_file = temp.0.join("result.json");
+    fs::write(&query_file, query).unwrap();
+    fs::write(&result_file, r#"{"result":[{"_count":"5"}]}"#).unwrap();
+    let commands = [
+        vec!["check", "--json", "count()"],
+        vec!["check", "--json", "--require-observed", query],
+        vec!["generate", "--json", "--intent", "count events"],
+        vec![
+            "generate",
+            "--json",
+            "--require-observed",
+            "--intent",
+            "count events where user is alice",
+        ],
+        vec![
+            "assess",
+            "--json",
+            "--query-file",
+            query_file.to_str().unwrap(),
+            "--result",
+            result_file.to_str().unwrap(),
+        ],
+    ];
+    let baseline: Vec<_> = commands
+        .iter()
+        .map(|args| temp.binary().args(args).output().unwrap())
+        .collect();
+    let scout = |action: Value| {
+        let request = temp.0.join("request.json");
+        fs::write(
+            &request,
+            json!({"schema_version":1,"action":action}).to_string(),
+        )
+        .unwrap();
+        let (code, result) = temp.one(&[
+            "env",
+            "inventory",
+            "--json",
+            "--state",
+            temp.default_state().to_str().unwrap(),
+            "--request",
+            request.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "{result}");
+        result
+    };
+    let plan = scout(json!({"kind":"prepare-scout","environment":environment(),
+        "start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z"}));
+    let compare = |phase| {
+        for (args, expected) in commands.iter().zip(&baseline) {
+            let actual = temp.binary().args(args).output().unwrap();
+            assert_eq!(
+                (actual.status, &actual.stdout, &actual.stderr),
+                (expected.status, &expected.stdout, &expected.stderr),
+                "{phase}: {args:?}: {}",
+                String::from_utf8_lossy(&actual.stdout)
+            );
+        }
+        let (code, selected) = temp.one(&[
+            "check",
+            "--json",
+            "--inventory-state",
+            temp.default_state().to_str().unwrap(),
+            "count()",
+        ]);
+        assert_eq!(code, 1, "{selected}");
+        assert!(diagnostic(&selected, "CQL_QUICK_INVENTORY", "error"));
+    };
+    compare("prepared");
+    let scout_result = temp.0.join("scout.json");
+    fs::write(
+        &scout_result,
+        json!({"result":[{"#repo":"sample","#type":"logs","events":5}]}).to_string(),
+    )
+    .unwrap();
+    scout(json!({"kind":"import-scout","result_file":scout_result,
+        "arguments":plan["action"]["arguments"],"retrieved_at":"2026-01-02T00:00:00Z"}));
+    compare("imported");
+    scout(json!({"kind":"set-discovery-mode","mode":"quick"}));
+    compare("mode changed");
+    scout(
+        json!({"kind":"record-failure","stage":"scout","source_id":null,
+        "message":"Synthetic search did not complete","recorded_at":"2026-01-02T01:00:00Z"}),
+    );
+    compare("failure recorded");
+}
+
+#[test]
+fn ordinary_family_mismatch_keeps_missing_field_warning_exit() {
+    let temp = Temp::new();
+    let mut data = pack(true, "2026-01-02T00:00:00Z").data;
+    data.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let pack = Pack::new(environment(), "2026-01-02T00:00:00Z".into(), data).unwrap();
+    let path = temp.0.join("pack.json");
+    save_pack(&path, &pack);
+    let (exit, result) = temp.one(&[
+        "check",
+        "--json",
+        "--pack",
+        path.to_str().unwrap(),
+        "--fail-on-warning",
+        "#repo=sample #event_simpleName=FileEvent | never_seen=* | count()",
+    ]);
+    assert_eq!(exit, 1, "{result}");
+    assert_eq!(result["outcome"], "ready");
+    assert!(diagnostic(&result, "CQL_UNMAPPED_FIELD", "warning"));
+}
+
+#[test]
+fn inspect_bridges_exact_inventory_source_ids() {
+    let temp = Temp::new();
+    let mut data = pack(true, "2026-01-02T00:00:00Z").data;
+    data.sources[0]["id"] = json!("env:repo:legacy-slug");
+    data.fields[0]["source_id"] = json!("env:repo:legacy-slug");
+    for (id, selectors) in [
+        (
+            "typed",
+            json!({"repo":"sample","type":"logs","sourcetype":"logs"}),
+        ),
+        ("type-only", json!({"type":"logs"})),
+        (
+            "narrow",
+            json!({"repo":"sample","type":"other","sourcetype":"parser-alias"}),
+        ),
+        (
+            "family",
+            json!({"repo":"other","event_family":"ProcessEvent"}),
+        ),
+    ] {
+        let mut row = data.sources[0].clone();
+        row["id"] = json!(format!("env:repo:{id}"));
+        row["selectors"] = selectors;
+        data.sources.push(row);
+    }
+    let input = Pack::new(environment(), "2026-01-02T00:00:00Z".into(), data).unwrap();
+    let file = temp.0.join("pack.json");
+    save_pack(&file, &input);
+    let file = file.to_str().unwrap();
+    for flag in [None, Some("--summary")] {
+        let args = ["env", "inspect", file].into_iter().chain(flag);
+        let (code, view) = temp.document(&args.collect::<Vec<_>>());
+        assert_eq!(code, 0);
+        let sources = view["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["id"], "env:repo:legacy-slug");
+        for (row, scope) in sources.iter().take(3).zip([
+            source(),
+            Scope {
+                type_: Some("logs".into()),
+                ..source()
+            },
+            Scope {
+                type_: Some("logs".into()),
+                ..Scope::default()
+            },
+        ]) {
+            assert_eq!(row["inventory_source_id"], discovery::source_id(&scope));
+        }
+        for row in &sources[3..] {
+            assert!(row.get("inventory_source_id").is_none(), "{row}");
+        }
+    }
+    let (code, full) = temp.document(&["env", "inspect", file, "--full"]);
+    assert_eq!(code, 0);
+    assert_eq!(full, serde_json::to_value(&input).unwrap());
+}
+
+#[test]
+fn inspect_distinguishes_filtered_views_misses_and_truncation() {
+    let temp = Temp::new();
+    let mut data = pack(true, "2026-01-02T00:00:00Z").data;
+    let mut second = data.fields[0].clone();
+    second["id"] = json!("env:field:sample:host");
+    second["path"] = json!("host");
+    data.fields.push(second);
+    for (index, field_id) in [
+        "env:field:sample:user",
+        "env:field:sample:user",
+        "env:field:sample:host",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        data.values.push(json!({
+            "id":format!("env:value:sample:{index}"),"field_id":field_id,"value_kind":"sample",
+            "vocabulary":"sampled","evidence_kind":"observed","provenance_ids":["prov:sample"],"value":index
+        }));
+    }
+
+    let input = Pack::new(environment(), "2026-01-02T00:00:00Z".into(), data).unwrap();
+    let file = temp.0.join("pack.json");
+    save_pack(&file, &input);
+    let file = file.to_str().unwrap();
+    let (code, full) = temp.document(&[
+        "env", "inspect", file, "--full", "--source", "sample", "--limit", "1",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(full["filtered"], true);
+    assert!(full.get("content_digest").is_none());
+    assert_eq!(full["source_pack_digest"], input.content_digest);
+    assert_eq!(full["filter"]["source"], "sample");
+    assert_eq!(full["matched_sources"], 1);
+    assert_eq!(full["matched_fields"], 2);
+    assert_eq!(full["data"]["fields"].as_array().unwrap().len(), 2);
+    let (code, compact) =
+        temp.document(&["env", "inspect", file, "--source", "sample", "--limit", "1"]);
+    assert_eq!(code, 0);
+    assert_eq!(compact["matched_sources"], 1);
+    assert_eq!(compact["omitted_fields"], 1);
+    assert_eq!(compact["omitted_values"], 2);
+    assert_eq!(compact["values"].as_array().unwrap().len(), 1);
+    assert_eq!(compact["fields"].as_array().unwrap().len(), 1);
+    for flag in [None, Some("--full")] {
+        for (source, count) in [("sample", 1), ("missing", 0)] {
+            let args = [
+                "env", "inspect", file, "--source", source, "--field", "absent",
+            ]
+            .into_iter()
+            .chain(flag);
+            let (code, view) = temp.document(&args.collect::<Vec<_>>());
+            assert_eq!(code, 0);
+            assert_eq!(view["matched_sources"], count);
+            assert_eq!(view["matched_fields"], 0);
+        }
+    }
+}
+
+#[test]
+fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
+    let temp = Temp::new();
+    let descriptor = temp.0.join("environment.json");
+    fs::write(&descriptor, serde_json::to_vec(&environment()).unwrap()).unwrap();
+    let descriptor = descriptor.to_str().unwrap();
+    let native = temp.0.join("original.json");
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    save_pack(&native, &pack);
+    let legacy_root = temp.0.join("legacy");
+    let legacy = legacy_root.join("environment");
+    private_directory(&legacy);
+    for (name, rows) in [
+        ("sources", &pack.data.sources),
+        ("fields", &pack.data.fields),
+        ("provenance", &pack.data.provenance),
+        ("values", &pack.data.values),
+        ("annotations", &pack.data.annotations),
+    ] {
+        let content = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(legacy.join(format!("{name}.jsonl")), content).unwrap();
+    }
+    let run_import = |from: &Path, out: &Path| {
+        temp.binary()
+            .current_dir(&legacy)
+            .args(["env", "import", "--from"])
+            .arg(from)
+            .args(["--out"])
+            .arg(out)
+            .args(["--environment", descriptor, "--replace"])
+            .output()
+            .unwrap()
+    };
+    for (from, out) in [
+        (&legacy_root, legacy.join("sources.jsonl")),
+        (&legacy_root, legacy.join("fields.jsonl")),
+        (&legacy_root, legacy.join("provenance.jsonl")),
+        (&legacy_root, legacy.join("values.jsonl")),
+        (&legacy_root, legacy.join("annotations.jsonl")),
+        (&native, legacy_root.join("../original.json")),
+        (&native, legacy_root.join("../environment.json")),
+    ] {
+        let before = fs::read(&out).unwrap();
+        let result = run_import(from, &out);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{}: {}",
+            out.display(),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains(out.file_name().unwrap().to_str().unwrap()),
+            "{error}"
+        );
+        assert!(message.contains("separate output path"), "{error}");
+        assert!(result.stdout.is_empty());
+        assert_eq!(fs::read(&out).unwrap(), before);
+    }
+
+    let fields = legacy.join("fields.jsonl");
+    let before = fs::read(&fields).unwrap();
+    let result = run_import(&legacy_root, Path::new("missing/../fields.jsonl"));
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("separate output path"));
+    assert_eq!(fs::read(&fields).unwrap(), before);
+    assert!(!legacy.join("missing").exists());
+    for name in ["values.jsonl", "annotations.jsonl"] {
+        let path = legacy.join(name);
+        fs::remove_file(&path).unwrap();
+        let result = run_import(&legacy_root, &path);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("separate output path"));
+        assert!(!path.exists());
+    }
+
+    let output = temp.0.join("output.json");
+    let (first, second) = (
+        run_import(&legacy_root, &output),
+        run_import(&native, &output),
+    );
+    assert!(first.status.success(), "{first:?}");
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(
+        cqlmatic::storage::read_pack(&output)
+            .unwrap()
+            .content_digest,
+        pack.content_digest
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn import_clamps_extra_parent_steps_at_the_filesystem_root() {
+    let temp = Temp::new();
+    let directory = temp.0.canonicalize().unwrap();
+    let input = directory.join("original.json");
+    let output = directory.join("output.json");
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    save_pack(&input, &pack);
+    let original = fs::read(&input).unwrap();
+    let mut destination = directory.join("missing");
+    for _ in 0..directory.components().count() + 1 {
+        destination.push("..");
+    }
+    destination.extend(output.components().skip(1));
+    let result = temp
+        .binary()
+        .args(["env", "import", "--from"])
+        .arg(&input)
+        .arg("--out")
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(fs::read(&input).unwrap(), original);
+    assert_eq!(
+        cqlmatic::storage::read_pack(&output)
+            .unwrap()
+            .content_digest,
+        pack.content_digest
+    );
+}
+
+#[test]
+fn import_replace_accepts_an_environment_from_standard_input() {
+    let temp = Temp::new();
+    let native = temp.0.join("original.json");
+    let output = temp.0.join("output.json");
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    save_pack(&native, &pack);
+    fs::write(&output, b"previous output").unwrap();
+    let mut child = temp
+        .binary()
+        .current_dir(&temp.0)
+        .args(["env", "import", "--from"])
+        .arg(&native)
+        .args(["--out"])
+        .arg(&output)
+        .args(["--environment", "-", "--replace"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&environment()).unwrap())
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        cqlmatic::storage::read_pack(&output)
+            .unwrap()
+            .content_digest,
+        pack.content_digest
+    );
+}
+
+#[test]
+fn catalog_exact_function_name_ranks_first_in_contracts() {
+    let temp = Temp::new();
+    for (term, name) in [
+        ("in", "in"),
+        ("IF", "if"),
+        ("sort", "sort"),
+        ("match", "match"),
+        ("eval", "eval"),
+    ] {
+        let (code, rows) = temp.document(&["catalog", "--functions", term]);
+        assert_eq!(code, 0);
+        let names: Vec<_> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names.first().copied(), Some(name), "{term}: {names:?}");
+        assert_eq!(
+            names[1..],
+            cqlmatic::catalog::FUNCTIONS
+                .iter()
+                .map(|f| f.name)
+                .filter(|f| *f != name && f.to_lowercase().contains(&term.to_lowercase()))
+                .take(9)
+                .collect::<Vec<_>>(),
+            "{term}"
+        );
+    }
+}
+
+#[test]
+fn catalog_exact_function_name_ranks_first_in_knowledge() {
+    let temp = Temp::new();
+    for (term, name) in [
+        ("in", "in"),
+        ("IF", "if"),
+        ("sort", "sort"),
+        ("match", "match"),
+        ("eval", "eval"),
+    ] {
+        let exact = cqlmatic::catalog::function(name).unwrap().reference_id;
+        for flag in [None, Some("--full")] {
+            let cmd = ["catalog", term]
+                .into_iter()
+                .chain(flag)
+                .collect::<Vec<_>>();
+            let (code, rows) = temp.document(&cmd);
+            assert_eq!(code, 0);
+            let rows = rows.as_array().unwrap();
+            assert_eq!(rows[0]["id"], exact, "{term}: {rows:?}");
+            let previous = cqlmatic::catalog::search(term, 10, flag.is_some());
+            assert_eq!(
+                rows[1..],
+                previous
+                    .into_iter()
+                    .filter(|row| row["id"] != exact)
+                    .take(9)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 }

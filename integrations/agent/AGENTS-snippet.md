@@ -21,6 +21,6 @@ Report the exact query, target/window, relevant rows, evidence and unresolved li
 
 ## Notices and mapping
 
-When status shows `settings_attention: true` (a refresh is due or inventory work is pending), read [the agent mapping checklist](https://docs.cqlmatic.dev/mcp-companion/#agent-mapping-checklist), even for a single query. Read it also before you build a map when status shows `active_pack: null`. It covers session entry, refresh reminders, notices, the inventory actions in order and the discovery relay.
+When status shows `settings_attention: true` (a refresh is due or inventory work is pending), read [the agent mapping checklist](https://docs.cqlmatic.dev/mcp-companion/#agent-mapping-checklist), even for a single query. Read it also before you build a map when status shows `active_pack: null`. It covers session entry, refresh reminders, notices, the inventory actions in order and the discovery relay. Where a capture hook or pass-through is registered for the client, discovery results reach CQLmatic without your saving them: after each discovery search, follow `next-probe`'s `next_action`, and save and submit a result only when it asks for one.
 
 See [the full workflow](https://docs.cqlmatic.dev/mcp-companion/) and [the agent skill](https://docs.cqlmatic.dev/integrations/agent/skill/), plus [contracts](https://docs.cqlmatic.dev/contracts/), [query construction](https://docs.cqlmatic.dev/query-reference/) and [result assessment](https://docs.cqlmatic.dev/result-assessment/).
