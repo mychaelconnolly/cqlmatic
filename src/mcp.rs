@@ -1613,7 +1613,11 @@ fn wire_probe(state: &State, p: &Probe) -> Value {
 }
 pub fn cost(state: &State, ready: usize) -> Cost {
     let limit = state.request.max_queries;
-    let expected = discovery::expected_searches(&state.request);
+    // An earlier-plan checkpoint counted each tag candidate in its own search.
+    let expected = discovery::expected_searches_for_plan(
+        &state.request,
+        state.discovery_algorithm != DISCOVERY_ALGORITHM,
+    );
     Cost {
         searches: Searches {
             used: state
@@ -2362,10 +2366,8 @@ mod recovery_tests {
     }
     fn fixture(probe: &Value) -> &'static str {
         match (probe["kind"].as_str().unwrap(), probe["field"].as_str()) {
-            ("volume", _) | ("tag-detect", Some("event_simpleName")) => {
-                include_str!("../examples/mcp/count.json")
-            }
-            ("tag-detect", _) => r#"{"result":[{"events":"0"}]}"#,
+            ("volume", _) => include_str!("../examples/mcp/count.json"),
+            ("tag-batch", _) => include_str!("../examples/mcp/tags.json"),
             ("dataset-facet", _) => include_str!("../examples/mcp/dataset.json"),
             ("fieldset", _) => include_str!("../examples/mcp/fieldset.json"),
             ("population", _) => include_str!("../examples/mcp/population.json"),

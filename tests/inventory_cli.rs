@@ -926,6 +926,14 @@ fn inventory_discovery_elapsed_tracks_active_work_and_excludes_paused_time() {
         used
     );
 }
+/// A tag batch answer in which no tag column is present.
+fn zero_tag_batch(probe: &Value) -> Value {
+    let mut row = json!({"total":10});
+    for index in 0..probe["fields"].as_array().unwrap().len() {
+        row[format!("c{index}")] = json!(0);
+    }
+    json!([row])
+}
 fn relay(
     dir: &Path,
     mut progress: Value,
@@ -987,7 +995,7 @@ fn relay(
                     }
                     json!([row])
                 }
-                "tag-detect" => json!([{"events":0}]),
+                "tag-batch" => zero_tag_batch(probe),
                 "value-facet" => {
                     json!([{probe["field"].as_str().unwrap():"synthetic","events":10}])
                 }
@@ -2185,7 +2193,7 @@ fn hint_boundary_does_not_credit_earlier_fields_or_unavailable_checkpoints() {
                     "volume" => json!([{"events":10}]),
                     "fieldset" => json!([{"field":"hinted_field"},{"field":"unrelated_field"}]),
                     "dataset-facet" => json!([]),
-                    "tag-detect" => json!([{"events":0}]),
+                    "tag-batch" => zero_tag_batch(&probe),
                     "population" => json!([{"total":10,"c0":10,"c1":10}]),
                     kind => panic!("Unexpected probe {kind}"),
                 };
@@ -5027,7 +5035,7 @@ fn complete_offline_relay_inventory_derives_completion_and_detects_pack_changes(
                     }
                     json!([row])
                 }
-                "tag-detect" => json!([{"events":0}]),
+                "tag-batch" => zero_tag_batch(probe),
                 kind => panic!("unexpected probe {kind}"),
             };
             let result = fixture(
@@ -6186,9 +6194,9 @@ fn identified_result_cannot_be_credited_to_another_probe() {
                 let query = reply["action"]["probe"]["arguments"]["query_string"]
                     .as_str()
                     .unwrap();
+                // The other source's tag batch is the next search after its volume.
                 if query.contains("synthetic-b")
-                    && query.ends_with("count(as=events)")
-                    && !query.contains("groupBy")
+                    && query.contains("count(field=\"#event_simpleName\"")
                 {
                     break;
                 }
@@ -6219,7 +6227,12 @@ fn identified_result_cannot_be_credited_to_another_probe() {
         let probe = &reply["action"]["probe"];
         let query = probe["arguments"]["query_string"].as_str().unwrap();
         assert!(
-            query.contains("synthetic-b") && query.ends_with("count(as=events)"),
+            query.contains("synthetic-b")
+                && if ended {
+                    query.contains("count(field=\"#event_simpleName\"")
+                } else {
+                    query.ends_with("count(as=events)")
+                },
             "{query}"
         );
         let id = probe["probe_id"].as_str().unwrap();

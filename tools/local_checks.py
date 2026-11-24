@@ -75,13 +75,12 @@ def windows_lint_environment():
 
 def fixture(probe):
     kind, field = probe["kind"], probe.get("field")
-    if kind == "tag-detect":
-        name = "count.json" if field == "event_simpleName" else "zero.json"
-    elif kind == "record-kind-facet":
+    if kind == "record-kind-facet":
         name = {"#type": "kind.json", "#event_simpleName": "simple-name.json"}[field]
     else:
         name = {"census": "census.json", "volume": "count.json", "dataset-facet": "dataset.json",
-                "fieldset": "fieldset.json", "population": "population.json", "value-facet": "value.json"}[kind]
+                "fieldset": "fieldset.json", "population": "population.json", "tag-batch": "tags.json",
+                "value-facet": "value.json"}[kind]
     return REPO / "examples" / "mcp" / name
 
 
@@ -92,7 +91,7 @@ def synthetic_replay(binary, out):
     rounds = 0
     while step.get("status") == "needs-probes":
         rounds += 1
-        if rounds > 4:
+        if rounds > 5:
             raise RuntimeError("Replay round bound exceeded")
         answers = [(probe, fixture(probe)) for probe in step["probes"]]
         if not answers:

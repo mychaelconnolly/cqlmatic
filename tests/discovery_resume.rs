@@ -324,10 +324,8 @@ fn full_native_measurement_graph_resumes_without_reissuing_accepted_probes() {
         }
         for probe in probes {
             let raw = match (probe.kind.as_str(), probe.field.as_deref()) {
-                ("volume", _) | ("tag-detect", Some("event_simpleName")) => {
-                    include_str!("../examples/mcp/count.json")
-                }
-                ("tag-detect", _) => r#"{"result":[{"events":"0"}]}"#,
+                ("volume", _) => include_str!("../examples/mcp/count.json"),
+                ("tag-batch", _) => include_str!("../examples/mcp/tags.json"),
                 ("dataset-facet", _) => include_str!("../examples/mcp/dataset.json"),
                 ("fieldset", _) => include_str!("../examples/mcp/fieldset.json"),
                 ("population", _) => include_str!("../examples/mcp/population.json"),
@@ -2434,7 +2432,13 @@ fn zero_population_total_ends_without_accepting_the_measurement() {
             "volume" => json!([{"events":10}]),
             "fieldset" => json!([{"field":"user"}]),
             "dataset-facet" => json!([]),
-            "tag-detect" => json!([{"events":0}]),
+            "tag-batch" => {
+                let mut row = json!({"total":10});
+                for index in 0..probe["fields"].as_array().unwrap().len() {
+                    row[format!("c{index}")] = json!(0);
+                }
+                json!([row])
+            }
             "population" => json!([{"total":0,"c0":0}]),
             other => panic!("Unexpected {other}"),
         };

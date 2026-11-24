@@ -60,7 +60,18 @@ impl Scenario {
                 .iter()
                 .map(|field| json!({"field":field}))
                 .collect(),
-            "tag-detect" => vec![json!({"events":0})],
+            "tag-batch" => {
+                let total = if p.start == request.start {
+                    1_000_000
+                } else {
+                    100
+                };
+                let mut row = json!({"total":total});
+                for (index, _) in p.fields.iter().enumerate() {
+                    row[format!("c{index}")] = json!(0);
+                }
+                vec![row]
+            }
             "record-kind-facet" => self.facets[p.field.as_ref().unwrap()].clone(),
             "kind-fieldset" => self
                 .rare_fields
@@ -555,9 +566,10 @@ fn repeated_fieldsets_do_not_merge_tag_and_ordinary_namespaces() {
     assert_eq!(fields.len(), 2);
     assert_ne!(fields[0]["is_tag"], fields[1]["is_tag"]);
     assert_ne!(fields[0]["id"], fields[1]["id"]);
+    // The tag column is counted once, by the tag batch, and reused for population.
     let selected = probes
         .iter()
-        .filter(|p| p.kind == "population")
+        .filter(|p| matches!(p.kind.as_str(), "population" | "tag-batch"))
         .flat_map(|p| &p.fields)
         .collect::<Vec<_>>();
     assert_eq!(
@@ -674,7 +686,7 @@ fn one_hundred_twenty_eight_fields_fit_the_forty_query_budget() {
     assert!(probes.iter().filter(|p| p.kind == "population").count() <= 8);
     let kinds_end = probes
         .iter()
-        .rposition(|p| matches!(p.kind.as_str(), "tag-detect" | "record-kind-facet"))
+        .rposition(|p| matches!(p.kind.as_str(), "tag-batch" | "record-kind-facet"))
         .unwrap();
     let rare_start = probes
         .iter()
@@ -718,7 +730,8 @@ fn sampled_selection_is_lexical_and_direct_kind_metadata_does_not_consume_the_ca
         .find(|field| field["path"] == "event.dataset")
         .unwrap();
     assert_eq!(dataset["is_tag"], true);
-    assert_eq!(dataset["coverage"]["observed"], false);
+    // The full-window dataset facet saw it; the tag batch's recent zero does not hide that.
+    assert_eq!(dataset["coverage"]["observed"], true);
     assert!(dataset["coverage"]["rate"].is_null());
 }
 
@@ -896,9 +909,9 @@ fn malformed_facets_budgets_and_timeouts_leave_the_active_pack_untouched() {
 #[test]
 fn expected_searches_follow_the_request_shape() {
     let capped = request();
-    // Three base searches, nine tag checks and one population chunk at least.
+    // Three base searches, one tag batch and one population chunk at least.
     let (low, high) = discovery::expected_searches(&capped).unwrap();
-    assert_eq!(low, 13);
+    assert_eq!(low, 5);
     assert!(high.unwrap() > low);
     let plan = discovery::initial_plan(&capped).unwrap();
     assert_eq!(

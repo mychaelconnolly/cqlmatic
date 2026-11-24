@@ -228,14 +228,19 @@ impl World {
             ("fieldset", rows)
         } else if query.contains("groupBy([#event.dataset]") {
             ("dataset-facet", json!([]))
+        } else if query.contains("count(field=\"#event_simpleName\"") {
+            // No tag candidate is present.
+            let mut row = json!({"total":10});
+            for index in 0..query.matches(", as=c").count() {
+                row[format!("c{index}")] = json!(0);
+            }
+            ("tag-batch", json!([row]))
         } else if query.contains("stats([count(as=total)") {
             let mut row = json!({"total":10});
             for index in 0..query.matches(", as=c").count() {
                 row[format!("c{index}")] = json!(10);
             }
             ("population", json!([row]))
-        } else if query.contains("=* | count(as=events)") {
-            ("tag-detect", json!([{"events":0}]))
         } else if query.contains("limit=25) | sort(events, order=desc, limit=25)") {
             let field = query
                 .split("groupBy([")
