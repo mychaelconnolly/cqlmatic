@@ -1783,11 +1783,11 @@ fn activate(
         );
     }
     let merged = match old {
-        Some(old) => environment::merge(&old, &candidate),
-        None => Ok(candidate),
+        Some(old) => environment::merge_with_notices(&old, &candidate),
+        None => Ok((candidate, Vec::new())),
     };
-    let merged = match merged {
-        Ok(pack) => pack,
+    let (merged, notices) = match merged {
+        Ok(merged) => merged,
         Err(d) => return fail_state(writer, state, d),
     };
     let receipt_writer = match storage::Writer::acquire(&state.receipt) {
@@ -1811,6 +1811,7 @@ fn activate(
     }
     let predecessor = optional_bytes(&state.pack)?.map(|bytes| sha256_hex(&bytes));
     report.active_pack_updated = true;
+    report.diagnostics.extend(notices.iter().cloned());
     let mut receipt = serde_json::to_value(&report)
         .map_err(|_| Diagnostic::error("LOCAL_SERIALIZATION", "Cannot serialize MCP receipt."))?;
     receipt["mode"] = json!(if state
@@ -1847,7 +1848,11 @@ fn activate(
         return Ok(activation_blocked(state, d));
     }
     activation_checkpoint("after-intent")?;
-    finish_activation(writer, &pack_writer, &receipt_writer, state)
+    let mut output = finish_activation(writer, &pack_writer, &receipt_writer, state)?;
+    if output.status == "complete" {
+        output.diagnostics.extend(notices);
+    }
+    Ok(output)
 }
 fn frozen_json(value: &impl Serialize) -> Result<String, Diagnostic> {
     let mut bytes = serde_json::to_string_pretty(value).map_err(|_| {

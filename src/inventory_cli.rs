@@ -606,7 +606,7 @@ fn cumulative_pack(state: &InventoryState) -> Result<Option<Pack>, Diagnostic> {
     let mut cumulative = None;
     for pack in loaded {
         cumulative = Some(match cumulative {
-            Some(previous) => cqlmatic::environment::merge(&previous, &pack)?,
+            Some(previous) => cqlmatic::environment::merge_historical(&previous, &pack)?,
             None => pack,
         });
     }
