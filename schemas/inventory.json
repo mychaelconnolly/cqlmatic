@@ -33,6 +33,190 @@
         "start"
       ]
     },
+    "BatchAction": {
+      "description": "The local actions one `batch` request can apply together. None reserves, dispatches or\nsettles a search, reads the network or imports a pack.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "data_model": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "review-source"
+            },
+            "purpose": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "purpose",
+            "data_model",
+            "reviewed_at",
+            "evidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "bind-parser"
+            },
+            "parser_id": {
+              "type": "string"
+            },
+            "parser_sha256": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "semantics": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/SemanticReview"
+              }
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "parser_id",
+            "parser_sha256",
+            "reviewed_at",
+            "evidence",
+            "semantics"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "exclude-parser"
+            },
+            "parser_id": {
+              "type": "string"
+            },
+            "parser_sha256": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "parser_id",
+            "parser_sha256",
+            "reviewed_at",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "evidence": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "parser-not-applicable"
+            },
+            "reason": {
+              "$ref": "#/$defs/NativeSourceReason"
+            },
+            "reviewed_at": {
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "reason",
+            "reviewed_at",
+            "evidence"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "details": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ParserDetailInput"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "import-parsers"
+            },
+            "pages": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ParserPageInput"
+              }
+            },
+            "retrieved_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pages",
+            "details",
+            "retrieved_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "reconcile"
+            },
+            "reviewed_at": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "reviewed_at"
+          ]
+        }
+      ]
+    },
     "CapabilityAttempt": {
       "type": "object",
       "properties": {
@@ -1398,6 +1582,28 @@
             "stage",
             "message",
             "recorded_at"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "actions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/BatchAction"
+              },
+              "maxItems": 32,
+              "minItems": 1
+            },
+            "kind": {
+              "type": "string",
+              "const": "batch"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "actions"
           ]
         }
       ]

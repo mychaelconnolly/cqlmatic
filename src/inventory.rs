@@ -242,6 +242,122 @@ pub enum InventoryAction {
         message: String,
         recorded_at: String,
     },
+    Batch {
+        #[cfg_attr(test, schemars(length(min = 1, max = 32)))]
+        actions: Vec<BatchAction>,
+    },
+}
+
+pub const MAX_BATCH_ACTIONS: usize = 32;
+
+/// The local actions one `batch` request can apply together. None reserves, dispatches or
+/// settles a search, reads the network or imports a pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BatchAction {
+    ReviewSource {
+        source_id: String,
+        purpose: String,
+        data_model: String,
+        reviewed_at: String,
+        evidence: String,
+    },
+    BindParser {
+        source_id: String,
+        parser_id: String,
+        parser_sha256: String,
+        reviewed_at: String,
+        evidence: String,
+        semantics: Vec<SemanticReview>,
+    },
+    ExcludeParser {
+        parser_id: String,
+        parser_sha256: String,
+        reviewed_at: String,
+        reason: String,
+    },
+    ParserNotApplicable {
+        source_id: String,
+        reason: NativeSourceReason,
+        reviewed_at: String,
+        evidence: String,
+    },
+    ImportParsers {
+        pages: Vec<ParserPageInput>,
+        details: Vec<ParserDetailInput>,
+        retrieved_at: String,
+    },
+    Reconcile {
+        reviewed_at: String,
+    },
+}
+
+impl From<BatchAction> for InventoryAction {
+    fn from(action: BatchAction) -> Self {
+        match action {
+            BatchAction::ReviewSource {
+                source_id,
+                purpose,
+                data_model,
+                reviewed_at,
+                evidence,
+            } => Self::ReviewSource {
+                source_id,
+                purpose,
+                data_model,
+                reviewed_at,
+                evidence,
+            },
+            BatchAction::BindParser {
+                source_id,
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                evidence,
+                semantics,
+            } => Self::BindParser {
+                source_id,
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                evidence,
+                semantics,
+            },
+            BatchAction::ExcludeParser {
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                reason,
+            } => Self::ExcludeParser {
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                reason,
+            },
+            BatchAction::ParserNotApplicable {
+                source_id,
+                reason,
+                reviewed_at,
+                evidence,
+            } => Self::ParserNotApplicable {
+                source_id,
+                reason,
+                reviewed_at,
+                evidence,
+            },
+            BatchAction::ImportParsers {
+                pages,
+                details,
+                retrieved_at,
+            } => Self::ImportParsers {
+                pages,
+                details,
+                retrieved_at,
+            },
+            BatchAction::Reconcile { reviewed_at } => Self::Reconcile { reviewed_at },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

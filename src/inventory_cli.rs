@@ -647,7 +647,10 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
             output(&extra)?;
         }
     }
-    Ok(0)
+    // A batch that saved nothing, or whose write is unconfirmed, is a failed request.
+    let batch_failed = extra["kind"] == "batch"
+        && !matches!(extra["commit"].as_str(), Some("committed" | "unchanged"));
+    Ok(if batch_failed { 2 } else { 0 })
 }
 
 struct NextProbeRun {
@@ -1034,6 +1037,9 @@ fn apply_locked(
     work_budget: u64,
     writer: &storage::Writer,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
+    if let InventoryAction::Batch { actions } = action {
+        return apply_batch_locked(path, actions, work_budget, writer);
+    }
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
     let now = discovery::timestamp();
@@ -1219,6 +1225,205 @@ fn apply_locked(
     })()
 }
 
+/// Applies the items in order to one private candidate, each with the checks its single action
+/// makes, then resolves pending work, reconciles, assesses and writes once. A failed batch
+/// leaves the saved inventory as it was, and its status describes what is saved.
+fn apply_batch_locked(
+    path: &Path,
+    actions: Vec<BatchAction>,
+    work_budget: u64,
+    writer: &storage::Writer,
+) -> Result<(InventoryStatus, Value), Diagnostic> {
+    if actions.is_empty() || actions.len() > MAX_BATCH_ACTIONS {
+        return Err(fail(
+            "A batch holds 1 to 32 actions. Send between 1 and 32, splitting a longer list into several batches.",
+        ));
+    }
+    if let Some(index) = actions
+        .iter()
+        .position(|action| matches!(action, BatchAction::Reconcile { .. }))
+        && index + 1 < actions.len()
+    {
+        return Err(fail(&format!(
+            "Batch item {index} is reconcile, which must be the last item. Keep one reconcile at the end of the batch."
+        )));
+    }
+    let stored = load_existing(path)?;
+    let before = stored.as_ref().map(state_fingerprint).transpose()?;
+    let now = discovery::timestamp();
+    let saved = match stored {
+        Some(state) => state,
+        None => InventoryState::new(&now)?,
+    };
+    // These actions change no retained pack, discovery run or pending work item, so the
+    // packs and the completed-run evidence are read once for the whole batch.
+    let loaded = packs(&saved)?;
+    let resolve_work = actions
+        .iter()
+        .any(|action| !matches!(action, BatchAction::ExcludeParser { .. }));
+    let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
+        inventory_run_evidence(&saved, work_budget, &[])?
+    } else {
+        (vec![], vec![], false)
+    };
+    let reconcile_at = match actions.last() {
+        Some(BatchAction::Reconcile { reviewed_at }) => Some(reviewed_at.clone()),
+        _ => None,
+    };
+    let count = actions.len();
+    let mut state = saved.clone();
+    if state.schema_version < STATE_VERSION {
+        state.field_evidence_schema_version = Some(state.schema_version);
+    }
+    state.schema_version = STATE_VERSION;
+    let failed = actions.into_iter().enumerate().find_map(|(index, action)| {
+        apply(path, &mut state, action.into(), &now, None, writer, &[])
+            .and_then(|_| state.validate())
+            .err()
+            .map(|diagnostic| (index, diagnostic))
+    });
+    let rolled_back = |item: Option<(usize, Diagnostic)>,
+                       diagnostic: Option<Diagnostic>|
+     -> Result<(InventoryStatus, Value), Diagnostic> {
+        let report = inventory::assess_at(&saved, &loaded, &now)?;
+        Ok((report, batch_reply("rolled-back", count, item, diagnostic)))
+    };
+    if failed.is_some() {
+        return rolled_back(failed, None);
+    }
+    let settled = (|| -> Result<(InventoryStatus, Option<Vec<u8>>), Diagnostic> {
+        let mut report = inventory::assess_at(&state, &loaded, &now)?;
+        if resolve_work {
+            state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
+            if let Some(reviewed_at) = reconcile_at {
+                state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
+                state.reconciled_at = Some(reviewed_at);
+            }
+            report = inventory::assess_at(&state, &loaded, &now)?;
+        }
+        let unchanged = match &before {
+            Some(before) => *before == state_fingerprint(&state)?,
+            None => false,
+        };
+        let bytes = if unchanged {
+            None
+        } else {
+            state.updated_at = now.clone();
+            Some(
+                serde_json::to_vec_pretty(&state)
+                    .map_err(|_| fail("Cannot serialize inventory state."))?,
+            )
+        };
+        Ok((report, bytes))
+    })();
+    let (report, bytes) = match settled {
+        Ok(settled) => settled,
+        Err(diagnostic) => return rolled_back(None, Some(diagnostic)),
+    };
+    let written = match &bytes {
+        None => writer.confirm_parent_durable(),
+        Some(bytes) => writer.commit_bytes(bytes, MAX_STATE_BYTES),
+    };
+    let mut action = match written {
+        Ok(()) => batch_reply(
+            if bytes.is_none() {
+                "unchanged"
+            } else {
+                "committed"
+            },
+            count,
+            None,
+            None,
+        ),
+        // The new state was renamed into place; only the directory sync is unconfirmed.
+        Err(diagnostic) if diagnostic.code == "PACK_DURABILITY" => batch_reply(
+            "visible-durability-unconfirmed",
+            count,
+            None,
+            Some(diagnostic),
+        ),
+        Err(diagnostic) => return rolled_back(None, Some(diagnostic)),
+    };
+    if evidence_limited {
+        action["inventory_work_evidence_limited"] = json!(true);
+    }
+    Ok((report, action))
+}
+
+/// The reply's `action` for a batch: one result per item, in order.
+fn batch_reply(
+    commit: &str,
+    count: usize,
+    failed: Option<(usize, Diagnostic)>,
+    diagnostic: Option<Diagnostic>,
+) -> Value {
+    let outcome = if commit == "rolled-back" {
+        "rolled-back"
+    } else {
+        "applied"
+    };
+    let results: Vec<Value> = (0..count)
+        .map(|index| match &failed {
+            Some((at, diagnostic)) if index == *at => {
+                json!({"index":index,"outcome":"failed","diagnostic":diagnostic})
+            }
+            Some((at, _)) if index > *at => json!({"index":index,"outcome":"skipped"}),
+            _ => json!({"index":index,"outcome":outcome}),
+        })
+        .collect();
+    let mut action = json!({"kind":"batch","commit":commit,"results":results});
+    if let Some(diagnostic) = diagnostic {
+        action["diagnostic"] = json!(diagnostic);
+    }
+    if commit == "visible-durability-unconfirmed" {
+        action["next_action"] = json!(BATCH_DURABILITY_UNCONFIRMED);
+    }
+    action
+}
+
+const BATCH_DURABILITY_UNCONFIRMED: &str = "The inventory shows the result of this batch, but the tool could not confirm that it reached the disk. Read inventory status before sending the batch again.";
+
+/// The brief reply for a batch: indices, outcomes, counts and one fixed diagnostic.
+fn batch_brief(action: &Value) -> Value {
+    let mut counts = serde_json::Map::new();
+    let mut results = Vec::new();
+    for (index, result) in action["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let outcome = result["outcome"].as_str().unwrap_or_default();
+        let count = counts.entry(outcome).or_insert(json!(0));
+        *count = json!(count.as_u64().unwrap_or(0) + 1);
+        results.push(json!({"index":index,"outcome":outcome}));
+    }
+    let mut brief = json!({"kind":"batch","commit":action["commit"],"results":results,
+        "counts":counts,"notification_only":true,"executes_searches":false});
+    let failed = action["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .position(|result| result["outcome"] == "failed");
+    if let Some(index) = failed {
+        brief["diagnostic"] = json!({"index":index,
+            "code":action["results"][index]["diagnostic"]["code"],
+            "message":"Nothing was saved. Send the batch again without --brief to read why the item at this index failed, correct that item, then send the whole batch again."});
+    } else if let Some(code) = action["diagnostic"]["code"].as_str() {
+        let message = if action["commit"] == "visible-durability-unconfirmed" {
+            BATCH_DURABILITY_UNCONFIRMED
+        } else {
+            "Nothing was saved. Send the batch again without --brief to read why it could not be saved."
+        };
+        brief["diagnostic"] = json!({"code":code,"message":message});
+    }
+    if action["inventory_work_evidence_limited"] == true {
+        brief["inventory_work_evidence_limited"] = json!(true);
+        brief["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}]);
+    }
+    brief
+}
+
 fn action_summary(action: &Value) -> Value {
     if action.is_null() {
         return Value::Null;
@@ -1247,6 +1452,9 @@ fn action_summary(action: &Value) -> Value {
 }
 
 fn action_brief(action: &Value) -> Value {
+    if action["kind"] == "batch" {
+        return batch_brief(action);
+    }
     let mut compact =
         json!({"outcome":"applied","notification_only":true,"executes_searches":false});
     if let Some(status) = action
@@ -2039,6 +2247,9 @@ fn apply(
     match action {
         InventoryAction::NextProbe { .. } => {
             Err(fail("Pass next-probe as a CLI inventory request."))
+        }
+        InventoryAction::Batch { .. } => {
+            unreachable!("apply_locked applies a batch item by item")
         }
         InventoryAction::PrepareCapabilities {
             execution_context_id,
