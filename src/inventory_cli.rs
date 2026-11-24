@@ -597,7 +597,10 @@ pub(crate) fn read_with_pack_reload<S, P>(
     unreachable!("the final read returns its result")
 }
 
-fn read_status(path: &Path) -> Result<(InventoryState, InventoryStatus), Diagnostic> {
+fn read_status(
+    path: &Path,
+    include_quiet_census: bool,
+) -> Result<(InventoryState, InventoryStatus), Diagnostic> {
     let (state, loaded) = if crate::setup_cli::private_input_exists(path)? {
         read_with_pack_reload(
             path,
@@ -612,7 +615,12 @@ fn read_status(path: &Path) -> Result<(InventoryState, InventoryStatus), Diagnos
     } else {
         (InventoryState::new(&discovery::timestamp())?, vec![])
     };
-    let report = live_status(&state, &loaded, &discovery::timestamp())?;
+    let report = live_status_options(
+        &state,
+        &loaded,
+        &discovery::timestamp(),
+        include_quiet_census,
+    )?;
     Ok((state, report))
 }
 
@@ -934,6 +942,42 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             source.fields.len()
         )
         .map_err(|_| fail(OUTPUT_FAILED))?;
+        if let Some(quiet) = &source.quiet {
+            writeln!(
+                out,
+                "  Zero events for [{selectors}] in {}/{} on view {:?} (discovery run {}). {}",
+                quiet.start, quiet.end, quiet.view, quiet.run_index, quiet.note
+            )
+            .map_err(|_| fail(OUTPUT_FAILED))?;
+            writeln!(out, "  {}", quiet.census).map_err(|_| fail(OUTPUT_FAILED))?;
+            for seen in &quiet.other_types {
+                writeln!(
+                    out,
+                    "    #type={:?}: {} events in {}/{} on view {:?}, retrieved {}",
+                    seen.type_, seen.events, seen.start, seen.end, seen.view, seen.retrieved_at
+                )
+                .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+            if quiet.omitted_types > 0 {
+                writeln!(out, "    {} more types omitted.", quiet.omitted_types)
+                    .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+            if quiet.ceiling_capture {
+                writeln!(
+                    out,
+                    "    A census capture reached 10,000 rows and may not list every type."
+                )
+                .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+            if let Some(query) = &quiet.query {
+                writeln!(
+                    out,
+                    "  Optional query over {}/{} on view {:?}: {query}",
+                    quiet.start, quiet.end, quiet.view
+                )
+                .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+        }
         for action in &source.next_actions {
             writeln!(out, "  - {action}").map_err(|_| fail(OUTPUT_FAILED))?;
         }
@@ -1048,7 +1092,7 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
         args.state
             .or_else(|| request.and_then(|r| r.state.map(PathBuf::from))),
     )?;
-    let (state, mut report) = read_status(&path)?;
+    let (state, mut report) = read_status(&path, !args.brief)?;
     if !args.brief {
         note_status_row_limit(&state, &mut report);
     }
@@ -1073,7 +1117,7 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
 pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     let path = state_path(args.state)?;
     if args.request.is_none() && !args.next_probe {
-        let (state, mut report) = read_status(&path)?;
+        let (state, mut report) = read_status(&path, !args.brief)?;
         if !args.brief {
             note_status_row_limit(&state, &mut report);
         }
@@ -1114,7 +1158,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         return Err(fail("Unsupported inventory request version."));
     }
     if let InventoryAction::NextProbe { run_index, answer } = request.action {
-        let mut action = next_probe(&path, run_index, answer)?;
+        let mut action = next_probe(&path, run_index, answer, args.brief)?;
         if args.brief {
             action
                 .as_object_mut()
@@ -1130,7 +1174,8 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
         _ => None,
     };
     let is_reconcile = matches!(request.action, InventoryAction::Reconcile { .. });
-    let (report, extra, state) = apply_request(&path, request.action, MAX_STATE_BYTES)?;
+    let (report, extra, state) =
+        apply_request_options(&path, request.action, MAX_STATE_BYTES, !args.brief)?;
     if args.json {
         if args.brief {
             let action = action_brief(&extra);
@@ -1300,11 +1345,12 @@ fn next_probe(
     path: &Path,
     run_index: Option<usize>,
     answer: Option<DiscoveryAnswer>,
+    brief: bool,
 ) -> Result<Value, Diagnostic> {
     let writer = inventory_writer(path)?;
     let mut run = inspect_next_probe_run(path, run_index, &writer)?;
     let index = run.index;
-    let apply = |action| apply_locked(path, action, MAX_STATE_BYTES, &writer);
+    let apply = |action| apply_locked_options(path, action, MAX_STATE_BYTES, &writer, false, false);
     let step = |answers| {
         apply(InventoryAction::DiscoveryStep {
             run_index: Some(index),
@@ -1419,6 +1465,7 @@ fn next_probe(
         diagnostics.push(safe_answer_diagnostic(&refusal.code, refusal.severity));
     }
     let mut expired = mcp::time_limit_passed(&run.relay, &discovery::timestamp());
+    let mut relay_quiet = mcp::quiet_source_ids(&run.relay).ok().flatten();
     drop(run);
 
     let mut dispatched = false;
@@ -1450,6 +1497,7 @@ fn next_probe(
         let saved = inspect_next_probe_run(path, Some(index), &writer)
             .map_err(|read_error| poll.err().unwrap_or(read_error))?;
         phase = saved.phase;
+        relay_quiet = mcp::quiet_source_ids(&saved.relay).ok().flatten();
         terminal_failure = relay_failure_cause(&saved.relay);
         source_id = terminal_failure
             .as_ref()
@@ -1552,6 +1600,40 @@ fn next_probe(
     }
     if !diagnostics.is_empty() {
         action["diagnostics"] = json!(diagnostics);
+    }
+    let state = if brief && relay_quiet.is_some() {
+        None
+    } else {
+        load_existing(path)?
+    };
+    let quiet_ids = relay_quiet
+        .or_else(|| {
+            state
+                .as_ref()
+                .and_then(|s| s.discovery_runs.get(index))
+                .map(|r| r.quiet_source_ids.clone())
+        })
+        .unwrap_or_default();
+    if !quiet_ids.is_empty() {
+        action["quiet_source_count"] = json!(quiet_ids.len());
+        if brief {
+            let mut notices = action
+                .get("notices")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            notices.push(json!({
+                "code": "DISCOVERY_QUIET_SOURCES",
+                "severity": "info",
+                "message": inventory::QUIET_RUN_BRIEF_POINTER
+            }));
+            action["notices"] = json!(notices);
+        } else if let Some(state) = state.as_ref() {
+            let quiet = inventory::run_quiet_sources_for(state, index, &quiet_ids);
+            if !quiet.is_empty() {
+                action["quiet_sources"] = json!(quiet);
+            }
+        }
     }
     Ok(action)
 }
@@ -1710,6 +1792,16 @@ fn relay_failure(error: &Diagnostic, legacy: bool, query_limit: u32) -> (Value, 
         ("PACK_INTEGRITY", _) if selector_conflict(error).is_some() => (
             "PACK_INTEGRITY",
             "The measured scope conflicts with imported restrictions.",
+            FULL_STEP,
+        ),
+        ("DISCOVERY_EVIDENCE", discovery::ALL_QUIET_SOURCES) => (
+            "DISCOVERY_EVIDENCE",
+            "Every selected source had zero events in the window.",
+            FULL_STEP,
+        ),
+        ("DISCOVERY_EVIDENCE", discovery::EMPTY_FIELD_LISTING) => (
+            "DISCOVERY_EVIDENCE",
+            "A source with events listed no fields in the window.",
             FULL_STEP,
         ),
         (
@@ -1981,6 +2073,15 @@ fn apply_request(
     action: InventoryAction,
     work_budget: u64,
 ) -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
+    apply_request_options(path, action, work_budget, true)
+}
+
+fn apply_request_options(
+    path: &Path,
+    action: InventoryAction,
+    work_budget: u64,
+    include_quiet_census: bool,
+) -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
     if let InventoryAction::ImportParsers {
         pages,
         details,
@@ -2006,7 +2107,15 @@ fn apply_request(
         return prune_inventory(path, dry_run, keep_last, include_failed);
     }
     let writer = inventory_writer(path)?;
-    apply_locked(path, action, work_budget, &writer)
+    let (report, extra, state) = apply_locked_options(
+        path,
+        action,
+        work_budget,
+        &writer,
+        include_quiet_census,
+        true,
+    )?;
+    Ok((report.expect("apply_request requests report"), extra, state))
 }
 
 const PRUNE_BATCH: usize = 64;
@@ -3202,8 +3311,23 @@ fn apply_locked(
     work_budget: u64,
     writer: &storage::Writer,
 ) -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
+    let (report, extra, state) =
+        apply_locked_options(path, action, work_budget, writer, true, true)?;
+    Ok((report.expect("apply_locked requests report"), extra, state))
+}
+
+fn apply_locked_options(
+    path: &Path,
+    action: InventoryAction,
+    work_budget: u64,
+    writer: &storage::Writer,
+    include_quiet_census: bool,
+    need_report: bool,
+) -> Result<(Option<InventoryStatus>, Value, InventoryState), Diagnostic> {
     if let InventoryAction::Batch { actions } = action {
-        return apply_batch_locked(path, actions, work_budget, writer);
+        let (report, extra, state) =
+            apply_batch_locked(path, actions, work_budget, writer, include_quiet_census)?;
+        return Ok((need_report.then_some(report), extra, state));
     }
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
@@ -3266,13 +3390,13 @@ fn apply_locked(
             let relay = inspect_selected_run(&state, index)?;
             let run = &state.discovery_runs[index];
             let phase = if matches!(run.status.as_str(), "complete" | "superseded") {
-                run.status.as_str()
+                run.status.clone()
             } else {
-                relay.status.as_str()
+                relay.status.clone()
             };
             if let InventoryAction::DiscoveryStep { answers, .. } = &action
                 && !answers.is_empty()
-                && matches!(phase, "complete" | "superseded" | "failed")
+                && matches!(phase.as_str(), "complete" | "superseded" | "failed")
             {
                 let (code, message) = if answers.iter().any(|answer| {
                     relay
@@ -3316,10 +3440,60 @@ fn apply_locked(
                     });
                     diagnostics.push(failure);
                 }
-                let report = live_status(&state, &packs(&state)?, &now)?;
+                let relay_quiet = mcp::quiet_source_ids(&relay)
+                    .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
+                if relay.status == "failed" {
+                    let run = &mut state.discovery_runs[index];
+                    let mut changed = false;
+                    if run.status != "failed" {
+                        run.status = "failed".into();
+                        changed = true;
+                    }
+                    if run.answered != relay.answers.len() {
+                        run.answered = relay.answers.len();
+                        changed = true;
+                    }
+                    if let Some(quiet) = &relay_quiet
+                        && run.quiet_source_ids != *quiet
+                    {
+                        run.quiet_source_ids.clone_from(quiet);
+                        changed = true;
+                    }
+                    if changed {
+                        state.validate()?;
+                        state.updated_at = now.clone();
+                        let bytes = serde_json::to_vec_pretty(&state)
+                            .map_err(|_| fail("Cannot serialize inventory state."))?;
+                        writer.commit_bytes(&bytes, MAX_STATE_BYTES)?;
+                    }
+                }
+                let report = if need_report {
+                    Some(live_status_options(
+                        &state,
+                        &packs(&state)?,
+                        &now,
+                        include_quiet_census,
+                    )?)
+                } else {
+                    None
+                };
                 let mut reply = json!({"run_index":index,"status":"incomplete","run_status":phase,"diagnostics":diagnostics});
                 if let Some(advice) = next_action {
                     reply["next_action"] = json!(advice);
+                }
+                let quiet_ids = relay_quiet
+                    .as_deref()
+                    .unwrap_or(&state.discovery_runs[index].quiet_source_ids);
+                if !quiet_ids.is_empty() {
+                    if include_quiet_census {
+                        let quiet = inventory::run_quiet_sources_for(&state, index, quiet_ids);
+                        if !quiet.is_empty() {
+                            reply["quiet_source_count"] = json!(quiet.len());
+                            reply["quiet_sources"] = json!(quiet);
+                        }
+                    } else {
+                        reply["quiet_source_count"] = json!(quiet_ids.len());
+                    }
                 }
                 return Ok((report, reply, state));
             }
@@ -3420,38 +3594,71 @@ fn apply_locked(
         }
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
+            if include_quiet_census {
+                attach_quiet_sources(&state, index, &mut extra);
+            } else {
+                let count = state
+                    .discovery_runs
+                    .get(index)
+                    .map_or(0, |r| r.quiet_source_ids.len());
+                if count > 0 && extra.is_object() {
+                    extra["quiet_source_count"] = json!(count);
+                }
+            }
         }
         state.validate()?;
         let loaded = packs(&state)?;
-        let mut report = inventory::assess_at(&state, &loaded, &now)?;
-        let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
-            inventory_run_evidence(&state, work_budget, &relay_guards)?
-        } else {
-            (vec![], vec![], false)
-        };
-        let mut recorded = None;
-        if resolve_work {
-            state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
-            if let Some(reviewed_at) = reconcile_at {
-                let digest = state.evidence_digest()?;
-                recorded = Some(state.reconciled_evidence_sha256.as_ref() != Some(&digest));
-                state.reconciled_evidence_sha256 = Some(digest);
-                state.reconciled_at = Some(reviewed_at);
+        let needs_work_pass = resolve_work
+            && (reconcile_at.is_some()
+                || state
+                    .pending_inventory
+                    .iter()
+                    .any(|w| w.resolution.is_none()));
+        let (report, evidence_limited) = if need_report || needs_work_pass {
+            let mut report = inventory::assess_at_options(
+                &state,
+                &loaded,
+                &now,
+                include_quiet_census && !needs_work_pass,
+            )?;
+            let (evidence, _evidence_guards, evidence_limited) = if needs_work_pass {
+                inventory_run_evidence(&state, work_budget, &relay_guards)?
+            } else {
+                (vec![], vec![], false)
+            };
+            let mut recorded = None;
+            if needs_work_pass {
+                state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
+                if let Some(reviewed_at) = reconcile_at {
+                    let digest = state.evidence_digest()?;
+                    recorded = Some(state.reconciled_evidence_sha256.as_ref() != Some(&digest));
+                    state.reconciled_evidence_sha256 = Some(digest);
+                    state.reconciled_at = Some(reviewed_at);
+                }
+                if need_report || recorded.is_some() {
+                    report =
+                        inventory::assess_at_options(&state, &loaded, &now, include_quiet_census)?;
+                }
             }
-            report = inventory::assess_at(&state, &loaded, &now)?;
-        }
-        inventory::advise(&state, &mut report, retained_blocker(&state, &now));
-        if let Some(recorded) = recorded {
-            let next_action = report
-                .completion_detail
-                .as_ref()
-                .and_then(|detail| detail.next_action.clone())
-                .unwrap_or_else(|| "No listed step is open. Read full_map_complete, selected_scope_complete or quick_scope_complete, and the status next_actions, for any other remaining work.".into());
-            extra = json!({"kind":"reconcile",
-                "status":if recorded { "recorded" } else { "already-current" },
-                "evidence_sha256":state.reconciled_evidence_sha256,"reviewed_at":state.reconciled_at,
-                "completion_detail":report.completion_detail,"next_action":next_action});
-        }
+            if need_report || recorded.is_some() {
+                inventory::advise(&state, &mut report, retained_blocker(&state, &now));
+            }
+            if let Some(recorded) = recorded {
+                let next_action = report
+                    .completion_detail
+                    .as_ref()
+                    .and_then(|detail| detail.next_action.clone())
+                    .unwrap_or_else(|| "No listed step is open. Read full_map_complete, selected_scope_complete or quick_scope_complete, and the status next_actions, for any other remaining work.".into());
+                extra = json!({"kind":"reconcile",
+                    "status":if recorded { "recorded" } else { "already-current" },
+                    "evidence_sha256":state.reconciled_evidence_sha256,"reviewed_at":state.reconciled_at,
+                    "completion_detail":report.completion_detail,"next_action":next_action});
+            }
+            (need_report.then_some(report), evidence_limited)
+        } else {
+            inventory::verify_packs(&state, &loaded)?;
+            (None, false)
+        };
         if evidence_limited {
             extra["inventory_work_evidence_limited"] = json!(true);
             notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
@@ -3480,7 +3687,16 @@ fn live_status(
     packs: &[Pack],
     now: &str,
 ) -> Result<InventoryStatus, Diagnostic> {
-    let mut report = inventory::assess_at(state, packs, now)?;
+    live_status_options(state, packs, now, true)
+}
+
+fn live_status_options(
+    state: &InventoryState,
+    packs: &[Pack],
+    now: &str,
+    include_quiet_census: bool,
+) -> Result<InventoryStatus, Diagnostic> {
+    let mut report = inventory::assess_at_options(state, packs, now, include_quiet_census)?;
     inventory::advise(state, &mut report, retained_blocker(state, now));
     Ok(report)
 }
@@ -3542,6 +3758,7 @@ fn apply_batch_locked(
     actions: Vec<BatchAction>,
     work_budget: u64,
     writer: &storage::Writer,
+    include_quiet_census: bool,
 ) -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
@@ -3573,7 +3790,7 @@ fn apply_batch_locked(
     let rolled_back = |item: Option<(usize, Diagnostic)>,
                        diagnostic: Option<Diagnostic>|
      -> Result<(InventoryStatus, Value, InventoryState), Diagnostic> {
-        let report = live_status(&saved, &loaded, &now)?;
+        let report = live_status_options(&saved, &loaded, &now, include_quiet_census)?;
         Ok((
             report,
             batch_reply("rolled-back", count, item, diagnostic),
@@ -3593,14 +3810,19 @@ fn apply_batch_locked(
         (vec![], vec![], false)
     };
     let settled = (|| -> Result<(InventoryStatus, Option<Vec<u8>>), Diagnostic> {
-        let mut report = inventory::assess_at(&state, &loaded, &now)?;
+        let mut report = inventory::assess_at_options(
+            &state,
+            &loaded,
+            &now,
+            include_quiet_census && !resolve_work,
+        )?;
         if resolve_work {
             state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
             if let Some(reviewed_at) = reconcile_at {
                 state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
                 state.reconciled_at = Some(reviewed_at);
             }
-            report = inventory::assess_at(&state, &loaded, &now)?;
+            report = inventory::assess_at_options(&state, &loaded, &now, include_quiet_census)?;
         }
         inventory::advise(&state, &mut report, retained_blocker(&state, &now));
         let unchanged = match &before {
@@ -3963,6 +4185,7 @@ fn action_brief(action: &Value) -> Value {
         "automatic_refresh_available",
         "inventory_work_evidence_limited",
         "run_index",
+        "quiet_source_count",
     ] {
         if let Some(value) = action.get(key).filter(|v| v.is_boolean() || v.is_u64()) {
             compact[key] = value.clone();
@@ -4052,6 +4275,12 @@ fn action_brief(action: &Value) -> Value {
     let mut notices = Vec::new();
     if action["inventory_work_evidence_limited"] == true {
         notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}));
+    }
+    if action["quiet_source_count"]
+        .as_u64()
+        .is_some_and(|count| count > 0)
+    {
+        notices.push(json!({"code":"DISCOVERY_QUIET_SOURCES","severity":"info","message":inventory::QUIET_RUN_BRIEF_POINTER}));
     }
     if let Some(index) = action["notices"].as_array().and_then(|notices| {
         notices
@@ -4424,6 +4653,21 @@ fn verify_run_reference(
             "Retained discovery checkpoint differs from its inventory reference.",
         ));
     }
+    // Earlier-plan runs never record quiet sources and are not checked for them.
+    if let Some(quiet) = mcp::quiet_source_ids(relay)? {
+        let finalized = matches!(run.status.as_str(), "complete" | "failed" | "superseded");
+        let mut remaining = quiet.iter();
+        if finalized && run.quiet_source_ids != quiet
+            || !run
+                .quiet_source_ids
+                .iter()
+                .all(|id| remaining.any(|answered| answered == id))
+        {
+            return Err(fail(
+                "Recorded quiet discovery sources differ from the checkpoint's accepted volume answers.",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -4583,7 +4827,23 @@ fn finish_discovery(
     }
     .into();
     run.answered = output.answered;
+    sync_quiet_sources(run, output);
     Ok(diagnostic)
+}
+
+fn sync_quiet_sources(run: &mut DiscoveryRun, output: &mcp::StepOutput) {
+    if let Some(quiet) = &output.quiet_source_ids {
+        run.quiet_source_ids.clone_from(quiet);
+    }
+}
+
+/// Name each zero of the selected run in its reply, with the saved census detail.
+fn attach_quiet_sources(state: &InventoryState, index: usize, reply: &mut Value) {
+    let quiet = inventory::run_quiet_sources(state, index);
+    if !quiet.is_empty() && reply.is_object() {
+        reply["quiet_source_count"] = json!(quiet.len());
+        reply["quiet_sources"] = json!(quiet);
+    }
 }
 
 const STALE_DISCOVERY_PREDECESSOR: &str = "Discovery started from an earlier inventory.";
@@ -4948,6 +5208,7 @@ fn prepare_discovery(
         status: output.status.into(),
         mode: state.discovery_mode,
         quick_depth: state.quick_depth,
+        quiet_source_ids: output.quiet_source_ids.clone().unwrap_or_default(),
     });
     let index = state.discovery_runs.len() - 1;
     let advice = discovery_step_advice(index, false, false, &output);
@@ -5667,6 +5928,11 @@ fn apply(
                 .discovery_runs
                 .get_mut(run_index)
                 .expect("Selected run exists");
+            if let Some(quiet) = mcp::quiet_source_ids(&relay)
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?
+            {
+                run.quiet_source_ids = quiet;
+            }
             let stored_failure = if run.status == "failed"
                 && let Ok(output) = &result
                 && output.terminal_failure
@@ -5869,6 +6135,7 @@ fn apply(
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             run.status = output.status.into();
             run.answered = output.answered;
+            sync_quiet_sources(run, &output);
             run.elapsed_seconds = resumable_elapsed(&run.state_path)
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             let advice = discovery_step_advice(run_index, false, true, &output);
@@ -5884,6 +6151,7 @@ fn apply(
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             run.status = output.status.into();
             run.answered = output.answered;
+            sync_quiet_sources(run, &output);
             run.elapsed_seconds = resumable_elapsed(&run.state_path)
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             Ok(json!({"relay":output,"executes_searches":false}))
@@ -6205,7 +6473,12 @@ fn import_pack(
                 .filter(|run| {
                     run.status == "complete" && promoted.contains(run.state_path.as_str())
                 })
-                .flat_map(|run| run.source_ids.iter().cloned())
+                .flat_map(|run| {
+                    run.source_ids
+                        .iter()
+                        .filter(|id| !run.quiet_source_ids.contains(*id))
+                        .cloned()
+                })
                 .collect();
             environment::import_update(previous, &pack, &measured)?
         }

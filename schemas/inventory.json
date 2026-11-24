@@ -520,6 +520,13 @@
           "$ref": "#/$defs/QuickDepth",
           "default": "sources-and-fields"
         },
+        "quiet_source_ids": {
+          "description": "Selected sources whose accepted volume answer in this run's window was zero, in request\norder. Written only for runs of the current discovery plan.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "receipt_path": {
           "type": "string"
         },

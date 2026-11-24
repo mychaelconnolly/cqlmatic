@@ -168,6 +168,40 @@
         "at_row_ceiling"
       ]
     },
+    "CensusType": {
+      "type": "object",
+      "properties": {
+        "end": {
+          "type": "string"
+        },
+        "events": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "retrieved_at": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "events",
+        "view",
+        "start",
+        "end",
+        "retrieved_at"
+      ]
+    },
     "Cloud": {
       "type": "string",
       "enum": [
@@ -320,6 +354,13 @@
         "quick_depth": {
           "$ref": "#/$defs/QuickDepth",
           "default": "sources-and-fields"
+        },
+        "quiet_source_ids": {
+          "description": "Selected sources whose accepted volume answer in this run's window was zero, in request\norder. Written only for runs of the current discovery plan.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "receipt_path": {
           "type": "string"
@@ -1252,6 +1293,74 @@
         "sources-and-fields"
       ]
     },
+    "QuietSource": {
+      "description": "A source whose latest discovery run measured zero events in its window.",
+      "type": "object",
+      "properties": {
+        "ceiling_capture": {
+          "description": "A matching capture reached the row ceiling, so it may not list every type.",
+          "type": "boolean"
+        },
+        "census": {
+          "description": "What saved census captures show for this source's repository.",
+          "type": "string"
+        },
+        "end": {
+          "type": "string"
+        },
+        "events": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "note": {
+          "type": "string"
+        },
+        "omitted_types": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "other_types": {
+          "description": "Other types with events in this repository, from saved scout and refresh captures,\nlatest positive capture per type, at most 25 by count.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CensusType"
+          }
+        },
+        "query": {
+          "description": "An optional query the agent may run itself over the same window and view.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_index": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "start": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run_index",
+        "events",
+        "start",
+        "end",
+        "view",
+        "census",
+        "other_types",
+        "omitted_types",
+        "ceiling_capture",
+        "note"
+      ]
+    },
     "RecordKind": {
       "type": "object",
       "properties": {
@@ -1650,6 +1759,16 @@
         },
         "parser": {
           "$ref": "#/$defs/Progress"
+        },
+        "quiet": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuietSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "record_kinds": {
           "type": "array",
