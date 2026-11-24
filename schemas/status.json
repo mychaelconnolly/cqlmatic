@@ -75,6 +75,27 @@
         "cases"
       ]
     },
+    "CarriedParserReview": {
+      "description": "The latest capture saved a reviewed parser definition again as other bytes with the same\nparsed resource, so the review made against `reviewed_sha256` stands on `saved_sha256`.",
+      "type": "object",
+      "properties": {
+        "parser_id": {
+          "type": "string"
+        },
+        "reviewed_sha256": {
+          "type": "string"
+        },
+        "saved_sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parser_id",
+        "reviewed_sha256",
+        "saved_sha256"
+      ]
+    },
     "CaseId": {
       "type": "string",
       "enum": [
@@ -129,6 +150,24 @@
         "case_revision"
       ]
     },
+    "CensusSize": {
+      "type": "object",
+      "properties": {
+        "at_row_ceiling": {
+          "type": "boolean"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "at_row_ceiling"
+      ]
+    },
     "CensusType": {
       "type": "object",
       "properties": {
@@ -169,6 +208,58 @@
         "us1",
         "us2",
         "eu1"
+      ]
+    },
+    "CompletionDetail": {
+      "description": "What the progress words cover and what is still open, derived from the rest of the status.",
+      "type": "object",
+      "properties": {
+        "evidence_reviewed_at": {
+          "description": "Review time of the current evidence fingerprint; null unless reconciliation is done.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_sources_open": {
+          "$ref": "#/$defs/OpenSourceCounts"
+        },
+        "latest_census": {
+          "description": "The most recently imported census; null before any census is saved.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CensusSize"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_action": {
+          "description": "The first step status and reconcile advise; null when no listed step is open.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "parser_catalog_captured": {
+          "type": "boolean"
+        },
+        "reconciliation_meaning": {
+          "type": "string"
+        },
+        "scout_awaiting_capture": {
+          "description": "A prepared census has no saved capture yet.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reconciliation_meaning",
+        "expected_sources_open",
+        "parser_catalog_captured",
+        "scout_awaiting_capture"
       ]
     },
     "Diagnostic": {
@@ -227,6 +318,9 @@
           "format": "uint",
           "minimum": 0
         },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "elapsed_seconds": {
           "type": "number",
           "format": "double"
@@ -250,6 +344,12 @@
         },
         "pack_path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "quick_depth": {
           "$ref": "#/$defs/QuickDepth",
@@ -373,6 +473,11 @@
         },
         "values_requested": {
           "type": "boolean"
+        },
+        "values_saved": {
+          "description": "The retained pack holds at least one observed value for this field. This describes\ncumulative evidence. A later sample can return no values while this flag stays true.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -475,6 +580,22 @@
           "items": {
             "$ref": "#/$defs/QueryObservation"
           }
+        },
+        "carried_parser_reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CarriedParserReview"
+          }
+        },
+        "completion_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompletionDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "context": {
           "type": [
@@ -626,6 +747,20 @@
             "$ref": "#/$defs/SourceStatus"
           }
         },
+        "suspended_parser_exclusions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "suspended_parser_reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SuspendedParserReview"
+          }
+        },
         "target": {
           "$ref": "#/$defs/Progress"
         },
@@ -735,9 +870,39 @@
         "platform-internal"
       ]
     },
+    "OpenSourceCounts": {
+      "description": "Expected sources whose work in each category is not done.",
+      "type": "object",
+      "properties": {
+        "interpretation_review": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "measurements": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "parser_review_or_binding": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "interpretation_review",
+        "parser_review_or_binding",
+        "measurements"
+      ]
+    },
     "PackReference": {
       "type": "object",
       "properties": {
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "content_digest": {
           "type": "string"
         },
@@ -750,8 +915,20 @@
         "imported_at": {
           "type": "string"
         },
+        "input_content_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -824,6 +1001,30 @@
             "evidence"
           ]
         }
+      ]
+    },
+    "ParserExclusion": {
+      "type": "object",
+      "properties": {
+        "parser_id": {
+          "type": "string"
+        },
+        "parser_sha256": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parser_id",
+        "parser_sha256",
+        "reviewed_at",
+        "reason"
       ]
     },
     "ParserRun": {
@@ -1471,6 +1672,30 @@
         "info"
       ]
     },
+    "SourceRestrictions": {
+      "type": "object",
+      "properties": {
+        "discovery_compatible": {
+          "type": "boolean"
+        },
+        "event_family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourcetype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "discovery_compatible"
+      ]
+    },
     "SourceReview": {
       "type": "object",
       "properties": {
@@ -1550,6 +1775,16 @@
           "items": {
             "$ref": "#/$defs/RecordKind"
           }
+        },
+        "retained_restrictions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRestrictions"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "review": {
           "anyOf": [
@@ -1656,6 +1891,67 @@
       "additionalProperties": false,
       "required": [
         "schema_version"
+      ]
+    },
+    "SuspendedParserReview": {
+      "description": "A binding or exclusion whose reviewed parser definition is not in the latest saved capture.\nIt satisfies nothing until a capture saves that definition again, as the same bytes or as\nthe same parsed resource.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "$ref": "#/$defs/ParserBinding"
+            },
+            "kind": {
+              "type": "string",
+              "const": "binding"
+            },
+            "resource_sha256": {
+              "description": "SHA-256 of the reviewed parser resource after JSON parsing.",
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "resource_sha256",
+            "binding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "exclusion": {
+              "$ref": "#/$defs/ParserExclusion"
+            },
+            "kind": {
+              "type": "string",
+              "const": "exclusion"
+            },
+            "position": {
+              "description": "Zero-based slot in the combined active and suspended exclusion order.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            },
+            "resource_sha256": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "resource_sha256",
+            "exclusion"
+          ]
+        }
       ]
     },
     "TargetScope": {

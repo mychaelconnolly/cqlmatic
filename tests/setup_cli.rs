@@ -318,3 +318,45 @@ fn host_managed_import_requires_bound_report_and_exact_available_tool() {
     assert!(handoff.contains("ends a format-3 MCP discovery attempt and pauses the run"));
     assert!(!handoff.contains("Discovery error answers still require settlement"));
 }
+
+#[test]
+fn copilot_adoption_inspects_disabled_and_search_excluding_entries() {
+    for client in ["copilot-cli", "copilot-app", "copilot-vscode"] {
+        let temp = Temp::new();
+        let folder = temp.0.join("synthetic-copilot");
+        fs::create_dir(&folder).unwrap();
+        let url = "https://mcp.crowdstrike.com/v1";
+        let config = json!({"mcpServers": {
+            "a-disabled": {"type":"http", "url":url, "enabled":false, "tools":["*"]},
+            "b-limited": {"type":"http", "url":url, "tools":["list_tools"]},
+            "c-direct": {"type":"http", "url":url, "tools":["falcon_search_ngsiem"]},
+            "d-gateway": {"type":"http", "url":url, "tools":["execute_tool"]},
+            "e-wildcard": {"type":"http", "url":url, "tools":["*"]},
+            "f-empty": {"type":"http", "url":url, "tools":[]}
+        }});
+        fs::write(folder.join("mcp-config.json"), config.to_string()).unwrap();
+        let output = temp.run(Some(json!({"schema_version":1,"action":{"type":"select","selection":{
+            "client":client,"cloud":"us1","server_name":"another","registration":{"mode":"host-managed"}
+        }}})));
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let notice = result["state"]["last_notice"].as_str().unwrap();
+        assert!(
+            notice.starts_with("'c-direct', 'd-gateway', 'e-wildcard' already point"),
+            "{client}: {notice}"
+        );
+        for (name, reason) in [
+            ("a-disabled", "disabled"),
+            ("b-limited", "allowlist"),
+            ("f-empty", "allowlist"),
+        ] {
+            assert!(
+                notice
+                    .split("Found '")
+                    .skip(1)
+                    .any(|entry| entry.starts_with(name) && entry.contains(reason)),
+                "{client}: {notice}"
+            );
+        }
+    }
+}

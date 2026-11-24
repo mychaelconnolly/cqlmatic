@@ -523,13 +523,35 @@ pub struct Context {
     pub accept_partial_coverage: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentId {
     pub cloud: Cloud,
     pub tenant: String,
     pub view: String,
+}
+
+impl PartialEq for EnvironmentId {
+    fn eq(&self, other: &Self) -> bool {
+        self.cloud == other.cloud
+            && self.view == other.view
+            && same_account(&self.tenant, &other.tenant)
+    }
+}
+
+pub(crate) fn falcon_cid(account: &str) -> Option<&str> {
+    let (cid, suffix) = match account.split_once('-') {
+        Some((cid, suffix)) => (cid, Some(suffix)),
+        None => (account, None),
+    };
+    let hex = |text: &str, len| text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit());
+    (hex(cid, 32) && suffix.is_none_or(|suffix| hex(suffix, 2))).then_some(cid)
+}
+
+pub(crate) fn same_account(a: &str, b: &str) -> bool {
+    a == b
+        || matches!((falcon_cid(a), falcon_cid(b)), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

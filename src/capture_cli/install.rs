@@ -2,7 +2,7 @@
 use super::{CaptureArgs, Client, GUARD_EVENT, HookName};
 use crate::{inventory_cli, setup_cli};
 use clap::ValueEnum;
-use cqlmatic::{contracts::Diagnostic, mcp};
+use cqlmatic::{contracts::Diagnostic, mcp, setup::SEARCH_TOOL, storage};
 use serde::Serialize;
 use serde_json::{Value, json, value::RawValue};
 #[cfg(unix)]
@@ -10,14 +10,15 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::SystemTime,
 };
 
 const MAX_SETTINGS_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MARKER_BYTES: u64 = 4096;
 const POST_TOOL_USE: &str = "PostToolUse";
 const COPILOT_EVENT: &str = "postToolUse";
 /// Long enough for a check against a large map; after it the client runs the search unchecked.
@@ -27,7 +28,7 @@ struct Managed {
     name: &'static str,
     event: &'static str,
     entry: Value,
-    legacy: Option<Value>,
+    previous_matcher: Option<String>,
     wanted: bool,
 }
 
@@ -57,8 +58,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         config_path(client)?
     {
         let copilot = is_copilot(client);
-        let mut endings = Vec::new();
-        let (command, managed) = if copilot {
+        let (command, managed, launches) = if copilot {
             // The Copilot clients read the same file and send the same payload, so they share
             // one entry. A second entry would run the capture twice for every search.
             let shared = Client::CopilotCli
@@ -66,30 +66,26 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 .expect("A capture client has a name");
             let bash = command(args, shared.get_name(), Shell::Bash)?;
             let powershell = command(args, shared.get_name(), Shell::PowerShell)?;
-            for shell in [Shell::Bash, Shell::PowerShell] {
-                endings.push(arguments(args, shared.get_name(), shell)?);
-            }
+            let launches = vec![
+                Launch::new(args, shared.get_name(), Shell::Bash, &bash)?,
+                Launch::new(args, shared.get_name(), Shell::PowerShell, &powershell)?,
+            ];
             (
                 json!({"bash": bash, "powershell": powershell}),
                 vec![Managed {
                     name: "capture",
                     event: COPILOT_EVENT,
                     entry: json!({"type": "command", "bash": bash, "powershell": powershell}),
-                    legacy: None,
+                    previous_matcher: None,
                     wanted: capture,
                 }],
+                launches,
             )
         } else {
             let shell = Shell::for_client(client);
             let direct = command(args, name.get_name(), shell)?;
             let command = shell.fail_open(&direct);
-            let ending = arguments(args, name.get_name(), shell)?;
-            endings.push(format!(
-                "{}{}",
-                shell.escape(&ending),
-                shell.fail_open_parts().1
-            ));
-            endings.push(ending);
+            let launches = vec![Launch::new(args, name.get_name(), shell, &direct)?];
             let server = super::codex_server(client, &args.server);
             let matcher = matcher("mcp__", &server, "__.*");
             let mut guard_entry = json!({"matcher": matcher, "hooks": [{
@@ -98,18 +94,15 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             if client == Client::ClaudeCode {
                 guard_entry["hooks"][0]["onFailure"] = json!("continue");
             }
-            let mut entries = [
-                matcher_hook(&matcher, &command, true),
-                matcher_hook(&matcher, &direct, true),
-                guard_entry,
-            ];
+            let capture_matcher = format!("mcp__.+__({SEARCH_TOOL}|execute_tool)$");
+            let mut entries = [matcher_hook(&capture_matcher, &command, true), guard_entry];
             // Claude Code on Windows would otherwise pick Git Bash whenever it is installed.
             if cfg!(windows) && client == Client::ClaudeCode {
                 for entry in &mut entries {
                     entry["hooks"][0]["shell"] = json!("powershell");
                 }
             }
-            let [capture_entry, legacy, guard_entry] = entries;
+            let [capture_entry, guard_entry] = entries;
             (
                 json!(command),
                 vec![
@@ -117,17 +110,18 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                         name: "capture",
                         event: POST_TOOL_USE,
                         entry: capture_entry,
-                        legacy: Some(legacy),
+                        previous_matcher: Some(matcher),
                         wanted: capture,
                     },
                     Managed {
                         name: "guard",
                         event: GUARD_EVENT,
                         entry: guard_entry,
-                        legacy: None,
+                        previous_matcher: None,
                         wanted: guard,
                     },
                 ],
+                launches,
             )
         };
         let mut entry = json!({"hooks": {}});
@@ -142,11 +136,6 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             .filter(|hook| hook.wanted)
             .map(|hook| hook.event)
             .collect();
-        let names_this_target = |command: &str| {
-            endings
-                .iter()
-                .any(|ending| command.ends_with(ending.as_str()))
-        };
 
         let destination = path
             .to_str()
@@ -214,7 +203,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             Settings::File(snapshot) if snapshot.bytes.starts_with(b"\xEF\xBB\xBF") => manual(
                 "Settings start with a byte order mark. Save the file as UTF-8 without it, then retry".into(),
             ),
-            Settings::File(snapshot) => match edit(&snapshot.bytes, &managed, &names_this_target) {
+            Settings::File(snapshot) => match edit(&snapshot.bytes, &managed, &launches) {
                 // A file its owner made read-only is theirs to change.
                 Ok(Plan {
                     edit: Edit::Write(_),
@@ -227,7 +216,19 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             Settings::NonRegular => manual("Settings must be a regular file".into()),
         }
         };
-        let mut settings = read_settings(&path, &user)?;
+        let read = || {
+            read_settings(&path, &user).map_err(|mut error| {
+                if !args.dry_run {
+                    match mark(args, &path, &[], |_| true) {
+                        Ok(true) => error.message.push_str(" Removed the inventory hook note because the installed hooks could not be confirmed."),
+                        Err(marker_error) => error.message.push_str(&format!(" Could not update the inventory hook note. {}", marker_error.message)),
+                        Ok(false) => {}
+                    }
+                }
+                error
+            })
+        };
+        let mut settings = read()?;
         let mut planned = plan(&settings);
         let mut failure = None;
         if !args.dry_run && matches!(planned.edit, Edit::Write(_)) {
@@ -236,7 +237,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
                 Ok(Some(lock)) => {
                     _lock = lock;
                     // Another installation may have written while this one waited for the lock.
-                    settings = read_settings(&path, &user)?;
+                    settings = read()?;
                     planned = plan(&settings);
                 }
                 Ok(None) => {
@@ -308,6 +309,30 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         if client == Client::Codex && !events.is_empty() {
             next_actions.push("Review and trust the hooks with /hooks before they run.".into());
         }
+        if !args.dry_run {
+            let certain = settled && refusal.is_none();
+            let hooks: Vec<_> = managed
+                .iter()
+                .zip(&statuses)
+                .filter(|(_, status)| certain && matches!(status, Status::Present | Status::Added))
+                .map(|(hook, _)| hook.name)
+                .collect();
+            match mark(args, &path, &hooks, |server| match read_settings(&path, &user) {
+                Ok(Settings::File(snapshot)) => has_capture(args, server, &snapshot.bytes),
+                Ok(Settings::Missing) => false,
+                _ => true,
+            }) {
+                Ok(_) if !certain => next_actions.push(
+                    "The inventory hook note could not confirm the installed hooks. Review the settings before relying on capture."
+                        .into(),
+                ),
+                Ok(_) => {}
+                Err(error) => next_actions.push(format!(
+                    "Could not update the inventory hook note. {}",
+                    error.message
+                )),
+            }
+        }
         let statuses: serde_json::Map<_, _> = managed
             .iter()
             .zip(statuses)
@@ -345,6 +370,7 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
             false,
         )
     };
+    next_actions.push(spelling(client, &args.server));
     crate::line(
         &json!({
             "path": path, "events": events, "command": command, "entry": entry,
@@ -354,6 +380,157 @@ pub(super) fn run(args: &CaptureArgs) -> Result<i32, Diagnostic> {
         .to_string(),
     )?;
     refusal.map_or(Ok(0), Err)
+}
+
+/// Record the settings file that confirmed capture, so a different profile can't clear the note.
+fn mark(
+    args: &CaptureArgs,
+    settings: &Path,
+    hooks: &[&str],
+    has_registration: impl FnOnce(&str) -> bool,
+) -> Result<bool, Diagnostic> {
+    let client = args.client;
+    let name = client
+        .to_possible_value()
+        .expect("A capture client has a name");
+    let server = super::codex_server(client, &args.server);
+    let state = inventory_cli::state_path(args.state.clone())?;
+    let directory = super::captures_directory(&state)
+        .ok_or_else(|| crate::input_error("--state must name the inventory state file."))?;
+    let marker = directory.join("hooks.json");
+    let Some(settings) = fs::canonicalize(settings)
+        .ok()
+        .or_else(|| resolved_parent_path(settings))
+    else {
+        return Ok(false);
+    };
+    if hooks.contains(&"capture") {
+        setup_cli::protect_directory(&directory)?;
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "client": name.get_name(), "server": args.server, "hooks": hooks,
+            "settings_path": settings
+        }))
+        .expect("A marker serializes");
+        storage::Writer::acquire(&marker)?.commit_bytes(&bytes, MAX_MARKER_BYTES)?;
+        return Ok(false);
+    }
+    if !marker.is_file() {
+        return Ok(false);
+    }
+    let _writer = storage::Writer::acquire(&marker)?;
+    let named = storage::read_bytes(&marker, MAX_MARKER_BYTES)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|note| {
+            // Earlier notes have no profile binding and are replaced on the next install.
+            let Some(noted_path) = note["settings_path"].as_str().map(Path::new) else {
+                return false;
+            };
+            if noted_path != settings && !same_existing_path(noted_path, &settings) {
+                return false;
+            }
+            let noted_client = note["client"]
+                .as_str()
+                .and_then(|name| Client::from_str(name, false).ok());
+            let same_client = noted_client
+                .is_some_and(|noted| noted == client || is_copilot(noted) && is_copilot(client));
+            same_client
+                && note["server"].as_str().is_none_or(|name| {
+                    super::codex_server(client, name) == server || !has_registration(name)
+                })
+        });
+    if named {
+        fs::remove_file(&marker)
+            .map_err(|e| io_error(&marker, "Cannot remove the hook note", e))?;
+    }
+    Ok(named)
+}
+
+fn has_capture(args: &CaptureArgs, server: &str, bytes: &[u8]) -> bool {
+    let args = CaptureArgs {
+        server: server.into(),
+        ..args.clone()
+    };
+    let copilot = is_copilot(args.client);
+    let event = if copilot {
+        COPILOT_EVENT
+    } else {
+        POST_TOOL_USE
+    };
+    let Ok(settings) = settings_value(bytes, [event]) else {
+        return false;
+    };
+    let Some(entries) = settings["hooks"][event].as_array() else {
+        return false;
+    };
+    let (client, shells): (Client, &[_]) = if copilot {
+        (Client::CopilotCli, &[Shell::Bash, Shell::PowerShell])
+    } else {
+        (args.client, &[Shell::for_client(args.client)])
+    };
+    let name = client
+        .to_possible_value()
+        .expect("A capture client has a name");
+    let mut launches = Vec::new();
+    for &shell in shells {
+        let Ok(direct) = command(&args, name.get_name(), shell) else {
+            return false;
+        };
+        let Ok(launch) = Launch::new(&args, name.get_name(), shell, &direct) else {
+            return false;
+        };
+        launches.push(launch);
+    }
+    let matches_target = |launch: &Launch, command: &str| {
+        launch
+            .prefix(&launch.unwrap(command))
+            .is_some_and(|program| !program.trim().is_empty())
+    };
+    entries.iter().any(|entry| {
+        if copilot {
+            let [Some(bash), Some(powershell)] =
+                [entry["bash"].as_str(), entry["powershell"].as_str()]
+            else {
+                return false;
+            };
+            matches_target(&launches[0], bash) && matches_target(&launches[1], powershell)
+        } else {
+            entry["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|handler| {
+                    handler["command"]
+                        .as_str()
+                        .is_some_and(|command| matches_target(&launches[0], command))
+                })
+        }
+    })
+}
+
+/// The tool name the hook matches for a search on `server`, so a misspelled server shows.
+fn spelling(client: Client, server: &str) -> String {
+    let server = super::codex_server(client, server);
+    let named = |name: String| {
+        format!(
+            "The hook records a search whose tool name is {name}, or the same server's execute_tool. If the client's tool names spell the server another way, install again with that spelling as --server."
+        )
+    };
+    match client {
+        Client::Cursor | Client::GeminiCli => format!(
+            "The hook records a search of {SEARCH_TOOL}, or execute_tool, that the client reports from the server named {server}. If the client names the server another way, install again with that name as --server."
+        ),
+        Client::CopilotApp | Client::CopilotCli | Client::CopilotVscode => {
+            named(format!("{server}-{SEARCH_TOOL}"))
+        }
+        Client::Cline => named(format!("{server}__{SEARCH_TOOL}")),
+        Client::Kiro => named(format!(
+            "mcp_{server}_{SEARCH_TOOL} or @{server}/{SEARCH_TOOL}"
+        )),
+        Client::ClaudeCode | Client::Codex | Client::Generic | Client::QwenCode => {
+            named(format!("mcp__{server}__{SEARCH_TOOL}"))
+        }
+    }
 }
 
 /// Which hooks an installation leaves in place: capture and guard.
@@ -562,6 +739,353 @@ impl Shell {
     }
 }
 
+struct Launch {
+    shell: Shell,
+    direct: String,
+    arguments: String,
+    argument_prefix: String,
+    state_identity: Option<PathBuf>,
+}
+
+impl Launch {
+    fn new(
+        args: &CaptureArgs,
+        client: &str,
+        shell: Shell,
+        direct: &str,
+    ) -> Result<Self, Diagnostic> {
+        let arguments = arguments(args, client, shell)?;
+        let state = inventory_cli::state_path(args.state.clone())?;
+        let quoted_state = shell.quote(state.to_str().expect("A resolved state path is Unicode"));
+        let argument_prefix = arguments
+            .strip_suffix(&quoted_state)
+            .expect("Generated arguments end with the quoted absolute state path")
+            .to_owned();
+        Ok(Self {
+            shell,
+            direct: direct.into(),
+            arguments,
+            argument_prefix,
+            state_identity: resolved_parent_path(&state),
+        })
+    }
+
+    fn mentions_target(&self, command: &str) -> bool {
+        command.contains(&self.arguments)
+            || command.contains(&self.shell.escape(&self.arguments))
+            || self.prefix(&self.unwrap(command)).is_some()
+    }
+
+    fn unwrap<'a>(&self, command: &'a str) -> std::borrow::Cow<'a, str> {
+        let (head, tail) = self.shell.fail_open_parts();
+        let Some(inner) = command
+            .strip_prefix(&head)
+            .and_then(|text| text.strip_suffix(tail))
+        else {
+            return command.into();
+        };
+        match self.shell {
+            Shell::Bash => inner.replace("'\\''", "'").into(),
+            Shell::PowerShell => {
+                let mut text = String::new();
+                let mut chars = inner.chars();
+                while let Some(c) = chars.next() {
+                    if is_powershell_quote(c) && chars.next() != Some(c) {
+                        return command.into();
+                    }
+                    text.push(c);
+                }
+                text.into()
+            }
+            Shell::Cmd => inner.into(),
+        }
+    }
+
+    fn prefix<'a>(&self, direct: &'a str) -> Option<&'a str> {
+        if let Some(prefix) = direct.strip_suffix(&self.arguments) {
+            return Some(prefix);
+        }
+        let (prefix, argument) = direct.rsplit_once(&self.argument_prefix)?;
+        let words;
+        let state = if matches!(self.shell, Shell::Cmd) {
+            // Decode the installer's state operand. Unlike shell launchers it may contain '!'.
+            let state = argument.strip_prefix('"')?.strip_suffix('"')?;
+            if state.contains(['"', '%']) {
+                return None;
+            }
+            state
+        } else {
+            words = literal_words(self.shell, argument)?;
+            let [state] = words.as_slice() else {
+                return None;
+            };
+            state
+        };
+        // Historical commands must have the installer's exact argument spelling.
+        if self.shell.quote(state) != argument
+            || !same_state(
+                self.state_identity.as_deref()?,
+                &resolved_parent_path(Path::new(state))?,
+            )
+        {
+            return None;
+        }
+        Some(prefix)
+    }
+
+    fn program(&self, command: &str) -> Option<Vec<String>> {
+        let direct = self.unwrap(command);
+        let mut words = literal_words(self.shell, self.prefix(&direct)?)?;
+        if !cqlmatic_program(self.shell, &words) {
+            return None;
+        }
+        if cfg!(windows) {
+            for word in &mut words {
+                *word = word.replace('\\', "/");
+            }
+        }
+        Some(words)
+    }
+}
+
+fn resolved_parent_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    match fs::canonicalize(parent) {
+        Ok(parent) => Some(parent.join(name)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Resolve existing ancestors before reducing the remaining components, so
+            // a symlink followed by ".." keeps the same meaning as it has on disk.
+            let mut missing = Vec::new();
+            let mut existing = parent;
+            let mut resolved = loop {
+                match fs::canonicalize(existing) {
+                    Ok(path) => break path,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        missing.push(existing.components().next_back()?);
+                        existing = existing.parent()?;
+                    }
+                    Err(_) => return None,
+                }
+            };
+            for component in missing.into_iter().rev() {
+                match component {
+                    Component::ParentDir => {
+                        resolved.pop();
+                    }
+                    Component::Normal(part) => resolved.push(part),
+                    _ => {}
+                }
+            }
+            Some(resolved.join(name))
+        }
+        Err(_) => None,
+    }
+}
+
+fn same_state(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let (Some(left_captures), Some(right_captures)) = (
+        super::captures_directory(left),
+        super::captures_directory(right),
+    ) else {
+        return false;
+    };
+    let both_missing = |a: &Path, b: &Path| {
+        [a, b].into_iter().all(|path| {
+            fs::metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+        })
+    };
+    // Equivalent filenames must refer to the same capture directory when one exists.
+    (same_existing_path(left, right)
+        && (same_existing_path(&left_captures, &right_captures)
+            || both_missing(&left_captures, &right_captures)))
+        || (both_missing(left, right) && same_existing_path(&left_captures, &right_captures))
+}
+
+#[cfg(unix)]
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    fs::metadata(left).is_ok_and(|left| {
+        fs::metadata(right)
+            .is_ok_and(|right| left.dev() == right.dev() && left.ino() == right.ino())
+    })
+}
+
+#[cfg(not(unix))]
+fn same_existing_path(left: &Path, right: &Path) -> bool {
+    fs::canonicalize(left)
+        .is_ok_and(|left| fs::canonicalize(right).is_ok_and(|right| left == right))
+}
+
+fn owns_commands(launches: &[Launch], current: &[&str], old: &[&str]) -> bool {
+    if current.len() != old.len() || launches.len() != old.len() || old.is_empty() {
+        return false;
+    }
+    if current == old || matches!(old, [single] if *single == launches[0].direct) {
+        return true;
+    }
+    if launches.iter().zip(old).all(|(launch, command)| {
+        launch
+            .prefix(&launch.unwrap(command))
+            .is_some_and(|prefix| Some(prefix) == launch.direct.strip_suffix(&launch.arguments))
+    }) {
+        return true;
+    }
+    let programs = launches
+        .iter()
+        .zip(old)
+        .map(|(launch, command)| launch.program(command))
+        .collect::<Option<Vec<_>>>();
+    programs.is_some_and(|programs| programs.len() == 1 || programs[0] == programs[1])
+}
+
+fn is_powershell_quote(c: char) -> bool {
+    "'\u{2018}\u{2019}\u{201a}\u{201b}".contains(c)
+}
+
+fn cqlmatic_program(shell: Shell, words: &[String]) -> bool {
+    let windows = cfg!(windows) || matches!(shell, Shell::Cmd);
+    let basename = |word: &str| {
+        let name = if windows {
+            word.rsplit(['/', '\\'])
+                .next()
+                .expect("At least one path component")
+        } else {
+            word.rsplit('/')
+                .next()
+                .expect("At least one path component")
+        };
+        if windows {
+            name.to_ascii_lowercase()
+        } else {
+            name.to_owned()
+        }
+    };
+    if let [program] = words {
+        return matches!(
+            basename(program).as_str(),
+            "cqlmatic"
+                | "cqlmatic.exe"
+                | "cqlmatic.cmd"
+                | "cqlmatic.cjs"
+                | "cqlmatic-linux-x86_64"
+                | "cqlmatic-macos-arm64"
+        );
+    }
+    let launcher = if let [env, assignments @ ..] = words
+        && env == "env"
+    {
+        let count = assignments
+            .iter()
+            .take_while(|word| {
+                word.split_once('=').is_some_and(|(key, _)| {
+                    !key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                })
+            })
+            .count();
+        &assignments[count..]
+    } else {
+        words
+    };
+    match launcher {
+        [program, script] if matches!(basename(program).as_str(), "node" | "node.exe") => {
+            basename(script) == "cqlmatic.cjs"
+        }
+        [program, package] | [program, _, package] => {
+            matches!(basename(program).as_str(), "npx" | "npx.cmd")
+                && (launcher.len() == 2 || launcher[1] == "--yes")
+                && (package == "cqlmatic"
+                    || package.strip_prefix("cqlmatic@").is_some_and(|version| {
+                        !version.is_empty()
+                            && version
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+                    }))
+        }
+        _ => false,
+    }
+}
+
+/// Read literal launch words without interpreting shell expressions or running a program.
+fn literal_words(shell: Shell, prefix: &str) -> Option<Vec<String>> {
+    let (prefix, call) = if matches!(shell, Shell::PowerShell) {
+        prefix
+            .trim_start()
+            .strip_prefix("& ")
+            .map_or((prefix, false), |text| (text, true))
+    } else {
+        (prefix, false)
+    };
+    let mut chars = prefix.chars().peekable();
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    while let Some(c) = chars.next() {
+        let quote = if matches!(shell, Shell::Cmd) {
+            '"'
+        } else {
+            '\''
+        };
+        match c {
+            c if c == quote => {
+                started = true;
+                loop {
+                    let quoted = chars.next()?;
+                    if quoted == quote {
+                        if matches!(shell, Shell::PowerShell) && chars.next_if_eq(&quote).is_some()
+                        {
+                            word.push(quote);
+                            continue;
+                        }
+                        break;
+                    }
+                    if matches!(shell, Shell::PowerShell)
+                        && is_powershell_quote(quoted)
+                        && chars.next() != Some(quoted)
+                    {
+                        return None;
+                    }
+                    if matches!(shell, Shell::Cmd) && matches!(quoted, '%' | '!') {
+                        return None;
+                    }
+                    word.push(quoted);
+                }
+            }
+            ' ' | '\t' => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            '\\' if matches!(shell, Shell::Bash) && chars.next_if_eq(&'\'').is_some() => {
+                started = true;
+                word.push('\'');
+            }
+            c if c.is_alphanumeric()
+                || "_./:@+=,-\\".contains(c) && !(c == '\\' && matches!(shell, Shell::Bash)) =>
+            {
+                started = true;
+                word.push(c);
+            }
+            _ => return None,
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    if call && words.is_empty() {
+        return None;
+    }
+    Some(words)
+}
+
 fn command(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, Diagnostic> {
     let program = if let Some(program) = &args.program {
         if program.trim().is_empty() || program.chars().any(char::is_control) {
@@ -615,7 +1139,7 @@ fn arguments(args: &CaptureArgs, client: &str, shell: Shell) -> Result<String, D
     // The client may start the hook in another directory and with another environment, so
     // register the state this installation resolves, default or not.
     let state = inventory_cli::state_path(args.state.clone())?;
-    if state.is_dir() {
+    if state.file_name().is_none() || state.is_dir() {
         return Err(crate::input_error(
             "--state must name the inventory state file, not a directory.",
         ));
@@ -974,74 +1498,174 @@ struct Plan {
     others: Vec<String>,
 }
 
-fn edit(
-    bytes: &[u8],
-    managed: &[Managed],
-    names_this_target: &dyn Fn(&str) -> bool,
-) -> Result<Plan, String> {
-    let value = settings_value(bytes, managed)?;
+#[derive(PartialEq)]
+enum HandlerEdit {
+    Preserve,
+    Update,
+    Remove,
+}
+
+fn edit(bytes: &[u8], managed: &[Managed], launches: &[Launch]) -> Result<Plan, String> {
+    settings_value(bytes, managed.iter().map(|hook| hook.event))?;
     let mut output = bytes.to_vec();
     let mut statuses = Vec::new();
     let mut others = Vec::new();
-    let mut additions = Vec::new();
     for hook in managed {
-        let entries = value["hooks"][hook.event]
-            .as_array()
-            .map_or(&[][..], Vec::as_slice);
-        let legacy = hook.legacy.as_ref();
-        let own: Vec<_> = commands(&hook.entry)
-            .into_iter()
-            .chain(legacy.map(commands).unwrap_or_default())
-            .collect();
-        let unmanaged: Vec<_> = entries
-            .iter()
-            .filter(|entry| {
-                **entry != hook.entry
-                    && Some(*entry) != legacy
-                    && commands(entry)
+        let copilot = hook.event == COPILOT_EVENT;
+        let installed = commands(&hook.entry);
+        let mut found = BTreeSet::new();
+        let mut legacy = false;
+        let mut ambiguous = false;
+        let mut changes = Vec::new();
+        let mut inspect = |fields: &[&RawValue], matcher: &str| {
+            let old = fields
+                .iter()
+                .map(|field| serde_json::from_str::<String>(field.get()).ok())
+                .collect::<Option<Vec<_>>>();
+            let Some(old) = old else {
+                return HandlerEdit::Preserve;
+            };
+            let old: Vec<_> = old.iter().map(String::as_str).collect();
+            if !owns_commands(launches, &installed, &old) {
+                if old.iter().any(|command| {
+                    launches
                         .iter()
-                        .any(|command| own.contains(command) || names_this_target(command))
-            })
-            .collect();
-        for entry in &unmanaged {
-            others.push(format!(
-                "hooks.{} holds a different hook entry that runs CQLmatic for this server and state: {}. Remove or replace it by hand",
-                hook.event,
-                commands(entry).join(" | ")
-            ));
-        }
-        let blocked = unmanaged
-            .iter()
-            .any(|entry| commands(entry).iter().any(|command| own.contains(command)));
-        let present = entries.contains(&hook.entry);
-        let status = if hook.wanted {
-            if present {
-                Status::Present
-            } else if blocked {
-                Status::Manual
-            } else {
-                additions.push(hook);
-                Status::Added
+                        .any(|launch| launch.mentions_target(command))
+                }) {
+                    ambiguous = true;
+                    others.push(format!(
+                        "hooks.{} holds a different hook entry that runs CQLmatic for this server and state: {}. Review it by hand",
+                        hook.event, old.join(" | ")
+                    ));
+                }
+                return HandlerEdit::Preserve;
             }
-        } else if !unmanaged.is_empty() {
+            if !found.insert(matcher.to_owned()) || !hook.wanted {
+                return HandlerEdit::Remove;
+            }
+            legacy |= !copilot && old != installed && old[0].ends_with(&launches[0].arguments);
+            HandlerEdit::Update
+        };
+        let mut removals = Vec::new();
+        if let Some(array) = raw_member(&output, &["hooks", hook.event]) {
+            let entries: Vec<&RawValue> =
+                serde_json::from_str(array.get()).expect("A checked array");
+            let mut gone = Vec::new();
+            for entry in &entries {
+                if copilot {
+                    let fields = ["bash", "powershell"]
+                        .map(|key| raw_member(entry.get().as_bytes(), &[key]));
+                    let action = if let [Some(bash), Some(powershell)] = fields {
+                        let action = inspect(&[bash, powershell], "");
+                        if action == HandlerEdit::Update {
+                            changes.extend(
+                                [bash, powershell].into_iter().zip(&installed).filter_map(
+                                    |(field, replacement)| {
+                                        replace_string(&output, field, replacement)
+                                    },
+                                ),
+                            );
+                        }
+                        action
+                    } else if let Some(command) = fields.into_iter().flatten().next() {
+                        // A hook can run on only one shell. Leave it with its owner.
+                        inspect(&[command], "")
+                    } else {
+                        HandlerEdit::Preserve
+                    };
+                    gone.push(action == HandlerEdit::Remove);
+                } else if let Some(handlers) = raw_member(entry.get().as_bytes(), &["hooks"])
+                    && let Ok(items) = serde_json::from_str::<Vec<&RawValue>>(handlers.get())
+                {
+                    let matcher = raw_member(entry.get().as_bytes(), &["matcher"]);
+                    let old_matcher =
+                        matcher.and_then(|raw| serde_json::from_str::<String>(raw.get()).ok());
+                    let upgrade =
+                        hook.previous_matcher.is_some() && old_matcher == hook.previous_matcher;
+                    let effective_matcher = if upgrade {
+                        hook.entry["matcher"]
+                            .as_str()
+                            .expect("The stock matcher is a string")
+                    } else {
+                        old_matcher.as_deref().unwrap_or_default()
+                    };
+                    let mut keep = None;
+                    let mut removed = Vec::new();
+                    for (index, item) in items.iter().enumerate() {
+                        let action = raw_member(item.get().as_bytes(), &["command"]).map_or(
+                            HandlerEdit::Preserve,
+                            |field| {
+                                let action = inspect(&[field], effective_matcher);
+                                if action == HandlerEdit::Update {
+                                    keep = Some((index, field));
+                                }
+                                action
+                            },
+                        );
+                        removed.push(action == HandlerEdit::Remove);
+                    }
+                    if let Some((index, field)) = keep {
+                        if upgrade
+                            && removed
+                                .iter()
+                                .enumerate()
+                                .any(|(i, gone)| i != index && !gone)
+                        {
+                            // Keep the old matcher and unrelated handlers in place.
+                            let item = items[index];
+                            let mut handler = item.get().to_owned();
+                            if let Some((range, replacement)) =
+                                replace_string(item.get().as_bytes(), field, installed[0])
+                            {
+                                handler.replace_range(range, &replacement);
+                            }
+                            removed[index] = true;
+                            let end = offset(&output, entry) + entry.get().len();
+                            changes.push((
+                                end..end,
+                                format!(
+                                    ",{{\"matcher\":{},\"hooks\":[{handler}]}}",
+                                    hook.entry["matcher"]
+                                ),
+                            ));
+                        } else {
+                            changes.extend(replace_string(&output, field, installed[0]));
+                            if let Some(matcher) = matcher.filter(|_| upgrade) {
+                                changes.extend(replace_string(&output, matcher, effective_matcher));
+                            }
+                        }
+                    }
+                    let all = !removed.is_empty() && removed.iter().all(|gone| *gone);
+                    if !all {
+                        removals.extend(remove_ranges(&output, handlers, &items, &removed));
+                    }
+                    gone.push(all);
+                } else {
+                    gone.push(false);
+                }
+            }
+            removals.extend(remove_ranges(&output, array, &entries, &gone));
+        }
+        changes.extend(removals.into_iter().map(|range| (range, String::new())));
+        changes.sort_by_key(|(range, _)| range.start);
+        for (range, replacement) in changes.into_iter().rev() {
+            output.splice(range, replacement.bytes());
+        }
+        let status = if ambiguous {
             Status::Manual
-        } else if present || legacy.is_some_and(|legacy| entries.contains(legacy)) {
+        } else if hook.wanted && found.is_empty() {
+            output = insert(&output, hook.event, &hook.entry);
+            Status::Added
+        } else if hook.wanted && legacy {
+            Status::Added
+        } else if hook.wanted {
+            Status::Present
+        } else if !found.is_empty() {
             Status::Removed
         } else {
             Status::Absent
         };
         statuses.push(status);
-        let mut keep_one = hook.wanted;
-        output = remove(&output, hook.event, |entry| {
-            if *entry == hook.entry {
-                !std::mem::replace(&mut keep_one, false)
-            } else {
-                Some(entry) == legacy
-            }
-        });
-    }
-    for hook in additions {
-        output = insert(&output, hook.event, &hook.entry);
     }
     Ok(Plan {
         edit: if output == bytes {
@@ -1054,7 +1678,10 @@ fn edit(
     })
 }
 
-fn settings_value(bytes: &[u8], managed: &[Managed]) -> Result<Value, String> {
+fn settings_value<'a>(
+    bytes: &[u8],
+    events: impl IntoIterator<Item = &'a str>,
+) -> Result<Value, String> {
     let invalid = || String::from("Settings must contain strict JSON with unique keys");
     // Require a single JSON value. The shared parser additionally checks for duplicate keys.
     serde_json::from_slice::<&RawValue>(bytes).map_err(|_| invalid())?;
@@ -1068,22 +1695,23 @@ fn settings_value(bytes: &[u8], managed: &[Managed]) -> Result<Value, String> {
     let root = value
         .as_object()
         .ok_or("Settings must contain a JSON object")?;
-    if managed.iter().any(|hook| hook.event == COPILOT_EVENT)
-        && root.get("version").is_some_and(|version| version != 1)
-    {
-        return Err("Expected hook configuration version 1".into());
-    }
-    if let Some(hooks) = root.get("hooks") {
-        let hooks = hooks
-            .as_object()
-            .ok_or("Expected hooks to be a JSON object")?;
-        for hook in managed {
-            if hooks
-                .get(hook.event)
-                .is_some_and(|entries| !entries.is_array())
-            {
-                return Err(format!("Expected hooks.{} to be a JSON array", hook.event));
-            }
+    let hooks = root
+        .get("hooks")
+        .map(|hooks| {
+            hooks
+                .as_object()
+                .ok_or("Expected hooks to be a JSON object")
+        })
+        .transpose()?;
+    for event in events {
+        if event == COPILOT_EVENT && root.get("version").is_some_and(|version| version != 1) {
+            return Err("Expected hook configuration version 1".into());
+        }
+        if hooks
+            .and_then(|hooks| hooks.get(event))
+            .is_some_and(|entries| !entries.is_array())
+        {
+            return Err(format!("Expected hooks.{event} to be a JSON array"));
         }
     }
     Ok(value)
@@ -1113,15 +1741,27 @@ fn offset(bytes: &[u8], raw: &RawValue) -> usize {
     raw.get().as_ptr().addr() - bytes.as_ptr().addr()
 }
 
-fn remove(bytes: &[u8], event: &str, mut doomed: impl FnMut(&Value) -> bool) -> Vec<u8> {
-    let Some(array) = raw_member(bytes, &["hooks", event]) else {
-        return bytes.to_vec();
-    };
-    let items: Vec<&RawValue> = serde_json::from_str(array.get()).expect("A checked array");
-    let gone: Vec<bool> = items
-        .iter()
-        .map(|item| doomed(&serde_json::from_str(item.get()).expect("A checked entry")))
-        .collect();
+fn replace_string(
+    bytes: &[u8],
+    field: &RawValue,
+    value: &str,
+) -> Option<(std::ops::Range<usize>, String)> {
+    if serde_json::from_str::<String>(field.get()).is_ok_and(|old| old == value) {
+        return None;
+    }
+    let start = offset(bytes, field);
+    Some((
+        start..start + field.get().len(),
+        serde_json::to_string(value).expect("JSON serializes"),
+    ))
+}
+
+fn remove_ranges(
+    bytes: &[u8],
+    array: &RawValue,
+    items: &[&RawValue],
+    gone: &[bool],
+) -> Vec<std::ops::Range<usize>> {
     let start = |item: &RawValue| offset(bytes, item);
     let end = |item: &RawValue| offset(bytes, item) + item.get().len();
     let mut ranges = Vec::new();
@@ -1146,11 +1786,7 @@ fn remove(bytes: &[u8], event: &str, mut doomed: impl FnMut(&Value) -> bool) -> 
             first = last + 1;
         }
     }
-    let mut output = bytes.to_vec();
-    for range in ranges.into_iter().rev() {
-        output.drain(range);
-    }
-    output
+    ranges
 }
 
 fn insert(bytes: &[u8], event: &str, entry: &Value) -> Vec<u8> {
@@ -1474,6 +2110,99 @@ mod tests {
         // The other shells receive the command as quoted text.
         assert!(with_program(unclosed, Shell::Bash).is_ok());
         assert!(with_program(unclosed, Shell::PowerShell).is_ok());
+    }
+
+    #[test]
+    fn cmd_hook_ownership_recognizes_exact_bang_commands() {
+        let shell = Shell::Cmd;
+        let args = CaptureArgs {
+            client: Client::Codex,
+            server: "synthetic".into(),
+            state: Some(env::temp_dir().join("inventory !").join("state.json")),
+            install: true,
+            dry_run: true,
+            program: Some(r#""C:\Tools With A Bang!\cqlmatic.exe""#.into()),
+            hooks: Vec::new(),
+        };
+        let direct = command(&args, "codex", shell).unwrap();
+        let launch = Launch::new(&args, "codex", shell, &direct).unwrap();
+        let launches = [launch];
+        for command in [shell.fail_open(&direct), direct] {
+            let mut hook = Managed {
+                name: "capture",
+                event: POST_TOOL_USE,
+                entry: matcher_hook(".*", &command, true),
+                previous_matcher: None,
+                wanted: true,
+            };
+            let settings = json!({"hooks": {POST_TOOL_USE: [&hook.entry]}}).to_string();
+            let present =
+                edit(settings.as_bytes(), std::slice::from_ref(&hook), &launches).unwrap();
+            assert!(present.statuses == [Status::Present]);
+            assert!(matches!(present.edit, Edit::Unchanged));
+            hook.wanted = false;
+            let removed = edit(settings.as_bytes(), &[hook], &launches).unwrap();
+            assert!(removed.statuses == [Status::Removed]);
+        }
+    }
+
+    #[test]
+    fn cmd_hook_ownership_updates_and_removes_an_aliased_bang_path() {
+        let temp = Temp::new("cmd-alias");
+        let directory = temp.0.join("Inventory !");
+        let child = directory.join("child");
+        fs::create_dir_all(&child).unwrap();
+        let state = directory.join("state.json");
+        fs::write(&state, b"{}").unwrap();
+        let shell = Shell::Cmd;
+        let args = CaptureArgs {
+            client: Client::Codex,
+            server: "synthetic".into(),
+            state: Some(state),
+            install: true,
+            dry_run: true,
+            program: Some(r#""C:\Tools With A Bang!\cqlmatic.exe""#.into()),
+            hooks: Vec::new(),
+        };
+        let old = shell.fail_open(&command(&args, "codex", shell).unwrap());
+        let settings = json!({"hooks": {POST_TOOL_USE: [matcher_hook(".*", &old, true)]}});
+        #[cfg(windows)]
+        let alias = directory.join("STATE.JSON");
+        #[cfg(not(windows))]
+        let alias = child.join("../state.json");
+        let args = CaptureArgs {
+            state: Some(alias),
+            ..args
+        };
+        let direct = command(&args, "codex", shell).unwrap();
+        let launches = [Launch::new(&args, "codex", shell, &direct).unwrap()];
+        let mut hook = Managed {
+            name: "capture",
+            event: POST_TOOL_USE,
+            entry: matcher_hook(".*", &shell.fail_open(&direct), true),
+            previous_matcher: None,
+            wanted: true,
+        };
+        let updated = edit(
+            settings.to_string().as_bytes(),
+            std::slice::from_ref(&hook),
+            &launches,
+        )
+        .unwrap();
+        assert_eq!(json!(updated.statuses[0]), "present");
+        let Edit::Write(bytes) = updated.edit else {
+            panic!("Expected updated command bytes");
+        };
+        let saved: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["hooks"][POST_TOOL_USE], json!([hook.entry]));
+        hook.wanted = false;
+        let removed = edit(&bytes, &[hook], &launches).unwrap();
+        assert_eq!(json!(removed.statuses[0]), "removed");
+        let Edit::Write(bytes) = removed.edit else {
+            panic!("Expected the command to be removed");
+        };
+        let saved: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["hooks"][POST_TOOL_USE], json!([]));
     }
 
     #[cfg(unix)]
