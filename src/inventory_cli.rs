@@ -918,7 +918,7 @@ fn inspect_next_probe_run(
         "complete" | "superseded" => run.status.clone(),
         _ => relay.status.clone(),
     };
-    let refusal = if phase == "needs-probes" {
+    let refusal = if phase == "needs-probes" && mcp::has_in_flight(&relay) {
         let stage = refusal_stage(index, &relay);
         state.failures.iter().rev().find_map(|failure| {
             let code = failure.stage.strip_prefix(&stage)?;
@@ -964,8 +964,10 @@ fn next_probe(
             .is_some_and(|answer| answer.outcome == "complete")
     };
     // An answer for a probe that is already answered changes nothing; the run carries on.
-    let answer =
-        answer.filter(|answer| run.phase != "failed" && !complete(&run.relay, &answer.probe_id));
+    let answer = answer.filter(|answer| {
+        !matches!(run.phase.as_str(), "failed" | "complete" | "superseded")
+            && !complete(&run.relay, &answer.probe_id)
+    });
     let (settled, mut diagnostics) = if let Some(answer) = answer {
         let probe_id = answer.probe_id.clone();
         let already_answered = run.relay.answers.contains_key(&probe_id);
@@ -1017,12 +1019,13 @@ fn next_probe(
     let mut phase = run.phase.clone();
     let mut terminal_failure = run.relay.failure.as_ref().map(relay_failure);
     if phase == "cleanup-pending" {
-        for diagnostic in cleanup_diagnostics(&run.relay) {
+        for diagnostic in cleanup_diagnostics(&run.relay, diagnostics.is_empty()) {
             if !diagnostics.contains(&diagnostic) {
                 diagnostics.push(diagnostic);
             }
         }
-    } else if diagnostics.is_empty()
+    } else if !settled
+        && diagnostics.is_empty()
         && let Some(refusal) = run.refusal.take()
     {
         diagnostics.push(refusal);
@@ -1335,7 +1338,7 @@ fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
     let (code, message) = match code {
         "MCP_UNKNOWN_PROBE" => (
             "MCP_UNKNOWN_PROBE",
-            "Use the outstanding probe ID when resubmitting the saved response.",
+            "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for. Run the outstanding probe only if its search never started, and submit that probe’s own result.",
         ),
         "LOCAL_FILE_TYPE" => (
             "LOCAL_FILE_TYPE",
@@ -1413,9 +1416,9 @@ fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
     json!({"code":code,"severity":severity,"message":message})
 }
 
-fn cleanup_diagnostics(relay: &mcp::State) -> Vec<Value> {
+fn cleanup_diagnostics(relay: &mcp::State, include_refusal: bool) -> Vec<Value> {
     let mut diagnostics = Vec::new();
-    if let Some(refusal) = mcp::outstanding_refusal(relay) {
+    if include_refusal && let Some(refusal) = mcp::outstanding_refusal(relay) {
         diagnostics.push(safe_answer_diagnostic(
             &refusal.code,
             refusal.severity.clone(),
@@ -1582,7 +1585,34 @@ fn apply_locked(
             } else {
                 None
             };
-            inspect_selected_run(&state, index)?;
+            let relay = inspect_selected_run(&state, index)?;
+            let run = &state.discovery_runs[index];
+            if let InventoryAction::DiscoveryStep { answers, .. } = &action
+                && !answers.is_empty()
+                && matches!(run.status.as_str(), "complete" | "superseded" | "failed")
+            {
+                let diagnostic = if answers
+                    .iter()
+                    .all(|answer| relay.answers.contains_key(&answer.probe_id))
+                {
+                    Diagnostic::error("MCP_ALREADY_ANSWERED", "This probe was already answered.")
+                } else if run.status == "superseded" {
+                    Diagnostic::error(
+                        "DISCOVERY_SUPERSEDED",
+                        "Newer inventory evidence superseded this run. Prepare discovery against the current inventory.",
+                    )
+                } else {
+                    Diagnostic::error(
+                        "DISCOVERY_PHASE",
+                        "This discovery run is finished. Prepare a new run for more searches.",
+                    )
+                };
+                let report = inventory::assess_at(&state, &packs(&state)?, &now)?;
+                return Ok((
+                    report,
+                    json!({"run_index":index,"status":"incomplete","diagnostics":[diagnostic]}),
+                ));
+            }
         }
         let mut ended_runs = Vec::new();
         if !relay_guards.is_empty() {
@@ -3110,7 +3140,6 @@ fn apply(
                 .get(run_index)
                 .ok_or_else(|| fail("Prepare discovery before relaying saved answers."))?;
             let already_finalized = matches!(run.status.as_str(), "complete" | "superseded");
-            let already_superseded = run.status == "superseded";
             let answers: Vec<_> = answers
                 .into_iter()
                 .map(|a| (a.probe_id, PathBuf::from(a.result_file)))
@@ -3137,9 +3166,6 @@ fn apply(
                 verify_run_reference(state, run, &relay)
                     .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             }
-            let duplicate_superseded = already_superseded
-                && !answers.is_empty()
-                && answers.iter().all(|(id, _)| relay.answers.contains_key(id));
             let run = state
                 .discovery_runs
                 .get_mut(run_index)
@@ -3208,18 +3234,16 @@ fn apply(
                     })
                 }
                 Err(diagnostic) => {
-                    if !(duplicate_superseded && diagnostic.code == "MCP_ALREADY_ANSWERED") {
-                        state.failures.push(InventoryFailure {
-                            stage: if relay.status == "needs-probes" && mcp::has_in_flight(&relay) {
-                                format!("{}{}", refusal_stage(run_index, &relay), diagnostic.code)
-                            } else {
-                                "discovery".into()
-                            },
-                            source_id: None,
-                            message: diagnostic.message.clone(),
-                            recorded_at: now.into(),
-                        });
-                    }
+                    state.failures.push(InventoryFailure {
+                        stage: if relay.status == "needs-probes" && mcp::has_in_flight(&relay) {
+                            format!("{}{}", refusal_stage(run_index, &relay), diagnostic.code)
+                        } else {
+                            "discovery".into()
+                        },
+                        source_id: None,
+                        message: diagnostic.message.clone(),
+                        recorded_at: now.into(),
+                    });
                     Ok(json!({"status":"incomplete","diagnostics":[diagnostic]}))
                 }
             }

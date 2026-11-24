@@ -1154,7 +1154,7 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
         assert_eq!(
             action["diagnostics"][0]["message"],
             if code == "MCP_UNKNOWN_PROBE" {
-                "Use the outstanding probe ID when resubmitting the saved response."
+                "The submitted ID does not match the outstanding probe. A saved result belongs to the probe it was run for. Run the outstanding probe only if its search never started, and submit that probe’s own result."
             } else {
                 "Use a regular file containing the saved response."
             }
@@ -1170,6 +1170,26 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
     assert_eq!(reread["action"]["probe"], first["action"]["probe"]);
     assert_eq!(reread["action"]["dispatched"], false);
     assert_eq!(reread["action"]["cost"], first["action"]["cost"]);
+
+    let accepted = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe_id,"result_file":result}}),
+    );
+    assert_eq!(accepted["action"]["settled"], true);
+    assert_eq!(accepted["action"]["state"], "complete");
+    assert!(accepted["action"].get("diagnostics").is_none());
+    let state = dir.0.join("workflow/state.json");
+    let before = fs::read(&state).unwrap();
+    for kind in ["next-probe", "discovery-step"] {
+        let wrong = json!({"probe_id":"p-wrong","result_file":result});
+        let action = if kind == "next-probe" {
+            json!({"kind":kind,"answer":wrong})
+        } else {
+            json!({"kind":kind,"answers":[wrong]})
+        };
+        call(&dir.0, action);
+        assert_eq!(fs::read(&state).unwrap(), before, "{kind}");
+    }
 }
 
 #[test]
