@@ -223,6 +223,13 @@ fn measured_fixture() -> Fixture {
                 "fieldset" => json!([{"field":"user"}]),
                 "dataset-facet" => json!([]),
                 "tag-detect" => json!([{"events":0}]),
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for i in 0..probe["fields"].as_array().unwrap().len() {
+                        row[format!("c{i}")] = json!(0);
+                    }
+                    json!([row])
+                }
                 "population" => {
                     let mut row = json!({"total":10});
                     for index in 0..probe["fields"].as_array().unwrap().len() {

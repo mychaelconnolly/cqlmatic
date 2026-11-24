@@ -212,6 +212,13 @@ fn complete_discovery(dir: &Path, mut progress: Value, values: Option<Value>) {
                     json!([row])
                 }
                 "tag-detect" => json!([{"events":0}]),
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for i in 0..probe["fields"].as_array().unwrap().len() {
+                        row[format!("c{i}")] = json!(0);
+                    }
+                    json!([row])
+                }
                 "value-facet" => values.clone().unwrap(),
                 kind => panic!("unexpected probe {kind}"),
             };
