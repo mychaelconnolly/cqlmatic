@@ -1,0 +1,1 @@
+- Rank exact function names first in catalog knowledge and function contract lookups.
