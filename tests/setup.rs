@@ -82,6 +82,7 @@ fn bundled_setup_examples_match_strict_contracts() {
         include_str!("../examples/setup/select-claude.request.json"),
         include_str!("../examples/setup/select-copilot.request.json"),
         include_str!("../examples/setup/select-host.request.json"),
+        include_str!("../examples/setup/select-adopt-claude.request.json"),
         include_str!("../examples/setup/preview.request.json"),
     ] {
         serde_json::from_str::<SetupRequest>(text)
@@ -96,6 +97,12 @@ fn bundled_setup_examples_match_strict_contracts() {
         serde_json::from_str(include_str!("../examples/setup/tool-discovery-host.json")).unwrap();
     assert_eq!(host_report.client, ClientKind::External);
     assert_eq!(host_report.host_id.as_deref(), Some("example-agent"));
+    let adopt_report: HostToolDiscovery = serde_json::from_str(include_str!(
+        "../examples/setup/tool-discovery-adopt-claude.json"
+    ))
+    .unwrap();
+    assert_eq!(adopt_report.client, ClientKind::ClaudeCode);
+    assert!(adopt_report.effective_oauth_client_id.is_none());
     for text in [
         include_str!("../examples/setup/tool-discovery-claude.json"),
         include_str!("../examples/setup/tool-discovery-copilot.json"),
@@ -519,12 +526,312 @@ fn host_managed_selection_is_tracked_without_native_detection_or_preview() {
         wrong_mode.validate().unwrap_err().code,
         "SETUP_REGISTRATION_MODE"
     );
-    let mut wrong_mode = selection(ClientKind::Codex);
-    wrong_mode.registration = RegistrationMode::HostManaged {};
-    assert_eq!(
-        wrong_mode.validate().unwrap_err().code,
-        "SETUP_REGISTRATION_MODE"
+}
+const NAMED: [ClientKind; 6] = [
+    ClientKind::Codex,
+    ClientKind::VsCode,
+    ClientKind::ClaudeCode,
+    ClientKind::CopilotCli,
+    ClientKind::CopilotApp,
+    ClientKind::CopilotVscode,
+];
+#[test]
+fn named_clients_can_use_the_server_already_configured() {
+    for client in NAMED {
+        let selection = host_selection(client, None);
+        selection.validate().unwrap();
+        // No executable is detected: host-managed setup runs nothing in the client.
+        let mut state = SetupState::default();
+        state.select(selection).unwrap();
+        assert_eq!(state.phase, SetupPhase::Selected, "{client:?}");
+        assert_eq!(
+            build_plan(
+                &state,
+                PlanOperation::Configure,
+                baseline(ExistingServer::Absent),
+                None
+            )
+            .unwrap_err()
+            .code,
+            "SETUP_HOST_MANAGED"
+        );
+        let guidance = result(state.clone(), None).next_actions.join(" ");
+        assert!(guidance.contains("already configured in"), "{guidance}");
+        assert!(guidance.contains("changes nothing"), "{guidance}");
+        assert!(!guidance.contains("Preview the exact"), "{guidance}");
+        let report = HostToolDiscovery {
+            schema_version: SCHEMA_VERSION,
+            client,
+            host_id: None,
+            server_name: "cs-mcp".into(),
+            endpoint: Cloud::Eu1.endpoint().into(),
+            authenticated: true,
+            effective_oauth_client_id: None,
+            effective_config_source: None,
+            tools: vec![DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: true,
+            }],
+        };
+        verify_discovery(&mut state.clone(), &report, sha256_hex(b"no identity")).unwrap();
+        // A supplied identity is not matched against a registration nobody chose.
+        let with_identity = HostToolDiscovery {
+            effective_oauth_client_id: Some("any-registered-app".into()),
+            effective_config_source: Some("user".into()),
+            ..report
+        };
+        verify_discovery(&mut state, &with_identity, sha256_hex(b"identity")).unwrap();
+        state.validate().unwrap();
+        assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+        assert!(state.configured);
+        assert_eq!(state.configured_sha256, None);
+        let handoff = result(state, None).handoff.unwrap();
+        assert!(handoff.contains("optional operator-supplied fields for host-managed reports"));
+        assert!(!handoff.contains("reports require effective_oauth_client_id"));
+    }
+    let mut external = host_selection(ClientKind::External, Some("synthetic-host"));
+    external.registration = RegistrationMode::Manual {
+        client_id: "synthetic".into(),
+        callback_url: "http://127.0.0.1:1234/callback".into(),
+    };
+    let refused = external.validate().unwrap_err();
+    assert_eq!(refused.code, "SETUP_REGISTRATION_MODE");
+    assert!(refused.message.contains("{\"mode\":\"host-managed\"}"));
+}
+#[test]
+fn identical_selection_replay_keeps_saved_configuration_and_evidence() {
+    let copilot = Selection {
+        client: ClientKind::CopilotCli,
+        host_id: None,
+        cloud: Cloud::Us1,
+        server_name: "cs-mcp".into(),
+        registration: RegistrationMode::Manual {
+            client_id: "synthetic-copilot-id".into(),
+            callback_url: "http://127.0.0.1:1234/callback".into(),
+        },
+    };
+    let mut state = SetupState::default();
+    state.select(copilot.clone()).unwrap();
+    state.configured = true;
+    let report = HostToolDiscovery {
+        schema_version: SCHEMA_VERSION,
+        client: ClientKind::CopilotCli,
+        host_id: None,
+        server_name: "cs-mcp".into(),
+        endpoint: Cloud::Us1.endpoint().into(),
+        authenticated: true,
+        effective_oauth_client_id: Some("synthetic-copilot-id".into()),
+        effective_config_source: Some("user".into()),
+        tools: vec![DiscoveryTool {
+            name: SEARCH_TOOL.into(),
+            available: true,
+        }],
+    };
+    verify_discovery(&mut state, &report, sha256_hex(b"verified")).unwrap();
+    let verified = serde_json::to_value(&state).unwrap();
+    state.select(copilot.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&state).unwrap(), verified);
+    assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+    // Any changed field is a new selection and clears what the old one recorded.
+    state
+        .select(Selection {
+            cloud: Cloud::Us2,
+            ..copilot
+        })
+        .unwrap();
+    assert_eq!(state.phase, SetupPhase::Selected);
+    assert!(!state.configured);
+    assert_eq!(state.discovery_sha256, None);
+    // Without saved evidence a replay still re-evaluates the phase after detection.
+    let mut waiting = SetupState::default();
+    waiting.select(selection(ClientKind::VsCode)).unwrap();
+    assert_eq!(waiting.phase, SetupPhase::InstallationRequired);
+    waiting.clients.push(observation(ClientKind::VsCode));
+    waiting.select(selection(ClientKind::VsCode)).unwrap();
+    assert_eq!(waiting.phase, SetupPhase::Selected);
+}
+#[test]
+fn discovery_binding_names_the_failed_field_without_repeating_values() {
+    let mut state = SetupState::default();
+    state
+        .select(host_selection(ClientKind::External, Some("synthetic-host")))
+        .unwrap();
+    let report = HostToolDiscovery {
+        schema_version: SCHEMA_VERSION,
+        client: ClientKind::External,
+        host_id: Some("synthetic-host".into()),
+        server_name: "cs-mcp".into(),
+        endpoint: Cloud::Eu1.endpoint().into(),
+        authenticated: true,
+        effective_oauth_client_id: None,
+        effective_config_source: None,
+        tools: Vec::new(),
+    };
+    let cases = [
+        (
+            HostToolDiscovery {
+                schema_version: 7,
+                ..report.clone()
+            },
+            "schema_version",
+        ),
+        (
+            HostToolDiscovery {
+                client: ClientKind::Codex,
+                ..report.clone()
+            },
+            "client",
+        ),
+        (
+            HostToolDiscovery {
+                host_id: Some("supplied-host-value".into()),
+                ..report.clone()
+            },
+            "host_id",
+        ),
+        (
+            HostToolDiscovery {
+                server_name: "supplied-server-value".into(),
+                ..report.clone()
+            },
+            "server_name",
+        ),
+        (
+            HostToolDiscovery {
+                endpoint: "https://supplied.example/v1".into(),
+                ..report.clone()
+            },
+            "endpoint",
+        ),
+        (
+            HostToolDiscovery {
+                authenticated: false,
+                ..report.clone()
+            },
+            "authenticated",
+        ),
+    ];
+    let mut messages = std::collections::BTreeSet::new();
+    for (wrong, field) in cases {
+        let refused = verify_discovery(&mut state, &wrong, sha256_hex(b"report")).unwrap_err();
+        assert_eq!(refused.code, "SETUP_DISCOVERY_BINDING");
+        assert!(
+            refused.message.contains(field),
+            "{field}: {}",
+            refused.message
+        );
+        assert!(!refused.message.contains("supplied"), "{}", refused.message);
+        messages.insert(refused.message);
+    }
+    assert_eq!(messages.len(), 6);
+    let oversized = HostToolDiscovery {
+        tools: (0..4097)
+            .map(|n| DiscoveryTool {
+                name: format!("tool-{n}"),
+                available: true,
+            })
+            .collect(),
+        ..report.clone()
+    };
+    assert!(
+        verify_discovery(&mut state, &oversized, sha256_hex(b"report"))
+            .unwrap_err()
+            .message
+            .contains("more than 4096 tools")
     );
+    assert!(
+        verify_discovery(&mut state, &report, "not-a-digest".into())
+            .unwrap_err()
+            .message
+            .contains("fingerprint")
+    );
+}
+#[test]
+fn cimd_capability_refusal_names_a_route_the_client_accepts() {
+    for client in [
+        ClientKind::ClaudeCode,
+        ClientKind::VsCode,
+        ClientKind::Codex,
+    ] {
+        let mut state = SetupState {
+            clients: vec![ClientObservation {
+                supports_cimd: false,
+                ..observation(client)
+            }],
+            ..SetupState::default()
+        };
+        let cimd = Selection {
+            registration: RegistrationMode::Cimd {
+                metadata_url: match client {
+                    ClientKind::ClaudeCode => "https://claude.ai/oauth/claude-code-client-metadata",
+                    ClientKind::VsCode => "https://vscode.dev/oauth/client-metadata.json",
+                    _ => "https://chatgpt.com/oauth/codex/synthetic/client.json",
+                }
+                .into(),
+                allowlist_confirmed: true,
+            },
+            ..host_selection(client, None)
+        };
+        state.select(cimd.clone()).unwrap();
+        let refused = build_plan(
+            &state,
+            PlanOperation::Configure,
+            baseline(ExistingServer::Absent),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(refused.code, "SETUP_CAPABILITY");
+        // The advised registration is one this client's selection accepts.
+        let advised = if client == ClientKind::ClaudeCode {
+            assert!(
+                refused.message.contains("select host-managed"),
+                "{}",
+                refused.message
+            );
+            assert!(!refused.message.contains("manual"), "{}", refused.message);
+            RegistrationMode::HostManaged {}
+        } else {
+            assert!(
+                refused.message.contains("select manual registration"),
+                "{}",
+                refused.message
+            );
+            RegistrationMode::Manual {
+                client_id: "synthetic".into(),
+                callback_url: "http://127.0.0.1:1234/callback".into(),
+            }
+        };
+        Selection {
+            registration: advised,
+            ..cimd
+        }
+        .validate()
+        .unwrap();
+    }
+    let claude_manual = Selection {
+        registration: RegistrationMode::Manual {
+            client_id: "synthetic".into(),
+            callback_url: "http://127.0.0.1:1234/callback".into(),
+        },
+        ..host_selection(ClientKind::ClaudeCode, None)
+    };
+    assert!(
+        claude_manual
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("or host-managed")
+    );
+}
+#[test]
+fn external_guidance_names_the_host_id() {
+    let mut state = SetupState::default();
+    state
+        .select(host_selection(ClientKind::External, Some("synthetic-host")))
+        .unwrap();
+    let guidance = result(state, None).next_actions.join(" ");
+    assert!(guidance.contains("in synthetic-host."), "{guidance}");
+    assert!(!guidance.contains("in Other agent."), "{guidance}");
 }
 #[test]
 fn host_managed_report_binds_surface_and_preserves_incomplete_discovery() {
@@ -954,4 +1261,134 @@ fn recovery_origin_validates_its_original_selection_command_and_acknowledged_rev
         .code,
         "SETUP_RECOVERY_ORIGIN"
     );
+}
+#[test]
+fn handoff_points_at_the_saved_report_schema() {
+    let mut state = SetupState::default();
+    state
+        .select(host_selection(ClientKind::External, Some("synthetic-host")))
+        .unwrap();
+    let handoff = result(state, None).handoff.unwrap();
+    assert!(handoff.contains("host_tool_discovery property of `cqlmatic --schema setup`"));
+}
+#[test]
+fn verified_setup_offers_the_capture_hook_where_the_installer_writes_settings() {
+    for client in [
+        ClientKind::Codex,
+        ClientKind::VsCode,
+        ClientKind::ClaudeCode,
+        ClientKind::CopilotCli,
+        ClientKind::CopilotApp,
+        ClientKind::CopilotVscode,
+        ClientKind::External,
+    ] {
+        let state = SetupState {
+            phase: SetupPhase::ToolDiscoveryVerified,
+            selection: Some(Selection {
+                server_name: "crowdstrike".into(),
+                ..host_selection(
+                    client,
+                    (client == ClientKind::External).then_some("synthetic-host"),
+                )
+            }),
+            ..SetupState::default()
+        };
+        let result = result(state, None);
+        let actions = result.next_actions.join(" ");
+        let name = serde_json::to_value(client).unwrap();
+        let command = format!(
+            "cqlmatic env capture --client {} --server crowdstrike --install",
+            name.as_str().unwrap()
+        );
+        if matches!(client, ClientKind::VsCode | ClientKind::External) {
+            assert!(!actions.contains("env capture"), "{client:?}: {actions}");
+            assert!(
+                actions.contains("capture hook table and the pass-through in docs/INVENTORY.md"),
+                "{actions}"
+            );
+        } else {
+            assert!(actions.contains(&command), "{client:?}: {actions}");
+            assert!(actions.contains("the one in the client's tool names"));
+            assert!(actions.contains("without the agent saving them"));
+        }
+        let handoff = result.handoff.unwrap();
+        assert!(handoff.contains("Where a capture hook or pass-through is registered"));
+    }
+}
+
+#[test]
+fn identical_selection_resumes_inactive_verified_setup() {
+    for mut state in [selected(ClientKind::VsCode), {
+        let mut state = SetupState::default();
+        state
+            .select(host_selection(ClientKind::ClaudeCode, None))
+            .unwrap();
+        state
+    }] {
+        let selection = state.selection.clone().unwrap();
+        let report = HostToolDiscovery {
+            schema_version: 1,
+            client: selection.client,
+            host_id: None,
+            server_name: selection.server_name.clone(),
+            endpoint: selection.cloud.endpoint().into(),
+            authenticated: true,
+            effective_oauth_client_id: None,
+            effective_config_source: None,
+            tools: vec![DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: true,
+            }],
+        };
+        state.configured = true;
+        verify_discovery(&mut state, &report, "a".repeat(64)).unwrap();
+        state.cancel();
+        state.select(selection.clone()).unwrap();
+        assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+        assert_eq!(
+            state.discovery_sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        if selection.client.needs_executable() && !selection.host_managed() {
+            state.phase = SetupPhase::InstallationRequired;
+            state.clients.clear();
+            state.select(selection.clone()).unwrap();
+            assert_eq!(state.phase, SetupPhase::InstallationRequired);
+            state.clients.push(observation(selection.client));
+            state.select(selection).unwrap();
+            assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+        }
+    }
+}
+
+#[test]
+fn claude_host_managed_accepts_an_existing_underscore_alias() {
+    let mut selection = host_selection(ClientKind::ClaudeCode, None);
+    selection.server_name = "_soc".into();
+    selection.validate().unwrap();
+    selection.server_name = "bad.name".into();
+    assert_eq!(selection.validate().unwrap_err().code, "SETUP_SERVER_NAME");
+}
+
+#[test]
+fn resuming_setup_does_not_promote_a_report_without_the_search_tool() {
+    let selection = host_selection(ClientKind::Codex, None);
+    let mut state = SetupState::default();
+    state.select(selection.clone()).unwrap();
+    let report = HostToolDiscovery {
+        schema_version: 1,
+        client: selection.client,
+        host_id: None,
+        server_name: selection.server_name.clone(),
+        endpoint: selection.cloud.endpoint().into(),
+        authenticated: true,
+        effective_oauth_client_id: None,
+        effective_config_source: None,
+        tools: vec![],
+    };
+    verify_discovery(&mut state, &report, "a".repeat(64)).unwrap();
+    assert_eq!(state.phase, SetupPhase::Authenticated);
+    state.cancel();
+    state.select(selection).unwrap();
+    assert_eq!(state.phase, SetupPhase::Authenticated);
 }
