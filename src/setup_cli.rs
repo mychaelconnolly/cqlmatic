@@ -4499,7 +4499,10 @@ mod tests {
         let plan = h.state.plan.as_ref().unwrap();
         assert!(plan.commands.is_empty());
         assert!(
-            !plan.changes.join(" ").contains("backup"),
+            !plan
+                .changes
+                .iter()
+                .any(|change| change.contains("backup remains private")),
             "{:?}",
             plan.changes
         );

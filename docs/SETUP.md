@@ -58,18 +58,48 @@ For another capable agent choose `external` with `registration: {"mode":"host-ma
 
 ### Use a server the client already has
 
-If the CrowdStrike MCP server is already configured and signed in in a named client, select that client with `registration: {"mode":"host-managed"}` and the server's name as it appears in the client's tool names. Setup then runs no client command and changes nothing in the client's configuration; it does not need the client's executable, a client ID or an exact entry shape. It verifies only the saved report, bound to the selected client, server name and endpoint, with `authenticated: true` and the search tool available. The report may omit `effective_oauth_client_id` and `effective_config_source`; when present they are not compared with a registration. See [`select-adopt-claude.request.json`](../examples/setup/select-adopt-claude.request.json) and [`tool-discovery-adopt-claude.json`](../examples/setup/tool-discovery-adopt-claude.json).
+If the CrowdStrike MCP server is already configured in a named client, select the client and the server name as it appears in its tool names. Host-managed setup runs no client commands and leaves the client's configuration as it is. In the wizard, choose `host-managed`. For a structured request, replace `CLIENT`, `CLOUD` and `SERVER` in this example.
 
-On `select`, the notice names servers in that client's configuration files that already point at the selected endpoint, so the report can use the right name. A file that cannot be read is reported, never refused. Servers from plugins, connectors or managed policy are not in these files.
+```json
+{
+  "schema_version": 1,
+  "action": {
+    "type": "select",
+    "selection": {
+      "client": "CLIENT",
+      "cloud": "CLOUD",
+      "server_name": "SERVER",
+      "registration": {"mode": "host-managed"}
+    }
+  }
+}
+```
+
+Sign in through the client if needed. Save the host report with the same `CLIENT` and `SERVER`. Use the canonical URL for `CLOUD` as `ENDPOINT` and set `authenticated` and the tool's `available` to true when the client confirms them.
+
+```json
+{
+  "schema_version": 1,
+  "client": "CLIENT",
+  "server_name": "SERVER",
+  "endpoint": "ENDPOINT",
+  "authenticated": true,
+  "tools": [{"name": "falcon_search_ngsiem", "available": true}]
+}
+```
+
+Import the report through setup. The binding uses the selected client, server name and endpoint. The host report may omit `effective_oauth_client_id` and `effective_config_source`.
+
+The `select` notice lists matching entries from files it can read. It identifies skipped files and names that need inspection because they are disabled, invalid or could be overridden. Check the effective server in the client when the notice gives a reason to inspect it.
 
 | Client | Files the `select` notice reads |
 | --- | --- |
-| Claude Code | `.claude.json` user and local-scope entries, workspace `.mcp.json` |
-| Copilot CLI, app, VS Code Copilot harness | The Copilot user file, workspace `.mcp.json` and `.github/mcp.json` |
-| VS Code Local harness | `mcp.json` |
-| Codex | None: its servers are listed only by running Codex, which this selection does not do |
+| Claude Code (`claude-code`) | `.claude.json` user and local-scope entries, workspace `.mcp.json`. An existing server alias can start with an underscore. See the [example selection](../examples/setup/select-adopt-claude.request.json) and [report](../examples/setup/tool-discovery-adopt-claude.json). |
+| Copilot CLI, app, VS Code Copilot harness (`copilot-cli`, `copilot-app`, `copilot-vscode`) | The Copilot user file, workspace `.mcp.json` and `.github/mcp.json`. |
+| VS Code Local harness (`vs-code`) | User `mcp.json`. |
+| Codex (`codex`) | Listing servers requires a client command, so setup uses the supplied name. If a native preview refuses to reuse an entry because its registration cannot be confirmed, the message advises selecting `host-managed` with the selected server name. |
 
-A native `preview` that would add a server, or that is refused for a name collision, an existing Copilot file or a Codex entry setup did not add, names any server already pointing at the endpoint and says to select `host-managed` with that name instead of adding another. The interactive wizard offers `host-managed` and suggests such a server's name in place of `cs-mcp`.
+A native `preview` that would add a server or that refuses a collision can recommend usable servers already at the endpoint. When the inspected configuration shows a usable alias and all relevant files were readable, the interactive wizard offers that alias as the default.
 
 ## Permissions and verification
 
@@ -204,7 +234,7 @@ The guard uses the inventory's map only when the call's `repository` is the map'
 
 The registered command ends with exit status 0 and prints nothing when CQLmatic cannot answer: when the program is missing, when an older copy at that path rejects the arguments, or when the shell cannot parse a `--program` prefix. On macOS and Linux it also prints nothing when a `--program` prefix prints a line and then fails to start its program, and a login shell that exits at the first failing command, such as zsh with `setopt ERR_EXIT` or bash with `set -e`, does not change the exit status. The client then goes on with the call as if no hook were registered. Claude Code's guard entry also sets `"onFailure": "continue"`, so a guard that fails or runs past its 5-second `timeout` lets the call go ahead there. A `--program` prefix must print nothing to standard output when it succeeds, or the client drops the guard's note; for an npm script, use `npm --silent run NAME --`.
 
-Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer leaves exactly the chosen entries for this program, client, server and state, and keeps the rest of the settings file's content and formatting. It keeps one copy of an entry that appears several times. An entry that a copy of CQLmatic in another folder, or with another `--program`, wrote for the same client, server and state is replaced, so one set remains however many folders you install from, and `--hooks none` removes them all. Its report gives each hook's result in `hooks`: `present`, `added`, `removed`, `absent`, or `manual` when the chosen state needs a change by hand. When the installer recognizes a command, it updates it in place and keeps the entry's other fields. Commands it cannot confirm as its own are left in place for manual review. The last next action names the tool name the hook matches; if the client's tool names spell the server another way, install again with that spelling.
+Choose the hooks with `--hooks`: `capture,guard` (the default for `claude-code` and `codex`), `capture` to switch the guard off, `guard`, or `none` to remove both. The installer manages recognized entries for this client, server and state and keeps the rest of the settings file's content and formatting. It keeps one copy of an entry that appears several times. An entry that a copy of CQLmatic in another folder, or with another `--program`, wrote for the same client, server and state is replaced, so one set remains however many folders you install from, and `--hooks none` removes them all. Its report gives each hook's result in `hooks`: `present`, `added`, `removed`, `absent`, or `manual` when the chosen state needs a change by hand. When the installer recognizes a command, it updates it in place and keeps the entry's other fields. Commands it cannot confirm as its own are left in place for manual review. The last next action names the tool name the hook matches; if the client's tool names spell the server another way, install again with that spelling.
 
 ```sh
 cqlmatic env capture --client claude-code --server SERVER --install --hooks capture
