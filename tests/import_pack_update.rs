@@ -1214,3 +1214,271 @@ fn remediation_removes_legacy_restrictions_and_discovery_promotes() {
         done["action"]["relay"]["answered"], brief["action"]["not_applied_count"]
     );
 }
+
+#[test]
+fn own_clock_prevents_strengthening_an_applied_or_retained_key() {
+    let wf = Workflow::new();
+    wf.confirm();
+    let mut old = simple();
+    old.created_at = day(12);
+    reseal(&mut old);
+    wf.import(&old, None);
+
+    // Incoming field links an on-time proof (day 4) and a post-clock proof (day 10) in a day-6 pack.
+    let mut first = measured(6, 4, Some(true), Some(true), "prov:on-time");
+    let mut later = proof("prov:too-late", 4);
+    later["retrieved_at"] = json!(day(10));
+    first.data.provenance.push(later);
+    first.data.fields[0]["provenance_ids"] = json!(["prov:on-time", "prov:too-late"]);
+    reseal(&mut first);
+    let r = wf.import(&first, Some("update"));
+    assert_eq!(
+        Workflow::active(&r).data.fields[0]["provenance_ids"],
+        json!(["prov:on-time"])
+    );
+
+    // A day-8 negative correction for the same window must beat the day-4 key.
+    let mut correcting = measured(9, 4, Some(true), Some(false), "prov:corrected");
+    correcting.data.provenance[0]["retrieved_at"] = json!(day(8));
+    reseal(&mut correcting);
+    let r = wf.import(&correcting, Some("update"));
+    assert_eq!(
+        Workflow::active(&r).data.fields[0]["coverage"]["observed"],
+        false
+    );
+    let q = "#repo=example_repo #type=example_type | user=* | count()";
+    strict(&wf, &Workflow::active(&r), q, 1, "needs-context");
+
+    // A retained field that already has an on-time key (day 4) plus a post-clock proof (day 10)
+    // must refuse an unrelated update that advances the cumulative clock past day 10.
+    let mut retained_two = measured(6, 4, Some(true), Some(true), "prov:on-time");
+    let mut later_ret = proof("prov:too-late", 4);
+    later_ret["retrieved_at"] = json!(day(10));
+    retained_two.data.provenance.push(later_ret);
+    retained_two.data.fields[0]["provenance_ids"] = json!(["prov:on-time", "prov:too-late"]);
+    reseal(&mut retained_two);
+    let mut unrelated = measured(12, 11, Some(true), Some(true), "prov:unrelated");
+    unrelated.data.fields[0]["id"] = json!("env:field:other");
+    unrelated.data.fields[0]["path"] = json!("other");
+    reseal(&mut unrelated);
+    let err = environment::import_update(&retained_two, &unrelated, &BTreeSet::new())
+        .expect_err("strengthening a retained field key must refuse");
+    assert_eq!(err.code, "PACK_INTEGRITY");
+    assert!(err.message.contains("retrieved_at"), "{}", err.message);
+}
+
+#[test]
+fn retained_and_unmatched_inventoried_sources_never_gain_measurement_authority() {
+    let wf = Workflow::new();
+    wf.confirm();
+    let mut old = measured(8, 4, Some(false), Some(true), "prov:old");
+    old.data.sources[0]["inventory_status"] = json!("inventoried");
+    reseal(&mut old);
+    wf.import(&old, None);
+
+    // Retained inventoried negative (day 8) has no ordering key; incoming window starting day 5
+    // is <= day 8 so row 6 keeps the negative.
+    let mut inc = measured(8, 6, Some(true), Some(true), "prov:new");
+    inc.data.fields.clear();
+    reseal(&mut inc);
+    let reply = wf.import(&inc, Some("update"));
+    assert_eq!(
+        reply["action"]["not_applied"],
+        json!([{"collection":"sources","id":SOURCE,"reason":"unorderable-against-negative"}])
+    );
+    let q = "#repo=example_repo #type=example_type | user=* | count()";
+    strict(&wf, &Workflow::active(&reply), q, 1, "needs-context");
+
+    // Unmatched inventoried source with post-clock retrieval (day 10 in day 5 pack) imported into
+    // day 12 inventory must be blocked as date-inconsistent rather than gaining a reader key.
+    let wf2 = Workflow::new();
+    wf2.confirm();
+    let mut base = simple();
+    base.created_at = day(12);
+    reseal(&mut base);
+    wf2.import(&base, None);
+    let mut post_clock_inv = measured(5, 4, Some(false), None, "prov:new");
+    post_clock_inv.data.sources[0]["selectors"] = json!({"repo":"other"});
+    post_clock_inv.data.sources[0]["inventory_status"] = json!("inventoried");
+    post_clock_inv.data.provenance[0]["retrieved_at"] = json!(day(10));
+    post_clock_inv.data.fields.clear();
+    reseal(&mut post_clock_inv);
+    let r = wf2.import(&post_clock_inv, Some("update"));
+    assert_eq!(r["action"]["pack_updated"], false);
+    assert_eq!(
+        r["action"]["not_applied"],
+        json!([{"collection":"sources","id":SOURCE,"reason":"date-inconsistent"}])
+    );
+    assert_eq!(Workflow::active(&r).data.sources.len(), 1);
+}
+
+#[test]
+fn applied_value_observations_advance_cumulative_clock_without_display_only_bumps() {
+    let wf = Workflow::new();
+    wf.confirm();
+    let mut old = simple();
+    let mut absent = field("env:field:absent", "absent", SOURCE, LEGACY);
+    absent["coverage"]["observed"] = json!(false);
+    old.data.fields.push(absent);
+    reseal(&mut old);
+    wf.import(&old, None);
+
+    // Display-only value edit (same proof) must not advance the clock.
+    let mut display_only = old.clone();
+    display_only.created_at = day(12);
+    display_only.data.values[0]["meaning"] = json!("Clarified sample");
+    reseal(&mut display_only);
+    let d = wf.import(&display_only, Some("update"));
+    assert_eq!(Workflow::active(&d).created_at, day(5));
+
+    // Adding a qualifying own-clock deployment proof to a value must advance the clock to day 10.
+    let mut inc = Workflow::active(&d);
+    inc.created_at = day(12);
+    inc.data.values[0]["provenance_ids"] = json!(["prov:new"]);
+    inc.data.values[0]["meaning"] = json!("Latest sample");
+    inc.data.provenance.push(proof("prov:new", 10));
+    reseal(&mut inc);
+    let r = wf.import(&inc, Some("update"));
+    assert_eq!(Workflow::active(&r).created_at, day(10));
+
+    // A day 6-7 positive observation cannot clear the undated negative once the clock is day 10.
+    let mut earlier = measured(8, 7, Some(true), Some(true), "prov:day7");
+    earlier.data.fields[0]["path"] = json!("absent");
+    earlier.data.fields[0]["id"] = json!("env:field:absent");
+    reseal(&mut earlier);
+    let second = wf.import(&earlier, Some("update"));
+    let q = "#repo=example_repo #type=example_type | absent=* | count()";
+    strict(&wf, &Workflow::active(&second), q, 1, "needs-context");
+}
+
+#[test]
+fn collision_reidentified_selectorless_sources_and_values_replay_idempotently() {
+    // Selectorless source colliding with an empty-object selector source.
+    let wf = Workflow::new();
+    wf.confirm();
+    let mut old = simple();
+    old.data.sources[0]["selectors"] = json!({});
+    reseal(&mut old);
+    wf.import(&old, None);
+    let mut input = old;
+    input.data.sources[0]["selectors"] = Value::Null;
+    reseal(&mut input);
+    let first = wf.import(&input, Some("update"));
+    assert_eq!(first["action"]["pack_updated"], true);
+    assert_eq!(Workflow::active(&first).data.sources.len(), 2);
+    for _ in 0..2 {
+        let replay = wf.import(&input, Some("update"));
+        assert_eq!(replay["action"]["pack_updated"], false);
+        let p = Workflow::active(&replay);
+        assert_eq!(p.data.sources.len(), 2);
+        assert_eq!(p.data.fields.len(), 2);
+        assert_eq!(p.data.values.len(), 2);
+        assert_eq!(p.data.annotations.len(), 2);
+    }
+
+    // Colliding value under an ambiguous key replays idempotently without growing snapshots.
+    let wf2 = Workflow::new();
+    wf2.confirm();
+    let mut base = simple();
+    for name in ["env:value:other-green", "env:value:third-green"] {
+        base.data
+            .values
+            .push(sample(name, FIELD, "sample", json!("green"), LEGACY));
+    }
+    reseal(&mut base);
+    wf2.import(&base, None);
+    let mut incoming = simple();
+    incoming.data.values[0]["value"] = json!("green");
+    incoming.data.values[0]["meaning"] = json!("Imported green");
+    reseal(&mut incoming);
+    let first = wf2.import(&incoming, Some("update"));
+    assert_eq!(first["action"]["pack_updated"], true);
+    assert_eq!(Workflow::active(&first).data.values.len(), 4);
+    let snapshots_after_first = read_json(&wf2.state())["packs"].as_array().unwrap().len();
+    for _ in 0..2 {
+        let replay = wf2.import(&incoming, Some("update"));
+        assert_eq!(replay["action"]["pack_updated"], false);
+        assert_eq!(Workflow::active(&replay).data.values.len(), 4);
+        assert_eq!(
+            read_json(&wf2.state())["packs"].as_array().unwrap().len(),
+            snapshots_after_first
+        );
+    }
+}
+
+#[test]
+fn multiple_incoming_values_preserve_both_meanings_independent_of_order() {
+    let old = simple();
+    let mut inc = old.clone();
+    inc.data.values[0]["meaning"] = json!("Analyst A's meaning");
+    let mut peer = inc.data.values[0].clone();
+    peer["id"] = json!("env:value:independent");
+    peer["meaning"] = json!("Analyst B's meaning");
+    inc.data.values.push(peer);
+    reseal(&mut inc);
+
+    for _ in 0..2 {
+        let wf = Workflow::new();
+        wf.confirm();
+        wf.import(&old, None);
+        let r = wf.import(&inc, Some("update"));
+        let p = Workflow::active(&r);
+        assert_eq!(p.data.values.len(), 2);
+        let original_id = old.data.values[0]["id"].as_str().unwrap();
+        assert_eq!(
+            by_id(&p.data.values, original_id)["meaning"],
+            "Analyst A's meaning"
+        );
+        assert_eq!(
+            by_id(&p.data.values, "env:value:independent")["meaning"],
+            "Analyst B's meaning"
+        );
+        inc.data.values.reverse();
+        reseal(&mut inc);
+    }
+}
+
+#[test]
+fn folded_field_matches_exact_id_value_correction_in_place() {
+    let wf = Workflow::new();
+    wf.confirm();
+    let mut old = measured(5, 4, Some(true), Some(true), "prov:prior");
+    old.data.fields[0]["is_tag"] = json!(true);
+    old.data.fields[0]["path"] = json!("#user");
+    let mut alias = old.data.fields[0].clone();
+    alias["id"] = json!("env:field:alias");
+    alias["path"] = json!("user");
+    old.data.fields.push(alias);
+    let mut v = sample(
+        "env:value:green",
+        "env:field:alias",
+        "sample",
+        json!("green"),
+        "prov:prior",
+    );
+    v["meaning"] = json!("Old meaning");
+    old.data.values.push(v.clone());
+    reseal(&mut old);
+    wf.import(&old, None);
+
+    let mut inc = measured(8, 7, Some(true), Some(true), "prov:fresh");
+    inc.data.fields[0]["is_tag"] = json!(true);
+    v["field_id"] = json!(FIELD);
+    v["meaning"] = json!("Corrected meaning");
+    v["provenance_ids"] = json!(["prov:fresh"]);
+    inc.data.values.push(v);
+    reseal(&mut inc);
+
+    let r = wf.import(&inc, Some("update"));
+    let p = Workflow::active(&r);
+    assert_eq!(p.data.fields.len(), 1);
+    assert_eq!(p.data.values.len(), 1);
+    assert_eq!(p.data.values[0]["id"], "env:value:green");
+    assert_eq!(p.data.values[0]["field_id"], FIELD);
+    assert_eq!(p.data.values[0]["meaning"], "Corrected meaning");
+    assert_eq!(
+        p.data.values[0]["provenance_ids"],
+        json!(["prov:prior", "prov:fresh"])
+    );
+    assert_eq!(r["action"]["counts"]["values_added"], 0);
+}

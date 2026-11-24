@@ -1076,13 +1076,14 @@ fn value_identity<'a>(field: &'a str, record: &'a Value) -> (&'a str, &'a str, S
 struct ImportIds<'a> {
     sources: BTreeMap<&'a str, String>,
     fields: BTreeMap<&'a str, String>,
-    values: BTreeMap<&'a str, String>,
     provenance: BTreeMap<&'a str, String>,
     field_matches: BTreeMap<&'a str, Vec<usize>>,
+    retained_ids: BTreeSet<&'a str>,
+    used: BTreeSet<String>,
     reidentified: Reidentified,
 }
 
-fn import_ids<'a>(old: &PackData, fresh: &'a PackData) -> Result<ImportIds<'a>, Diagnostic> {
+fn import_ids<'a>(old: &'a PackData, fresh: &'a PackData) -> Result<ImportIds<'a>, Diagnostic> {
     let source_indices = record_indices(&old.sources);
     let selector_indices: BTreeMap<_, _> = old
         .sources
@@ -1113,6 +1114,7 @@ fn import_ids<'a>(old: &PackData, fresh: &'a PackData) -> Result<ImportIds<'a>, 
         .collect();
     let mut counts = Reidentified::default();
     let mut sources = BTreeMap::new();
+    let mut claimed_sources = BTreeSet::new();
     for record in &fresh.sources {
         let original = id(record);
         let same_id = source_indices.get(original).map(|&i| &old.sources[i]);
@@ -1147,11 +1149,18 @@ fn import_ids<'a>(old: &PackData, fresh: &'a PackData) -> Result<ImportIds<'a>, 
                 record,
                 &mut used,
                 &mut counts.sources,
-                |_| false,
+                |candidate| {
+                    key.is_none()
+                        && !claimed_sources.contains(candidate)
+                        && source_indices
+                            .get(candidate)
+                            .is_some_and(|&i| selector_key(&old.sources[i]).is_none())
+                },
             )
         } else {
             original.to_owned()
         };
+        claimed_sources.insert(target.clone());
         sources.insert(original, target);
     }
 
@@ -1215,49 +1224,126 @@ fn import_ids<'a>(old: &PackData, fresh: &'a PackData) -> Result<ImportIds<'a>, 
         provenance.insert(original, target);
     }
 
-    let value_indices = record_indices(&old.values);
-    let mut value_keys = BTreeMap::new();
-    for record in &old.values {
-        let key = value_identity(record["field_id"].as_str().unwrap(), record);
-        // None marks an ambiguous key. Exact ID matches still take precedence.
-        value_keys
-            .entry(key)
-            .and_modify(|slot| *slot = None)
-            .or_insert(Some(id(record)));
-    }
-    let mut values = BTreeMap::new();
-    for record in &fresh.values {
-        let original = id(record);
-        let key = value_identity(&fields[record["field_id"].as_str().unwrap()], record);
-        let same_id = value_indices.get(original).map(|&i| &old.values[i]);
-        let target =
-            if same_id.is_some_and(|v| value_identity(v["field_id"].as_str().unwrap(), v) == key) {
-                original.to_owned()
-            } else if let Some(Some(target)) = value_keys.get(&key) {
-                (*target).to_owned()
-            } else if retained_ids.contains(original) {
-                imported_id(
-                    "values",
-                    "env:value",
-                    record,
-                    &mut used,
-                    &mut counts.values,
-                    |_| false,
-                )
-            } else {
-                original.to_owned()
-            };
-        values.insert(original, target);
-    }
-
     Ok(ImportIds {
         sources,
         fields,
-        values,
         provenance,
         field_matches,
+        retained_ids,
+        used,
         reidentified: counts,
     })
+}
+
+fn match_value_ids<'a>(
+    retained_values: &[Value],
+    incoming_values: &'a [Value],
+    fields: &BTreeMap<&'a str, String>,
+    retained_ids: &BTreeSet<&str>,
+    used: &mut BTreeSet<String>,
+    reidentified_values: &mut usize,
+) -> BTreeMap<&'a str, String> {
+    let value_indices = record_indices(retained_values);
+    let mut value_ids = BTreeMap::new();
+    let mut claimed = BTreeSet::new();
+
+    // Pass 1: reserve exact-ID matches first so later records cannot overwrite them.
+    for record in incoming_values {
+        let original = id(record);
+        let key = value_identity(
+            fields[record["field_id"].as_str().unwrap()].as_str(),
+            record,
+        );
+        if value_indices.get(original).is_some_and(|&i| {
+            value_identity(
+                retained_values[i]["field_id"].as_str().unwrap(),
+                &retained_values[i],
+            ) == key
+        }) {
+            claimed.insert(original.to_owned());
+            value_ids.insert(original, original.to_owned());
+        }
+    }
+
+    // Pass 2: unique key fallback only when one unclaimed retained value matches one
+    // remaining incoming value, keeping assignment order-independent.
+    let mut retained_by_key = BTreeMap::new();
+    for record in retained_values {
+        let rid = id(record);
+        if claimed.contains(rid) {
+            continue;
+        }
+        let key = value_identity(record["field_id"].as_str().unwrap(), record);
+        retained_by_key
+            .entry(key)
+            .and_modify(|slot| *slot = None)
+            .or_insert(Some(rid));
+    }
+    let mut incoming_by_key = BTreeMap::<_, usize>::new();
+    for record in incoming_values {
+        if value_ids.contains_key(id(record)) {
+            continue;
+        }
+        let key = value_identity(
+            fields[record["field_id"].as_str().unwrap()].as_str(),
+            record,
+        );
+        *incoming_by_key.entry(key).or_default() += 1;
+    }
+    for record in incoming_values {
+        let original = id(record);
+        if value_ids.contains_key(original) {
+            continue;
+        }
+        let key = value_identity(
+            fields[record["field_id"].as_str().unwrap()].as_str(),
+            record,
+        );
+        if incoming_by_key.get(&key) == Some(&1)
+            && let Some(Some(target)) = retained_by_key.get(&key)
+        {
+            claimed.insert((*target).to_owned());
+            value_ids.insert(original, (*target).to_owned());
+        }
+    }
+
+    // Pass 3: add remaining values, reusing a prior collision re-ID on identical replay.
+    for record in incoming_values {
+        let original = id(record);
+        if value_ids.contains_key(original) {
+            continue;
+        }
+        let key = value_identity(
+            fields[record["field_id"].as_str().unwrap()].as_str(),
+            record,
+        );
+        let target = if retained_ids.contains(original) {
+            imported_id(
+                "values",
+                "env:value",
+                record,
+                used,
+                reidentified_values,
+                |candidate| {
+                    !claimed.contains(candidate)
+                        && value_indices.get(candidate).is_some_and(|&i| {
+                            value_identity(
+                                retained_values[i]["field_id"].as_str().unwrap(),
+                                &retained_values[i],
+                            ) == key
+                        })
+                },
+            )
+        } else {
+            original.to_owned()
+        };
+        if value_indices.contains_key(target.as_str()) {
+            claimed.insert(target.clone());
+        }
+        value_ids.insert(original, target);
+    }
+
+    value_ids
 }
 
 fn rewrite_proof(record: &mut Value, ids: &BTreeMap<&str, String>) {
@@ -1330,7 +1416,6 @@ fn update_observation(
     kind: UpdatedRecord,
     record: &Value,
     created: time::OffsetDateTime,
-    incoming: bool,
 ) -> Result<UpdateObservation, Diagnostic> {
     Ok(match kind {
         UpdatedRecord::Source => {
@@ -1339,11 +1424,10 @@ fn update_observation(
                 record.inventory_status == "stale" || linked_stale(pack, &record.provenance_ids);
             let observed = record.evidence.as_ref().and_then(|e| e.observed);
             let key = if !stale
-                && (!incoming
-                    || matches!(
-                        record.inventory_status.as_str(),
-                        "observed-only" | "reconciled"
-                    )) {
+                && matches!(
+                    record.inventory_status.as_str(),
+                    "observed-only" | "reconciled"
+                ) {
                 source_measurement_at(pack, &record, created)
             } else {
                 None
@@ -1367,6 +1451,84 @@ fn update_observation(
             }
         }
     })
+}
+
+/// The measurement key exposed to existing pack readers (`source_measurement` / `field_measurement`).
+fn pack_reader_measurement(
+    pack: &Pack,
+    kind: UpdatedRecord,
+    record: &Value,
+    created: time::OffsetDateTime,
+) -> Result<Option<MeasurementKey>, Diagnostic> {
+    Ok(match kind {
+        UpdatedRecord::Source => source_measurement_at(pack, &source(record)?, created),
+        UpdatedRecord::Field => {
+            field_measurement_at(pack, &field(record)?, created).map(FieldMeasurement::key)
+        }
+    })
+}
+
+/// Latest qualifying own-clock deployment retrieval linked by an applied value observation.
+fn value_qualifying_retrieved_at(
+    pack: &Pack,
+    created: time::OffsetDateTime,
+    all_proofs: &[String],
+    linked_proofs: &BTreeSet<&str>,
+) -> Option<time::OffsetDateTime> {
+    if linked_proofs.is_empty() || linked_stale(pack, all_proofs) {
+        return None;
+    }
+    pack.data
+        .provenance
+        .iter()
+        .filter(|value| {
+            deployment_provenance(value)
+                && linked_proofs.contains(id(value))
+                && matches!(
+                    value["coverage_status"].as_str(),
+                    Some("complete" | "observed-only" | "reconciled")
+                )
+        })
+        .filter_map(|value| {
+            let (start, end) = value["observation_window"].as_str()?.split_once('/')?;
+            let start = parse_time(start).ok()?;
+            let end = parse_time(end).ok()?;
+            if start >= end {
+                return None;
+            }
+            let retrieved = parse_time(value["retrieved_at"].as_str()?).ok()?;
+            (end <= retrieved && retrieved <= created).then_some(retrieved)
+        })
+        .max()
+}
+
+fn strip_post_clock_incoming_proofs(
+    fresh: &mut Value,
+    original: &Value,
+    post_clock_incoming: &BTreeSet<&str>,
+    ids: &BTreeMap<&str, String>,
+) {
+    if post_clock_incoming.is_empty() {
+        return;
+    }
+    let allowed: BTreeSet<&str> = original["provenance_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .filter(|p| !post_clock_incoming.contains(*p))
+        .map(|p| ids[p].as_str())
+        .collect();
+    let incoming_all: BTreeSet<&str> = original["provenance_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| ids[p.as_str().unwrap()].as_str())
+        .collect();
+    fresh["provenance_ids"].as_array_mut().unwrap().retain(|p| {
+        let pid = p.as_str().unwrap();
+        !incoming_all.contains(pid) || allowed.contains(pid)
+    });
 }
 
 fn keep_observation(
@@ -1447,59 +1609,95 @@ fn not_applied(
     });
 }
 
-type AddedObservation<'a> = (UpdatedRecord, &'a Value, &'a str, Option<MeasurementKey>);
+type AddedObservation<'a> = (
+    UpdatedRecord,
+    &'a Value,
+    &'a str,
+    Option<MeasurementKey>,
+    Option<MeasurementKey>,
+    bool,
+);
+
+struct UpdateClockInputs<'a> {
+    applied: &'a BTreeMap<&'a str, MeasurementKey>,
+    folded: &'a BTreeMap<&'a str, &'a str>,
+    additions: &'a [AddedObservation<'a>],
+    value_clocks: &'a [(&'a str, time::OffsetDateTime)],
+}
 
 fn protect_update_clock(
     old: &Pack,
     candidate: &Pack,
     data: &mut PackData,
-    applied: &BTreeMap<&str, MeasurementKey>,
-    folded: &BTreeMap<&str, &str>,
-    additions: &[AddedObservation<'_>],
+    inputs: &UpdateClockInputs<'_>,
     skipped: &mut Vec<NotAppliedRecord>,
 ) -> Result<(time::OffsetDateTime, BTreeSet<String>), Diagnostic> {
     let retained = &old.data;
     let old_clock = parse_time(&old.created_at)?;
-    let clock = applied
-        .values()
-        .map(|key| key.2)
-        .chain(
-            additions
-                .iter()
-                .filter_map(|(_, _, _, key)| key.map(|key| key.2)),
-        )
-        .fold(old_clock, std::cmp::max);
-    let mut date_blocked = BTreeSet::<String>::new();
-    for &(kind, record, target, key) in additions {
-        if key.is_none()
-            && update_observation(candidate, kind, record, clock, true)?
-                .key
-                .is_some()
-        {
-            date_blocked.insert(target.to_owned());
-        }
-    }
-    // Omit dependent new records as well, so refusing a date cannot leave dangling references.
     let mut children = BTreeMap::<_, Vec<_>>::new();
     for record in &data.sources[retained.sources.len()..] {
         if let Some(parent) = record["relationship"]["parent_repo_id"].as_str() {
             children.entry(parent).or_default().push(id(record));
         }
     }
-    let mut blocked: Vec<_> = date_blocked.iter().cloned().collect();
-    while let Some(parent) = blocked.pop() {
-        for &child in children.get(parent.as_str()).into_iter().flatten() {
-            if date_blocked.insert(child.to_owned()) {
-                blocked.push(child.to_owned());
+    let compute_clock = |blocked: &BTreeSet<String>| {
+        inputs
+            .applied
+            .values()
+            .map(|key| key.2)
+            .chain(
+                inputs
+                    .additions
+                    .iter()
+                    .filter_map(|(_, _, target, key, _, _)| {
+                        key.filter(|_| !blocked.contains(*target)).map(|key| key.2)
+                    }),
+            )
+            .chain(
+                inputs
+                    .value_clocks
+                    .iter()
+                    .filter(|(field_target, _)| !blocked.contains(*field_target))
+                    .map(|(_, retrieved_at)| *retrieved_at),
+            )
+            .fold(old_clock, std::cmp::max)
+    };
+    let mut date_blocked = BTreeSet::<String>::new();
+    let mut clock = compute_clock(&date_blocked);
+    loop {
+        let mut next_blocked = BTreeSet::<String>::new();
+        for &(kind, record, target, key, raw_key, stripped) in inputs.additions {
+            if stripped {
+                continue;
+            }
+            if update_observation(candidate, kind, record, clock)?.key != key
+                || pack_reader_measurement(candidate, kind, record, clock)? != raw_key
+            {
+                next_blocked.insert(target.to_owned());
             }
         }
-    }
-    for record in &data.fields[retained.fields.len()..] {
-        if date_blocked.contains(record["source_id"].as_str().unwrap()) {
-            date_blocked.insert(id(record).to_owned());
+        // Omit dependent new records as well, so refusing a date cannot leave dangling references.
+        let mut queue: Vec<_> = next_blocked.iter().cloned().collect();
+        while let Some(parent) = queue.pop() {
+            for &child in children.get(parent.as_str()).into_iter().flatten() {
+                if next_blocked.insert(child.to_owned()) {
+                    queue.push(child.to_owned());
+                }
+            }
         }
+        for record in &data.fields[retained.fields.len()..] {
+            if next_blocked.contains(record["source_id"].as_str().unwrap()) {
+                next_blocked.insert(id(record).to_owned());
+            }
+        }
+        let next_clock = compute_clock(&next_blocked);
+        date_blocked = next_blocked;
+        if next_clock == clock {
+            break;
+        }
+        clock = next_clock;
     }
-    for (kind, record, target, _) in additions {
+    for (kind, record, target, _, _, _) in inputs.additions {
         if date_blocked.contains(*target) {
             not_applied(skipped, kind.collection(), id(record), "date-inconsistent");
         }
@@ -1512,34 +1710,30 @@ fn protect_update_clock(
             set_parent(record, &prior["relationship"]["parent_repo_id"]);
         }
     }
-    let clock = applied
-        .values()
-        .map(|key| key.2)
-        .chain(additions.iter().filter_map(|(_, _, target, key)| {
-            key.filter(|_| !date_blocked.contains(*target))
-                .map(|key| key.2)
-        }))
-        .fold(old_clock, std::cmp::max);
     if clock > old_clock {
         for (kind, records) in [
             (UpdatedRecord::Source, &retained.sources),
             (UpdatedRecord::Field, &retained.fields),
         ] {
             for record in records {
-                if applied.contains_key(id(record)) || folded.contains_key(id(record)) {
+                if inputs.applied.contains_key(id(record)) || inputs.folded.contains_key(id(record))
+                {
                     continue;
                 }
-                if update_observation(old, kind, record, old_clock, false)?
-                    .key
-                    .is_none()
-                    && let Some((_, _, retrieved_at)) =
-                        update_observation(old, kind, record, clock, false)?.key
-                {
+                let before_obs = update_observation(old, kind, record, old_clock)?.key;
+                let after_obs = update_observation(old, kind, record, clock)?.key;
+                let before_raw = pack_reader_measurement(old, kind, record, old_clock)?;
+                let after_raw = pack_reader_measurement(old, kind, record, clock)?;
+                if after_obs != before_obs || after_raw != before_raw {
+                    let (_, _, retrieved_at) = after_obs
+                        .filter(|_| after_obs != before_obs)
+                        .or(after_raw)
+                        .expect("a changed measurement key under a later clock is present");
                     let retrieved_at = retrieved_at
                         .format(&time::format_description::well_known::Rfc3339)
                         .map_err(|_| invalid("Cannot represent the retained retrieval time."))?;
                     return Err(invalid(&format!(
-                        "Retained {} record {:?} has retrieved_at {retrieved_at} after its pack created_at {}; an update would newly qualify it.",
+                        "Retained {} record {:?} has retrieved_at {retrieved_at} after its pack created_at {}; an update would newly qualify or strengthen it.",
                         kind.collection(),
                         id(record),
                         old.created_at,
@@ -1561,9 +1755,21 @@ pub fn import_update(
     validate_update_input(candidate)?;
     let retained = &old.data;
     let incoming = &candidate.data;
-    let ids = import_ids(retained, incoming)?;
+    let mut ids = import_ids(retained, incoming)?;
     let old_clock = parse_time(&old.created_at)?;
     let input_clock = parse_time(&candidate.created_at)?;
+    let post_clock_incoming: BTreeSet<_> = incoming
+        .provenance
+        .iter()
+        .filter(|v| {
+            deployment_provenance(v)
+                && v["retrieved_at"]
+                    .as_str()
+                    .and_then(|s| parse_time(s).ok())
+                    .is_some_and(|retrieved| retrieved > input_clock)
+        })
+        .map(id)
+        .collect();
     let mut data = retained.clone();
     let mut skipped = Vec::new();
     let mut applied = BTreeMap::new();
@@ -1594,9 +1800,19 @@ pub fn import_update(
         rewrite_proof(&mut fresh, &ids.provenance);
         let kind = UpdatedRecord::Source;
         let Some(&index) = old_sources.get(target) else {
-            let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+            let measurement = update_observation(candidate, kind, record, input_clock)?;
+            let raw_key = pack_reader_measurement(candidate, kind, record, input_clock)?;
+            let stripped = measurement.key.is_some() || raw_key.is_some();
+            if stripped {
+                strip_post_clock_incoming_proofs(
+                    &mut fresh,
+                    record,
+                    &post_clock_incoming,
+                    &ids.provenance,
+                );
+            }
             data.sources.push(fresh);
-            additions.push((kind, record, target, measurement.key));
+            additions.push((kind, record, target, measurement.key, raw_key, stripped));
             continue;
         };
 
@@ -1642,11 +1858,17 @@ pub fn import_update(
         if fresh == *metadata {
             continue;
         }
-        let measurement = update_observation(candidate, kind, record, input_clock, true)?;
-        let previous = update_observation(old, kind, prior, old_clock, false)?;
+        let measurement = update_observation(candidate, kind, record, input_clock)?;
+        let previous = update_observation(old, kind, prior, old_clock)?;
         if let Some(reason) = keep_observation(&measurement, &previous, old_clock) {
             not_applied(&mut skipped, "sources", original, reason);
         } else {
+            strip_post_clock_incoming_proofs(
+                &mut fresh,
+                record,
+                &post_clock_incoming,
+                &ids.provenance,
+            );
             *metadata = fresh;
             applied.insert(target, measurement.key.unwrap());
         }
@@ -1670,9 +1892,19 @@ pub fn import_update(
         }
         let kind = UpdatedRecord::Field;
         let Some(matches) = matches else {
-            let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+            let measurement = update_observation(candidate, kind, record, input_clock)?;
+            let raw_key = pack_reader_measurement(candidate, kind, record, input_clock)?;
+            let stripped = measurement.key.is_some() || raw_key.is_some();
+            if stripped {
+                strip_post_clock_incoming_proofs(
+                    &mut fresh,
+                    record,
+                    &post_clock_incoming,
+                    &ids.provenance,
+                );
+            }
             data.fields.push(fresh);
-            additions.push((kind, record, target, measurement.key));
+            additions.push((kind, record, target, measurement.key, raw_key, stripped));
             continue;
         };
         let first = matches[0];
@@ -1696,11 +1928,10 @@ pub fn import_update(
         if fresh == *metadata {
             continue;
         }
-        let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+        let measurement = update_observation(candidate, kind, record, input_clock)?;
         let mut reason = None;
         for &index in matches {
-            let previous =
-                update_observation(old, kind, &retained.fields[index], old_clock, false)?;
+            let previous = update_observation(old, kind, &retained.fields[index], old_clock)?;
             reason = keep_observation(&measurement, &previous, old_clock);
             if reason.is_some() {
                 break;
@@ -1718,30 +1949,90 @@ pub fn import_update(
             folded.insert(id(&retained.fields[index]), target);
         }
         fresh.as_object_mut().unwrap().remove("refresh_status");
+        strip_post_clock_incoming_proofs(&mut fresh, record, &post_clock_incoming, &ids.provenance);
         *metadata = fresh;
         applied.insert(target, measurement.key.unwrap());
     }
 
-    let (clock, date_blocked) = protect_update_clock(
-        old,
-        candidate,
-        &mut data,
-        &applied,
-        &folded,
-        &additions,
-        &mut skipped,
-    )?;
+    // Rewrite retained value field links for folded fields before indexing and matching values.
     for record in &mut data.values {
         if let Some(&survivor) = folded.get(record["field_id"].as_str().unwrap()) {
             record["field_id"] = Value::String(survivor.into());
         }
     }
-
-    let old_values = record_indices(&retained.values);
+    let value_ids = match_value_ids(
+        &data.values,
+        &incoming.values,
+        &ids.fields,
+        &ids.retained_ids,
+        &mut ids.used,
+        &mut ids.reidentified.values,
+    );
+    let old_values: BTreeMap<String, usize> = data
+        .values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (id(v).to_owned(), i))
+        .collect();
     let incoming_field_indices = record_indices(&incoming.fields);
+    let mut value_clocks = Vec::new();
     for record in &incoming.values {
         let original = id(record);
-        let target = ids.values[original].as_str();
+        let field = record["field_id"].as_str().unwrap();
+        let field_target = ids.fields[field].as_str();
+        let field_record = &incoming.fields[incoming_field_indices[field]];
+        let source = ids.sources[field_record["source_id"].as_str().unwrap()].as_str();
+        if restricted.contains(source) {
+            continue;
+        }
+        let target = value_ids[original].as_str();
+        let all_proofs: Vec<String> = record["provenance_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p.as_str().unwrap().to_owned())
+            .collect();
+        let newly_linked: BTreeSet<&str> = if let Some(&i) = old_values.get(target) {
+            let existing: BTreeSet<&str> = data.values[i]["provenance_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap())
+                .collect();
+            record["provenance_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap())
+                .filter(|p| !existing.contains(ids.provenance[*p].as_str()))
+                .collect()
+        } else {
+            record["provenance_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p.as_str().unwrap())
+                .collect()
+        };
+        if let Some(retrieved_at) =
+            value_qualifying_retrieved_at(candidate, input_clock, &all_proofs, &newly_linked)
+        {
+            value_clocks.push((field_target, retrieved_at));
+        }
+    }
+
+    let clock_inputs = UpdateClockInputs {
+        applied: &applied,
+        folded: &folded,
+        additions: &additions,
+        value_clocks: &value_clocks,
+    };
+    let (clock, date_blocked) =
+        protect_update_clock(old, candidate, &mut data, &clock_inputs, &mut skipped)?;
+
+    for record in &incoming.values {
+        let original = id(record);
+        let target = value_ids[original].as_str();
         let field = record["field_id"].as_str().unwrap();
         let field_record = &incoming.fields[incoming_field_indices[field]];
         let source = ids.sources[field_record["source_id"].as_str().unwrap()].as_str();
