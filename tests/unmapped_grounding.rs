@@ -324,7 +324,7 @@ fn the_target_view_name_used_as_a_repository_is_called_the_view() {
 }
 
 #[test]
-fn strict_mode_output_is_unchanged() {
+fn strict_mode_reports_missing_fields_and_keeps_selector_warnings() {
     for (query, missing) in [
         (
             r#"#repo=alpha_repo | dest.made_up="x" | count()"#,
@@ -343,7 +343,15 @@ fn strict_mode_output_is_unchanged() {
         assert_eq!(result.outcome, Outcome::NeedsContext, "{query}");
         assert_eq!(result.grounding.missing, missing, "{query}");
         let codes: Vec<_> = result.diagnostics.iter().map(|d| d.code.as_str()).collect();
-        assert_eq!(codes, ["CQL_CONTEXT_REQUIRED"], "{query}");
+        if query.contains("synthetic-view") {
+            assert_eq!(
+                codes,
+                ["CQL_CONTEXT_REQUIRED", "CQL_UNMAPPED_SOURCE"],
+                "{query}"
+            );
+        } else {
+            assert_eq!(codes, ["CQL_CONTEXT_REQUIRED"], "{query}");
+        }
     }
     let result = check(
         r#"#repo=alpha_repo | src.ip="10.0.0.1" | count()"#,
@@ -796,4 +804,23 @@ fn each_selected_source_is_judged_by_its_own_records() {
         unlisted.contains(BETA) && !unlisted.contains(ALPHA),
         "{unlisted}"
     );
+}
+
+#[test]
+fn strict_check_retains_the_literal_source_warning() {
+    let pack = pack();
+    let typo = "#repo=alpah_repo | count()";
+    let lenient = check(typo, Some(&pack), false);
+    let strict = check(typo, Some(&pack), true);
+    assert_eq!(strict.outcome, Outcome::Ready);
+    assert_eq!(
+        one_warning(&strict, "CQL_UNMAPPED_SOURCE"),
+        one_warning(&lenient, "CQL_UNMAPPED_SOURCE")
+    );
+    assert_eq!(strict.exit_code(false), lenient.exit_code(false));
+    assert_eq!(strict.exit_code(true), lenient.exit_code(true));
+    for require_observed in [false, true] {
+        let correct = check("#repo=alpha_repo | count()", Some(&pack), require_observed);
+        assert!(correct.diagnostics.is_empty(), "{correct:?}");
+    }
 }

@@ -446,3 +446,443 @@ fn mixed_record_kind_policy_still_applies_to_anchored_discriminator_filters() {
         &pack,
     ));
 }
+fn check_with_packs(query: &str, primary: &Pack, active: Option<&Pack>) -> Analysis {
+    app::check_with_evidence(
+        CheckRequest {
+            schema_version: 1,
+            id: None,
+            query: query.into(),
+            context: context(),
+        },
+        Some(primary),
+        Some(app::GroundingEvidence {
+            environment: &primary.environment,
+            active_pack: active,
+            query_observations: &[],
+            captured_observations: &[],
+            capabilities: None,
+        }),
+    )
+}
+
+fn check_both(query: &str, pack: &Pack) -> [Analysis; 2] {
+    [
+        check(query, pack),
+        check_with_packs(query, pack, Some(pack)),
+    ]
+}
+
+fn add_scoped_field(data: &mut PackData, kind: &str, field: &str) {
+    let id = format!("env:source:{kind}");
+    let mut source = data.sources[0].clone();
+    source["id"] = json!(id);
+    source["kind"] = json!("source");
+    source["selectors"] = json!({"repo":REPO,"type":kind,"sourcetype":kind});
+    data.sources.push(source);
+    data.fields.push(observation(&id, field));
+}
+
+#[test]
+fn exact_repo_and_type_observations_resolve_overlapping_dataset_records() {
+    let mut data = data();
+    data.fields.push(observation(SOURCE, "#event.dataset"));
+    add_scoped_field(&mut data, "logs", "#event.dataset");
+    data.fields.push(observation("env:source:logs", "user"));
+    let pack = pack(data);
+    for query in [
+        "#repo=scope_example user=* | count()",
+        "#repo=scope_example #event.dataset=example user=* | count()",
+        "#repo=scope_example #type=logs #event.dataset=example user=* | count()",
+    ] {
+        for result in check_both(query, &pack) {
+            assert_ready(&result);
+        }
+    }
+}
+
+#[test]
+fn ambiguity_names_the_competing_scopes() {
+    let mut data = data();
+    add_scoped_field(&mut data, "logs", "aid");
+    add_scoped_field(&mut data, "other", "aid");
+    data.fields
+        .retain(|f| f["path"] != "aid" || f["source_id"] != SOURCE);
+    let pack = pack(data);
+    for result in check_both("#repo=scope_example aid=* | count()", &pack) {
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+        let basis = &result.grounding.basis["scope_example:*:aid"];
+        assert!(
+            basis.contains(r#"#type="logs""#) && basis.contains(r#"#type="other""#),
+            "{basis}"
+        );
+        assert!(
+            basis.ends_with("Narrow the query to one of these selectors, or measure the field at the query's own scope."),
+            "{basis}"
+        );
+    }
+}
+
+#[test]
+fn two_exact_namespace_variants_still_refuse() {
+    let mut primary = data();
+    primary.sources[0]["selectors"] = json!({"repo":REPO,"type":"logs","sourcetype":"logs"});
+    let mut active = primary.clone();
+    active.sources[0]["selectors"] = json!({"repo":REPO,"type":"logs"});
+    let primary = pack(primary);
+    let active = pack(active);
+    let query = "#repo=scope_example #type=logs aid=* | count()";
+    let result = check_with_packs(query, &primary, Some(&active));
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    let basis = &result.grounding.basis["scope_example:logs:aid"];
+    assert!(
+        basis.contains(r#"#repo="scope_example" #type="logs";"#),
+        "{basis}"
+    );
+    assert!(basis.contains(r#"@sourcetype="logs""#), "{basis}");
+    assert!(
+        basis.ends_with(
+            "Select the intended snapshot, or measure the field at the query's own scope."
+        ),
+        "{basis}"
+    );
+    assert_ready(&check_with_packs(query, &active, Some(&active)));
+}
+
+#[test]
+fn pasted_strict_selector_keeps_the_full_type() {
+    let mut data = data();
+    data.fields.retain(|f| f["path"] != "aid");
+    add_scoped_field(&mut data, "Windows", "aid");
+    add_scoped_field(&mut data, "Windows Events", "aid");
+    for source in &mut data.sources[1..] {
+        source["selectors"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourcetype");
+    }
+    let listed = data.fields.last_mut().unwrap();
+    listed["evidence_kind"] = json!("documented");
+    listed.as_object_mut().unwrap().remove("coverage");
+    let pack = pack(data);
+    for result in check_both("#repo=scope_example aid=* | count()", &pack) {
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+        let basis = &result.grounding.basis["scope_example:*:aid"];
+        let (selectors, _) = basis.split_once("). ").unwrap();
+        let (_, selectors) = selectors.split_once(" (").unwrap();
+        let pasted = selectors
+            .split("; ")
+            .find(|s| s.contains("Windows Events"))
+            .unwrap();
+        let result = check(&format!("{pasted} aid=* | count()"), &pack);
+        assert_eq!(
+            result.outcome,
+            Outcome::NeedsContext,
+            "{pasted}: {result:?}"
+        );
+        assert_eq!(result.validation.status, Acceptance::Accepted);
+        assert_eq!(
+            result.grounding.basis["scope_example:Windows Events:aid"],
+            "listed field namespace; population not measured"
+        );
+    }
+    assert_ready(&check(
+        "#repo=scope_example #type=Windows aid=* | count()",
+        &pack,
+    ));
+}
+
+#[test]
+fn sourcetype_only_refusal_offers_snapshot_and_measurement_remedies() {
+    let mut measured = data();
+    measured.sources[0]["selectors"] = json!({"repo": REPO, "type": "logs"});
+    let mut primary = measured.clone();
+    primary.sources[0]["selectors"]["sourcetype"] = json!("vendor:a");
+    let mut active = measured.clone();
+    active.sources[0]["selectors"]["sourcetype"] = json!("vendor:b");
+    let primary = pack(primary);
+    let active = pack(active);
+    let query = "#repo=scope_example #type=logs aid=* | count()";
+    let result = check_with_packs(query, &primary, Some(&active));
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    let basis = &result.grounding.basis["scope_example:logs:aid"];
+    assert_eq!(
+        basis.split_once("). ").unwrap().1,
+        "Select the intended snapshot, or measure the field at the query's own scope."
+    );
+    for selector in [r#"@sourcetype="vendor:a""#, r#"@sourcetype="vendor:b""#] {
+        assert!(basis.contains(selector), "{basis}");
+    }
+    assert_ready(&check_with_packs(query, &active, Some(&active)));
+    let measured = pack(measured);
+    let result = check_with_packs(query, &measured, Some(&active));
+    assert_ready(&result);
+    assert_eq!(result.grounding.basis["scope_example:logs:aid"], OBSERVED);
+}
+
+#[test]
+fn narrower_or_independent_selectors_do_not_resolve_ambiguity() {
+    let repo_query = "#repo=scope_example aid=* | count()";
+    let logs = json!({"repo": REPO, "type": "logs"});
+    for (case, query, key, selectors, other) in [
+        (
+            "event family",
+            repo_query,
+            "scope_example:*:aid",
+            json!({"repo": REPO, "event_family": "FileEvent"}),
+            logs.clone(),
+        ),
+        (
+            "sourcetype",
+            repo_query,
+            "scope_example:*:aid",
+            json!({"repo": REPO, "sourcetype": "vendor:enriched"}),
+            logs.clone(),
+        ),
+        (
+            "repository",
+            "#type=logs aid=* | count()",
+            "*:logs:aid",
+            logs,
+            json!({"repo": "other_repo", "type": "logs", "event_family": "FileEvent"}),
+        ),
+    ] {
+        let mut data = data();
+        add_scoped_field(&mut data, "logs", "aid");
+        data.sources[0]["selectors"] = selectors;
+        data.sources[1]["selectors"] = other;
+        let pack = pack(data);
+        for result in check_both(query, &pack) {
+            assert_eq!(result.outcome, Outcome::NeedsContext, "{case}: {result:?}");
+            assert!(
+                result.grounding.basis[key]
+                    .starts_with("multiple source-specific observations; not interchangeable"),
+                "{case}: {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn different_active_event_family_cannot_override_matching_primary_evidence() {
+    let mut primary = data();
+    primary.sources[0]["selectors"] =
+        json!({"repo": REPO, "type": "logs", "event_family": "FileEvent"});
+    let mut active = primary.clone();
+    active.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let result = check_with_packs(
+        "#repo=scope_example #type=logs #event_simpleName=FileEvent aid=* | count()",
+        &pack(primary),
+        Some(&pack(active)),
+    );
+    assert_ready(&result);
+    assert_eq!(result.grounding.basis["scope_example:logs:aid"], OBSERVED);
+}
+
+#[test]
+fn selected_pack_measurement_at_a_different_scope_is_named() {
+    let active = pack(data());
+    let mut narrow = data();
+    narrow.sources[0]["selectors"]["type"] = json!("logs");
+    let query = "#repo=scope_example aid=* | count()";
+    let result = check_with_packs(query, &pack(narrow), Some(&active));
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    assert_eq!(
+        result.grounding.basis["scope_example:*:aid"],
+        "The selected pack measures this field at a different scope. See the field record at the query's scope in the inventory's active pack."
+    );
+    assert_ready(&check_with_packs(query, &active, Some(&active)));
+}
+
+#[test]
+fn exact_scalar_namespace_cannot_borrow_narrow_array() {
+    let mut data = data();
+    data.fields.push(observation(SOURCE, "parts[]"));
+    let exact_only = pack(data.clone());
+    add_scoped_field(&mut data, "logs", "parts[]");
+    let array = data.fields.last_mut().unwrap();
+    array["data_type"] = json!("array");
+    array["is_array"] = json!(true);
+    let mixed = pack(data);
+    let query = r#"#repo=scope_example | array:length("parts[]")"#;
+    let result = check_with_packs(query, &mixed, None);
+    let control = check(query, &exact_only);
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    assert_eq!(result.grounding.basis, control.grounding.basis);
+}
+
+#[test]
+fn exact_documented_active_namespace_cannot_borrow_narrow_primary_measurement() {
+    let mut documented = data();
+    let field = documented
+        .fields
+        .iter_mut()
+        .find(|f| f["path"] == "aid")
+        .unwrap();
+    field["evidence_kind"] = json!("documented");
+    field.as_object_mut().unwrap().remove("coverage");
+    let active = pack(documented);
+    let mut narrow = data();
+    narrow.sources[0]["selectors"]["type"] = json!("logs");
+    let narrow = pack(narrow);
+    let query = "#repo=scope_example aid=* | count()";
+    assert_ready(&check(query, &narrow));
+    let result = check_with_packs(query, &narrow, Some(&active));
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    assert_eq!(
+        result.grounding.basis["scope_example:*:aid"],
+        "The selected pack measures this field at a different scope. See the field record at the query's scope in the inventory's active pack."
+    );
+}
+
+#[test]
+fn exact_namespace_keeps_stale_negative_and_measured_absent_outcomes() {
+    let query = "#repo=scope_example aid=* | count()";
+    for condition in ["stale", "negative", "measured-absent"] {
+        let mut data = data();
+        match condition {
+            "stale" => data.sources[0]["inventory_status"] = json!("stale"),
+            "negative" => data.fields[1]["coverage"]["observed"] = json!(false),
+            "measured-absent" => {
+                data.fields.remove(1);
+                let window = json!("2025-12-31T00:00:00Z/2026-01-01T00:00:00Z");
+                data.sources[0]["evidence"]["measured_fields"] = json!(["aid"]);
+                data.sources[0]["evidence"]["observation_window"] = window.clone();
+                data.provenance[0]["observation_window"] = window;
+            }
+            _ => unreachable!(),
+        }
+        let exact = pack(data.clone());
+        add_scoped_field(&mut data, "logs", "aid");
+        data.sources[1]["inventory_status"] = json!("observed-only");
+        let mixed = pack(data);
+        let control = check_with_packs(query, &exact, Some(&exact));
+        let result = check_with_packs(query, &mixed, Some(&mixed));
+        assert_eq!(
+            result.outcome,
+            Outcome::NeedsContext,
+            "{condition}: {result:?}"
+        );
+        assert_eq!(
+            result.grounding.basis["scope_example:*:aid"],
+            control.grounding.basis["scope_example:*:aid"],
+            "{condition}"
+        );
+        if condition != "measured-absent" {
+            let result = check(query, &mixed);
+            assert_eq!(
+                result.outcome,
+                Outcome::NeedsContext,
+                "{condition}: {result:?}"
+            );
+            assert_eq!(result.grounding.basis, check(query, &exact).grounding.basis);
+        }
+    }
+}
+
+#[test]
+fn contradictory_literal_event_family_does_not_supply_grounding() {
+    let mut data = data();
+    data.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let pack = pack(data);
+    let result_key = "scope_example:*:aid";
+    for result in check_both(
+        "#repo=scope_example #event_simpleName=FileEvent aid=* | count()",
+        &pack,
+    ) {
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+        assert_eq!(
+            result.grounding.basis[result_key],
+            "query-supplied; not measured in selected pack"
+        );
+    }
+    for result in check_both(
+        "#repo=scope_example #event_simpleName=ProcessEvent aid=* | count()",
+        &pack,
+    ) {
+        assert_ready(&result);
+        assert_eq!(result.grounding.basis[result_key], OBSERVED);
+    }
+    for (name, outcome) in [
+        ("FileEvent", Outcome::NeedsContext),
+        ("ProcessEvent", Outcome::Ready),
+    ] {
+        let result = app::generate(
+            GenerateRequest {
+                schema_version: 1,
+                id: None,
+                input: GenerateInput::Recipe {
+                    request: Recipe::CountEvents {
+                        source: Scope {
+                            repo: Some(REPO.into()),
+                            event: Some(name.into()),
+                            ..Scope::default()
+                        },
+                        filters: vec![Predicate::Exists {
+                            field: "aid".into(),
+                            present: true,
+                        }],
+                    },
+                },
+                context: context(),
+            },
+            Some(&pack),
+        );
+        assert_eq!(result.outcome, outcome, "{result:?}");
+        assert_eq!(result.query.is_some(), outcome == Outcome::Ready);
+    }
+}
+
+#[test]
+fn nonliteral_and_unrestricted_event_queries_keep_their_basis() {
+    let mut data = data();
+    data.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let pack = pack(data);
+    // These outcomes and basis strings are from the released checker.
+    for (filter, outcome, basis) in [
+        ("", Outcome::Ready, OBSERVED),
+        (
+            r##"in(field="#event_simpleName", values=["FileEvent"]) | "##,
+            Outcome::Ready,
+            OBSERVED,
+        ),
+        (
+            r##"in(field="#event_simpleName", values=["FileEvent","NetworkEvent"]) | "##,
+            Outcome::Ready,
+            OBSERVED,
+        ),
+        (
+            r##"in(field="#event_simpleName", values=["fileevent"], ignoreCase=true) | "##,
+            Outcome::Ready,
+            OBSERVED,
+        ),
+        (
+            r##"case { in(#event_simpleName, values=["FileEvent"]); in(#event_simpleName, values=["NetworkEvent"]) } | "##,
+            Outcome::Ready,
+            OBSERVED,
+        ),
+        (
+            r##"!in(field="#event_simpleName", values=["ProcessEvent"]) | "##,
+            Outcome::Ready,
+            OBSERVED,
+        ),
+        (
+            "#event_simpleName=/^FileEvent$/ | ",
+            Outcome::NeedsContext,
+            "source or field selection unresolved; unverified",
+        ),
+        (
+            "#event_simpleName!=ProcessEvent | ",
+            Outcome::NeedsContext,
+            "source or field selection unresolved; unverified",
+        ),
+    ] {
+        let query = format!("#repo=scope_example | {filter}aid=* | count()");
+        for result in check_both(&query, &pack) {
+            assert_eq!(result.outcome, outcome, "{query}: {result:?}");
+            assert_eq!(
+                result.grounding.basis["scope_example:*:aid"], basis,
+                "{query}"
+            );
+        }
+    }
+}

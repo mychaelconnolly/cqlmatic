@@ -1721,8 +1721,11 @@ fn field_pack_parser_and_general_activity_do_not_renew_reminders() {
     let pack = Pack::new(environment(), FIRST_DUE.into(), PackData::default()).unwrap();
     state.register_pack_sources(&pack).unwrap();
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: "synthetic-pack.json".into(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: FIRST_DUE.into(),
         discovery_run: None,
     };

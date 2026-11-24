@@ -6,7 +6,7 @@ use crate::{
     mcp, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const COMPLETION_MESSAGE: &str = "Complete full discovery + parser inventory to validate whether your environment has any remaining quiet or inaccessible sources.";
@@ -17,12 +17,33 @@ pub const MAX_STATE_BYTES: u64 = 67_108_864;
 pub const STATE_VERSION: u32 = 4;
 pub const REFRESH_OFF_WARNING: &str = "Turning off automatic inventory refresh can leave new repositories, sources, and types undiscovered. Manual refresh remains available.";
 pub const REFRESH_SECONDS: u64 = 300;
+pub const SOURCE_SELECTION_PREFIX: &str = "Source selection is outside the allowed scope. ";
+
+pub fn source_selection_count(count: usize) -> String {
+    if count == 1 {
+        format!("{SOURCE_SELECTION_PREFIX}There is 1 valid inventory source ID.")
+    } else {
+        format!("{SOURCE_SELECTION_PREFIX}There are {count} valid inventory source IDs.")
+    }
+}
 pub const MANUAL_REFRESH_SECONDS: u64 = 600;
 pub const AUTOMATIC_REFRESH_AVAILABLE: bool = false;
 const REFRESH_REMINDER_DAYS: i64 = 30;
 const MAX_PENDING_WORK: usize = 1000;
 // shortcut: retain 200 refresh attempts per state, add protected archival for longer histories.
 const MAX_REFRESH_ATTEMPTS: usize = 200;
+
+fn deserialize_keep_last<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    let value = usize::deserialize(deserializer)?;
+    if value > 1000 {
+        return Err(serde::de::Error::custom(
+            "keep_last must be between 0 and 1000",
+        ));
+    }
+    Ok(value)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -37,6 +58,14 @@ pub struct InventoryRequest {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum InventoryAction {
     Init {},
+    Prune {
+        dry_run: bool,
+        #[serde(default, deserialize_with = "deserialize_keep_last")]
+        #[cfg_attr(test, schemars(range(min = 0, max = 1000)))]
+        keep_last: usize,
+        #[serde(default)]
+        include_failed: bool,
+    },
     SetDiscoveryMode {
         mode: DiscoveryMode,
         #[serde(default)]
@@ -232,6 +261,10 @@ pub enum InventoryAction {
     },
     ImportPack {
         pack_file: String,
+        #[serde(default)]
+        mode: ImportPackMode,
+        #[serde(default)]
+        supersede_runs: bool,
     },
     Reconcile {
         reviewed_at: String,
@@ -242,6 +275,145 @@ pub enum InventoryAction {
         message: String,
         recorded_at: String,
     },
+    Batch {
+        #[cfg_attr(test, schemars(length(min = 1, max = 32), transform = reconcile_last))]
+        actions: Vec<BatchAction>,
+    },
+}
+
+pub const MAX_BATCH_ACTIONS: usize = 32;
+
+/// Refuses `reconcile` at any position but the last of a batch.
+#[cfg(test)]
+fn reconcile_last(schema: &mut schemars::Schema) {
+    let reconcile = json!({"properties":{"kind":{"const":"reconcile"}}});
+    let positions: Vec<Value> = (0..MAX_BATCH_ACTIONS - 1)
+        .map(|index| {
+            let mut prefix = vec![Value::Bool(true); index];
+            prefix.push(reconcile.clone());
+            json!({"minItems":index + 2,"prefixItems":prefix})
+        })
+        .collect();
+    schema.insert("not".into(), json!({"anyOf":positions}));
+}
+
+/// The local actions one `batch` request can apply together. None reserves, dispatches or
+/// settles a search, reads the network or imports a pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BatchAction {
+    ReviewSource {
+        source_id: String,
+        purpose: String,
+        data_model: String,
+        reviewed_at: String,
+        evidence: String,
+    },
+    BindParser {
+        source_id: String,
+        parser_id: String,
+        parser_sha256: String,
+        reviewed_at: String,
+        evidence: String,
+        semantics: Vec<SemanticReview>,
+    },
+    ExcludeParser {
+        parser_id: String,
+        parser_sha256: String,
+        reviewed_at: String,
+        reason: String,
+    },
+    ParserNotApplicable {
+        source_id: String,
+        reason: NativeSourceReason,
+        reviewed_at: String,
+        evidence: String,
+    },
+    ImportParsers {
+        pages: Vec<ParserPageInput>,
+        details: Vec<ParserDetailInput>,
+        retrieved_at: String,
+    },
+    Reconcile {
+        reviewed_at: String,
+    },
+}
+
+impl From<BatchAction> for InventoryAction {
+    fn from(action: BatchAction) -> Self {
+        match action {
+            BatchAction::ReviewSource {
+                source_id,
+                purpose,
+                data_model,
+                reviewed_at,
+                evidence,
+            } => Self::ReviewSource {
+                source_id,
+                purpose,
+                data_model,
+                reviewed_at,
+                evidence,
+            },
+            BatchAction::BindParser {
+                source_id,
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                evidence,
+                semantics,
+            } => Self::BindParser {
+                source_id,
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                evidence,
+                semantics,
+            },
+            BatchAction::ExcludeParser {
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                reason,
+            } => Self::ExcludeParser {
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                reason,
+            },
+            BatchAction::ParserNotApplicable {
+                source_id,
+                reason,
+                reviewed_at,
+                evidence,
+            } => Self::ParserNotApplicable {
+                source_id,
+                reason,
+                reviewed_at,
+                evidence,
+            },
+            BatchAction::ImportParsers {
+                pages,
+                details,
+                retrieved_at,
+            } => Self::ImportParsers {
+                pages,
+                details,
+                retrieved_at,
+            },
+            BatchAction::Reconcile { reviewed_at } => Self::Reconcile { reviewed_at },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportPackMode {
+    #[default]
+    Append,
+    Update,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -718,6 +890,8 @@ pub struct RawSnapshot {
     pub sha256: String,
     pub retrieved_at: String,
     pub raw_hex: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
 }
 
 impl RawSnapshot {
@@ -735,8 +909,19 @@ impl RawSnapshot {
             sha256: sha256_hex(raw),
             retrieved_at: retrieved_at.into(),
             raw_hex,
+            extended_result_framing: false,
         })
     }
+    pub(crate) fn new_search_result(raw: &[u8], retrieved_at: &str) -> Result<Self, Diagnostic> {
+        let mut snapshot = Self::new(raw, retrieved_at)?;
+        snapshot.extended_result_framing = mcp::uses_extended_framing(raw);
+        Ok(snapshot)
+    }
+
+    pub(crate) fn normalized_result(&self) -> Result<mcp::Normalized, Diagnostic> {
+        mcp::normalize_framed(&self.bytes()?, self.extended_result_framing)
+    }
+
     pub fn bytes(&self) -> Result<Vec<u8>, Diagnostic> {
         environment::parse_time(&self.retrieved_at)?;
         if self.raw_hex.len() > mcp::MAX_RESULT_BYTES * 2 || !self.raw_hex.len().is_multiple_of(2) {
@@ -868,14 +1053,65 @@ pub struct ParserExclusion {
     pub reason: String,
 }
 
+/// A binding or exclusion whose reviewed parser definition is not in the latest saved capture.
+/// It satisfies nothing until a capture saves that definition again, as the same bytes or as
+/// the same parsed resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SuspendedParserReview {
+    Binding {
+        source_id: String,
+        /// SHA-256 of the reviewed parser resource after JSON parsing.
+        resource_sha256: String,
+        binding: ParserBinding,
+    },
+    Exclusion {
+        resource_sha256: String,
+        exclusion: ParserExclusion,
+        /// Zero-based slot in the combined active and suspended exclusion order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<usize>,
+    },
+}
+
+/// The latest capture saved a reviewed parser definition again as other bytes with the same
+/// parsed resource, so the review made against `reviewed_sha256` stands on `saved_sha256`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CarriedParserReview {
+    pub parser_id: String,
+    pub reviewed_sha256: String,
+    pub saved_sha256: String,
+}
+
+/// How a parser import settled the bindings and exclusions that existed before it.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ParserReviewCounts {
+    pub kept: usize,
+    pub carried: usize,
+    pub suspended: usize,
+    pub restored: usize,
+}
+
+pub const SUSPENDED_PARSER_REVIEWS: &str = "Some parser bindings or exclusions are suspended: the latest capture lacks the exact parser definition each was reviewed against, so they count for nothing until restored. They are kept with their line reviews and reasons. Import or fetch a capture that includes those definitions to restore them; where a parser has changed, review its new definition and bind or exclude it again.";
+const SUSPENDED_SOURCE_BINDING: &str = "This source's parser binding is suspended: the latest capture lacks the exact parser definition it was reviewed against, so it counts for nothing until restored. Import or fetch a capture that includes that definition to restore it with its line reviews, or review the source's current parser definition and bind it again.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PackReference {
     pub path: String,
     pub content_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_content_digest: Option<String>,
     pub imported_at: String,
     pub discovery_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -898,6 +1134,10 @@ pub struct DiscoveryRun {
     pub mode: DiscoveryMode,
     #[serde(default)]
     pub quick_depth: QuickDepth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -959,6 +1199,10 @@ pub struct InventoryState {
     pub parser_pages: Vec<ParserPage>,
     pub parsers: Vec<ParserSnapshot>,
     pub parser_exclusions: Vec<ParserExclusion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspended_parser_reviews: Vec<SuspendedParserReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_parser_reviews: Vec<CarriedParserReview>,
     pub packs: Vec<PackReference>,
     #[serde(default)]
     pub active_pack: Option<PackReference>,
@@ -1005,10 +1249,23 @@ pub struct FieldStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+pub struct SourceRestrictions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sourcetype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_family: Option<String>,
+    pub discovery_compatible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SourceStatus {
     pub source_id: String,
     pub expected: bool,
     pub selectors: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_restrictions: Option<SourceRestrictions>,
     pub scouted_events: Option<u64>,
     pub review: Option<SourceReview>,
     pub binding: Option<ParserBinding>,
@@ -1090,6 +1347,12 @@ pub struct InventoryStatus {
     pub parsers: Vec<ParserSummary>,
     pub scouting_evidence: Vec<ScoutSummary>,
     pub unclassified_parser_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspended_parser_reviews: Vec<SuspendedParserReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_parser_exclusions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_parser_reviews: Vec<CarriedParserReview>,
     pub sources: Vec<SourceStatus>,
     pub discovery_runs: Vec<DiscoveryRun>,
     pub parser_runs: Vec<ParserRun>,
@@ -1504,6 +1767,7 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "completion_detail":status.completion_detail,
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
+            "suspended_parser_exclusions":status.suspended_parser_exclusions.unwrap_or_default(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
             "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
             "pending_inventory":status.pending_inventory.len(),"inventory_notifications":status.inventory_notification_count},
@@ -1513,12 +1777,18 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "settings_attention":status.settings_attention,
         "refresh_attempts":status.refresh_attempts,
         "pending_inventory":status.pending_inventory,
-        "sources":status.sources.iter().map(|source| json!({"source_id":source.source_id,"selectors":source.selectors,
+        "sources":status.sources.iter().map(|source| {
+            let mut row = json!({"source_id":source.source_id,"selectors":source.selectors,
             "expected":source.expected,"status":source.status,"interpretation":source.interpretation,"parser":source.parser,
             "measurements":source.measurements,"observation":source.observation,"scouted_events":source.scouted_events,
             "fields":{"total":source.fields.len(),"declared":source.fields.iter().filter(|f|f.declared).count(),
                 "observed":source.fields.iter().filter(|f|f.observed).count(),"measured":source.fields.iter().filter(|f|f.measured).count(),
-                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).collect::<Vec<_>>(),
+                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions});
+            if let Some(restrictions) = &source.retained_restrictions {
+                row["retained_restrictions"] = json!(restrictions);
+            }
+            row
+        }).collect::<Vec<_>>(),
         "active_pack":status.active_pack,"covered_queries_usable":status.covered_queries_usable,"next_actions":status.next_actions
     })
 }
@@ -1561,7 +1831,10 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     let mut discovery_work: Vec<_> = status
         .discovery_runs
         .iter()
-        .filter(|run| !matches!(run.status.as_str(), "complete" | "superseded" | "paused"))
+        .filter(|run| {
+            run.pruned_at.is_none()
+                && !matches!(run.status.as_str(), "complete" | "superseded" | "paused")
+        })
         .collect();
     discovery_work.sort_by_key(|run| {
         (
@@ -1609,13 +1882,17 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         }
     };
     let mut notices = Vec::new();
+    if !status.suspended_parser_reviews.is_empty() {
+        notices.push(json!({"code":"SUSPENDED_PARSER_REVIEWS","severity":"info",
+            "message":"Import or fetch the reviewed definitions to restore suspended parser reviews."}));
+    }
     if status.capability_blocked {
         notices.push(json!({"code":"CAPABILITY_SETTLEMENT_REQUIRED","severity":"warning",
             "message":"A capability search has unresolved termination. Submit exact settlement before another inventory dispatch."}));
     }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
-            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later."}));
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost, client-wait, transport or unrecognized errors stay unresolved. Use timed-out for a hosted cutoff, not-started for a start rejection, or for a poll failure set search_started_at to the answer's arrival time and lifetime-expired after the provider lifetime."}));
     } else if blocker == "awaiting-host-settlement" {
         notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
             "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
@@ -1632,7 +1909,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if discovery_recovery > 0 {
         notices.push(json!({"code":"DISCOVERY_RECOVERY_RECORDED","severity":"warning",
-            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the exact saved attempt before another search. Recorded state does not establish current backend execution. Runs written by 0.1.6 or 0.1.7 are rechecked from their saved checkpoints on the next inventory search action."}));
+            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the saved attempt before another search; recorded state does not prove live execution. 0.1.6/0.1.7 checkpoints recheck on the next search."}));
     } else if !discovery_work.is_empty() {
         notices.push(json!({"code":"DISCOVERY_UNFINISHED_RECORDED","severity":"info",
             "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
@@ -1724,6 +2001,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "refresh_reminder":reminder,
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|source| source.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
+            "suspended_parser_exclusions":status.suspended_parser_exclusions.unwrap_or_default(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
             "discovery_recovery":discovery_recovery,"discovery_unfinished":discovery_work.len(),
             "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
@@ -1795,20 +2073,35 @@ fn inventory_work_run(
     })
 }
 
+pub fn inventory_work_run_candidate(
+    index: usize,
+    run: &DiscoveryRun,
+    work: &PendingInventoryWork,
+) -> bool {
+    run.status == "complete"
+        && run.source_ids.contains(&work.id)
+        && (work.fields.is_empty()
+            || run.mode != DiscoveryMode::Quick
+            || run.quick_depth != QuickDepth::SourcesOnly)
+        && (index >= work.after_run
+            || work
+                .capture_boundary
+                .as_ref()
+                .is_some_and(|boundary| boundary.run == run.state_path))
+}
+
 fn inventory_work_run_eligible(
     index: usize,
     run: &DiscoveryRun,
     work: &PendingInventoryWork,
     request_sha256: Option<&str>,
 ) -> bool {
-    run.status == "complete"
-        && run.source_ids.contains(&work.id)
+    inventory_work_run_candidate(index, run, work)
         && (index >= work.after_run
-            || index + 1 == work.after_run
-                && work.capture_boundary.as_ref().is_some_and(|boundary| {
-                    boundary.run == run.state_path
-                        && request_sha256 == Some(boundary.request_sha256.as_str())
-                }))
+            || work
+                .capture_boundary
+                .as_ref()
+                .is_some_and(|boundary| request_sha256 == Some(boundary.request_sha256.as_str())))
 }
 
 fn validate_inventory_work_proof(
@@ -2093,7 +2386,7 @@ impl InventoryState {
                         "Refresh result requires an exact completed settlement.",
                     ));
                 }
-                refresh_rows(&result.bytes()?)?;
+                refresh_rows(&result.bytes()?, result.extended_result_framing)?;
             } else if attempt.phase == RefreshPhase::Imported {
                 return Err(fail("Imported refresh is missing its original result."));
             }
@@ -2199,7 +2492,7 @@ impl InventoryState {
             if attempt.phase == RefreshPhase::Imported
                 && attempt.environment == target.environment
                 && let Some(result) = &attempt.result
-                && refresh_rows(&result.bytes()?).is_ok()
+                && refresh_rows(&result.bytes()?, result.extended_result_framing).is_ok()
             {
                 let end = environment::parse_time(&attempt.arguments.end)?;
                 last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
@@ -2208,7 +2501,11 @@ impl InventoryState {
         for scout in &self.scouting {
             if scout.plan.environment == target.environment
                 && scout.plan.arguments.repository == target.environment.view
-                && refresh_rows(&scout.snapshot.bytes()?).is_ok()
+                && refresh_rows(
+                    &scout.snapshot.bytes()?,
+                    scout.snapshot.extended_result_framing,
+                )
+                .is_ok()
             {
                 let end = environment::parse_time(&scout.plan.arguments.end)?;
                 last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
@@ -2341,7 +2638,8 @@ impl InventoryState {
                 .discovery_runs
                 .last()
                 .filter(|run| {
-                    run.state_path == boundary.run
+                    run.pruned_at.is_none()
+                        && run.state_path == boundary.run
                         && !matches!(run.status.as_str(), "complete" | "superseded")
                 })
                 .ok_or_else(|| {
@@ -2587,9 +2885,6 @@ impl InventoryState {
                     continue;
                 };
                 if !inventory_work_run_eligible(run_index, run, work, Some(&report.request_sha256))
-                    || !work.fields.is_empty()
-                        && run.mode == DiscoveryMode::Quick
-                        && run.quick_depth == QuickDepth::SourcesOnly
                 {
                     continue;
                 }
@@ -2869,7 +3164,7 @@ impl InventoryState {
         raw: &[u8],
         retrieved_at: &str,
     ) -> Result<usize, Diagnostic> {
-        let rows = refresh_rows(raw)?;
+        let rows = refresh_rows(raw, true)?;
         let mut candidate = self.clone();
         let index = candidate
             .refresh_attempts
@@ -2946,7 +3241,7 @@ impl InventoryState {
                 usize::from(candidate.queue_inventory_work(source, vec![], novel, new_source)?);
         }
         let attempt = &mut candidate.refresh_attempts[index];
-        attempt.result = Some(RawSnapshot::new(raw, retrieved_at)?);
+        attempt.result = Some(RawSnapshot::new_search_result(raw, retrieved_at)?);
         attempt.phase = RefreshPhase::Imported;
         candidate.validate()?;
         *self = candidate;
@@ -2980,6 +3275,8 @@ impl InventoryState {
             parser_pages: vec![],
             parsers: vec![],
             parser_exclusions: vec![],
+            suspended_parser_reviews: vec![],
+            carried_parser_reviews: vec![],
             packs: vec![],
             active_pack: None,
             discovery_runs: vec![],
@@ -3019,6 +3316,15 @@ impl InventoryState {
                 });
         copy.field_evidence_schema_version = None;
         copy.refresh_reminder = None;
+        for reference in copy.packs.iter_mut().chain(copy.active_pack.iter_mut()) {
+            reference.input_content_digest = None;
+            reference.pruned_at = None;
+            reference.cleanup_pending = false;
+        }
+        for run in &mut copy.discovery_runs {
+            run.pruned_at = None;
+            run.cleanup_pending = false;
+        }
         for work in &mut copy.pending_inventory {
             work.notified_revision = 0;
             work.deferred = false;
@@ -3027,6 +3333,99 @@ impl InventoryState {
             .map(|b| sha256_hex(&b))
             .map_err(|_| fail("Cannot serialize inventory evidence."))
     }
+    pub fn run_pack_claimants(
+        &self,
+        index: usize,
+    ) -> impl Iterator<Item = (usize, &PackReference)> {
+        let run = &self.discovery_runs[index];
+        self.packs.iter().enumerate().filter(|(_, reference)| {
+            reference.path == run.pack_path
+                || reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+        })
+    }
+
+    fn validate_prune_markers(&self) -> Result<(), Diagnostic> {
+        let check = |at: &Option<String>, pending: bool| {
+            if let Some(at) = at {
+                if self.schema_version != STATE_VERSION {
+                    return Err(fail("Pruned inventory history requires schema version 4."));
+                }
+                environment::parse_time(at)?;
+            } else if pending {
+                return Err(fail("Pending cleanup requires a pruning timestamp."));
+            }
+            Ok(())
+        };
+        let mut paths = BTreeMap::new();
+        let mut track = |path, marked| {
+            if paths
+                .insert(path, marked)
+                .is_some_and(|previous| previous != marked)
+            {
+                return Err(fail("Pruned and retained inventory paths overlap."));
+            }
+            Ok(())
+        };
+        let active = self.active_pack.as_ref();
+        if let Some(active) = active
+            && (active.pruned_at.is_some() || active.cleanup_pending)
+        {
+            return Err(fail("The active inventory snapshot cannot be pruned."));
+        }
+        let mut matched = BTreeSet::new();
+        for (index, run) in self.discovery_runs.iter().enumerate() {
+            check(&run.pruned_at, run.cleanup_pending)?;
+            let marked = run.pruned_at.is_some();
+            for path in [&run.state_path, &run.pack_path, &run.receipt_path] {
+                track(path, marked)?;
+            }
+            if !marked {
+                continue;
+            }
+            if active.is_some_and(|reference| {
+                reference.path == run.pack_path
+                    || reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+            }) || self.pending_inventory.iter().any(|work| {
+                work.resolution.is_none() && inventory_work_run_candidate(index, run, work)
+            }) {
+                return Err(fail(
+                    "Pruned discovery history is required by active inventory or pending work.",
+                ));
+            }
+            let mut claimants = self.run_pack_claimants(index);
+            match (run.status.as_str(), claimants.next()) {
+                ("complete", Some((pack_index, reference)))
+                    if claimants.next().is_none()
+                        && reference.path == run.pack_path
+                        && reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+                        && reference.pruned_at == run.pruned_at
+                        && reference.cleanup_pending == run.cleanup_pending
+                        && matched.insert(pack_index) => {}
+                ("superseded" | "failed", None) => {}
+                _ => {
+                    return Err(fail(
+                        "Pruned discovery history has inconsistent promotion references.",
+                    ));
+                }
+            }
+        }
+        for (index, reference) in self.packs.iter().enumerate() {
+            check(&reference.pruned_at, reference.cleanup_pending)?;
+            let marked = reference.pruned_at.is_some();
+            track(&reference.path, marked)?;
+            if marked
+                && (active.is_none_or(|active| {
+                    active.path == reference.path
+                        && active.content_digest == reference.content_digest
+                }) || !sha256_valid(&reference.content_digest)
+                    || (reference.discovery_run.is_some() && !matched.contains(&index)))
+            {
+                return Err(fail("Invalid pruned inventory snapshot reference."));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), Diagnostic> {
         if self.format != "cqlmatic-inventory-state"
             || !matches!(self.schema_version, 1..=STATE_VERSION)
@@ -3042,6 +3441,7 @@ impl InventoryState {
             return Err(fail("Invalid retained field-evidence schema version."));
         }
         self.validate_refresh()?;
+        self.validate_prune_markers()?;
         if self.schema_version < 4 && !self.capability_runs.is_empty() {
             return Err(fail(
                 "Legacy inventory states cannot attest capability checks.",
@@ -3070,6 +3470,17 @@ impl InventoryState {
             > 1
         {
             return Err(fail("Only one capability search may await termination."));
+        }
+        for reference in self.packs.iter().chain(self.active_pack.iter()) {
+            if let Some(digest) = &reference.input_content_digest
+                && (reference.discovery_run.is_some()
+                    || digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            {
+                return Err(fail("Invalid imported pack input_content_digest."));
+            }
         }
         if let Some(active) = &self.active_pack
             && !self
@@ -3112,7 +3523,7 @@ impl InventoryState {
             {
                 return Err(fail("Scouting belongs to another environment."));
             }
-            if mcp::normalize(&scout.snapshot.bytes()?)?.rows.len() != scout.rows {
+            if scout.snapshot.normalized_result()?.rows.len() != scout.rows {
                 return Err(fail("Scouting row count differs from saved evidence."));
             }
         }
@@ -3171,10 +3582,165 @@ impl InventoryState {
             }
         }
         catalog(self)?;
+        let mut binding_keys: BTreeSet<_> = self
+            .sources
+            .iter()
+            .filter_map(|source| parser_binding_key(source.binding.as_ref()?))
+            .collect();
+        let active_ids: BTreeSet<_> = binding_keys.iter().map(|&(id, _)| id).collect();
+        let active_keys: BTreeSet<_> = self.active_parser_review_keys().collect();
+        let mut exclusion_ids = BTreeSet::new();
+        let mut exclusion_keys = BTreeSet::new();
         for exclusion in &self.parser_exclusions {
-            self.parser_version(&exclusion.parser_id, &exclusion.parser_sha256)?;
+            let (id, hash) = (
+                exclusion.parser_id.as_str(),
+                exclusion.parser_sha256.as_str(),
+            );
+            self.parser_version(id, hash)?;
+            if !exclusion_ids.insert(id) || active_ids.contains(id) {
+                return Err(fail(
+                    "A parser cannot have duplicate exclusions or be both actively bound and excluded.",
+                ));
+            }
+            exclusion_keys.insert((id, hash));
             environment::parse_time(&exclusion.reviewed_at)?;
             text(&exclusion.reason)?;
+        }
+        let mut carried = BTreeSet::new();
+        for carry in &self.carried_parser_reviews {
+            text(&carry.parser_id)?;
+            let key = (carry.parser_id.as_str(), carry.reviewed_sha256.as_str());
+            if !parser_digest_valid(&carry.reviewed_sha256)
+                || !parser_digest_valid(&carry.saved_sha256)
+                || carry.reviewed_sha256 == carry.saved_sha256
+                || !carried.insert(key)
+                || !active_keys.contains(&key)
+                || !self
+                    .parsers
+                    .iter()
+                    .any(|p| p.id == carry.parser_id && p.snapshot.sha256 == carry.saved_sha256)
+            {
+                return Err(fail(
+                    "A carried parser review must match an active review and its saved re-encoded definition.",
+                ));
+            }
+        }
+        let mut exclusion_positions = BTreeSet::new();
+        let exclusion_count = self.parser_exclusions.len()
+            + self
+                .suspended_parser_reviews
+                .iter()
+                .filter(|held| matches!(held, SuspendedParserReview::Exclusion { .. }))
+                .count();
+        let mut held_bindings = BTreeSet::new();
+        let mut held_exclusions = BTreeSet::new();
+        let mut held_resources = BTreeMap::new();
+        let mut saved_resources = BTreeMap::new();
+        let mut held_sources = BTreeSet::new();
+        for held in &self.suspended_parser_reviews {
+            let (parser_id, parser_sha256, resource_sha256) = match held {
+                SuspendedParserReview::Binding {
+                    source_id,
+                    resource_sha256,
+                    binding:
+                        ParserBinding::Parser {
+                            parser_id,
+                            parser_sha256,
+                            reviewed_at,
+                            evidence,
+                            semantics,
+                        },
+                } => {
+                    // One binding record per source: a held binding waits on a source with none.
+                    if !held_sources.insert(source_id)
+                        || self
+                            .sources
+                            .iter()
+                            .find(|s| &s.id == source_id)
+                            .is_none_or(|s| s.binding.is_some())
+                    {
+                        return Err(fail(
+                            "A suspended parser binding must belong to a saved source without an active binding.",
+                        ));
+                    }
+                    environment::parse_time(reviewed_at)?;
+                    text(evidence)?;
+                    let mut lines = BTreeSet::new();
+                    for semantic in semantics {
+                        text(&semantic.interpretation)?;
+                        text(&semantic.evidence)?;
+                        if semantic.line == 0 || !lines.insert(semantic.line) {
+                            return Err(fail(
+                                "Semantic review must refer to distinct pending parser lines.",
+                            ));
+                        }
+                    }
+                    binding_keys.insert((parser_id.as_str(), parser_sha256.as_str()));
+                    held_bindings.insert((parser_id.as_str(), resource_sha256.as_str()));
+                    (parser_id, parser_sha256, resource_sha256)
+                }
+                SuspendedParserReview::Binding { .. } => {
+                    return Err(fail("Only a parser binding can be suspended."));
+                }
+                SuspendedParserReview::Exclusion {
+                    resource_sha256,
+                    exclusion,
+                    position,
+                } => {
+                    let id = exclusion.parser_id.as_str();
+                    if !exclusion_ids.insert(id) {
+                        return Err(fail("A parser cannot have duplicate exclusions."));
+                    }
+                    if position.is_some_and(|position| {
+                        position >= exclusion_count || !exclusion_positions.insert(position)
+                    }) {
+                        return Err(fail("Invalid suspended parser exclusion position."));
+                    }
+                    exclusion_keys.insert((id, exclusion.parser_sha256.as_str()));
+                    held_exclusions.insert((id, resource_sha256.as_str()));
+                    environment::parse_time(&exclusion.reviewed_at)?;
+                    text(&exclusion.reason)?;
+                    (
+                        &exclusion.parser_id,
+                        &exclusion.parser_sha256,
+                        resource_sha256,
+                    )
+                }
+            };
+            text(parser_id)?;
+            if !saved_resources.contains_key(parser_id.as_str()) {
+                let digest = self
+                    .parsers
+                    .iter()
+                    .find(|parser| parser.id == *parser_id)
+                    .map(|parser| parser_resource_sha256(&parser.snapshot))
+                    .transpose()?;
+                saved_resources.insert(parser_id.as_str(), digest);
+            }
+            if !parser_digest_valid(parser_sha256)
+                || !parser_digest_valid(resource_sha256)
+                || self.parser_version(parser_id, parser_sha256).is_ok()
+                || saved_resources[parser_id.as_str()].as_ref() == Some(resource_sha256)
+            {
+                return Err(fail(
+                    "A suspended parser review must name a definition absent from the saved capture.",
+                ));
+            }
+            if held_resources
+                .insert((parser_id, parser_sha256), resource_sha256)
+                .is_some_and(|digest| digest != resource_sha256)
+            {
+                return Err(fail(
+                    "Suspended parser reviews disagree on the definition for the same reviewed bytes. Restore an intact inventory state from backup.",
+                ));
+            }
+        }
+        if !binding_keys.is_disjoint(&exclusion_keys)
+            || !held_bindings.is_disjoint(&held_exclusions)
+        {
+            return Err(fail(
+                "A parser definition cannot be both bound and excluded.",
+            ));
         }
         Ok(())
     }
@@ -3277,7 +3843,7 @@ impl InventoryState {
         }
         let evidence = ScoutEvidence {
             plan: plan.clone(),
-            snapshot: RawSnapshot::new(raw, retrieved_at)?,
+            snapshot: RawSnapshot::new_search_result(raw, retrieved_at)?,
             rows: result.rows.len(),
         };
         if self.scouting.iter().any(|scout| {
@@ -3547,15 +4113,144 @@ impl InventoryState {
         Ok(())
     }
     pub fn source_mut(&mut self, id: &str) -> Result<&mut InventorySource, Diagnostic> {
-        self.sources
-            .iter_mut()
-            .find(|s| s.id == id)
-            .ok_or_else(|| fail("Unknown source ID; use the status source IDs."))
+        let index = self
+            .sources
+            .iter()
+            .position(|source| source.id == id)
+            .ok_or_else(|| self.source_selection_error(false))?;
+        Ok(&mut self.sources[index])
     }
+    fn active_parser_review_keys(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.sources
+            .iter()
+            .filter_map(|source| parser_binding_key(source.binding.as_ref()?))
+            .chain(self.parser_exclusions.iter().map(|exclusion| {
+                (
+                    exclusion.parser_id.as_str(),
+                    exclusion.parser_sha256.as_str(),
+                )
+            }))
+    }
+
+    pub fn prune_unused_carried_parser_reviews(&mut self) {
+        let mut carries = std::mem::take(&mut self.carried_parser_reviews);
+        if !carries.is_empty() {
+            let used: BTreeSet<_> = self.active_parser_review_keys().collect();
+            carries.retain(|carry| {
+                used.contains(&(carry.parser_id.as_str(), carry.reviewed_sha256.as_str()))
+            });
+        }
+        self.carried_parser_reviews = carries;
+    }
+
+    /// Positions of active exclusions are the slots not occupied by suspended exclusions.
+    fn free_exclusion_positions(&self) -> impl Iterator<Item = usize> + use<> {
+        let held: BTreeSet<_> = self
+            .suspended_parser_reviews
+            .iter()
+            .filter_map(|review| match review {
+                SuspendedParserReview::Exclusion { position, .. } => *position,
+                _ => None,
+            })
+            .collect();
+        (0..).filter(move |position| !held.contains(position))
+    }
+
+    pub fn remove_parser_exclusion(&mut self, parser_id: &str) {
+        let mut removed = self
+            .parser_exclusions
+            .iter()
+            .zip(self.free_exclusion_positions())
+            .find_map(|(exclusion, position)| {
+                (exclusion.parser_id == parser_id).then_some(position)
+            });
+        self.parser_exclusions
+            .retain(|exclusion| exclusion.parser_id != parser_id);
+        self.suspended_parser_reviews.retain(|held| {
+            if let SuspendedParserReview::Exclusion {
+                exclusion,
+                position,
+                ..
+            } = held
+                && exclusion.parser_id == parser_id
+            {
+                removed = *position;
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(removed) = removed {
+            for held in &mut self.suspended_parser_reviews {
+                if let SuspendedParserReview::Exclusion {
+                    position: Some(position),
+                    ..
+                } = held
+                    && *position > removed
+                {
+                    *position -= 1;
+                }
+            }
+        }
+    }
+
+    /// An explicit binding replaces the source's binding, active or suspended.
+    pub fn set_binding(
+        &mut self,
+        source_id: &str,
+        binding: ParserBinding,
+    ) -> Result<(), Diagnostic> {
+        self.source_mut(source_id)?.binding = Some(binding);
+        self.suspended_parser_reviews.retain(|held| {
+            !matches!(held, SuspendedParserReview::Binding { source_id: id, .. } if id == source_id)
+        });
+        self.prune_unused_carried_parser_reviews();
+        Ok(())
+    }
+
+    fn source_selection_error(&self, expected_only: bool) -> Diagnostic {
+        let expected = self.sources.iter().filter(|source| source.expected);
+        let other = self
+            .sources
+            .iter()
+            .filter(|source| !expected_only && !source.expected);
+        let valid = expected.chain(other);
+        let count = valid.clone().count();
+        let mut message = source_selection_count(count);
+        if count == 0 {
+            message.push_str(" Read status and confirm the target sources.");
+        } else {
+            message
+                .push_str(" Choose an inventory source ID from this list or read summary status.");
+        }
+        for source in valid.take(20) {
+            message.push_str(&format!("\n- {}", source.id));
+            if let Some(repo) = &source.selectors.repo {
+                message.push_str(&format!(" repo {repo:?}"));
+            }
+            if let Some(type_) = &source.selectors.type_ {
+                message.push_str(&format!(" type {type_:?}"));
+            }
+        }
+        if count > 20 {
+            message.push_str(&format!(
+                "\n{} more source IDs are available in summary status.",
+                count - 20
+            ));
+        }
+        fail(&message)
+    }
+
     pub fn parser_version(&self, id: &str, hash: &str) -> Result<&ParserSnapshot, Diagnostic> {
+        // A carried review names the bytes it was made against; the saved re-encoding stands in.
+        let saved = self
+            .carried_parser_reviews
+            .iter()
+            .find(|c| c.parser_id == id && c.reviewed_sha256 == hash)
+            .map_or(hash, |c| c.saved_sha256.as_str());
         self.parsers
             .iter()
-            .find(|p| p.id == id && p.snapshot.sha256 == hash)
+            .find(|p| p.id == id && p.snapshot.sha256 == saved)
             .ok_or_else(|| {
                 fail("Binding must identify an exact saved parser ID and SHA-256 snapshot.")
             })
@@ -3600,34 +4295,168 @@ impl InventoryState {
         &mut self,
         pages: Vec<ParserPage>,
         parsers: Vec<ParserSnapshot>,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<ParserReviewCounts, Diagnostic> {
+        enum Review {
+            Binding(String, ParserBinding),
+            Exclusion(ParserExclusion, usize),
+        }
+        enum Standing {
+            Exact,
+            Carried(String),
+            Suspended(String),
+        }
+        fn suspended_key(review: &SuspendedParserReview) -> (u8, Option<usize>, &str) {
+            match review {
+                SuspendedParserReview::Binding { source_id, .. } => (0, None, source_id),
+                SuspendedParserReview::Exclusion {
+                    exclusion,
+                    position,
+                    ..
+                } => (1, *position, &exclusion.parser_id),
+            }
+        }
         let mut candidate = self.clone();
         candidate.parser_pages = pages;
         candidate.parsers = parsers;
-        // Snapshot changes deliberately invalidate old bindings and exclusions.
+        candidate.carried_parser_reviews.clear();
+        // Every parser binding and exclusion, active or suspended, settles against the new
+        // capture. A review keeps the exact hash it was made against and is never dropped.
+        let mut reviews = Vec::new();
         for source in &mut candidate.sources {
             if let Some(ParserBinding::Parser {
                 parser_id,
                 parser_sha256,
                 ..
             }) = &source.binding
-                && !candidate
-                    .parsers
-                    .iter()
-                    .any(|p| &p.id == parser_id && &p.snapshot.sha256 == parser_sha256)
             {
-                source.binding = None;
+                let key = (parser_id.clone(), parser_sha256.clone(), None);
+                let binding = source.binding.take().expect("parser binding");
+                reviews.push((key, Review::Binding(source.id.clone(), binding)));
             }
         }
-        candidate.parser_exclusions.retain(|e| {
-            candidate
-                .parsers
-                .iter()
-                .any(|p| p.id == e.parser_id && p.snapshot.sha256 == e.parser_sha256)
+        let mut positions = candidate.free_exclusion_positions();
+        for exclusion in std::mem::take(&mut candidate.parser_exclusions) {
+            let key = (
+                exclusion.parser_id.clone(),
+                exclusion.parser_sha256.clone(),
+                None,
+            );
+            reviews.push((key, Review::Exclusion(exclusion, positions.next().unwrap())));
+        }
+        for held in std::mem::take(&mut candidate.suspended_parser_reviews) {
+            reviews.push(match held {
+                SuspendedParserReview::Binding {
+                    source_id,
+                    resource_sha256,
+                    binding,
+                } => {
+                    let ParserBinding::Parser {
+                        parser_id,
+                        parser_sha256,
+                        ..
+                    } = &binding
+                    else {
+                        return Err(fail("Only a parser binding can be suspended."));
+                    };
+                    let key = (
+                        parser_id.clone(),
+                        parser_sha256.clone(),
+                        Some(resource_sha256),
+                    );
+                    (key, Review::Binding(source_id, binding))
+                }
+                SuspendedParserReview::Exclusion {
+                    resource_sha256,
+                    exclusion,
+                    position,
+                } => {
+                    let key = (
+                        exclusion.parser_id.clone(),
+                        exclusion.parser_sha256.clone(),
+                        Some(resource_sha256),
+                    );
+                    let position = position.unwrap_or_else(|| positions.next().unwrap());
+                    (key, Review::Exclusion(exclusion, position))
+                }
+            });
+        }
+        let mut counts = ParserReviewCounts::default();
+        let mut exclusions = Vec::new();
+        for ((parser_id, reviewed, held), review) in reviews {
+            let saved = candidate.parsers.iter().find(|p| p.id == parser_id);
+            let standing = match saved {
+                Some(p) if p.snapshot.sha256 == reviewed => Standing::Exact,
+                _ => {
+                    let resource = match &held {
+                        Some(resource) => resource.clone(),
+                        None => parser_resource_sha256(
+                            &self.parser_version(&parser_id, &reviewed)?.snapshot,
+                        )?,
+                    };
+                    match saved {
+                        Some(p) if parser_resource_sha256(&p.snapshot)? == resource => {
+                            Standing::Carried(p.snapshot.sha256.clone())
+                        }
+                        _ => Standing::Suspended(resource),
+                    }
+                }
+            };
+            match standing {
+                Standing::Suspended(resource_sha256) => {
+                    counts.suspended += 1;
+                    candidate.suspended_parser_reviews.push(match review {
+                        Review::Binding(source_id, binding) => SuspendedParserReview::Binding {
+                            source_id,
+                            resource_sha256,
+                            binding,
+                        },
+                        Review::Exclusion(exclusion, position) => {
+                            SuspendedParserReview::Exclusion {
+                                resource_sha256,
+                                exclusion,
+                                position: Some(position),
+                            }
+                        }
+                    });
+                    continue;
+                }
+                Standing::Carried(saved_sha256) => {
+                    counts.carried += 1;
+                    let carry = CarriedParserReview {
+                        parser_id,
+                        reviewed_sha256: reviewed,
+                        saved_sha256,
+                    };
+                    if !candidate.carried_parser_reviews.contains(&carry) {
+                        candidate.carried_parser_reviews.push(carry);
+                    }
+                }
+                Standing::Exact if held.is_some() => counts.restored += 1,
+                Standing::Exact => counts.kept += 1,
+            }
+            match review {
+                Review::Binding(source_id, binding) => {
+                    candidate.source_mut(&source_id)?.binding = Some(binding);
+                }
+                Review::Exclusion(exclusion, position) => exclusions.push((position, exclusion)),
+            }
+        }
+        exclusions.sort_unstable_by_key(|(position, _)| *position);
+        candidate.parser_exclusions = exclusions
+            .into_iter()
+            .map(|(_, exclusion)| exclusion)
+            .collect();
+        candidate.prune_unused_carried_parser_reviews();
+        // Reconciliation binds to the serialized reviews, regardless of which were suspended.
+        candidate.carried_parser_reviews.sort_unstable_by(|a, b| {
+            (&a.parser_id, &a.reviewed_sha256).cmp(&(&b.parser_id, &b.reviewed_sha256))
         });
+        candidate
+            .suspended_parser_reviews
+            .sort_unstable_by(|a, b| suspended_key(a).cmp(&suspended_key(b)));
         candidate.validate()?;
         *self = candidate;
-        Ok(())
+        Ok(counts)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn discovery_request(
@@ -3677,9 +4506,7 @@ impl InventoryState {
             .iter()
             .any(|id| !self.sources.iter().any(|s| s.expected && &s.id == id))
         {
-            return Err(fail(
-                "Discovery requires known sources in the confirmed target scope. source_ids are the source_id values of expected sources in status --json --summary (env:repo: followed by sixteen hexadecimal digits), not repository or type names; omit source_ids to use every expected source.",
-            ));
+            return Err(self.source_selection_error(true));
         }
         if sources.is_empty() {
             return Err(fail(
@@ -3738,19 +4565,37 @@ pub(crate) fn validate_refresh_host(
     text(session_id)?;
     text(&host.capability_reference)?;
     text(&host.verification_evidence)?;
-    if host.schema_version != 1
-        || &host.environment != environment
-        || host.session_id != session_id
-        || !(1..=if automatic {
-            REFRESH_SECONDS
-        } else {
-            MANUAL_REFRESH_SECONDS
-        })
-            .contains(&host.max_search_seconds)
-        || environment::parse_time(&host.verified_at)? > environment::parse_time(now)?
-    {
+    let max_seconds = if automatic {
+        REFRESH_SECONDS
+    } else {
+        MANUAL_REFRESH_SECONDS
+    };
+    for (valid, message) in [
+        (
+            host.schema_version == 1,
+            "Refresh host evidence requires schema_version 1. Export a compatible report.",
+        ),
+        (
+            &host.environment == environment,
+            "Refresh host evidence environment differs from the confirmed target. Use evidence for the selected target.",
+        ),
+        (
+            host.session_id == session_id,
+            "Refresh host evidence session_id differs from the selected session. Use evidence for the selected session.",
+        ),
+    ] {
+        if !valid {
+            return Err(fail(message));
+        }
+    }
+    if !(1..=max_seconds).contains(&host.max_search_seconds) {
+        return Err(fail(&format!(
+            "Refresh host evidence max_search_seconds must be 1..{max_seconds} seconds. Supply a verified provider lifetime in that range."
+        )));
+    }
+    if environment::parse_time(&host.verified_at)? > environment::parse_time(now)? {
         return Err(fail(
-            "Host evidence must bind this exact target/session to a verified provider-enforced search lifetime of 1..300 seconds for automatic refresh or 1..600 seconds for explicit manual refresh. Client wait timeouts do not qualify.",
+            "Refresh host evidence verified_at is in the future. Supply the actual verification time.",
         ));
     }
     Ok(())
@@ -3763,31 +4608,62 @@ pub(crate) fn validate_refresh_settlement(
 ) -> Result<(), Diagnostic> {
     text(&report.evidence)?;
     let recorded = environment::parse_time(&report.recorded_at)?;
-    if (report.termination == RefreshTermination::Completed) != report.result_sha256.is_some()
-        || report
-            .result_sha256
-            .as_ref()
-            .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    for (valid, message) in [
+        (
+            (report.termination == RefreshTermination::Completed) == report.result_sha256.is_some(),
+            "Refresh settlement requires result_sha256 for completed searches and forbids it for other outcomes. Supply the settlement for the actual outcome.",
+        ),
+        (
+            report
+                .result_sha256
+                .as_ref()
+                .is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+            "Refresh settlement result_sha256 is invalid. Use the SHA-256 of the exact saved result.",
+        ),
+        (
+            report.schema_version == 1,
+            "Refresh settlement requires schema_version 1. Export a compatible report.",
+        ),
+        (
+            report.attempt_id == attempt.id,
+            "Refresh settlement attempt_id differs from the reserved attempt. Use evidence for the exact attempt.",
+        ),
+        (
+            report.environment == attempt.environment,
+            "Refresh settlement environment differs from the reserved target. Use evidence for the exact target.",
+        ),
+        (
+            report.session_id == attempt.session_id,
+            "Refresh settlement session_id differs from the reserved session. Use evidence for the exact session.",
+        ),
+        (
+            report.arguments == attempt.arguments,
+            "Refresh settlement arguments differ from the reservation. Use the exact reserved arguments.",
+        ),
+    ] {
+        if !valid {
+            return Err(fail(message));
+        }
+    }
+    if recorded > environment::parse_time(now)?
+        || recorded < environment::parse_time(&attempt.prepared_at)?
     {
         return Err(fail(
-            "Completed refresh settlement requires the exact full result SHA-256; other outcomes cannot attest a result.",
+            "Refresh settlement recorded_at falls outside the prepared-to-current interval. Supply the actual settlement time.",
         ));
     }
-    if report.schema_version != 1
-        || report.attempt_id != attempt.id
-        || report.environment != attempt.environment
-        || report.session_id != attempt.session_id
-        || report.arguments != attempt.arguments
-        || recorded > environment::parse_time(now)?
-        || recorded < environment::parse_time(&attempt.prepared_at)?
-        || (attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted)
-        || attempt
-            .dispatched_at
-            .as_ref()
-            .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
+    if attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted {
+        return Err(fail(
+            "Refresh settlement for a reservation without dispatch requires not-started. Check the recorded dispatch before settling.",
+        ));
+    }
+    if attempt
+        .dispatched_at
+        .as_ref()
+        .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
     {
         return Err(fail(
-            "Settlement must identify the exact target, session, attempt and arguments after dispatch; a lost response is unresolved.",
+            "Refresh settlement recorded_at precedes dispatch. Supply the actual settlement time.",
         ));
     }
     if report.termination == RefreshTermination::LifetimeExpired {
@@ -3825,8 +4701,8 @@ pub(crate) fn validate_refresh_settlement(
 }
 
 type RefreshRows = Vec<(Scope, Vec<String>, u64)>;
-fn refresh_rows(raw: &[u8]) -> Result<RefreshRows, Diagnostic> {
-    let result = mcp::normalize(raw)?;
+fn refresh_rows(raw: &[u8], extended: bool) -> Result<RefreshRows, Diagnostic> {
+    let result = mcp::normalize_framed(raw, extended)?;
     if result.rows.len() >= 10_000 {
         return Err(fail(
             "Cap-sized refresh results cannot establish a complete metadata capture.",
@@ -3988,61 +4864,205 @@ fn catalog(state: &InventoryState) -> Result<(bool, BTreeSet<String>), Diagnosti
     Ok((complete, ids))
 }
 
-pub fn parse_parser(id: &str, snapshot: RawSnapshot) -> Result<ParserSnapshot, Diagnostic> {
-    let value: Value = serde_json::from_slice(&snapshot.bytes()?)
-        .map_err(|_| fail("Native parser response must be JSON."))?;
-    if value
-        .get("errors")
-        .is_some_and(|e| !e.is_null() && e.as_array().is_none_or(|a| !a.is_empty()))
-    {
+fn parser_digest_valid(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn parser_binding_key(binding: &ParserBinding) -> Option<(&str, &str)> {
+    match binding {
+        ParserBinding::Parser {
+            parser_id,
+            parser_sha256,
+            ..
+        } => Some((parser_id, parser_sha256)),
+        ParserBinding::NotApplicable { .. } => None,
+    }
+}
+
+type RawJsonObject<'a> = BTreeMap<String, &'a RawValue>;
+
+fn parser_resource(raw: &[u8]) -> Result<&RawValue, Diagnostic> {
+    let envelope: RawJsonObject<'_> = serde_json::from_slice(raw)
+        .map_err(|_| fail("Native parser response must be a JSON object."))?;
+    if envelope.get("errors").is_some_and(|errors| {
+        errors.get() != "null"
+            && !serde_json::from_str::<Vec<&RawValue>>(errors.get())
+                .is_ok_and(|items| items.is_empty())
+    }) {
         return Err(fail("Native parser response returned errors."));
     }
-    let resources = value
+    let resources: Vec<&RawValue> = envelope
         .get("resources")
-        .and_then(Value::as_array)
+        .and_then(|resources| serde_json::from_str(resources.get()).ok())
         .ok_or_else(|| fail("Native parser detail requires resources."))?;
-    if resources.len() != 1 {
-        return Err(fail(
+    match resources.as_slice() {
+        [resource] => Ok(resource),
+        _ => Err(fail(
             "Each parser detail capture must contain exactly one resource.",
-        ));
+        )),
     }
-    let parser = &resources[0];
-    if parser.get("id").and_then(Value::as_str) != Some(id) {
+}
+
+pub fn parse_parser(id: &str, snapshot: RawSnapshot) -> Result<ParserSnapshot, Diagnostic> {
+    let raw = snapshot.bytes()?;
+    let resource = parser_resource(&raw)?;
+    let parser: RawJsonObject<'_> = serde_json::from_str(resource.get())
+        .map_err(|_| fail("Native parser resource must be a JSON object."))?;
+    let string = |field| {
+        parser
+            .get(field)
+            .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+    };
+    if string("id").as_deref() != Some(id) {
         return Err(fail(
             "Parser detail ID differs from the explicitly requested catalog ID.",
         ));
     }
-    let name = parser
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or(id)
-        .to_owned();
-    let script = parser
-        .get("script")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            fail("Native parser resource needs a script string; unsupported shapes remain pending.")
-        })?;
-    let mut tags = vec![];
-    if let Some(value) = parser.get("fields_to_tag") {
-        for tag in value
-            .as_array()
-            .ok_or_else(|| fail("fields_to_tag must be an array of field names."))?
-        {
-            tags.push(
-                tag.as_str()
-                    .ok_or_else(|| fail("fields_to_tag entries must be strings."))?
-                    .to_owned(),
-            );
-        }
-    }
-    let declarations = extract_declarations(script, &tags)?;
+    let name = string("name").unwrap_or_else(|| id.into());
+    let script = string("script").ok_or_else(|| {
+        fail("Native parser resource needs a script string; unsupported shapes remain pending.")
+    })?;
+    let tags: Vec<String> = parser
+        .get("fields_to_tag")
+        .map(|raw| {
+            serde_json::from_str(raw.get())
+                .map_err(|_| fail("fields_to_tag must be an array of field names."))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let declarations = extract_declarations(&script, &tags)?;
+    // Check the entire resource now, including strings and nesting in unknown fields.
+    canonical_parser_resource(resource)?;
     Ok(ParserSnapshot {
         id: id.into(),
         name,
         snapshot,
         declarations,
     })
+}
+
+/// SHA-256 of the exact parsed resource, excluding formatting and envelope metadata.
+fn parser_resource_sha256(snapshot: &RawSnapshot) -> Result<String, Diagnostic> {
+    let raw = snapshot.bytes()?;
+    let canonical = canonical_parser_resource(parser_resource(&raw)?)?;
+    Ok(sha256_hex(canonical.as_bytes()))
+}
+
+fn canonical_parser_resource(resource: &RawValue) -> Result<String, Diagnostic> {
+    let mut canonical = String::new();
+    canonical_parser_json(resource, &mut canonical, 0)?;
+    Ok(canonical)
+}
+
+// Borrow the original tokens at each level so no number is decoded through a float.
+fn canonical_parser_json(
+    raw: &RawValue,
+    output: &mut String,
+    depth: usize,
+) -> Result<(), Diagnostic> {
+    if depth >= 128 {
+        return Err(fail(
+            "Native parser resource exceeds the JSON nesting limit.",
+        ));
+    }
+    let invalid = |_| fail("Invalid JSON in the native parser resource.");
+    let json = raw.get();
+    match json.as_bytes()[0] {
+        b'{' => {
+            let fields: RawJsonObject<'_> = serde_json::from_str(json).map_err(invalid)?;
+            output.push('{');
+            for (index, (key, value)) in fields.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(&serde_json::to_string(&key).map_err(invalid)?);
+                output.push(':');
+                canonical_parser_json(value, output, depth + 1)?;
+            }
+            output.push('}');
+        }
+        b'[' => {
+            let values: Vec<&RawValue> = serde_json::from_str(json).map_err(invalid)?;
+            output.push('[');
+            for (index, value) in values.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                canonical_parser_json(value, output, depth + 1)?;
+            }
+            output.push(']');
+        }
+        b'"' => {
+            let value: String = serde_json::from_str(json).map_err(invalid)?;
+            output.push_str(&serde_json::to_string(&value).map_err(invalid)?);
+        }
+        b'-' | b'0'..=b'9' => canonical_parser_number(json, output),
+        _ => output.push_str(json), // true, false and null already have one spelling.
+    }
+    Ok(())
+}
+
+// Each nonzero number has one signed coefficient with no leading or trailing zeros
+// and one power of ten. Never expand the exponent into zero padding.
+fn canonical_parser_number(token: &str, output: &mut String) {
+    let (mantissa, exponent) = token.split_once(['e', 'E']).unwrap_or((token, "0"));
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.trim_start_matches('-');
+    let fraction_len = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let digits = mantissa.replace('.', "");
+    let coefficient = digits.trim_matches('0');
+    if coefficient.is_empty() {
+        output.push('0');
+        return;
+    }
+    let zeros = digits.len() - digits.trim_end_matches('0').len();
+    let power = offset_decimal_exponent(exponent, zeros as i64 - fraction_len as i64);
+    if negative {
+        output.push('-');
+    }
+    output.push_str(coefficient);
+    if power != "0" {
+        output.push('e');
+        output.push_str(&power);
+    }
+}
+
+fn offset_decimal_exponent(exponent: &str, offset: i64) -> String {
+    let negative = exponent.starts_with('-');
+    let digits = exponent
+        .trim_start_matches(['+', '-'])
+        .trim_start_matches('0');
+    if digits.is_empty() {
+        return offset.to_string();
+    }
+    // The shift is bounded by the capture size, even when the exponent is much larger.
+    if let Ok(magnitude) = digits.parse::<i64>() {
+        let signed = if negative { -magnitude } else { magnitude };
+        return (i128::from(signed) + i128::from(offset)).to_string();
+    }
+    let mut carry = if negative { -offset } else { offset };
+    let mut result = Vec::with_capacity(digits.len() + 2);
+    for digit in digits.bytes().rev() {
+        let sum = i64::from(digit - b'0') + carry;
+        result.push(b'0' + sum.rem_euclid(10) as u8);
+        carry = sum.div_euclid(10);
+    }
+    if carry > 0 {
+        result.push(b'0' + carry as u8);
+    }
+    while result.last() == Some(&b'0') {
+        result.pop();
+    }
+    if negative {
+        result.push(b'-');
+    }
+    result.reverse();
+    String::from_utf8(result).expect("decimal digits and sign are ASCII")
 }
 
 /// Conservative lexical extraction. Conditional and unsupported lines need explicit review.
@@ -4165,7 +5185,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     if state
         .packs
         .iter()
-        .any(|r| !verified_packs.contains_key(&r.content_digest))
+        .any(|r| r.pruned_at.is_none() && !verified_packs.contains_key(&r.content_digest))
     {
         return Err(fail(
             "A referenced pack is missing or its digest changed; import the new snapshot explicitly.",
@@ -4365,6 +5385,16 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             })
             .collect(),
         unclassified_parser_ids: unclassified,
+        suspended_parser_reviews: state.suspended_parser_reviews.clone(),
+        suspended_parser_exclusions: Some(
+            state
+                .suspended_parser_reviews
+                .iter()
+                .filter(|review| matches!(review, SuspendedParserReview::Exclusion { .. }))
+                .count(),
+        )
+        .filter(|&count| count > 0),
+        carried_parser_reviews: state.carried_parser_reviews.clone(),
         sources,
         discovery_runs: state.discovery_runs.clone(),
         parser_runs: state.parser_runs.clone(),
@@ -4389,7 +5419,7 @@ fn full_census(state: &InventoryState) -> (Vec<&ScoutEvidence>, bool) {
     let qualifies = census.iter().any(|s| {
         s.snapshot
             .bytes()
-            .is_ok_and(|raw| refresh_rows(&raw).is_ok())
+            .is_ok_and(|raw| refresh_rows(&raw, s.snapshot.extended_result_framing).is_ok())
     });
     (census, qualifies)
 }
@@ -4552,6 +5582,9 @@ pub fn advise(state: &InventoryState, status: &mut InventoryStatus, retained: Op
     }
 
     let mut notes: Vec<String> = Vec::new();
+    if !state.suspended_parser_reviews.is_empty() {
+        notes.push(SUSPENDED_PARSER_REVIEWS.into());
+    }
     if unresolved {
         notes.push("Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
     }
@@ -4624,6 +5657,7 @@ fn assess_source(
     let mut fields = BTreeMap::<String, FieldStatus>::new();
     let mut record_kinds = Vec::new();
     let mut observed_source = false;
+    let mut retained_restrictions = None;
     let mut parser_status = Progress::Pending;
     if let Some(binding) = &source.binding {
         match binding {
@@ -4693,6 +5727,27 @@ fn assess_source(
         else {
             continue;
         };
+        if let Some(selectors) = pack_source.selectors.as_ref() {
+            let mut merged = environment::Selectors {
+                repo: source.selectors.repo.clone(),
+                type_: source.selectors.type_.clone(),
+                sourcetype: retained_restrictions
+                    .as_ref()
+                    .and_then(|r: &SourceRestrictions| r.sourcetype.clone())
+                    .or_else(|| selectors.sourcetype.clone()),
+                event_family: retained_restrictions
+                    .as_ref()
+                    .and_then(|r: &SourceRestrictions| r.event_family.clone())
+                    .or_else(|| selectors.event_family.clone()),
+            };
+            if merged.sourcetype.is_some() || merged.event_family.is_some() {
+                retained_restrictions = Some(SourceRestrictions {
+                    discovery_compatible: environment::discovery_compatible_restrictions(&merged),
+                    sourcetype: merged.sourcetype.take(),
+                    event_family: merged.event_family.take(),
+                });
+            }
+        }
         observed_source = pack_source
             .evidence
             .as_ref()
@@ -4835,6 +5890,11 @@ fn assess_source(
             "Resolve the explicit parser binding and all pending parser semantics.".into()
         });
     }
+    if state.suspended_parser_reviews.iter().any(|held| {
+        matches!(held, SuspendedParserReview::Binding { source_id, .. } if source_id == &source.id)
+    }) {
+        next_actions.push(SUSPENDED_SOURCE_BINDING.into());
+    }
     if !measured {
         next_actions.push("Complete a finite discovery run for this source; imported pack history alone is unknown.".into());
     }
@@ -4848,6 +5908,7 @@ fn assess_source(
         source_id: source.id.clone(),
         expected: source.expected,
         selectors: source.selectors.clone(),
+        retained_restrictions,
         scouted_events: source.scouted_events,
         review: source.review.clone(),
         binding: source.binding.clone(),
