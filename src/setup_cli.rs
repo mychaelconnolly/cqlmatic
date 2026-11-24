@@ -942,9 +942,77 @@ fn config_hash(path: &Path) -> Result<Option<String>, Diagnostic> {
         MAX_CONFIG_BYTES,
     )?)))
 }
+/// Hosts read their MCP files as JSON with comments and trailing commas. Remove both outside
+/// strings so setup can read such a file; anything else that is not JSON still fails to parse.
+fn strip_jsonc(raw: &[u8]) -> Vec<u8> {
+    let mut plain = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match (raw[i], raw.get(i + 1)) {
+            (b'"', _) => {
+                let start = i;
+                i += 1;
+                while i < raw.len() && raw[i] != b'"' {
+                    i += if raw[i] == b'\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(raw.len());
+                plain.extend_from_slice(&raw[start..i]);
+            }
+            (b'/', Some(b'/')) => {
+                while i < raw.len() && raw[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            (b'/', Some(b'*')) => {
+                i += 2;
+                while i < raw.len() && !(raw[i] == b'*' && raw.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(raw.len());
+                plain.push(b' ');
+            }
+            (byte, _) => {
+                plain.push(byte);
+                i += 1;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(plain.len());
+    let mut i = 0;
+    while i < plain.len() {
+        if plain[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < plain.len() && plain[i] != b'"' {
+                i += if plain[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(plain.len());
+            out.extend_from_slice(&plain[start..i]);
+            continue;
+        }
+        let trailing = plain[i] == b','
+            && plain[i + 1..]
+                .iter()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|byte| matches!(byte, b'}' | b']'));
+        if !trailing {
+            out.push(plain[i]);
+        }
+        i += 1;
+    }
+    out
+}
+fn strict_json(raw: &[u8]) -> bool {
+    serde_json::from_slice::<serde::de::IgnoredAny>(raw).is_ok()
+}
 fn read_json_config(path: &Path) -> Result<Value, Diagnostic> {
     let value = if path.exists() {
         let raw = storage::read_bytes(path, MAX_CONFIG_BYTES)?;
+        let raw = if strict_json(&raw) {
+            raw
+        } else {
+            strip_jsonc(&raw)
+        };
         mcp::parse_saved_result(&raw).map_err(|_| {
             err(
                 "SETUP_NATIVE_CONFIG",
@@ -1207,6 +1275,107 @@ fn check_claude_project_shadow(config: &Value, cwd: &Path, name: &str) -> Result
     }
     Ok(())
 }
+/// Names of servers already pointing at the selected endpoint in the places this adapter reads.
+/// Advice only: `None` means a place could not be read. Codex is listed only through its
+/// detected executable, so callers that must run no client command pass no observation.
+fn servers_at_endpoint(
+    client: ClientKind,
+    cloud: Cloud,
+    codex: Option<&ClientObservation>,
+    runner: &mut impl Runner,
+) -> Option<Vec<String>> {
+    let endpoint = cloud.endpoint();
+    let points_here = |entry: &Value, pointer: &str| {
+        entry
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .is_some_and(|url| url.trim_end_matches('/') == endpoint)
+    };
+    let mut names = Vec::new();
+    let mut collect = |servers: Option<&Value>, pointer: &str| {
+        for (name, entry) in servers.and_then(Value::as_object).into_iter().flatten() {
+            if points_here(entry, pointer) && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    };
+    let cwd = env::current_dir().ok();
+    let workspace = |files: &[&str]| -> Vec<PathBuf> {
+        cwd.iter()
+            .flat_map(|cwd| cwd.ancestors())
+            .flat_map(|directory| files.iter().map(move |file| directory.join(file)))
+            .filter(|path| path.exists())
+            .collect()
+    };
+    match client {
+        ClientKind::Codex => {
+            let codex = codex?;
+            let raw = probe(
+                runner,
+                Path::new(&codex.executable),
+                &["mcp", "list", "--json"],
+            )
+            .ok()?;
+            let list: Value = serde_json::from_slice(&raw).ok()?;
+            for entry in list.as_array()? {
+                if let Some(name) = entry.get("name").and_then(Value::as_str)
+                    && points_here(entry, "/transport/url")
+                    && !names.iter().any(|known| known == name)
+                {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        ClientKind::VsCode => {
+            let config = read_json_config(&runner.config_path(client).ok()?).ok()?;
+            collect(config.get("servers"), "/url");
+        }
+        ClientKind::ClaudeCode => {
+            let config = read_json_config(&runner.config_path(client).ok()?).ok()?;
+            collect(config.get("mcpServers"), "/url");
+            let active = cwd.as_ref().and_then(|cwd| cwd.canonicalize().ok());
+            for (root, project) in config
+                .get("projects")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+            {
+                if Path::new(root)
+                    .canonicalize()
+                    .is_ok_and(|root| active.as_ref().is_some_and(|a| a.starts_with(root)))
+                {
+                    collect(project.get("mcpServers"), "/url");
+                }
+            }
+            for path in workspace(&[".mcp.json"]) {
+                collect(read_json_config(&path).ok()?.get("mcpServers"), "/url");
+            }
+        }
+        ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode => {
+            let config = read_json_config(&runner.config_path(client).ok()?).ok()?;
+            collect(config.get("mcpServers"), "/url");
+            for path in workspace(&[".mcp.json", ".github/mcp.json"]) {
+                collect(read_json_config(&path).ok()?.get("mcpServers"), "/url");
+            }
+        }
+        ClientKind::External => return Some(Vec::new()),
+    }
+    Some(names)
+}
+/// One sentence naming servers at the endpoint and how to select one; nothing when none is known.
+fn existing_server_advice(client: ClientKind, cloud: Cloud, names: &[String]) -> Option<String> {
+    let quoted: Vec<_> = names.iter().map(|name| format!("'{name}'")).collect();
+    (!quoted.is_empty()).then(|| {
+        format!(
+            "{} already {} at {} in {}. To use {} as configured instead of adding another, select host-managed registration with that server_name; setup then changes nothing in the client.",
+            quoted.join(", "),
+            if quoted.len() == 1 { "points" } else { "point" },
+            cloud.endpoint(),
+            client.label(),
+            if quoted.len() == 1 { "it" } else { "one of them" }
+        )
+    })
+}
 fn configured_fingerprint(
     selection: &Selection,
     path: &Path,
@@ -1255,7 +1424,7 @@ fn inspect_operation_baseline(
     if state.recovery_origin.is_none() {
         return Err(err(
             "SETUP_RECOVERY_ORIGIN",
-            "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Existing or manual entries cannot be adopted.",
+            "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Recovery cannot adopt an existing or manual entry; to use a server already configured in Codex, select host-managed.",
         ));
     }
     let baseline = inspect_baseline_for(state, state_path, runner, BaselineInspection::Structural)?;
@@ -1282,7 +1451,7 @@ fn inspect_baseline_for(
         .selection
         .as_ref()
         .ok_or_else(|| err("SETUP_SELECTION", "Choose a client and cloud first."))?;
-    if !selected.client.is_native() {
+    if selected.host_managed() {
         return Err(err(
             "SETUP_HOST_MANAGED",
             "This host owns its MCP configuration; no native baseline is inspected.",
@@ -1346,7 +1515,7 @@ fn inspect_baseline_for(
                     {
                         return Err(err(
                             "SETUP_REGISTRATION_UNINSPECTABLE",
-                            "Codex MCP list does not expose the selected OAuth registration. A matching URL cannot confirm the manual client ID or CIMD identity. Review this server's registration and authenticate in Codex, or select an unused server name. Setup will not reuse or overwrite this entry; no native change was attempted.",
+                            "Codex MCP list does not expose the selected OAuth registration. A matching URL cannot confirm the manual client ID or CIMD identity. Review this server's registration and authenticate in Codex, select host-managed registration with this server name to use the server as configured, or select an unused server name. This registration mode will not reuse or overwrite this entry; no native change was attempted.",
                         ));
                     }
                     ExistingServer::Same
@@ -1362,7 +1531,12 @@ fn inspect_baseline_for(
                 ExistingServer::Absent
             } else {
                 let raw = storage::read_bytes(&config, MAX_CONFIG_BYTES)?;
-                let value: Value = serde_json::from_slice(&raw).map_err(|_| err("SETUP_NATIVE_CONFIG", "VS Code mcp.json is not strict JSON (comments/JSONC require manual review). Setup will not overwrite it."))?;
+                let raw = if strict_json(&raw) {
+                    raw
+                } else {
+                    strip_jsonc(&raw)
+                };
+                let value: Value = serde_json::from_slice(&raw).map_err(|_| err("SETUP_NATIVE_CONFIG", "VS Code mcp.json is not valid JSON, even allowing comments and trailing commas. Fix it in VS Code, then preview again."))?;
                 let object = value.as_object().ok_or_else(|| {
                     err(
                         "SETUP_NATIVE_CONFIG",
@@ -1700,19 +1874,59 @@ fn perform(
             state.clients = clients;
             if let Some(s) = &state.selection
                 && s.client.needs_executable()
+                && !s.host_managed()
                 && !state.clients.iter().any(|c| c.client == s.client)
             {
                 state.phase = SetupPhase::InstallationRequired;
             }
             Ok(())
         }
-        SetupAction::Select { selection } => state.select(selection),
+        SetupAction::Select { selection } => {
+            let revision = state.revision;
+            state.select(selection)?;
+            if let Some(s) = state.selection.clone().filter(|s| {
+                state.revision != revision
+                    && s.host_managed()
+                    && s.client.is_native()
+                    && s.client != ClientKind::Codex
+            }) {
+                // Advice only: name servers at the endpoint so the report can use the right name.
+                state.last_notice = match servers_at_endpoint(s.client, s.cloud, None, runner) {
+                    None => Some(format!(
+                        "{}'s MCP configuration could not be read, so setup did not look for servers at {} there; nothing was changed. Check the server's name in the client.",
+                        s.client.label(),
+                        s.cloud.endpoint()
+                    )),
+                    Some(names) if names.contains(&s.server_name) => Some(format!(
+                        "'{}' already points at {} in {}; the selection uses it.",
+                        s.server_name,
+                        s.cloud.endpoint(),
+                        s.client.label()
+                    )),
+                    Some(names) if !names.is_empty() => Some(format!(
+                        "{} already {} at {} in {}, not '{}'. To use {}, select that name as server_name with host-managed registration.",
+                        names
+                            .iter()
+                            .map(|name| format!("'{name}'"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        if names.len() == 1 { "points" } else { "point" },
+                        s.cloud.endpoint(),
+                        s.client.label(),
+                        s.server_name,
+                        if names.len() == 1 {
+                            "it"
+                        } else {
+                            "one of them"
+                        }
+                    )),
+                    Some(_) => None,
+                };
+            }
+            Ok(())
+        }
         SetupAction::Preview { operation } => {
-            if state
-                .selection
-                .as_ref()
-                .is_some_and(|s| !s.client.is_native())
-            {
+            if state.selection.as_ref().is_some_and(|s| s.host_managed()) {
                 return Err(err(
                     "SETUP_HOST_MANAGED",
                     "This host uses its own MCP configuration. Save and import a host tool-discovery report; no native preview is available.",
@@ -1743,12 +1957,72 @@ fn perform(
             } else {
                 None
             };
-            let mut plan = setup::build_plan(state, operation, baseline, backup)?;
+            let selected = state.selection.clone().expect("preview needs a selection");
+            let codex = state
+                .clients
+                .iter()
+                .find(|client| client.client == ClientKind::Codex)
+                .cloned();
+            // Name a server already at the endpoint before adding another or refusing a collision.
+            let find_advice = |runner: &mut _| {
+                servers_at_endpoint(selected.client, selected.cloud, codex.as_ref(), runner)
+                    .and_then(|names| {
+                        existing_server_advice(selected.client, selected.cloud, &names)
+                    })
+            };
+            let with_advice = |mut diagnostic: Diagnostic, advice: &Option<String>| {
+                if let Some(advice) = advice {
+                    diagnostic.message = format!("{} {advice}", diagnostic.message);
+                }
+                diagnostic
+            };
+            let mut plan = match setup::build_plan(state, operation, baseline, backup) {
+                Err(diagnostic) if diagnostic.code == "SETUP_COLLISION" => {
+                    return Err(with_advice(diagnostic, &find_advice(runner)));
+                }
+                plan => plan?,
+            };
+            let adding = operation == PlanOperation::Configure
+                && plan.baseline.server == ExistingServer::Absent;
+            let advice = if adding { find_advice(runner) } else { None };
+            if adding
+                && matches!(
+                    plan.selection.client,
+                    ClientKind::VsCode | ClientKind::ClaudeCode
+                )
+                && config_hash(Path::new(&plan.baseline.path))?.is_some()
+                && !strict_json(&storage::read_bytes(
+                    Path::new(&plan.baseline.path),
+                    MAX_CONFIG_BYTES,
+                )?)
+            {
+                // The client's own add command rewrites this file; do not risk its comments.
+                return Err(with_advice(
+                    err(
+                        "SETUP_NATIVE_CONFIG",
+                        format!(
+                            "{}'s MCP configuration has comments or trailing commas, and adding the server would have the client rewrite it. Add the server in the client, then preview again, or select host-managed to use a server already configured there; nothing was changed.",
+                            plan.selection.client.label()
+                        ),
+                    ),
+                    &advice,
+                ));
+            }
+            if let Some(advice) = &advice {
+                plan.changes.push(advice.clone());
+            }
             if operation == PlanOperation::Configure
                 && !plan.selection.client.needs_executable()
                 && plan.baseline.server == ExistingServer::Absent
             {
-                let bytes = copilot_config_bytes(&plan.selection, Path::new(&plan.baseline.path))?;
+                let bytes = copilot_config_bytes(&plan.selection, Path::new(&plan.baseline.path))
+                    .map_err(|diagnostic| {
+                    if diagnostic.code == "SETUP_EXISTING_CONFIG" {
+                        with_advice(diagnostic, &advice)
+                    } else {
+                        diagnostic
+                    }
+                })?;
                 plan.config_write_sha256 = Some(sha256_hex(&bytes));
                 if let RegistrationMode::Manual { client_id, .. } = &plan.selection.registration {
                     plan.changes.push(format!(
@@ -1761,7 +2035,9 @@ fn perform(
             }
             plan.changes
                 .push(format!("Protected setup state: {}", state_path.display()));
-            if plan.backup_path.is_some() {
+            if plan.backup_path.is_some()
+                && (!plan.commands.is_empty() || plan.config_write_sha256.is_some())
+            {
                 plan.changes.push("The original client configuration may contain secrets. Its exact backup remains private; setup never prints config bytes or stores native output.".into());
             }
             plan.confirmation_sha256 = plan.digest()?;
@@ -1772,11 +2048,7 @@ fn perform(
         SetupAction::Apply {
             confirmation_sha256,
         } => {
-            if state
-                .selection
-                .as_ref()
-                .is_some_and(|s| !s.client.is_native())
-            {
+            if state.selection.as_ref().is_some_and(|s| s.host_managed()) {
                 return Err(err(
                     "SETUP_HOST_MANAGED",
                     "This host uses its own MCP configuration. No native plan can be applied.",
@@ -1960,11 +2232,7 @@ fn perform(
             Ok(())
         }
         SetupAction::ConfirmAuthentication {} => {
-            if state
-                .selection
-                .as_ref()
-                .is_some_and(|s| !s.client.is_native())
-            {
+            if state.selection.as_ref().is_some_and(|s| s.host_managed()) {
                 return Err(err(
                     "SETUP_HOST_MANAGED",
                     "This host owns sign-in and consent. Import its saved tool-discovery report instead of confirming native sign-in.",
@@ -1983,10 +2251,7 @@ fn perform(
             Ok(())
         }
         SetupAction::ImportDiscovery { file } => {
-            if state
-                .selection
-                .as_ref()
-                .is_some_and(|s| s.client.is_native())
+            if state.selection.as_ref().is_some_and(|s| !s.host_managed())
                 && (!state.configured || state.phase == SetupPhase::CommandPending)
             {
                 return Err(err(
@@ -1996,11 +2261,7 @@ fn perform(
             }
             let raw = storage::read_bytes(Path::new(&file), MAX_DISCOVERY_BYTES)?;
             let report: HostToolDiscovery = serde_json::from_slice(&raw).map_err(|_| err("SETUP_DISCOVERY_JSON", "Expected a strict v1 saved HostToolDiscovery report. No query or network call was run."))?;
-            if state
-                .selection
-                .as_ref()
-                .is_some_and(|s| s.client.is_native())
-            {
+            if state.selection.as_ref().is_some_and(|s| !s.host_managed()) {
                 let baseline = inspect_baseline(state, state_path, runner)?;
                 if baseline.server != ExistingServer::Same
                     || configured_fingerprint(
@@ -2246,10 +2507,7 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
     loop {
         let state = load_state(state_path)?;
         emit(setup::result(state.clone(), None), false)?;
-        let host_managed = state
-            .selection
-            .as_ref()
-            .is_some_and(|s| !s.client.is_native());
+        let host_managed = state.selection.as_ref().is_some_and(|s| s.host_managed());
         if host_managed {
             println!(
                 "\nChoose: 1 detect native clients, 2 choose agent/cloud, 7 import saved host report, 8 quit (progress saved)"
@@ -2338,11 +2596,21 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                         continue;
                     }
                 };
-                let Some(server_name) = prompt(&rx, "Server name [cs-mcp]: ")? else {
+                // Codex lists servers only through a client command; none runs before registration is chosen.
+                let found = if client.is_native() && client != ClientKind::Codex {
+                    servers_at_endpoint(client, cloud, None, &mut NativeRunner).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                if let Some(advice) = existing_server_advice(client, cloud, &found) {
+                    println!("{advice}");
+                }
+                let default = found.first().cloned().unwrap_or_else(|| "cs-mcp".into());
+                let Some(server_name) = prompt(&rx, &format!("Server name [{default}]: "))? else {
                     continue;
                 };
                 let server_name = if server_name.is_empty() {
-                    "cs-mcp".into()
+                    default
                 } else {
                     server_name
                 };
@@ -2350,19 +2618,25 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                     RegistrationMode::HostManaged {}
                 } else {
                     let options = if client == ClientKind::ClaudeCode {
-                        "Registration [cimd/api-client]: "
+                        "Registration [cimd/host-managed/api-client]: "
                     } else if matches!(
                         client,
                         ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode
                     ) {
-                        "Registration [manual/api-client]: "
+                        "Registration [manual/host-managed/api-client]: "
                     } else {
-                        "Registration [cimd/manual/api-client]: "
+                        "Registration [cimd/manual/host-managed/api-client]: "
                     };
                     let Some(mode) = prompt(&rx, options)? else {
                         continue;
                     };
                     match mode.as_str() {
+                        "host-managed" => {
+                            println!(
+                                "Host-managed uses the server already configured in the client and changes nothing there. Sign in to it in the client, then import a saved host report."
+                            );
+                            RegistrationMode::HostManaged {}
+                        }
                         "cimd" => {
                             let url = if client == ClientKind::ClaudeCode {
                                 "https://claude.ai/oauth/claude-code-client-metadata".into()
@@ -2424,7 +2698,7 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                             RegistrationMode::ApiClient { credentials_file }
                         }
                         _ => {
-                            println!("Choose cimd, manual or api-client.");
+                            println!("Choose one of the listed registrations.");
                             continue;
                         }
                     }
@@ -3883,6 +4157,262 @@ mod tests {
         );
         assert_eq!(fs::read(&h.runner.config).unwrap(), original);
         assert_eq!(h.runner.native_calls, 0);
+    }
+    /// Host-managed setup must neither run nor detect a client; reading its files is allowed.
+    struct PanicRunner(PathBuf);
+    impl Runner for PanicRunner {
+        fn run(&mut self, command: &NativeCommand) -> Result<CommandOutput, Diagnostic> {
+            panic!("host-managed setup ran a client command: {command:?}")
+        }
+        fn detect(&mut self, _: Option<ClientKind>) -> Result<Vec<ClientObservation>, Diagnostic> {
+            panic!("host-managed setup detected clients")
+        }
+        fn config_path(&self, _: ClientKind) -> Result<PathBuf, Diagnostic> {
+            Ok(self.0.clone())
+        }
+    }
+    #[test]
+    fn setup_host_managed_named_clients_use_the_existing_server_unchanged() {
+        let endpoint = Cloud::Us1.endpoint();
+        for client in [
+            ClientKind::ClaudeCode,
+            ClientKind::Codex,
+            ClientKind::VsCode,
+            ClientKind::CopilotCli,
+            ClientKind::CopilotApp,
+            ClientKind::CopilotVscode,
+        ] {
+            let config = match client {
+                ClientKind::ClaudeCode => format!(
+                    "{{\"numStartups\":3,\"mcpServers\":{{\"crowdstrike\":{{\"type\":\"http\",\"url\":\"{endpoint}\",\"oauth\":{{\"clientId\":\"registered-app\"}},\"headers\":{{}}}}}}}}"
+                ),
+                ClientKind::Codex => format!(
+                    "[mcp_servers.crowdstrike]\nurl = \"{endpoint}\"\n# signed in with codex mcp login\n"
+                ),
+                ClientKind::VsCode => format!(
+                    "{{\n  // servers\n  \"servers\": {{\n    \"crowdstrike\": {{\"type\": \"http\", \"url\": \"{endpoint}/\"}},\n  }},\n}}\n"
+                ),
+                _ => format!(
+                    "{{\"mcpServers\":{{\"crowdstrike\":{{\"type\":\"http\",\"url\":\"{endpoint}\",\"tools\":[\"*\"],\"oauthClientId\":\"registered-app\"}}}}}}"
+                ),
+            };
+            let temp = Temp::new();
+            let directory = temp.0.join("private");
+            protect_directory(&directory).unwrap();
+            let path = directory.join("state.json");
+            let config_path = temp.0.join("client-config");
+            fs::write(&config_path, &config).unwrap();
+            let mut runner = PanicRunner(config_path.clone());
+            let mut state = SetupState::default();
+            let mut act = |state: &mut SetupState, action| {
+                let writer = storage::Writer::acquire(&path)?;
+                let result = perform(state, action, &path, &mut runner, &writer, false);
+                save_state(&writer, state)?;
+                result
+            };
+            act(
+                &mut state,
+                SetupAction::Select {
+                    selection: Selection {
+                        client,
+                        host_id: None,
+                        cloud: Cloud::Us1,
+                        server_name: "crowdstrike".into(),
+                        registration: RegistrationMode::HostManaged {},
+                    },
+                },
+            )
+            .unwrap();
+            assert_eq!(state.phase, SetupPhase::Selected);
+            // Codex lists servers only by running its executable, which this path never does.
+            assert_eq!(
+                state.last_notice.is_some(),
+                client != ClientKind::Codex,
+                "{client:?}"
+            );
+            if client != ClientKind::Codex {
+                assert!(
+                    state
+                        .last_notice
+                        .as_ref()
+                        .unwrap()
+                        .contains("'crowdstrike' already points at")
+                );
+            }
+            for action in [
+                SetupAction::Preview {
+                    operation: PlanOperation::Configure,
+                },
+                SetupAction::Apply {
+                    confirmation_sha256: "a".repeat(64),
+                },
+                SetupAction::ConfirmAuthentication {},
+            ] {
+                assert_eq!(
+                    act(&mut state.clone(), action).unwrap_err().code,
+                    "SETUP_HOST_MANAGED"
+                );
+            }
+            let report = temp.0.join("report.json");
+            fs::write(
+                &report,
+                json!({"schema_version":1,"client":client,"server_name":"crowdstrike","endpoint":endpoint,"authenticated":true,"tools":[{"name":SEARCH_TOOL,"available":true}]}).to_string(),
+            )
+            .unwrap();
+            act(
+                &mut state,
+                SetupAction::ImportDiscovery {
+                    file: report.to_string_lossy().into_owned(),
+                },
+            )
+            .unwrap();
+            assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified, "{client:?}");
+            assert_eq!(fs::read_to_string(&config_path).unwrap(), config);
+        }
+    }
+    #[test]
+    fn setup_native_preview_names_a_server_already_at_the_endpoint() {
+        let endpoint = Cloud::Us1.endpoint();
+        let mut h = Harness::claude();
+        fs::write(
+            &h.runner.config,
+            json!({"mcpServers":{"crowdstrike":{"type":"http","url":endpoint,"oauth":{"clientId":"registered-app"}}}}).to_string(),
+        )
+        .unwrap();
+        h.preview();
+        let changes = h.state.plan.as_ref().unwrap().changes.join(" ");
+        assert!(
+            changes.contains("'crowdstrike' already points at"),
+            "{changes}"
+        );
+        assert!(changes.contains("select host-managed registration"));
+        let mut h = Harness::claude();
+        let collided =
+            json!({"mcpServers":{"cs-mcp":{"type":"http","url":endpoint,"headers":{"X-Team":"soc"}}}}).to_string();
+        fs::write(&h.runner.config, &collided).unwrap();
+        let refused = h
+            .action(SetupAction::Preview {
+                operation: PlanOperation::Configure,
+            })
+            .unwrap_err();
+        assert_eq!(refused.code, "SETUP_COLLISION");
+        assert!(refused.message.contains("'cs-mcp' already points at"));
+        // Following the advice reaches verified discovery with the file untouched.
+        h.action(SetupAction::Select {
+            selection: Selection {
+                client: ClientKind::ClaudeCode,
+                host_id: None,
+                cloud: Cloud::Us1,
+                server_name: "cs-mcp".into(),
+                registration: RegistrationMode::HostManaged {},
+            },
+        })
+        .unwrap();
+        let report = h._temp.0.join("report.json");
+        fs::write(
+            &report,
+            json!({"schema_version":1,"client":"claude-code","server_name":"cs-mcp","endpoint":endpoint,"authenticated":true,"tools":[{"name":SEARCH_TOOL,"available":true}]}).to_string(),
+        )
+        .unwrap();
+        h.action(SetupAction::ImportDiscovery {
+            file: report.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+        assert_eq!(h.state.phase, SetupPhase::ToolDiscoveryVerified);
+        assert_eq!(fs::read_to_string(&h.runner.config).unwrap(), collided);
+        let mut h = Harness::claude();
+        fs::write(
+            &h.runner.config,
+            json!({"mcpServers":{"other":{"type":"http","url":"https://synthetic.example/v1"}}})
+                .to_string(),
+        )
+        .unwrap();
+        h.preview();
+        let changes = h.state.plan.as_ref().unwrap().changes.join(" ");
+        assert!(!changes.contains("already points at"), "{changes}");
+        assert_eq!(h.runner.native_calls, 0);
+        let mut h = Harness::codex(manual_registration("synthetic-b"));
+        fs::write(
+            &h.runner.config,
+            json!({"servers":{"cs-mcp":{"type":"http","url":endpoint}}}).to_string(),
+        )
+        .unwrap();
+        let refused = h
+            .action(SetupAction::Preview {
+                operation: PlanOperation::Configure,
+            })
+            .unwrap_err();
+        assert_eq!(refused.code, "SETUP_REGISTRATION_UNINSPECTABLE");
+        assert!(refused.message.contains("select host-managed registration"));
+    }
+    #[test]
+    fn setup_vscode_comments_refuse_only_an_add_the_client_would_write() {
+        let endpoint = Cloud::Us1.endpoint();
+        let mut h = Harness::new();
+        let same = format!(
+            "{{\n  // mine\n  \"servers\": {{\n    \"cs-mcp\": {{\"type\": \"http\", \"url\": \"{endpoint}\"}},\n  }},\n}}\n"
+        );
+        fs::write(&h.runner.config, &same).unwrap();
+        let hash = h.preview();
+        assert!(h.state.plan.as_ref().unwrap().commands.is_empty());
+        assert_eq!(
+            h.state.plan.as_ref().unwrap().baseline.server,
+            ExistingServer::Same
+        );
+        h.apply(hash).unwrap();
+        assert_eq!(h.state.phase, SetupPhase::AuthenticationRequired);
+        assert_eq!(fs::read_to_string(&h.runner.config).unwrap(), same);
+        let mut h = Harness::new();
+        let unrelated = "{\n  // mine\n  \"servers\": {\"files\": {\"type\": \"stdio\", \"command\": \"files\"},},\n}\n";
+        fs::write(&h.runner.config, unrelated).unwrap();
+        let refused = h
+            .action(SetupAction::Preview {
+                operation: PlanOperation::Configure,
+            })
+            .unwrap_err();
+        assert_eq!(refused.code, "SETUP_NATIVE_CONFIG");
+        assert!(refused.message.contains("comments or trailing commas"));
+        assert!(refused.message.contains("select host-managed"));
+        assert_eq!(fs::read_to_string(&h.runner.config).unwrap(), unrelated);
+        assert_eq!(h.runner.native_calls, 0);
+    }
+    #[test]
+    fn setup_preview_mentions_a_backup_only_when_it_writes() {
+        let endpoint = Cloud::Us1.endpoint();
+        let mut h = Harness::claude();
+        fs::write(
+            &h.runner.config,
+            json!({"mcpServers":{"cs-mcp":{"type":"http","url":endpoint}}}).to_string(),
+        )
+        .unwrap();
+        h.preview();
+        let plan = h.state.plan.as_ref().unwrap();
+        assert!(plan.commands.is_empty());
+        assert!(
+            !plan.changes.join(" ").contains("backup"),
+            "{:?}",
+            plan.changes
+        );
+        let mut h = Harness::claude();
+        fs::write(&h.runner.config, json!({"mcpServers":{}}).to_string()).unwrap();
+        h.preview();
+        let plan = h.state.plan.as_ref().unwrap();
+        assert_eq!(plan.commands.len(), 1);
+        assert!(plan.changes.join(" ").contains("backup remains private"));
+    }
+    #[test]
+    fn setup_reads_comments_and_trailing_commas_outside_strings() {
+        let raw = br#"{ // note
+          "a": "x // kept, /* kept */",
+          /* block */ "b": [1, 2,],
+          "c": "quote \" and comma,}",
+        }"#;
+        let value: Value = serde_json::from_slice(&strip_jsonc(raw)).unwrap();
+        assert_eq!(
+            value,
+            json!({"a":"x // kept, /* kept */","b":[1,2],"c":"quote \" and comma,}"})
+        );
+        assert!(serde_json::from_slice::<Value>(&strip_jsonc(b"{\"a\": }")).is_err());
     }
     #[test]
     fn setup_partial_failure_is_durable_pending_and_never_blind_retried() {

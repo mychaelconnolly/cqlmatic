@@ -394,6 +394,12 @@ impl SetupState {
                 "A prior native command may have changed configuration. Review it before changing selection.",
             ));
         }
+        // Replaying the selection that saved configuration or host evidence belongs to changes nothing.
+        if self.selection.as_ref() == Some(&selection)
+            && (self.configured || self.authentication_evidence != AuthenticationEvidence::None)
+        {
+            return Ok(());
+        }
         self.revision += 1;
         self.selection = Some(selection.clone());
         self.plan = None;
@@ -405,7 +411,8 @@ impl SetupState {
         self.last_notice = None;
         self.phase = if matches!(selection.registration, RegistrationMode::ApiClient { .. }) {
             SetupPhase::AdvancedPending
-        } else if !selection.client.needs_executable()
+        } else if selection.host_managed()
+            || !selection.client.needs_executable()
             || self.clients.iter().any(|c| c.client == selection.client)
         {
             SetupPhase::Selected
@@ -427,6 +434,10 @@ impl SetupState {
     }
 }
 impl Selection {
+    /// Use the MCP server already configured in the agent; setup registers and changes nothing.
+    pub fn host_managed(&self) -> bool {
+        matches!(self.registration, RegistrationMode::HostManaged {})
+    }
     pub fn validate(&self) -> Result<(), Diagnostic> {
         if !identifier(&self.server_name) {
             return Err(error(
@@ -447,11 +458,10 @@ impl Selection {
                 "host_id is only valid when client is external.",
             ));
         }
-        if self.client.is_native() == matches!(self.registration, RegistrationMode::HostManaged {})
-        {
+        if !self.client.is_native() && !self.host_managed() {
             return Err(error(
                 "SETUP_REGISTRATION_MODE",
-                "Named agents use native registration; external agents use host-managed registration.",
+                "External agents use host-managed registration: select registration {\"mode\":\"host-managed\"}.",
             ));
         }
         match &self.registration {
@@ -493,7 +503,7 @@ impl Selection {
                 if self.client == ClientKind::ClaudeCode {
                     return Err(error(
                         "SETUP_REGISTRATION_MODE",
-                        "Claude Code's native setup uses its allowlisted CIMD identity; select CIMD for this adapter.",
+                        "Claude Code's native setup uses its allowlisted CIMD identity; select CIMD for this adapter, or host-managed to use a server already configured in Claude Code.",
                     ));
                 }
                 if client_id.is_empty()
@@ -636,28 +646,49 @@ pub fn verify_discovery(
         .selection
         .as_ref()
         .ok_or_else(|| error("SETUP_SELECTION", "Choose a client and cloud first."))?;
-    let host_managed = !selected.client.is_native();
-    if (selected.client.is_native() && !state.configured)
-        || state.phase == SetupPhase::CommandPending
-    {
+    let host_managed = selected.host_managed();
+    if (!host_managed && !state.configured) || state.phase == SetupPhase::CommandPending {
         return Err(error(
             "SETUP_NOT_CONFIGURED",
             "Complete configuration and inspect any pending native command first.",
         ));
     }
-    if report.schema_version != SCHEMA_VERSION
-        || report.client != selected.client
-        || report.host_id.as_deref() != selected.host_id.as_deref()
-        || report.server_name != selected.server_name
-        || report.endpoint != selected.cloud.endpoint()
-        || !report.authenticated
-        || !is_digest(&raw_sha256)
-        || report.tools.len() > 4096
-    {
-        return Err(error(
-            "SETUP_DISCOVERY_BINDING",
-            "Saved host report must state authentication for the exact selected client, host ID, server name, and canonical cloud endpoint.",
-        ));
+    // Name the first binding that fails; never repeat supplied values.
+    let binding = if report.schema_version != SCHEMA_VERSION {
+        Some(
+            "The report's schema_version is not 1. Save the report again in the v1 HostToolDiscovery shape and import it.",
+        )
+    } else if report.client != selected.client {
+        Some(
+            "The report's client is not the selected client. Save discovery from the selected client's session, or select the client that produced the report.",
+        )
+    } else if report.host_id.as_deref() != selected.host_id.as_deref() {
+        Some(
+            "The report's host_id does not match the selection. External reports carry the selected host_id and named clients omit it; correct the report and import it again.",
+        )
+    } else if report.server_name != selected.server_name {
+        Some(
+            "The report's server_name is not the selected server name. Report the server under the name in the setup handoff, or select the name the host uses.",
+        )
+    } else if report.endpoint != selected.cloud.endpoint() {
+        Some(
+            "The report's endpoint is not the selected cloud's canonical endpoint. Report the exact endpoint named in the setup handoff, or select the cloud the server uses.",
+        )
+    } else if !report.authenticated {
+        Some(
+            "The report does not state authenticated: true. Sign in to the server in the host, then save discovery again and import it.",
+        )
+    } else if !is_digest(&raw_sha256) {
+        Some("Cannot fingerprint the saved report. Save it again and import it.")
+    } else if report.tools.len() > 4096 {
+        Some(
+            "The report lists more than 4096 tools. Save only the selected server's tools and import it again.",
+        )
+    } else {
+        None
+    };
+    if let Some(message) = binding {
+        return Err(error("SETUP_DISCOVERY_BINDING", message));
     }
     let expected_id = match &selected.registration {
         RegistrationMode::Cimd { metadata_url, .. } => Some(metadata_url.as_str()),
@@ -675,19 +706,23 @@ pub fn verify_discovery(
             "The host report contradicts the selected OAuth client identity.",
         ));
     }
-    if matches!(
-        selected.client,
-        ClientKind::ClaudeCode
-            | ClientKind::CopilotCli
-            | ClientKind::CopilotApp
-            | ClientKind::CopilotVscode
-    ) && (report.effective_oauth_client_id.as_deref() != expected_id
-        || !report
-            .effective_config_source
-            .as_deref()
-            .is_some_and(|source| {
-                !source.is_empty() && source.len() <= 256 && !source.chars().any(char::is_control)
-            }))
+    if !host_managed
+        && matches!(
+            selected.client,
+            ClientKind::ClaudeCode
+                | ClientKind::CopilotCli
+                | ClientKind::CopilotApp
+                | ClientKind::CopilotVscode
+        )
+        && (report.effective_oauth_client_id.as_deref() != expected_id
+            || !report
+                .effective_config_source
+                .as_deref()
+                .is_some_and(|source| {
+                    !source.is_empty()
+                        && source.len() <= 256
+                        && !source.chars().any(char::is_control)
+                }))
     {
         return Err(error(
             "SETUP_DISCOVERY_IDENTITY",
@@ -743,7 +778,7 @@ pub fn build_plan(
         .selection
         .clone()
         .ok_or_else(|| error("SETUP_SELECTION", "Choose a client and cloud first."))?;
-    if !selection.client.is_native() {
+    if selection.host_managed() {
         return Err(error(
             "SETUP_HOST_MANAGED",
             "This agent uses its own MCP configuration. Configure and sign in there, then import a saved host tool-discovery report; no native plan is available.",
@@ -794,7 +829,17 @@ pub fn build_plan(
     {
         return Err(error(
             "SETUP_CAPABILITY",
-            "Installed client does not support the selected CIMD flow. VS Code requires stable 1.106.0 or later; Codex must advertise the CIMD flags. Update the client or explicitly choose manual registration; no DCR fallback is attempted.",
+            match selection.client {
+                ClientKind::ClaudeCode => {
+                    "Installed Claude Code does not support the CIMD flow; it requires stable 2.1.81 or later. Update it and detect again, or select host-managed to use a server already configured in Claude Code; no DCR fallback is attempted."
+                }
+                ClientKind::VsCode => {
+                    "Installed VS Code does not support the CIMD flow; it requires stable 1.106.0 or later. Update it and detect again, or select manual registration; no DCR fallback is attempted."
+                }
+                _ => {
+                    "Installed Codex does not advertise the CIMD flags. Update it and detect again, or select manual registration; no DCR fallback is attempted."
+                }
+            },
         ));
     }
     if selection.client.needs_executable()
@@ -868,7 +913,7 @@ pub fn build_plan(
             if operation == PlanOperation::Recover {
                 let origin = state.recovery_origin.as_ref().ok_or_else(|| error(
                     "SETUP_RECOVERY_ORIGIN",
-                    "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Existing or manual entries cannot be adopted.",
+                    "Inspect and acknowledge the pending fresh Codex CIMD add plan before previewing recovery. Recovery cannot adopt an existing or manual entry; to use a server already configured in Codex, select host-managed.",
                 ))?;
                 if baseline.path != origin.baseline.path
                     || baseline.server != ExistingServer::Same
@@ -1010,8 +1055,11 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
             if let Some(s) = selected && let Some(url) = s.client.install_url() { next_actions.push(format!("Install {} from {}; then run cqlmatic setup again. No installer is run automatically.", s.client.label(), url)); }
         }
         SetupPhase::Selected | SetupPhase::ReviewRequired | SetupPhase::Cancelled => {
-            if let Some(s) = selected.filter(|s| !s.client.is_native()) {
-                next_actions.push(format!("Configure '{}' as an HTTP MCP server at {} in {}. Confirm the effective server and supported OAuth identity before connecting; do not fall back to DCR.", s.server_name, s.cloud.endpoint(), s.client.label()));
+            if let Some(s) = selected.filter(|s| s.host_managed() && s.client.is_native()) {
+                next_actions.push(format!("Setup uses the MCP server already configured in {} and changes nothing in that client's configuration. The selection names it '{}' at {}; if the server has another name in that client's tool names, or points at another cloud, select again with those.", s.client.label(), s.server_name, s.cloud.endpoint()));
+                next_actions.push(format!("Sign in to that server in {} if it is not signed in, then save a caller-supplied v1 HostToolDiscovery report for this client/server/endpoint and import it with cqlmatic setup; setup checks only that report and runs no query.", s.client.label()));
+            } else if let Some(s) = selected.filter(|s| s.host_managed()) {
+                next_actions.push(format!("Configure '{}' as an HTTP MCP server at {} in {}. Confirm the effective server and supported OAuth identity before connecting; do not fall back to DCR.", s.server_name, s.cloud.endpoint(), s.host_id.as_deref().unwrap_or(s.client.label())));
                 next_actions.push(host_setup_hint(s.client).into());
                 next_actions.push("Save a caller-supplied v1 HostToolDiscovery report for this host/server/endpoint and import it with cqlmatic setup; setup does not inspect host configuration or run a query.".into());
             } else if state.recovery_origin.is_some() {
@@ -1045,6 +1093,8 @@ pub fn result(state: SetupState, id: Option<String>) -> SetupResult {
         }
         let identity_guidance = if s.client == ClientKind::External {
             "Inspect the effective server and confirm supported host-managed authentication. effective_oauth_client_id and effective_config_source are optional operator-supplied fields for external reports; include them only when known."
+        } else if s.host_managed() {
+            "Inspect the effective server in this host session and confirm it is signed in. effective_oauth_client_id and effective_config_source are optional operator-supplied fields for host-managed reports; include them only when known."
         } else {
             "Inspect the effective server and OAuth client ID in this host session. Claude/Copilot reports require effective_oauth_client_id and effective_config_source matching the selected session; those fields remain optional for legacy Codex/VS Code reports."
         };

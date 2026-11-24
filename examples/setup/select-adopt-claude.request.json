@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "action": {
+    "type": "select",
+    "selection": {
+      "client": "claude-code",
+      "cloud": "us1",
+      "server_name": "crowdstrike",
+      "registration": { "mode": "host-managed" }
+    }
+  }
+}
