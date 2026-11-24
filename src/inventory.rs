@@ -243,12 +243,26 @@ pub enum InventoryAction {
         recorded_at: String,
     },
     Batch {
-        #[cfg_attr(test, schemars(length(min = 1, max = 32)))]
+        #[cfg_attr(test, schemars(length(min = 1, max = 32), transform = reconcile_last))]
         actions: Vec<BatchAction>,
     },
 }
 
 pub const MAX_BATCH_ACTIONS: usize = 32;
+
+/// Refuses `reconcile` at any position but the last of a batch.
+#[cfg(test)]
+fn reconcile_last(schema: &mut schemars::Schema) {
+    let reconcile = json!({"properties":{"kind":{"const":"reconcile"}}});
+    let positions: Vec<Value> = (0..MAX_BATCH_ACTIONS - 1)
+        .map(|index| {
+            let mut prefix = vec![Value::Bool(true); index];
+            prefix.push(reconcile.clone());
+            json!({"minItems":index + 2,"prefixItems":prefix})
+        })
+        .collect();
+    schema.insert("not".into(), json!({"anyOf":positions}));
+}
 
 /// The local actions one `batch` request can apply together. None reserves, dispatches or
 /// settles a search, reads the network or imports a pack.

@@ -1593,7 +1593,848 @@
                 "$ref": "#/$defs/BatchAction"
               },
               "maxItems": 32,
-              "minItems": 1
+              "minItems": 1,
+              "not": {
+                "anyOf": [
+                  {
+                    "minItems": 2,
+                    "prefixItems": [
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 3,
+                    "prefixItems": [
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 4,
+                    "prefixItems": [
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 5,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 6,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 7,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 8,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 9,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 10,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 11,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 12,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 13,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 14,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 15,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 16,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 17,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 18,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 19,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 20,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 21,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 22,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 23,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 24,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 25,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 26,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 27,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 28,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 29,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 30,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 31,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "minItems": 32,
+                    "prefixItems": [
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      true,
+                      {
+                        "properties": {
+                          "kind": {
+                            "const": "reconcile"
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
             },
             "kind": {
               "type": "string",

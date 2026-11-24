@@ -754,3 +754,416 @@ fn pending_work_is_judged_against_the_final_result_of_the_batch() {
     );
     assert_eq!(status(&batched)["sources"][0]["status"], "review");
 }
+
+/// A Full inventory with 12 sources whose status carries four notices at once: an unresolved
+/// refresh, a recorded unfinished discovery run, an overdue refresh reminder and pending work.
+fn noticed_fixture() -> Fixture {
+    let dir = Temp::new();
+    let state = dir.0.join("workflow/state.json");
+    let inventory = |action| call(&dir.0, &state, action);
+    let file = |name: &str, value: Value| {
+        let path = dir.0.join(name);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        path
+    };
+    inventory(json!({"kind":"set-discovery-mode","mode":"full"}));
+    let expected: Vec<Value> = (0..12)
+        .map(|i| json!({"repo":format!("synthetic-repo-{i:02}"),"type":format!("synthetic-type-{i:02}")}))
+        .collect();
+    let confirmed = inventory(
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources",
+            "context":"Synthetic notice target","expected_sources":expected}),
+    );
+    let sources = source_ids(&confirmed);
+    let hints: Vec<Value> = expected[..6]
+        .iter()
+        .map(|source| json!({"source":source,"fields":["user"]}))
+        .collect();
+    inventory(json!({"kind":"record-inventory-hints","environment":environment(),"hints":hints}));
+    // One query is not enough for a Full measurement, so the run is recorded as failed.
+    let prepared = inventory(
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":AT,
+            "source_ids":[sources[0]],"max_queries":1,"max_seconds":3600}),
+    );
+    let probe = prepared["action"]["relay"]["probes"][0]["probe_id"].clone();
+    inventory(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe}));
+    let answer = file("volume.json", json!({"result":[{"events":10}]}));
+    let step = inventory(json!({"kind":"discovery-step","run_index":0,
+        "answers":[{"probe_id":probe,"result_file":answer}]}));
+    assert_eq!(step["status"]["discovery_runs"][0]["status"], "failed");
+    let host = file(
+        "host.json",
+        json!({"schema_version":1,"environment":environment(),"session_id":"synthetic-session",
+            "verified_at":AT,"mechanism":"provider-enforced-search-lifetime","max_search_seconds":300,
+            "capability_reference":"Synthetic capability","verification_evidence":"Synthetic evidence"}),
+    );
+    let attempt = inventory(
+        json!({"kind":"prepare-refresh","session_id":"synthetic-session",
+        "host_evidence_file":host,"automatic":false}),
+    )["action"]["attempt_id"]
+        .clone();
+    let dispatched = inventory(
+        json!({"kind":"dispatch-refresh","attempt_id":attempt,"session_id":"synthetic-session"}),
+    );
+    let settlement = file(
+        "settlement.json",
+        json!({"schema_version":1,"attempt_id":attempt,"environment":environment(),
+            "session_id":"synthetic-session","arguments":dispatched["action"]["arguments"],
+            "termination":"unresolved",
+            "recorded_at":read(&state)["refresh_attempts"][0]["dispatched_at"],
+            "evidence":"Synthetic lost response"}),
+    );
+    inventory(json!({"kind":"settle-refresh","attempt_id":attempt,"evidence_file":settlement}));
+    // Age the target so the 30-day refresh reminder is due.
+    let mut saved = read(&state);
+    saved["target"]["confirmed_at"] = json!(AT);
+    saved["refresh_reminder"]["baseline_at"] = json!(AT);
+    fs::write(&state, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    let (import, parsers) = parser_inputs(&dir.0, 0);
+    Fixture {
+        sources,
+        dir,
+        state,
+        parsers,
+        import,
+    }
+}
+
+fn notice_codes(status: &Value) -> Vec<String> {
+    status["notices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|notice| notice["code"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn brief_batch_replies_fit_under_every_notice_for_every_outcome() {
+    let f = noticed_fixture();
+    let notices = [
+        "REFRESH_SETTLEMENT_REQUIRED",
+        "DISCOVERY_UNFINISHED_RECORDED",
+        "INVENTORY_REFRESH_DUE",
+        "INVENTORY_WORK_PENDING",
+    ];
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--json", "--brief", "--state"])
+        .arg(&f.state)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(notice_codes(&stdout_json(&output)), notices);
+    let marker = "synthetic-input-marker";
+    let reviews = |suffix: &str| -> Vec<Value> {
+        (0..32)
+            .map(|i| review(&f.sources[i % 12], &format!("{marker} {suffix} {i}")))
+            .collect()
+    };
+    let purposes = || -> Vec<Value> {
+        read(&f.state)["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| source["review"]["purpose"].clone())
+            .collect()
+    };
+    let brief = |action, code, commit: &str| {
+        let output = send(&f.dir.0, &f.state, action, &["--brief"]);
+        assert_eq!(output.status.code(), Some(code), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert!(output.stdout.len() <= 4096, "{}", output.stdout.len());
+        assert_eq!(output.stdout.last(), Some(&b'\n'));
+        let text = String::from_utf8(output.stdout.clone()).unwrap();
+        for private in [marker, f.dir.0.to_str().unwrap(), "0000000000000000"] {
+            assert!(!text.contains(private), "{private}: {text}");
+        }
+        for source in &f.sources {
+            assert!(!text.contains(source.as_str()), "{source}: {text}");
+        }
+        let reply = stdout_json(&output);
+        assert_eq!(reply["action"]["commit"], commit, "{reply}");
+        assert_eq!(outcomes(&reply).len(), 32);
+        assert_eq!(notice_codes(&reply["status"]), notices);
+        for notice in reply["status"]["notices"].as_array().unwrap() {
+            assert!(notice["severity"].is_string(), "{notice}");
+        }
+        reply
+    };
+    let before = fs::read(&f.state).unwrap();
+    for index in [0, 31] {
+        let mut failing = reviews("first");
+        failing[index]["source_id"] = json!("env:repo:0000000000000000");
+        let reply = brief(batch(failing), 2, "rolled-back");
+        assert_eq!(reply["action"]["diagnostic"]["index"], index);
+        assert_eq!(outcomes(&reply)[index], "failed");
+        assert_eq!(fs::read(&f.state).unwrap(), before);
+    }
+    brief(batch(reviews("first")), 0, "committed");
+    assert!(purposes().contains(&json!(format!("{marker} first 31"))));
+    let committed = fs::read(&f.state).unwrap();
+    brief(batch(reviews("first")), 0, "unchanged");
+    assert_eq!(fs::read(&f.state).unwrap(), committed);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let workflow = f.state.parent().unwrap().to_path_buf();
+        let mode = |mode| fs::set_permissions(&workflow, fs::Permissions::from_mode(mode)).unwrap();
+        mode(0o500);
+        if fs::write(workflow.join("probe.tmp"), b"").is_ok() {
+            mode(0o700);
+            eprintln!("skipped: this account can write a directory without write permission");
+            return;
+        }
+        let reply = brief(batch(reviews("second")), 2, "rolled-back");
+        mode(0o700);
+        assert_eq!(reply["action"]["diagnostic"]["code"], "LOCAL_IO");
+        assert_eq!(fs::read(&f.state).unwrap(), committed);
+        mode(0o300);
+        let reply = brief(
+            batch(reviews("second")),
+            2,
+            "visible-durability-unconfirmed",
+        );
+        mode(0o700);
+        assert_eq!(reply["action"]["diagnostic"]["code"], "PACK_DURABILITY");
+        assert!(purposes().contains(&json!(format!("{marker} second 31"))));
+    }
+}
+
+#[test]
+fn malformed_batch_shapes_create_nothing_and_are_not_refused_as_busy() {
+    let f = fixture(1, 0);
+    let shapes = [
+        batch(vec![]),
+        batch(
+            (0..33)
+                .map(|i| review(&f.sources[0], &format!("Item {i}")))
+                .collect(),
+        ),
+        batch(vec![reconcile(), review(&f.sources[0], "After reconcile")]),
+        batch(vec![
+            review(&f.sources[0], "First"),
+            reconcile(),
+            reconcile(),
+        ]),
+    ];
+    let refused = |state: &Path, action: &Value| {
+        let output = send(&f.dir.0, state, action.clone(), &[]);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(diagnostic["code"], "INVENTORY_INPUT", "{diagnostic}");
+    };
+    let absent = f.dir.0.join("absent/state.json");
+    for action in &shapes {
+        refused(&absent, action);
+        assert!(!absent.parent().unwrap().exists(), "{action}");
+    }
+    let before = fs::read(&f.state).unwrap();
+    let writer = cqlmatic::storage::Writer::acquire(&f.state).unwrap();
+    for action in &shapes {
+        refused(&f.state, action);
+    }
+    drop(writer);
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+}
+
+#[test]
+fn missing_run_evidence_neither_hides_an_invalid_item_nor_drops_the_batch_reply() {
+    let f = measured_fixture();
+    let source = &f.sources[0];
+    let receipt = read(&f.state)["discovery_runs"][0]["receipt_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::remove_file(&receipt).unwrap();
+    let before = fs::read(&f.state).unwrap();
+    // The invalid first item is reported at its own index, as the single action reports it.
+    let invalid = review(source, "");
+    let single = send(&f.dir.0, &f.state, invalid.clone(), &[]);
+    assert_eq!(single.status.code(), Some(2), "{single:?}");
+    let single: Value = serde_json::from_slice(&single.stderr).unwrap();
+    let output = send(
+        &f.dir.0,
+        &f.state,
+        batch(vec![invalid, review(source, "Valid")]),
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let reply = stdout_json(&output);
+    assert_eq!(reply["action"]["commit"], "rolled-back");
+    assert_eq!(outcomes(&reply), ["failed", "skipped"]);
+    assert_eq!(
+        reply["action"]["results"][0]["diagnostic"]["code"],
+        single["code"]
+    );
+    assert_eq!(single["code"], "INVENTORY_EVIDENCE");
+    // Valid items whose completed-run evidence cannot be read: the batch reply says so.
+    for flags in [&[][..], &["--brief"]] {
+        let output = send(
+            &f.dir.0,
+            &f.state,
+            batch(vec![review(source, "Valid"), reconcile()]),
+            flags,
+        );
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let reply = stdout_json(&output);
+        assert_eq!(reply["action"]["commit"], "rolled-back");
+        assert_eq!(outcomes(&reply), ["rolled-back", "rolled-back"]);
+        assert!(reply["action"]["diagnostic"]["code"].is_string(), "{reply}");
+        if !flags.is_empty() {
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(!text.contains(f.dir.0.to_str().unwrap()), "{text}");
+        }
+        assert_eq!(fs::read(&f.state).unwrap(), before);
+    }
+}
+
+#[test]
+fn importing_and_binding_in_one_batch_then_failing_leaves_the_file_byte_identical() {
+    let f = fixture(4, 2);
+    let before = fs::read(&f.state).unwrap();
+    let mut wrong_digest = bind(&f.sources[1], &f.parsers[1]);
+    wrong_digest["parser_sha256"] = json!("0".repeat(64));
+    let output = send(
+        &f.dir.0,
+        &f.state,
+        batch(vec![
+            f.import.clone(),
+            bind(&f.sources[0], &f.parsers[0]),
+            wrong_digest,
+            review(&f.sources[2], "Skipped"),
+            not_applicable(&f.sources[3]),
+        ]),
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let reply = stdout_json(&output);
+    assert_eq!(
+        outcomes(&reply),
+        ["rolled-back", "rolled-back", "failed", "skipped", "skipped"]
+    );
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+    assert_eq!(read(&f.state)["parsers"], json!([]));
+}
+
+#[test]
+fn an_invalid_final_reconcile_fails_at_its_index_and_saves_nothing() {
+    let f = fixture(1, 0);
+    let before = fs::read(&f.state).unwrap();
+    let output = send(
+        &f.dir.0,
+        &f.state,
+        batch(vec![
+            review(&f.sources[0], "Not saved"),
+            json!({"kind":"reconcile","reviewed_at":"not-a-date"}),
+        ]),
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let reply = stdout_json(&output);
+    assert_eq!(reply["action"]["commit"], "rolled-back");
+    assert_eq!(outcomes(&reply), ["rolled-back", "failed"]);
+    assert_eq!(
+        reply["action"]["results"][1]["diagnostic"]["code"],
+        "PACK_TIME"
+    );
+    assert_eq!(fs::read(&f.state).unwrap(), before);
+}
+
+#[test]
+fn an_exclusion_only_batch_completes_no_work_like_the_single_action() {
+    let f = measured_fixture();
+    let source = &f.sources[0];
+    for action in [
+        f.import.clone(),
+        review(source, "Synthetic measured source"),
+        not_applicable(source),
+    ] {
+        call(&f.dir.0, &f.state, action);
+    }
+    // Work that the saved evidence would complete, but that no action has completed yet.
+    let mut saved = read(&f.state);
+    assert_eq!(
+        saved["pending_inventory"][0]["resolution"]["kind"],
+        "inventoried"
+    );
+    saved["pending_inventory"][0]["resolution"] = Value::Null;
+    fs::write(&f.state, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+    let copy = |name| {
+        let path = f.state.with_file_name(name);
+        fs::copy(&f.state, &path).unwrap();
+        path
+    };
+    let (single, batched, control) = (
+        copy("single.json"),
+        copy("batched.json"),
+        copy("control.json"),
+    );
+    call(&f.dir.0, &single, exclude(&f.parsers[0]));
+    call(&f.dir.0, &batched, batch(vec![exclude(&f.parsers[0])]));
+    call(
+        &f.dir.0,
+        &control,
+        batch(vec![exclude(&f.parsers[0]), reconcile()]),
+    );
+    let resolution = |path: &Path| read(path)["pending_inventory"][0]["resolution"].clone();
+    assert_eq!(resolution(&single), Value::Null);
+    assert_eq!(resolution(&batched), Value::Null);
+    assert_eq!(
+        without_updated_at(read(&batched)),
+        without_updated_at(read(&single))
+    );
+    assert_eq!(resolution(&control)["kind"], "inventoried");
+}
+
+#[test]
+fn inventory_schema_allows_reconcile_only_as_the_last_batch_item() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["--schema", "inventory"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let actions = schema["$defs"]["InventoryAction"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["kind"]["const"] == "batch")
+        .unwrap()["properties"]["actions"]
+        .clone();
+    // Evaluates the array's `not: {anyOf: [{minItems, prefixItems}]}` rule for a list of kinds.
+    let refused = |kinds: &[&str]| {
+        actions["not"]["anyOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| {
+                kinds.len() as u64 >= rule["minItems"].as_u64().unwrap()
+                    && rule["prefixItems"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .zip(kinds)
+                        .all(|(item, kind)| {
+                            *item == json!(true) || item["properties"]["kind"]["const"] == *kind
+                        })
+            })
+    };
+    assert!(refused(&["reconcile", "review-source"]));
+    assert!(refused(&["reconcile", "reconcile"]));
+    assert!(refused(&["review-source", "reconcile", "bind-parser"]));
+    let mut late = vec!["review-source"; 32];
+    late[30] = "reconcile";
+    assert!(refused(&late));
+    assert!(!refused(&["review-source", "reconcile"]));
+    assert!(!refused(&["reconcile"]));
+    late[30] = "review-source";
+    late[31] = "reconcile";
+    assert!(!refused(&late));
+    assert!(!refused(&["review-source"; 32]));
+}

@@ -167,7 +167,18 @@ fn brief_bytes(mut value: Value) -> Result<Vec<u8>, Diagnostic> {
             .and_then(Vec::pop)
             .is_none()
         {
-            return Err(brief_failure());
+            // Every notice keeps its code and severity; only the explanations are dropped.
+            let shortened = report["notices"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object_mut)
+                .filter_map(|notice| notice.remove("message"))
+                .count();
+            if shortened == 0 {
+                return Err(brief_failure());
+            }
+            continue;
         }
         report["omitted_references"] = json!(
             report["omitted_references"]
@@ -647,10 +658,14 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
             output(&extra)?;
         }
     }
-    // A batch that saved nothing, or whose write is unconfirmed, is a failed request.
-    let batch_failed = extra["kind"] == "batch"
-        && !matches!(extra["commit"].as_str(), Some("committed" | "unchanged"));
-    Ok(if batch_failed { 2 } else { 0 })
+    Ok(batch_exit_code(&extra))
+}
+
+/// A batch that saved nothing, or whose write is unconfirmed, is a failed request.
+fn batch_exit_code(action: &Value) -> i32 {
+    let failed = action["kind"] == "batch"
+        && !matches!(action["commit"].as_str(), Some("committed" | "unchanged"));
+    if failed { 2 } else { 0 }
 }
 
 struct NextProbeRun {
@@ -1020,6 +1035,9 @@ fn apply_and_store_with_work_budget(
     action: InventoryAction,
     work_budget: u64,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
+    if let InventoryAction::Batch { actions } = &action {
+        batch_shape(actions)?;
+    }
     let writer = inventory_writer(path)?;
     apply_locked(path, action, work_budget, &writer)
 }
@@ -1225,15 +1243,8 @@ fn apply_locked(
     })()
 }
 
-/// Applies the items in order to one private candidate, each with the checks its single action
-/// makes, then resolves pending work, reconciles, assesses and writes once. A failed batch
-/// leaves the saved inventory as it was, and its status describes what is saved.
-fn apply_batch_locked(
-    path: &Path,
-    actions: Vec<BatchAction>,
-    work_budget: u64,
-    writer: &storage::Writer,
-) -> Result<(InventoryStatus, Value), Diagnostic> {
+/// Refuses a batch whose shape is wrong before anything is locked or read.
+fn batch_shape(actions: &[BatchAction]) -> Result<(), Diagnostic> {
     if actions.is_empty() || actions.len() > MAX_BATCH_ACTIONS {
         return Err(fail(
             "A batch holds 1 to 32 actions. Send between 1 and 32, splitting a longer list into several batches.",
@@ -1248,6 +1259,18 @@ fn apply_batch_locked(
             "Batch item {index} is reconcile, which must be the last item. Keep one reconcile at the end of the batch."
         )));
     }
+    Ok(())
+}
+
+/// Applies the items in order to one private candidate, each with the checks its single action
+/// makes, then resolves pending work, reconciles, assesses and writes once. A failed batch
+/// leaves the saved inventory as it was, and its status describes what is saved.
+fn apply_batch_locked(
+    path: &Path,
+    actions: Vec<BatchAction>,
+    work_budget: u64,
+    writer: &storage::Writer,
+) -> Result<(InventoryStatus, Value), Diagnostic> {
     let stored = load_existing(path)?;
     let before = stored.as_ref().map(state_fingerprint).transpose()?;
     let now = discovery::timestamp();
@@ -1256,16 +1279,12 @@ fn apply_batch_locked(
         None => InventoryState::new(&now)?,
     };
     // These actions change no retained pack, discovery run or pending work item, so the
-    // packs and the completed-run evidence are read once for the whole batch.
+    // packs are read once for the whole batch, and the completed-run evidence once after
+    // every item has applied.
     let loaded = packs(&saved)?;
     let resolve_work = actions
         .iter()
         .any(|action| !matches!(action, BatchAction::ExcludeParser { .. }));
-    let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
-        inventory_run_evidence(&saved, work_budget, &[])?
-    } else {
-        (vec![], vec![], false)
-    };
     let reconcile_at = match actions.last() {
         Some(BatchAction::Reconcile { reviewed_at }) => Some(reviewed_at.clone()),
         _ => None,
@@ -1291,6 +1310,15 @@ fn apply_batch_locked(
     if failed.is_some() {
         return rolled_back(failed, None);
     }
+    // The evidence locks are held through the write.
+    let (evidence, _evidence_guards, evidence_limited) = if resolve_work {
+        match inventory_run_evidence(&state, work_budget, &[]) {
+            Ok(evidence) => evidence,
+            Err(diagnostic) => return rolled_back(None, Some(diagnostic)),
+        }
+    } else {
+        (vec![], vec![], false)
+    };
     let settled = (|| -> Result<(InventoryStatus, Option<Vec<u8>>), Diagnostic> {
         let mut report = inventory::assess_at(&state, &loaded, &now)?;
         if resolve_work {
@@ -1346,6 +1374,8 @@ fn apply_batch_locked(
     };
     if evidence_limited {
         action["inventory_work_evidence_limited"] = json!(true);
+        action["notices"] = json!([{"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info",
+            "message":"Some older discovery evidence was omitted from automatic pending-work resolution because its verification budget was reached. Unproven work remains pending. Send reconcile to check it again."}]);
     }
     Ok((report, action))
 }
@@ -3894,7 +3924,7 @@ fn interactive(
     if !extra.is_null() {
         output(&extra)?;
     }
-    Ok(0)
+    Ok(batch_exit_code(&extra))
 }
 
 #[cfg(test)]
@@ -4186,6 +4216,198 @@ mod tests {
                 .pending_inventory
                 .iter()
                 .all(|work| work.resolution.is_some())
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_batch_with_limited_evidence_leaves_work_for_a_later_reconcile() {
+        let directory =
+            std::env::temp_dir().join(format!("cqlmatic-batch-budget-{}", std::process::id()));
+        crate::setup_cli::protect_directory(&directory).unwrap();
+        let path = directory.join("state.json");
+        let environment = json!({"cloud":"us1","tenant":"0".repeat(32),"view":"synthetic_view"});
+        for action in [
+            json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+            json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
+                "context":"Synthetic batch budget fixture","expected_sources":[{"type":"initial"}]}),
+            json!({"kind":"record-inventory-hints","environment":environment,"hints":[
+                {"source":{"type":"first"},"fields":[]},{"source":{"type":"second"},"fields":[]}]}),
+            json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
+                "context":"Synthetic batch budget fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
+        ] {
+            work_action(&path, action, MAX_STATE_BYTES);
+        }
+        // Both runs complete without an evidence allowance, so their work stays pending.
+        for source in ["first", "second"] {
+            let (_, action) = source_work_run(&path, source, 0, 0);
+            assert_eq!(action["relay"]["status"], "complete");
+        }
+        let sizes: Vec<u64> = load(&path)
+            .unwrap()
+            .discovery_runs
+            .iter()
+            .map(|run| {
+                let (_, report) =
+                    mcp::inspect_completed_report(Path::new(&run.state_path)).unwrap();
+                serde_json::to_vec(&report.captures).unwrap().len() as u64
+            })
+            .collect();
+        // The allowance fits the evidence of either run, not of both.
+        let budget = *sizes.iter().max().unwrap();
+        assert!(sizes.iter().sum::<u64>() > budget);
+        let resolved = |source: &str| {
+            load(&path)
+                .unwrap()
+                .pending_inventory
+                .iter()
+                .find(|work| work.source.type_.as_deref() == Some(source))
+                .unwrap()
+                .resolution
+                .is_some()
+        };
+        assert!(!resolved("first") && !resolved("second"));
+        let review = |source: &str| {
+            json!({"kind":"review-source","source_id":discovery::source_id(&cqlmatic::contracts::Scope {
+                    type_:Some(source.into()),..Default::default()}),
+                "purpose":"Synthetic review","data_model":"Synthetic events",
+                "reviewed_at":"2026-01-02T00:00:00Z","evidence":"Synthetic review"})
+        };
+        let before = std::fs::read(&path).unwrap();
+        // Sent one at a time, each request has its own allowance and both complete.
+        work_action(&path, review("second"), budget);
+        work_action(&path, review("first"), budget);
+        assert!(resolved("first") && resolved("second"));
+        std::fs::write(&path, before).unwrap();
+        // One batch has one allowance: the newest run's work completes, the older stays pending.
+        let (_, action) = work_action(
+            &path,
+            json!({"kind":"batch","actions":[review("second"),review("first")]}),
+            budget,
+        );
+        assert_eq!(action["commit"], "committed");
+        assert_eq!(action["inventory_work_evidence_limited"], true);
+        assert_eq!(
+            action["notices"][0]["code"],
+            "INVENTORY_WORK_EVIDENCE_LIMITED"
+        );
+        assert!(action["notices"][0]["message"].is_string());
+        assert!(resolved("second") && !resolved("first"));
+        // A later reconcile checks the remaining work again with its own allowance.
+        work_action(
+            &path,
+            json!({"kind":"reconcile","reviewed_at":"2026-01-02T00:00:00Z"}),
+            budget,
+        );
+        assert!(resolved("first") && resolved("second"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_brief_batch_with_limited_evidence_fits_under_every_notice() {
+        let directory =
+            std::env::temp_dir().join(format!("cqlmatic-batch-notices-{}", std::process::id()));
+        crate::setup_cli::protect_directory(&directory).unwrap();
+        let path = directory.join("state.json");
+        let at = "2026-01-02T00:00:00Z";
+        let environment = json!({"cloud":"us1","tenant":"0".repeat(32),"view":"search-all"});
+        let source = |kind: &str| {
+            discovery::source_id(&cqlmatic::contracts::Scope {
+                type_: Some(kind.into()),
+                ..Default::default()
+            })
+        };
+        let file = |name: &str, value: Value| {
+            let file = directory.join(name);
+            std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+            file
+        };
+        let action = |action: Value| work_action(&path, action, MAX_STATE_BYTES).1;
+        action(json!({"kind":"set-discovery-mode","mode":"full"}));
+        action(
+            json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
+            "context":"Synthetic notice fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
+        );
+        action(
+            json!({"kind":"record-inventory-hints","environment":environment,"hints":[
+            {"source":{"type":"first"},"fields":["user"]},{"source":{"type":"second"},"fields":["user"]}]}),
+        );
+        // One query is not enough for a Full measurement, so this run is recorded as failed.
+        let prepared = action(
+            json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":at,
+            "source_ids":[source("first")],"max_queries":1,"max_seconds":3600}),
+        );
+        let probe = prepared["relay"]["probes"][0]["probe_id"].clone();
+        action(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe}));
+        let answer = file("volume.json", json!({"result":[{"events":10}]}));
+        action(json!({"kind":"discovery-step","run_index":0,
+            "answers":[{"probe_id":probe,"result_file":answer}]}));
+        // A completed run whose pending work no evidence allowance has reached.
+        action(json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}));
+        source_work_run(&path, "second", 0, 0);
+        let host = file(
+            "host.json",
+            json!({"schema_version":1,"environment":environment,"session_id":"synthetic-session",
+            "verified_at":at,"mechanism":"provider-enforced-search-lifetime","max_search_seconds":300,
+            "capability_reference":"Synthetic capability","verification_evidence":"Synthetic evidence"}),
+        );
+        let attempt = action(
+            json!({"kind":"prepare-refresh","session_id":"synthetic-session",
+            "host_evidence_file":host,"automatic":false}),
+        )["attempt_id"]
+            .clone();
+        let dispatched = action(
+            json!({"kind":"dispatch-refresh","attempt_id":attempt,"session_id":"synthetic-session"}),
+        );
+        let settlement = file(
+            "settlement.json",
+            json!({"schema_version":1,"attempt_id":attempt,"environment":environment,
+            "session_id":"synthetic-session","arguments":dispatched["arguments"],
+            "termination":"unresolved",
+            "recorded_at":load(&path).unwrap().refresh_attempts[0].dispatched_at,
+            "evidence":"Synthetic lost response"}),
+        );
+        action(json!({"kind":"settle-refresh","attempt_id":attempt,"evidence_file":settlement}));
+        // Age the target so the 30-day refresh reminder is due.
+        let mut aged: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        aged["target"]["confirmed_at"] = json!(at);
+        aged["refresh_reminder"]["baseline_at"] = json!(at);
+        std::fs::write(&path, serde_json::to_vec_pretty(&aged).unwrap()).unwrap();
+
+        let reviews: Vec<Value> = (0..32)
+            .map(|index| {
+                json!({"kind":"review-source","source_id":source(["first","second"][index % 2]),
+                    "purpose":format!("Synthetic review {index}"),"data_model":"Synthetic events",
+                    "reviewed_at":at,"evidence":"Synthetic review"})
+            })
+            .collect();
+        let (report, action) = work_action(&path, json!({"kind":"batch","actions":reviews}), 0);
+        assert_eq!(action["commit"], "committed");
+        assert_eq!(action["inventory_work_evidence_limited"], true);
+        let bytes = brief_bytes(json!({"schema_version":1,"brief":true,
+            "status":inventory::brief(&report, None),"action":action_brief(&action)}))
+        .unwrap();
+        assert!(bytes.len() <= 4096, "{}", bytes.len());
+        let brief: Value = serde_json::from_slice(&bytes).unwrap();
+        let codes: Vec<_> = brief["status"]["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|notice| notice["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            codes,
+            [
+                "REFRESH_SETTLEMENT_REQUIRED",
+                "DISCOVERY_UNFINISHED_RECORDED",
+                "INVENTORY_REFRESH_DUE",
+                "INVENTORY_WORK_PENDING"
+            ]
+        );
+        assert_eq!(brief["action"]["counts"], json!({"applied":32}));
+        assert_eq!(
+            brief["action"]["notices"][0]["code"],
+            "INVENTORY_WORK_EVIDENCE_LIMITED"
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

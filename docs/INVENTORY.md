@@ -200,12 +200,14 @@ The reply is the usual `{schema_version, state, status, action}`. `action` is `{
 | --- | --- | --- | --- |
 | `committed` | 0 | Every item was applied and saved. | `applied` |
 | `unchanged` | 0 | Every item was applied and the result equals the saved inventory, so nothing was written. | `applied` |
-| `rolled-back` | 2 | Nothing was saved. | Items before the failing one are `rolled-back`, the failing one is `failed` with its `diagnostic`, later ones are `skipped`. When the failure belongs to no single item, for example when the result could not be written, every item is `rolled-back` and `action.diagnostic` gives the reason. |
-| `visible-durability-unconfirmed` | 2 | The new state file replaced the old one and later commands read it, but the tool could not confirm that it reached the disk. Read status before sending the batch again. | `applied` |
+| `rolled-back` | 2 | Nothing was saved. | Items before the failing one are `rolled-back`, the failing one is `failed` with its `diagnostic`, later ones are `skipped`. When the failure belongs to no single item, for example when completed discovery evidence could not be read or the result could not be written, every item is `rolled-back` and `action.diagnostic` gives the reason. |
+| `visible-durability-unconfirmed` | 2 | The requested result is visible on disk and durability remains unconfirmed: later commands read it, but the tool could not confirm that it reached the disk. Read status before sending the batch again. | `applied` |
 
-`status` always describes what is saved: after `rolled-back` it is the inventory as it was before the batch. Correct the failing item and send the whole batch again. A request that is malformed before any item is applied exits 2 with the ordinary diagnostic on stderr and changes nothing: an unknown kind or field in an item, no items or more than 32, or `reconcile` anywhere but last. With `--brief`, the action keeps every index and outcome, the count of each outcome and, for a batch that exits 2, one fixed diagnostic, within the usual 4,096 bytes.
+`status` always describes what is saved: after `rolled-back` it is the inventory as it was before the batch. Correct the failing item and send the whole batch again. A request that is malformed before any item is applied exits 2 with the ordinary diagnostic on stderr and changes nothing: an unknown kind or field in an item, no items or more than 32, or `reconcile` anywhere but last. With `--brief`, the action keeps every index and outcome, the count of each outcome and, for a batch that exits 2, one fixed diagnostic, within the usual 4,096 bytes. When the inventory's notices would push the reply past that limit, each status notice keeps its code and severity and drops its message.
 
 Pending inventory work is checked once, against the result of the whole batch. A step that a later item in the same batch undoes does not complete work. For example, `parser-not-applicable` followed by a binding to a parser with an unreviewed line leaves the source's work pending, where the same actions sent one at a time would complete it in between.
+
+That check reads completed discovery evidence within one allowance for the whole batch, newest run first. When the reply sets `inventory_work_evidence_limited`, older evidence was not read, so work it would have completed stays pending, even where the same actions sent one at a time would have completed it. Send `reconcile` afterwards to check the remaining work again.
 
 ## Full and Quick discovery
 
