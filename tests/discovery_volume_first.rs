@@ -45,6 +45,7 @@ struct World {
     volume: BTreeMap<String, u64>,
     recent: BTreeMap<String, Vec<String>>,
     full: BTreeMap<String, Vec<String>>,
+    tags: BTreeMap<(String, String), u64>,
     census: Vec<Value>,
 }
 impl World {
@@ -77,7 +78,11 @@ impl World {
             }
             "fieldset" => listing(self.recent.get(&source).map_or(&[][..], Vec::as_slice)),
             "dataset-facet" | "record-kind-facet" | "kind-fieldset" | "value-facet" => vec![],
-            "tag-detect" => vec![json!({"events":0})],
+            "tag-detect" => {
+                let tag = probe.field.clone().unwrap_or_default();
+                let events = self.tags.get(&(source, tag)).copied().unwrap_or(0);
+                vec![json!({"events":events})]
+            }
             "population" => {
                 let mut row = json!({"total":10});
                 for index in 0..probe.fields.len() {
@@ -518,4 +523,165 @@ fn native_runs_follow_the_same_order_across_pause_and_resume() {
         );
         assert_eq!(backend.started, expected, "pause after {pause_after}");
     }
+}
+
+#[test]
+fn capped_mandatory_selection_failure_stops_after_listings() {
+    let _lock = SIGNAL.lock().unwrap();
+    let sources = ["one", "two"];
+    let mut world = World::live(&sources);
+    world.recent.insert("one".into(), vec!["gamma".into()]);
+    world
+        .recent
+        .insert("two".into(), vec!["alpha".into(), "beta".into()]);
+
+    for (explicit, expected_message) in [
+        (
+            false,
+            "Population cap cannot include all observed requested kind/value fields.",
+        ),
+        (
+            true,
+            "Explicit population selections must include observed requested kind/value fields.",
+        ),
+    ] {
+        let mut r = request(&sources, "2026-01-01T00:15:00Z", true);
+        r.max_population_fields_per_source = Some(1);
+        r.max_queries = 8;
+        r.value_fields = vec!["alpha".into(), "beta".into()];
+        if explicit {
+            let mut value = serde_json::to_value(&r).unwrap();
+            value["population_fields"] = json!([
+                {"source":{"type":"two"},"fields":["alpha"]}
+            ]);
+            r = serde_json::from_value(value).unwrap();
+        }
+        let (relayed, failure) = relay(&r, &world);
+        let failure = failure.expect("capped mandatory mismatch must fail");
+        assert_eq!(failure.message, expected_message);
+        assert_eq!(relayed.len(), 6, "{:?}", kinds(&relayed));
+        assert!(
+            relayed
+                .iter()
+                .all(|probe| BASE.contains(&probe.kind.as_str())),
+            "{:?}",
+            kinds(&relayed)
+        );
+        let (executed, activated) = execute(&r, &world);
+        assert!(!activated);
+        assert_eq!(executed.len(), 6);
+        assert_eq!(ids(&r, &executed), ids(&r, &relayed));
+
+        // Resumable MCP with a tight budget surfaces the selection failure instead of budget exhaustion.
+        let run = Native::new(&r);
+        let mcp_state = run.directory.join("mcp-state.json");
+        mcp::init_resumable(
+            r.clone(),
+            &mcp_state,
+            &run.directory.join("mcp-pack.json"),
+            &run.directory.join("mcp-receipt.json"),
+            Transport::Mcp,
+        )
+        .unwrap();
+        let mut charged = 0usize;
+        let final_step = loop {
+            let step = mcp::step_resumable(&mcp_state, &[]).unwrap();
+            if step.status == "failed" {
+                break step;
+            }
+            assert_eq!(step.status, "needs-probes", "{step:?}");
+            let probe_id = step.probes[0]["probe_id"].as_str().unwrap().to_string();
+            let probe = relayed
+                .iter()
+                .find(|p| discovery::probe_id(&r.environment.view, p) == probe_id)
+                .expect("probe was planned")
+                .clone();
+            mcp::dispatch(&mcp_state, &probe_id).unwrap();
+            charged += 1;
+            let answer_path = run.directory.join(format!("ans-{charged}.json"));
+            fs::write(
+                &answer_path,
+                serde_json::to_vec(&json!({"result":world.rows(&r, &probe)})).unwrap(),
+            )
+            .unwrap();
+            let answered = mcp::step_resumable(&mcp_state, &[(probe_id, answer_path)]).unwrap();
+            if answered.status == "failed" {
+                break answered;
+            }
+        };
+        assert_eq!(charged, 6, "explicit={explicit}");
+        assert_eq!(final_step.status, "failed");
+        assert_eq!(final_step.diagnostics[0].message, expected_message);
+    }
+}
+
+#[test]
+fn native_and_relay_share_facet_order_with_positive_tag_and_listed_field() {
+    let _lock = SIGNAL.lock().unwrap();
+    network::CANCELLED.store(false, Ordering::Relaxed);
+    let sources = ["one"];
+    let mut r = request(&sources, "2026-01-01T01:00:00Z", false);
+    r.kind_fields = vec!["#type".into()];
+    let mut world = World::live(&sources);
+    world.recent.insert("one".into(), vec!["event.kind".into()]);
+    world.full.insert("one".into(), vec!["event.kind".into()]);
+    world.tags.insert(("one".into(), "type".into()), 5);
+
+    let (relayed, failure) = relay(&r, &world);
+    assert!(failure.is_none(), "{failure:?}");
+    let expected = ids(&r, &relayed);
+    let facet_fields: Vec<_> = relayed
+        .iter()
+        .filter(|probe| probe.kind == "record-kind-facet")
+        .filter_map(|probe| probe.field.as_deref())
+        .collect();
+    assert_eq!(facet_fields, ["#type", "event.kind"]);
+
+    // Resumable MCP relay completes in exact frontier order.
+    let run = Native::new(&r);
+    let mcp_state = run.directory.join("mcp-state.json");
+    mcp::init_resumable(
+        r.clone(),
+        &mcp_state,
+        &run.directory.join("mcp-pack.json"),
+        &run.directory.join("mcp-receipt.json"),
+        Transport::Mcp,
+    )
+    .unwrap();
+    let mut mcp_started = Vec::new();
+    loop {
+        let step = mcp::step_resumable(&mcp_state, &[]).unwrap();
+        if step.status == "complete" {
+            break;
+        }
+        assert_eq!(step.status, "needs-probes", "{step:?}");
+        let probe_id = step.probes[0]["probe_id"].as_str().unwrap().to_string();
+        let probe = relayed
+            .iter()
+            .find(|p| discovery::probe_id(&r.environment.view, p) == probe_id)
+            .expect("probe was planned")
+            .clone();
+        mcp::dispatch(&mcp_state, &probe_id).unwrap();
+        mcp_started.push(probe_id.clone());
+        let answer_path = run
+            .directory
+            .join(format!("mcp-{}.json", mcp_started.len()));
+        fs::write(
+            &answer_path,
+            serde_json::to_vec(&json!({"result":world.rows(&r, &probe)})).unwrap(),
+        )
+        .unwrap();
+        let answered = mcp::step_resumable(&mcp_state, &[(probe_id, answer_path)]).unwrap();
+        if answered.status == "complete" {
+            break;
+        }
+    }
+    assert_eq!(mcp_started, expected);
+
+    // Resumable native run completes with the exact same probe IDs in order.
+    let mut backend = Recorder::new(&r, &world);
+    backend.learn(&relayed);
+    let native = mcp::run_native(&run.state, &mut backend).unwrap();
+    assert_eq!(native.status, "complete", "{native:?}");
+    assert_eq!(backend.started, expected);
 }

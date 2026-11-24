@@ -984,25 +984,7 @@ fn stratified_source(
             .filter(|(_, count)| **count > 0)
             .map(|(field, _)| format!("#{field}")),
     );
-    let mandatory = r
-        .kind_fields
-        .iter()
-        .chain(&r.value_fields)
-        .filter(|field| observed.contains(*field))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    if field_selection(r, s).is_none() && mandatory.len() > limit {
-        return Err(fail(
-            "Population cap cannot include all observed requested kind/value fields.",
-        ));
-    }
-    if let Some(fields) = field_selection(r, s)
-        && mandatory.iter().any(|field| !fields.contains(field))
-    {
-        return Err(fail(
-            "Explicit population selections must include observed requested kind/value fields.",
-        ));
-    }
+    let mandatory = validate_mandatory_population(r, s, &observed)?;
     let newly_seen = rare_fields.difference(&sampled).cloned().collect();
     let mut selected = BTreeSet::new();
     measured.fields = match field_selection(r, s) {
@@ -1162,6 +1144,17 @@ pub(crate) fn frontier_with_policy(
                 "Quiet or empty measurement windows cannot replace an existing schema.",
             ));
         }
+        let mut known_observed: BTreeSet<String> = fields.iter().cloned().collect();
+        if let Some(rows) = answered.get(&id(&base[1]))
+            && record_kind_candidates(r).contains(&"#event.dataset")
+            && kind_facet(rows, "#event.dataset", None)?
+                .values
+                .iter()
+                .any(|(_, count)| *count > 0)
+        {
+            known_observed.insert("#event.dataset".into());
+        }
+        validate_mandatory_population(r, s, &known_observed)?;
         listed.push((s, base, fields, full_window));
     }
     if !pending.is_empty() {
@@ -1185,27 +1178,60 @@ pub(crate) fn frontier_with_policy(
             continue;
         }
         let measured = sampled_measurements(r, s, fields.clone(), full_window);
-        let mut dependent = selected_population_probes(r, s, &measured)?;
+        let pop_probes = selected_population_probes(r, s, &measured)?;
         let tag_probes = tag_probes(r, s, full_window)?;
-        dependent.extend(tag_probes.iter().cloned());
-        dependent.extend(record_kind_probes(r, s, &fields, &BTreeMap::new())?);
-        let waiting = unanswered(r, &dependent, answered);
-        if !waiting.is_empty() {
-            pending.extend(waiting);
-            continue;
+        let tags_ready = unanswered(r, &tag_probes, answered).is_empty();
+        let tags = if tags_ready {
+            let mut tags = BTreeMap::new();
+            for p in &tag_probes {
+                tags.insert(
+                    p.field.clone().expect("tag probe has a name"),
+                    count_row(&answered[&id(p)])?,
+                );
+            }
+            tags
+        } else {
+            BTreeMap::new()
+        };
+        let mut dependent = pop_probes.clone();
+        dependent.extend(tag_probes);
+        dependent.extend(record_kind_probes(r, s, &fields, &tags)?);
+        if tags_ready && unanswered(r, &pop_probes, answered).is_empty() {
+            dependent.extend(value_probes(r, s, full_window)?);
         }
-        let mut tags = BTreeMap::new();
-        for p in &tag_probes {
-            tags.insert(
-                p.field.clone().expect("tag probe has a name"),
-                count_row(&answered[&id(p)])?,
-            );
-        }
-        let mut final_probes = record_kind_probes(r, s, &fields, &tags)?;
-        final_probes.extend(value_probes(r, s, full_window)?);
-        pending.extend(unanswered(r, &final_probes, answered));
+        pending.extend(unanswered(r, &dependent, answered));
     }
     Ok(pending)
+}
+
+fn validate_mandatory_population(
+    r: &DiscoverRequest,
+    s: &Scope,
+    observed: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, Diagnostic> {
+    let Some(limit) = r.max_population_fields_per_source else {
+        return Ok(BTreeSet::new());
+    };
+    let mandatory = r
+        .kind_fields
+        .iter()
+        .chain(&r.value_fields)
+        .filter(|field| observed.contains(*field))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if field_selection(r, s).is_none() && mandatory.len() > limit {
+        return Err(fail(
+            "Population cap cannot include all observed requested kind/value fields.",
+        ));
+    }
+    if let Some(fields) = field_selection(r, s)
+        && mandatory.iter().any(|field| !fields.contains(field))
+    {
+        return Err(fail(
+            "Explicit population selections must include observed requested kind/value fields.",
+        ));
+    }
+    Ok(mandatory)
 }
 
 fn sparse_fieldset_probe(r: &DiscoverRequest, s: &Scope) -> Result<Probe, Diagnostic> {
@@ -1393,6 +1419,7 @@ impl<B: SearchBackend> Run<'_, B> {
         let mut listings = Vec::new();
         for (s, volume) in sources.iter().zip(volumes) {
             let mut datasets = Vec::new();
+            let mut dataset_observed = false;
             let mut fields = Vec::new();
             let mut answered = BTreeMap::new();
             answered.insert(
@@ -1408,11 +1435,9 @@ impl<B: SearchBackend> Run<'_, B> {
                 let rows = self.execute(p)?;
                 match kind.as_str() {
                     "dataset-facet" => {
-                        datasets = kind_facet(&rows, "#event.dataset", None)?
-                            .values
-                            .into_iter()
-                            .map(|(value, _)| value)
-                            .collect();
+                        let facet = kind_facet(&rows, "#event.dataset", None)?;
+                        dataset_observed = facet.values.iter().any(|(_, count)| *count > 0);
+                        datasets = facet.values.into_iter().map(|(value, _)| value).collect();
                     }
                     "fieldset" => {
                         fields = fieldset_fields(&rows)?;
@@ -1437,6 +1462,15 @@ impl<B: SearchBackend> Run<'_, B> {
                 return Err(fail(
                     "Quiet or empty measurement windows cannot replace an existing schema.",
                 ));
+            }
+            if self.request.depth != DiscoveryDepth::SourcesOnly {
+                let mut known_observed: BTreeSet<String> = fields.iter().cloned().collect();
+                if dataset_observed
+                    && record_kind_candidates(self.request).contains(&"#event.dataset")
+                {
+                    known_observed.insert("#event.dataset".into());
+                }
+                validate_mandatory_population(self.request, s, &known_observed)?;
             }
             listings.push((datasets, fields, full_window, answered));
         }

@@ -88,6 +88,20 @@ fn status(dir: &Path) -> Value {
     );
     serde_json::from_slice(&output.stdout).unwrap()
 }
+fn status_brief(dir: &Path) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .env("HOME", dir)
+        .args(["status", "--json", "--brief", "--state"])
+        .arg(state(dir))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
 fn fixture(dir: &Path, name: &str, value: Value) -> String {
     let path = dir.join(name);
     write(&path, &value);
@@ -512,4 +526,123 @@ fn standalone_earlier_plan_checkpoints_refuse_every_lifecycle_step() {
         }
         assert_eq!(fs::read(&path).unwrap(), retained);
     }
+}
+
+#[test]
+fn earlier_plan_status_preserves_failure_and_row_limit_guidance() {
+    // 1. Failed zero-volume run retains failed_discovery.code in brief status.
+    let dir = Temp::new();
+    let path = run_in_phase(&dir.0, "failed");
+    let v3_brief = status_brief(&dir.0);
+    assert_eq!(
+        v3_brief["failed_discovery"]["code"], "DISCOVERY_EVIDENCE",
+        "{v3_brief}"
+    );
+    as_earlier_plan(&path, true);
+    let retained = fs::read(&path).unwrap();
+    let v2_brief = status_brief(&dir.0);
+    assert_eq!(
+        v2_brief["failed_discovery"], v3_brief["failed_discovery"],
+        "{v2_brief}"
+    );
+    assert_eq!(fs::read(&path).unwrap(), retained);
+
+    // 2. Paused row-limit run retains discovery_row_limit and narrower-window advice.
+    let dir = Temp::new();
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":"synthetic"}]}),
+    );
+    call(&dir.0, prepare_request(10));
+    let p1 = call(&dir.0, json!({"kind":"next-probe"}))["action"]["probe"]["probe_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let f1 = fixture(&dir.0, "vol.json", json!({"result":[{"events":10}]}));
+    let p2 = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":p1,"result_file":f1}}),
+    )["action"]["probe"]["probe_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let f2 = fixture(&dir.0, "ds.json", json!({"result":[]}));
+    let p3 = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":p2,"result_file":f2}}),
+    )["action"]["probe"]["probe_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rows: Vec<Value> = (0..10_000)
+        .map(|i| json!({"field":format!("f{i}")}))
+        .collect();
+    let f3 = fixture(&dir.0, "fieldset-10k.json", json!({"result":rows}));
+    let paused = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":p3,"result_file":f3}}),
+    );
+    assert_eq!(paused["action"]["state"], "paused", "{paused}");
+
+    let v3_brief = status_brief(&dir.0);
+    let v3_full = status(&dir.0);
+    assert_eq!(
+        v3_brief["discovery_row_limit"]["code"], "SEARCH_ROW_LIMIT",
+        "{v3_brief}"
+    );
+    let has_window_advice = |full: &Value| {
+        full["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|line| line.contains("narrower") || line.contains("row limit"))
+    };
+    assert!(has_window_advice(&v3_full), "{v3_full}");
+
+    let path = checkpoint(&dir.0, 0);
+    as_earlier_plan(&path, true);
+    let retained = fs::read(&path).unwrap();
+    let v2_brief = status_brief(&dir.0);
+    let v2_full = status(&dir.0);
+    assert_eq!(
+        v2_brief["discovery_row_limit"], v3_brief["discovery_row_limit"],
+        "{v2_brief}"
+    );
+    assert!(has_window_advice(&v2_full), "{v2_full}");
+    assert_eq!(fs::read(&path).unwrap(), retained);
+}
+
+#[test]
+fn unrelated_prepare_beside_exhausted_earlier_plan_does_not_replay_it() {
+    let dir = Temp::new();
+    confirm(&dir.0);
+    call(&dir.0, prepare_request(1));
+    let reserved = call(&dir.0, json!({"kind":"next-probe"}));
+    let probe = reserved["action"]["probe"]["probe_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let file = fixture(
+        &dir.0,
+        "unusable.json",
+        json!({"result":[{"field":"shape-mismatch"}]}),
+    );
+    let paused = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe,"result_file":file}}),
+    );
+    assert_eq!(paused["action"]["state"], "paused", "{paused}");
+    let path = checkpoint(&dir.0, 0);
+    as_earlier_plan(&path, true);
+    let inspected = mcp::inspect_state(&path).unwrap();
+    assert!(!mcp::has_discovery_work_after_resume(&inspected));
+    let retained = fs::read(&path).unwrap();
+    call(&dir.0, prepare_request(2));
+    assert_eq!(runs(&dir.0), 2);
+    assert_eq!(fs::read(&path).unwrap(), retained);
 }

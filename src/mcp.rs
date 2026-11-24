@@ -2066,7 +2066,8 @@ fn replay_mcp(state: &State, remaining: Duration) -> (Option<Pack>, DiscoverRepo
 pub fn has_discovery_work_after_resume(state: &State) -> bool {
     state.session.as_ref().is_some_and(|session| {
         session.attempts_len() < state.request.max_queries as usize
-            || (session.transport == Transport::Mcp
+            || (state.discovery_algorithm == DISCOVERY_ALGORITHM
+                && session.transport == Transport::Mcp
                 && replay_mcp(state, Duration::from_secs(state.request.max_seconds))
                     .0
                     .is_some())
