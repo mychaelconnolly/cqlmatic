@@ -327,6 +327,8 @@ fn source_only_pack_and_reconciliation_cannot_claim_full_map() {
         ..Default::default()
     }).unwrap();
     state.packs.push(PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: "synthetic-pack.json".into(),
         content_digest: pack.content_digest.clone(),
         input_content_digest: None,
@@ -368,6 +370,8 @@ fn declared_parser_fields_are_not_observed_and_mismatched_pack_digest_fails() {
     assert_eq!(quiet.values, Progress::NotApplicable);
     assert!(!quiet.values_requested);
     state.packs.push(PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: "changed.json".into(),
         content_digest: "f".repeat(64),
         input_content_digest: None,
@@ -435,6 +439,8 @@ fn measured_pack(date: &str, coverage: &str, observed: bool) -> Pack {
 }
 fn retain(state: &mut InventoryState, pack: &Pack, path: &str) -> PackReference {
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: path.into(),
         content_digest: pack.content_digest.clone(),
         input_content_digest: None,
@@ -882,6 +888,8 @@ fn full_environment_completion_requires_newly_imported_selectors_to_be_confirmed
         .unwrap();
     let pack = imported_pack(source(), "complete", NOW);
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: "synthetic-pack.json".into(),
         content_digest: pack.content_digest.clone(),
         input_content_digest: None,

@@ -193,6 +193,9 @@
           "format": "uint",
           "minimum": 0
         },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "elapsed_seconds": {
           "type": "number",
           "format": "double"
@@ -216,6 +219,12 @@
         },
         "pack_path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "quick_depth": {
           "$ref": "#/$defs/QuickDepth",
@@ -697,6 +706,9 @@
     "PackReference": {
       "type": "object",
       "properties": {
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "content_digest": {
           "type": "string"
         },
@@ -717,6 +729,12 @@
         },
         "path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

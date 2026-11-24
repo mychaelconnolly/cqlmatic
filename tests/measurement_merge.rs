@@ -541,6 +541,8 @@ fn a_zero_facet_is_measured_without_a_population_rate_or_full_inventory_completi
         )
         .unwrap();
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: "/synthetic/pack.json".into(),
         content_digest: pack.content_digest.clone(),
         input_content_digest: None,

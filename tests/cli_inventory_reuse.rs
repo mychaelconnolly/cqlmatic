@@ -172,6 +172,8 @@ fn state(mode: DiscoveryMode) -> InventoryState {
 
 fn attach(state: &mut InventoryState, path: &Path, digest: String) {
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: path.to_string_lossy().into_owned(),
         content_digest: digest,
         input_content_digest: None,

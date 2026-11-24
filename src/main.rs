@@ -559,10 +559,42 @@ fn select_inventory(
             Ok((None, false))
         };
     }
-    let data = storage::read_bytes(&path, inventory::MAX_STATE_BYTES)?;
-    let state = match parse_inventory_state(&data) {
+    let (selection, active_pack) = inventory_cli::read_with_pack_reload(
+        &path,
+        |data| {
+            let mut candidate_context = context.clone();
+            let (selection, applied) = prepare_inventory_selection(
+                &path,
+                data,
+                selected_path.is_some(),
+                &mut candidate_context,
+                pack,
+            )?;
+            Ok((selection, applied, candidate_context))
+        },
+        |(selection, _, _)| match selection {
+            Some(quick) => load_active_pack(&quick.state),
+            None => Ok(None),
+        },
+    )?;
+    let (mut quick, target_applied, candidate_context) = selection;
+    if let Some(quick) = &mut quick {
+        quick.active_pack = active_pack;
+    }
+    *context = candidate_context;
+    Ok((quick, target_applied))
+}
+
+fn prepare_inventory_selection(
+    path: &Path,
+    data: &[u8],
+    strict: bool,
+    context: &mut Context,
+    pack: Option<&Pack>,
+) -> Result<(Option<SavedInventory>, bool), Diagnostic> {
+    let state = match parse_inventory_state(data) {
         Ok(state) => state,
-        Err(d) if selected_path.is_none() && pack.is_some() => {
+        Err(d) if !strict && pack.is_some() => {
             return Err(Diagnostic::warning(
                 "CQL_QUICK_INVENTORY_IGNORED",
                 format!(
@@ -573,7 +605,7 @@ fn select_inventory(
         }
         Err(d) => return Err(d),
     };
-    if selected_path.is_none() && state.target.is_none() {
+    if !strict && state.target.is_none() {
         return Ok((None, false));
     }
     if state.active_pack.is_none() && !state.packs.is_empty() {
@@ -611,13 +643,12 @@ fn select_inventory(
         }
         return Ok((None, false));
     }
-    let mut quick = SavedInventory {
-        path,
+    let quick = SavedInventory {
+        path: path.to_path_buf(),
         state,
         active_pack: None,
     };
     let target_applied = apply_inventory_target(context, pack, &quick)?;
-    quick.active_pack = load_active_pack(&quick.state)?;
     Ok((Some(quick), target_applied))
 }
 

@@ -871,9 +871,9 @@ pub use session::has_search_allowance;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
     has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
-    inventory_probe, is_resumable, outstanding_probe_id, outstanding_refusal, pause,
-    recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
-    run_native, settle_cancelled, step_resumable, time_limit_passed,
+    inspect_inventory_owner_path, inventory_probe, is_resumable, outstanding_probe_id,
+    outstanding_refusal, pause, recover_native_cleanup, resumable_info, resumable_request, resume,
+    resume_inventory, run_native, settle_cancelled, step_resumable, time_limit_passed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1373,6 +1373,24 @@ pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
     inspect_state_for_producer(path, env!("CARGO_PKG_VERSION"))
 }
 fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diagnostic> {
+    inspect_checkpoint(path, producer, None)
+}
+
+/// Verify a marked run's surviving activation artifacts. The inventory cleaner
+/// supplies the verified live or detached paths, which may now be absent.
+pub fn inspect_prune_leftovers(
+    path: &Path,
+    pack: &Path,
+    receipt: &Path,
+) -> Result<State, Diagnostic> {
+    inspect_checkpoint(path, env!("CARGO_PKG_VERSION"), Some((pack, receipt)))
+}
+
+fn inspect_checkpoint(
+    path: &Path,
+    producer: &str,
+    leftovers: Option<(&Path, &Path)>,
+) -> Result<State, Diagnostic> {
     let bytes = storage::read_bytes(path, MAX_PACK_BYTES)?;
     let header: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
@@ -1457,11 +1475,16 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
     if state.status == "activated" {
         let expected = state.pack_sha256.as_deref().ok_or_else(tampered)?;
         let intent = state.activation.as_ref().ok_or_else(tampered)?;
-        let committed = storage::read_bytes(&state.pack, MAX_PACK_BYTES).map_err(|_| tampered())?;
-        if expected != sha256_hex(&committed)
-            || expected != intent.pack_sha256
-            || storage::read_bytes(&state.receipt, MAX_PACK_BYTES)
-                .map_or(true, |bytes| bytes != intent.receipt_bytes.as_bytes())
+        let (pack, receipt) = match leftovers {
+            Some((pack, receipt)) => (optional_bytes(pack)?, optional_bytes(receipt)?),
+            None => (
+                Some(storage::read_bytes(&state.pack, MAX_PACK_BYTES).map_err(|_| tampered())?),
+                Some(storage::read_bytes(&state.receipt, MAX_PACK_BYTES).map_err(|_| tampered())?),
+            ),
+        };
+        if expected != intent.pack_sha256
+            || pack.is_some_and(|committed| expected != sha256_hex(&committed))
+            || receipt.is_some_and(|committed| committed != intent.receipt_bytes.as_bytes())
             || state.failure.is_some()
         {
             return Err(tampered());
@@ -2909,6 +2932,8 @@ mod recovery_tests {
             )
             .unwrap();
         inventory.discovery_runs.push(DiscoveryRun {
+            pruned_at: None,
+            cleanup_pending: false,
             state_path: run.state.to_str().unwrap().into(),
             pack_path: run.pack.to_str().unwrap().into(),
             receipt_path: run.receipt.to_str().unwrap().into(),

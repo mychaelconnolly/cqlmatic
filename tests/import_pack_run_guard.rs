@@ -1064,22 +1064,30 @@ fn paused_run_withholds_resume_advice_when_sibling_blocks_continuing() {
 
 #[test]
 fn replay_and_update_noop_refuse_missing_completed_pending_evidence() {
-    let inv = Inventory::new(&["expected"]);
+    let inv = Inventory::new(&["baseline"]);
     let seed = inv.import("seed", "Seed", false);
     inv.call(seed.clone());
     inv.call(json!({
         "kind":"record-inventory-hints",
         "environment":environment(),
-        "hints":[{"source":{"type":"expected"},"fields":["pending_field"]}]
+        "hints":[{"source":{"type":"expected"}}]
     }));
+    inv.confirm(&["expected"]);
     let run = inv.prepare(4);
     let probe = inv.next(&run);
     inv.settle(&run, &probe);
-    assert_eq!(
-        read(&inv.state())["discovery_runs"][0]["status"],
-        "complete"
-    );
-    assert!(read(&inv.state())["pending_inventory"][0]["resolution"].is_null());
+    let mut state = read(&inv.state());
+    assert_eq!(state["discovery_runs"][0]["status"], "complete");
+    // Keep an unresolved source revision that this sources-only run can prove.
+    let work = state["pending_inventory"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|work| work["source"]["type"] == "expected")
+        .unwrap();
+    assert!(work["resolution"].is_object());
+    work["resolution"] = Value::Null;
+    write(&inv.state(), &state);
 
     // Remove only the completed run's checkpoint while keeping its pack and receipt.
     let backup = run.bytes();

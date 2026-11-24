@@ -2881,6 +2881,8 @@ fn map_at(state: &Path) {
     Writer::acquire(&path).unwrap().commit(&pack).unwrap();
     let mut inventory: InventoryState = serde_json::from_slice(&fs::read(state).unwrap()).unwrap();
     let active = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: path.to_string_lossy().into_owned(),
         content_digest: pack.content_digest.clone(),
         input_content_digest: None,
