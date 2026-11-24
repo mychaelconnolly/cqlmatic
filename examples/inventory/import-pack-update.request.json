@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "action": {
+    "kind": "import-pack",
+    "pack_file": "updated-pack.json",
+    "mode": "update"
+  }
+}

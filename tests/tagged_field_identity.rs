@@ -554,7 +554,7 @@ fn an_undated_negative_tag_completes_activation_with_a_warning() {
 }
 
 #[test]
-fn legacy_history_stages_the_same_predecessor_and_can_import() {
+fn legacy_history_stages_the_same_predecessor_and_replays_without_replacing_it() {
     let workflow = Workflow::new();
     workflow.confirm();
     let mut first = pack(2, 2, vec![tag(LEGACY, "#foo", 2)], vec![]);
@@ -614,9 +614,13 @@ fn legacy_history_stages_the_same_predecessor_and_can_import() {
         sha256_hex(&expected),
         "b4fb5c0518d66e849ca427ca602add6fcdc67bedf50cceecf8b0b9cecea35a8d"
     );
-    let path = workflow.import("next.json", &predecessor);
-    let active = Path::new(path["status"]["active_pack"]["path"].as_str().unwrap());
-    storage::read_pack(active).unwrap();
+    let before = fs::read(&state_path).unwrap();
+    let replay = workflow.import("next.json", &predecessor);
+    assert_eq!(replay["action"]["already_imported"], true);
+    assert_eq!(replay["action"]["pack_updated"], false);
+    assert!(replay["status"]["active_pack"].is_null());
+    assert_eq!(fs::read(&state_path).unwrap(), before);
+    assert_eq!(fs::read(staged).unwrap(), bytes);
 }
 
 #[test]

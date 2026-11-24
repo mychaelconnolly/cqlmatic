@@ -424,8 +424,15 @@ pub fn linked_stale(pack: &Pack, ids: &[String]) -> bool {
     })
 }
 
+type MeasurementKey = (
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+);
+
 fn measurement_key(
     pack: &Pack,
+    created: time::OffsetDateTime,
     provenance_ids: &[String],
     window: &str,
 ) -> Option<(
@@ -436,7 +443,6 @@ fn measurement_key(
     let (start, end) = window.split_once('/')?;
     let start = parse_time(start).ok()?;
     let end = parse_time(end).ok()?;
-    let created = parse_time(&pack.created_at).ok()?;
     if start >= end {
         return None;
     }
@@ -467,16 +473,33 @@ pub fn source_measurement(
     time::OffsetDateTime,
     time::OffsetDateTime,
 )> {
+    source_measurement_at(pack, source, parse_time(&pack.created_at).ok()?)
+}
+
+fn source_measurement_at(
+    pack: &Pack,
+    source: &LegacySource,
+    created: time::OffsetDateTime,
+) -> Option<MeasurementKey> {
     let evidence = source.evidence.as_ref()?;
     evidence.observed?;
     measurement_key(
         pack,
+        created,
         &source.provenance_ids,
         evidence.observation_window.as_deref()?,
     )
 }
 
 pub(crate) fn field_measurement(pack: &Pack, field: &LegacyField) -> Option<FieldMeasurement> {
+    field_measurement_at(pack, field, parse_time(&pack.created_at).ok()?)
+}
+
+fn field_measurement_at(
+    pack: &Pack,
+    field: &LegacyField,
+    created: time::OffsetDateTime,
+) -> Option<FieldMeasurement> {
     if field.evidence_kind != "observed"
         || field.refresh_status.is_some()
         || linked_stale(pack, &field.provenance_ids)
@@ -507,6 +530,7 @@ pub(crate) fn field_measurement(pack: &Pack, field: &LegacyField) -> Option<Fiel
     }
     let (end, start, retrieved_at) = measurement_key(
         pack,
+        created,
         &field.provenance_ids,
         field.observation_window.as_deref()?,
     )?;
@@ -827,24 +851,23 @@ impl PackData {
 
 /// Import compatible historical records without refreshing or weakening retained evidence.
 pub fn import_history(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
-    old.validate()?;
-    candidate.validate()?;
-    if old.environment != candidate.environment {
-        return Err(Diagnostic::error(
-            "PACK_ENVIRONMENT_MISMATCH",
-            "Cloud, tenant and searchable target must all match.",
-        ));
-    }
+    validate_import_pair(old, candidate)?;
     if old.content_digest == candidate.content_digest {
         return Ok(old.clone());
     }
     let mut data = old.data.clone();
-    for (retained, imported, key) in [
-        (&mut data.sources, &candidate.data.sources, "id"),
-        (&mut data.fields, &candidate.data.fields, "id"),
-        (&mut data.values, &candidate.data.values, "id"),
-        (&mut data.provenance, &candidate.data.provenance, "id"),
+    for (collection, retained, imported, key) in [
+        ("sources", &mut data.sources, &candidate.data.sources, "id"),
+        ("fields", &mut data.fields, &candidate.data.fields, "id"),
+        ("values", &mut data.values, &candidate.data.values, "id"),
         (
+            "provenance",
+            &mut data.provenance,
+            &candidate.data.provenance,
+            "id",
+        ),
+        (
+            "annotations",
             &mut data.annotations,
             &candidate.data.annotations,
             "source_id",
@@ -856,11 +879,23 @@ pub fn import_history(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> 
                 .find(|previous| previous[key] == record[key])
             {
                 if previous != record {
-                    return Err(invalid(
-                        "Imported record ID conflicts with retained evidence.",
-                    ));
+                    return Err(invalid(&format!(
+                        "Imported {collection} {key} {} conflicts with retained evidence. Submit import-pack with mode: \"update\" to update matching records.",
+                        record[key],
+                    )));
                 }
             } else {
+                if collection == "sources"
+                    && let Some(selectors) = selector_key(record)
+                    && retained
+                        .iter()
+                        .any(|prior| selector_key(prior) == Some(selectors))
+                {
+                    return Err(invalid(&format!(
+                        "Imported sources have duplicate source selectors (repo: {:?}, type: {:?}). Submit import-pack with mode: \"update\" to update matching records.",
+                        selectors.0, selectors.1,
+                    )));
+                }
                 retained.push(record.clone());
             }
         }
@@ -874,6 +909,987 @@ pub fn import_history(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> 
         old.created_at.clone()
     };
     Pack::new(old.environment.clone(), created_at, data)
+}
+
+fn validate_import_pair(old: &Pack, candidate: &Pack) -> Result<(), Diagnostic> {
+    old.validate()?;
+    candidate.validate()?;
+    if old.environment != candidate.environment {
+        return Err(Diagnostic::error(
+            "PACK_ENVIRONMENT_MISMATCH",
+            "Cloud, tenant and searchable target must all match.",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default, Debug, Serialize)]
+pub struct ImportCounts {
+    pub sources_updated: usize,
+    pub sources_added: usize,
+    pub sources_unchanged: usize,
+    pub fields_updated: usize,
+    pub fields_added: usize,
+    pub fields_unchanged: usize,
+    pub values_updated: usize,
+    pub values_added: usize,
+    pub annotations_added: usize,
+    pub reidentified: Reidentified,
+}
+
+#[derive(Default, Debug, Serialize)]
+pub struct Reidentified {
+    pub sources: usize,
+    pub fields: usize,
+    pub values: usize,
+    pub provenance: usize,
+}
+
+impl ImportCounts {
+    pub fn appended(previous: Option<&Pack>, pack: &Pack, input: &Pack) -> Self {
+        let old = previous.map(|p| &p.data);
+        let old_sources = old.map_or(0, |data| data.sources.len());
+        let old_fields = old.map_or(0, |data| data.fields.len());
+        Self {
+            sources_added: pack.data.sources.len() - old_sources,
+            sources_unchanged: input.data.sources.len() - (pack.data.sources.len() - old_sources),
+            fields_added: pack.data.fields.len() - old_fields,
+            fields_unchanged: input.data.fields.len() - (pack.data.fields.len() - old_fields),
+            values_added: pack.data.values.len() - old.map_or(0, |data| data.values.len()),
+            annotations_added: pack.data.annotations.len()
+                - old.map_or(0, |data| data.annotations.len()),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotAppliedRecord {
+    pub collection: &'static str,
+    pub id: String,
+    pub reason: &'static str,
+}
+
+#[derive(Debug)]
+pub struct ImportUpdateResult {
+    pub pack: Pack,
+    pub counts: ImportCounts,
+    pub not_applied: Vec<NotAppliedRecord>,
+}
+
+fn selector_key(record: &Value) -> Option<(Option<&str>, Option<&str>)> {
+    let selectors = record["selectors"].as_object()?;
+    Some((
+        selectors.get("repo").and_then(Value::as_str),
+        selectors.get("type").and_then(Value::as_str),
+    ))
+}
+
+fn scoped(record: &Value) -> bool {
+    selector_key(record).is_some_and(|(repo, ty)| repo.is_some() || ty.is_some())
+}
+
+pub fn validate_update_input(pack: &Pack) -> Result<(), Diagnostic> {
+    let mut identities = BTreeMap::new();
+    for record in &pack.data.fields {
+        let (source, path, tag) = record_field_parts(record);
+        if let Some(previous) = identities.insert(field_identity(source, path, tag), id(record)) {
+            return Err(invalid(&format!(
+                "Duplicate incoming fields {:?} and {previous:?} for source {source:?}.",
+                id(record)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn record_indices(records: &[Value]) -> BTreeMap<&str, usize> {
+    records
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (id(v), i))
+        .collect()
+}
+
+fn imported_id(
+    collection: &str,
+    prefix: &str,
+    record: &Value,
+    used: &mut BTreeSet<String>,
+    count: &mut usize,
+    identical: impl Fn(&str) -> bool,
+) -> String {
+    for counter in 0u64.. {
+        let bytes = serde_json::to_vec(&(collection, id(record), record, counter))
+            .expect("validated JSON records are serializable");
+        let hash = sha256_hex(&bytes);
+        let id = format!("{prefix}:import:{}", &hash[..16]);
+        if used.insert(id.clone()) || identical(&id) {
+            *count += 1;
+            return id;
+        }
+    }
+    unreachable!("finite pack record IDs cannot exhaust the import ID space")
+}
+
+fn discovery_proof_class(record: &Value) -> Option<&'static str> {
+    let class = match record["canonical_source"].as_str()? {
+        "CrowdStrike Falcon MCP falcon_search_ngsiem (agent-relayed)" => "prov:mcp",
+        "Falcon NG-SIEM search API" => "prov:api",
+        _ => return None,
+    };
+    let tail = id(record).strip_prefix(class)?.strip_prefix(':')?;
+    let hash = |s: &str| {
+        s.len() == 16
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let valid = match tail.split(':').collect::<Vec<_>>().as_slice() {
+        ["import", digest] => hash(digest),
+        [clock, digest, kind, index] => {
+            let bytes = clock.as_bytes();
+            bytes.len() >= 16
+                && bytes[..8].iter().all(u8::is_ascii_digit)
+                && matches!(bytes[8], b'T' | b't')
+                && bytes[9..15].iter().all(u8::is_ascii_digit)
+                && (bytes[15..].iter().all(u8::is_ascii_digit)
+                    || matches!(bytes.last(), Some(b'Z' | b'z'))
+                        && bytes[15..bytes.len() - 1].iter().all(u8::is_ascii_digit))
+                && hash(digest)
+                && !kind.is_empty()
+                && !index.is_empty()
+                && index.bytes().all(|b| b.is_ascii_digit())
+        }
+        _ => false,
+    };
+    valid.then_some(class)
+}
+
+fn value_identity<'a>(field: &'a str, record: &'a Value) -> (&'a str, &'a str, String) {
+    (
+        field,
+        record["value_kind"].as_str().unwrap(),
+        record["value"].to_string(),
+    )
+}
+
+struct ImportIds<'a> {
+    sources: BTreeMap<&'a str, String>,
+    fields: BTreeMap<&'a str, String>,
+    values: BTreeMap<&'a str, String>,
+    provenance: BTreeMap<&'a str, String>,
+    field_matches: BTreeMap<&'a str, Vec<usize>>,
+    reidentified: Reidentified,
+}
+
+fn import_ids<'a>(old: &PackData, fresh: &'a PackData) -> Result<ImportIds<'a>, Diagnostic> {
+    let source_indices = record_indices(&old.sources);
+    let selector_indices: BTreeMap<_, _> = old
+        .sources
+        .iter()
+        .filter_map(|v| Some((selector_key(v)?, id(v))))
+        .collect();
+    let retained_ids: BTreeSet<_> = [&old.sources, &old.fields, &old.values, &old.provenance]
+        .into_iter()
+        .flatten()
+        .map(id)
+        .collect();
+    // Reserve incoming IDs too so a generated ID cannot take an unmatched record's ID.
+    let mut used = retained_ids
+        .iter()
+        .copied()
+        .chain(
+            [
+                &fresh.sources,
+                &fresh.fields,
+                &fresh.values,
+                &fresh.provenance,
+            ]
+            .into_iter()
+            .flatten()
+            .map(id),
+        )
+        .map(str::to_owned)
+        .collect();
+    let mut counts = Reidentified::default();
+    let mut sources = BTreeMap::new();
+    for record in &fresh.sources {
+        let original = id(record);
+        let same_id = source_indices.get(original).map(|&i| &old.sources[i]);
+        let key = selector_key(record);
+        let matched = match key {
+            Some(key) => selector_indices.get(&key).copied(),
+            None => same_id.filter(|v| selector_key(v).is_none()).map(id),
+        };
+        if let Some(prior) = same_id {
+            let conflict = if key.is_none() && scoped(prior) {
+                Some(id(prior))
+            } else {
+                matched.filter(|target| scoped(record) && !scoped(prior) && *target != original)
+            };
+            if let Some(target) = conflict {
+                return Err(invalid(&format!(
+                    "Incoming source {original:?} has an ambiguous identity with retained source {target:?}."
+                )));
+            }
+        }
+        let target = if let Some(target) = matched {
+            target.to_owned()
+        } else if retained_ids.contains(original) {
+            let prefix = original
+                .splitn(3, ':')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(":");
+            imported_id(
+                "sources",
+                &prefix,
+                record,
+                &mut used,
+                &mut counts.sources,
+                |_| false,
+            )
+        } else {
+            original.to_owned()
+        };
+        sources.insert(original, target);
+    }
+
+    let mut identities = BTreeMap::<_, Vec<usize>>::new();
+    for (index, record) in old.fields.iter().enumerate() {
+        let (source, path, tag) = record_field_parts(record);
+        identities
+            .entry(field_identity(source, path, tag))
+            .or_default()
+            .push(index);
+    }
+    let mut fields = BTreeMap::new();
+    let mut field_matches = BTreeMap::new();
+    for record in &fresh.fields {
+        let original = id(record);
+        let (source, path, tag) = record_field_parts(record);
+        let identity = field_identity(&sources[source], path, tag);
+        let target = if let Some(matches) = identities.get(&identity) {
+            field_matches.insert(original, matches.clone());
+            id(&old.fields[matches[0]]).to_owned()
+        } else if retained_ids.contains(original) {
+            imported_id(
+                "fields",
+                "env:field",
+                record,
+                &mut used,
+                &mut counts.fields,
+                |_| false,
+            )
+        } else {
+            original.to_owned()
+        };
+        fields.insert(original, target);
+    }
+
+    let proofs = record_indices(&old.provenance);
+    let mut provenance = BTreeMap::new();
+    for record in &fresh.provenance {
+        let original = id(record);
+        let target = if proofs
+            .get(original)
+            .is_some_and(|&i| old.provenance[i] != *record)
+        {
+            imported_id(
+                "provenance",
+                discovery_proof_class(record).unwrap_or("prov"),
+                record,
+                &mut used,
+                &mut counts.provenance,
+                |id| {
+                    proofs.get(id).is_some_and(|&index| {
+                        let mut rewritten = record.clone();
+                        rewritten["id"] = Value::String(id.into());
+                        old.provenance[index] == rewritten
+                    })
+                },
+            )
+        } else {
+            original.to_owned()
+        };
+        provenance.insert(original, target);
+    }
+
+    let value_indices = record_indices(&old.values);
+    let mut value_keys = BTreeMap::new();
+    for record in &old.values {
+        let key = value_identity(record["field_id"].as_str().unwrap(), record);
+        // None marks an ambiguous key. Exact ID matches still take precedence.
+        value_keys
+            .entry(key)
+            .and_modify(|slot| *slot = None)
+            .or_insert(Some(id(record)));
+    }
+    let mut values = BTreeMap::new();
+    for record in &fresh.values {
+        let original = id(record);
+        let key = value_identity(&fields[record["field_id"].as_str().unwrap()], record);
+        let same_id = value_indices.get(original).map(|&i| &old.values[i]);
+        let target =
+            if same_id.is_some_and(|v| value_identity(v["field_id"].as_str().unwrap(), v) == key) {
+                original.to_owned()
+            } else if let Some(Some(target)) = value_keys.get(&key) {
+                (*target).to_owned()
+            } else if retained_ids.contains(original) {
+                imported_id(
+                    "values",
+                    "env:value",
+                    record,
+                    &mut used,
+                    &mut counts.values,
+                    |_| false,
+                )
+            } else {
+                original.to_owned()
+            };
+        values.insert(original, target);
+    }
+
+    Ok(ImportIds {
+        sources,
+        fields,
+        values,
+        provenance,
+        field_matches,
+        reidentified: counts,
+    })
+}
+
+fn rewrite_proof(record: &mut Value, ids: &BTreeMap<&str, String>) {
+    for proof in record["provenance_ids"].as_array_mut().unwrap() {
+        *proof = Value::String(ids[proof.as_str().unwrap()].clone());
+    }
+}
+
+fn discovery_sources(data: &PackData) -> BTreeSet<&str> {
+    let proofs: BTreeSet<_> = data
+        .provenance
+        .iter()
+        .filter(|v| discovery_proof_class(v).is_some())
+        .map(id)
+        .collect();
+    let has_discovery = |v: &Value| {
+        v["provenance_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| proofs.contains(p.as_str().unwrap()))
+    };
+    let field_sources: BTreeMap<_, _> = data
+        .fields
+        .iter()
+        .map(|v| (id(v), v["source_id"].as_str().unwrap()))
+        .collect();
+    data.sources
+        .iter()
+        .filter(|v| has_discovery(v))
+        .map(id)
+        .chain(
+            data.fields
+                .iter()
+                .filter(|v| has_discovery(v))
+                .map(|v| v["source_id"].as_str().unwrap()),
+        )
+        .chain(
+            data.values
+                .iter()
+                .filter(|v| has_discovery(v))
+                .map(|v| field_sources[v["field_id"].as_str().unwrap()]),
+        )
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum UpdatedRecord {
+    Source,
+    Field,
+}
+
+impl UpdatedRecord {
+    fn collection(self) -> &'static str {
+        match self {
+            Self::Source => "sources",
+            Self::Field => "fields",
+        }
+    }
+}
+
+struct UpdateObservation {
+    key: Option<MeasurementKey>,
+    observed: Option<bool>,
+    stale: bool,
+}
+
+fn update_observation(
+    pack: &Pack,
+    kind: UpdatedRecord,
+    record: &Value,
+    created: time::OffsetDateTime,
+    incoming: bool,
+) -> Result<UpdateObservation, Diagnostic> {
+    Ok(match kind {
+        UpdatedRecord::Source => {
+            let record = source(record)?;
+            let stale =
+                record.inventory_status == "stale" || linked_stale(pack, &record.provenance_ids);
+            let observed = record.evidence.as_ref().and_then(|e| e.observed);
+            let key = if !stale
+                && (!incoming
+                    || matches!(
+                        record.inventory_status.as_str(),
+                        "observed-only" | "reconciled"
+                    )) {
+                source_measurement_at(pack, &record, created)
+            } else {
+                None
+            };
+            UpdateObservation {
+                key,
+                observed,
+                stale,
+            }
+        }
+        UpdatedRecord::Field => {
+            let record = field(record)?;
+            let stale =
+                record.refresh_status.is_some() || linked_stale(pack, &record.provenance_ids);
+            let key = field_measurement_at(pack, &record, created).map(FieldMeasurement::key);
+            let observed = record.coverage.and_then(|c| c.observed);
+            UpdateObservation {
+                key,
+                observed,
+                stale,
+            }
+        }
+    })
+}
+
+fn keep_observation(
+    incoming: &UpdateObservation,
+    retained: &UpdateObservation,
+    old_clock: time::OffsetDateTime,
+) -> Option<&'static str> {
+    let Some(key) = incoming.key else {
+        return Some("unqualified-incoming");
+    };
+    if let Some(previous) = retained.key {
+        return match key.cmp(&previous) {
+            std::cmp::Ordering::Greater => None,
+            std::cmp::Ordering::Less => Some("older-observation"),
+            std::cmp::Ordering::Equal => Some("tied-observation"),
+        };
+    }
+    if retained.stale || retained.observed == Some(false) {
+        return (key.1 <= old_clock).then_some("unorderable-against-negative");
+    }
+    (retained.observed == Some(true) && incoming.observed == Some(false))
+        .then_some("unorderable-contradiction")
+}
+
+fn copy_key(to: &mut Value, from: &Value, key: &str) {
+    let to = to.as_object_mut().unwrap();
+    if let Some(value) = from.get(key) {
+        to.insert(key.to_owned(), value.clone());
+    } else {
+        to.remove(key);
+    }
+}
+
+fn set_parent(record: &mut Value, parent: &Value) {
+    if !parent.is_null() {
+        record["relationship"]["parent_repo_id"] = parent.clone();
+    } else if let Some(relationship) = record["relationship"].as_object_mut() {
+        relationship.remove("parent_repo_id");
+        if relationship.is_empty() {
+            record.as_object_mut().unwrap().remove("relationship");
+        }
+    }
+}
+
+fn union_proof(record: &mut Value, incoming: impl IntoIterator<Item = Value>) {
+    let ids = record["provenance_ids"].as_array_mut().unwrap();
+    for value in incoming {
+        if !ids.contains(&value) {
+            ids.push(value);
+        }
+    }
+}
+
+fn retained_proof<'a>(
+    record: &'a Value,
+    deployment: &'a BTreeSet<&str>,
+) -> impl Iterator<Item = Value> + 'a {
+    record["provenance_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|value| !deployment.contains(value.as_str().unwrap()))
+        .cloned()
+}
+
+const SELECTOR_KEPT: &str = "discovery-evidence-selector-kept";
+
+fn not_applied(
+    entries: &mut Vec<NotAppliedRecord>,
+    collection: &'static str,
+    id: &str,
+    reason: &'static str,
+) {
+    entries.push(NotAppliedRecord {
+        collection,
+        id: id.to_owned(),
+        reason,
+    });
+}
+
+type AddedObservation<'a> = (UpdatedRecord, &'a Value, &'a str, Option<MeasurementKey>);
+
+fn protect_update_clock(
+    old: &Pack,
+    candidate: &Pack,
+    data: &mut PackData,
+    applied: &BTreeMap<&str, MeasurementKey>,
+    folded: &BTreeMap<&str, &str>,
+    additions: &[AddedObservation<'_>],
+    skipped: &mut Vec<NotAppliedRecord>,
+) -> Result<(time::OffsetDateTime, BTreeSet<String>), Diagnostic> {
+    let retained = &old.data;
+    let old_clock = parse_time(&old.created_at)?;
+    let clock = applied
+        .values()
+        .map(|key| key.2)
+        .chain(
+            additions
+                .iter()
+                .filter_map(|(_, _, _, key)| key.map(|key| key.2)),
+        )
+        .fold(old_clock, std::cmp::max);
+    let mut date_blocked = BTreeSet::<String>::new();
+    for &(kind, record, target, key) in additions {
+        if key.is_none()
+            && update_observation(candidate, kind, record, clock, true)?
+                .key
+                .is_some()
+        {
+            date_blocked.insert(target.to_owned());
+        }
+    }
+    // Omit dependent new records as well, so refusing a date cannot leave dangling references.
+    let mut children = BTreeMap::<_, Vec<_>>::new();
+    for record in &data.sources[retained.sources.len()..] {
+        if let Some(parent) = record["relationship"]["parent_repo_id"].as_str() {
+            children.entry(parent).or_default().push(id(record));
+        }
+    }
+    let mut blocked: Vec<_> = date_blocked.iter().cloned().collect();
+    while let Some(parent) = blocked.pop() {
+        for &child in children.get(parent.as_str()).into_iter().flatten() {
+            if date_blocked.insert(child.to_owned()) {
+                blocked.push(child.to_owned());
+            }
+        }
+    }
+    for record in &data.fields[retained.fields.len()..] {
+        if date_blocked.contains(record["source_id"].as_str().unwrap()) {
+            date_blocked.insert(id(record).to_owned());
+        }
+    }
+    for (kind, record, target, _) in additions {
+        if date_blocked.contains(*target) {
+            not_applied(skipped, kind.collection(), id(record), "date-inconsistent");
+        }
+    }
+    for (prior, record) in retained.sources.iter().zip(&mut data.sources) {
+        if record["relationship"]["parent_repo_id"]
+            .as_str()
+            .is_some_and(|p| date_blocked.contains(p))
+        {
+            set_parent(record, &prior["relationship"]["parent_repo_id"]);
+        }
+    }
+    let clock = applied
+        .values()
+        .map(|key| key.2)
+        .chain(additions.iter().filter_map(|(_, _, target, key)| {
+            key.filter(|_| !date_blocked.contains(*target))
+                .map(|key| key.2)
+        }))
+        .fold(old_clock, std::cmp::max);
+    if clock > old_clock {
+        for (kind, records) in [
+            (UpdatedRecord::Source, &retained.sources),
+            (UpdatedRecord::Field, &retained.fields),
+        ] {
+            for record in records {
+                if applied.contains_key(id(record)) || folded.contains_key(id(record)) {
+                    continue;
+                }
+                if update_observation(old, kind, record, old_clock, false)?
+                    .key
+                    .is_none()
+                    && let Some((_, _, retrieved_at)) =
+                        update_observation(old, kind, record, clock, false)?.key
+                {
+                    let retrieved_at = retrieved_at
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .map_err(|_| invalid("Cannot represent the retained retrieval time."))?;
+                    return Err(invalid(&format!(
+                        "Retained {} record {:?} has retrieved_at {retrieved_at} after its pack created_at {}; an update would newly qualify it.",
+                        kind.collection(),
+                        id(record),
+                        old.created_at,
+                    )));
+                }
+            }
+        }
+    }
+    Ok((clock, date_blocked))
+}
+
+/// Update an inventory snapshot without attaching an observation to a different search scope.
+pub fn import_update(
+    old: &Pack,
+    candidate: &Pack,
+    discovery_measured_sources: &BTreeSet<String>,
+) -> Result<ImportUpdateResult, Diagnostic> {
+    validate_import_pair(old, candidate)?;
+    validate_update_input(candidate)?;
+    let retained = &old.data;
+    let incoming = &candidate.data;
+    let ids = import_ids(retained, incoming)?;
+    let old_clock = parse_time(&old.created_at)?;
+    let input_clock = parse_time(&candidate.created_at)?;
+    let mut data = retained.clone();
+    let mut skipped = Vec::new();
+    let mut applied = BTreeMap::new();
+    let mut additions = Vec::new();
+    let deployment: BTreeSet<_> = retained
+        .provenance
+        .iter()
+        .filter(|v| deployment_provenance(v))
+        .map(id)
+        .collect();
+    let old_sources = record_indices(&retained.sources);
+    let mut measured = discovery_sources(retained);
+    measured.extend(
+        discovery_sources(incoming)
+            .into_iter()
+            .map(|id| ids.sources[id].as_str()),
+    );
+    let mut restricted = BTreeSet::new();
+
+    for record in &incoming.sources {
+        let original = id(record);
+        let target = ids.sources[original].as_str();
+        let mut fresh = record.clone();
+        fresh["id"] = Value::String(target.into());
+        if let Some(parent) = record["relationship"]["parent_repo_id"].as_str() {
+            set_parent(&mut fresh, &Value::String(ids.sources[parent].clone()));
+        }
+        rewrite_proof(&mut fresh, &ids.provenance);
+        let kind = UpdatedRecord::Source;
+        let Some(&index) = old_sources.get(target) else {
+            let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+            data.sources.push(fresh);
+            additions.push((kind, record, target, measurement.key));
+            continue;
+        };
+
+        let prior = &retained.sources[index];
+        let previous = source(prior)?;
+        let old_selector = previous.selectors.unwrap_or_default();
+        let new_selector = source(record)?.selectors.unwrap_or_default();
+        let scope = crate::contracts::Scope {
+            repo: old_selector.repo.clone(),
+            type_: old_selector.type_.clone(),
+            event: None,
+        };
+        let discovery_measured = measured.contains(target)
+            || discovery_measured_sources.contains(&crate::discovery::source_id(&scope))
+            || previous
+                .evidence
+                .as_ref()
+                .is_some_and(|e| e.measured_fields.is_some() || e.discovery_depth.is_some());
+        let metadata = &mut data.sources[index];
+        for key in ["name", "description"] {
+            if !fresh[key].is_null() {
+                copy_key(metadata, &fresh, key);
+            }
+        }
+        if discovery_measured && !compatible_selector_restrictions(&old_selector, &new_selector) {
+            restricted.insert(target);
+            not_applied(&mut skipped, "sources", original, SELECTOR_KEPT);
+            continue;
+        }
+        if !discovery_measured {
+            copy_key(metadata, &fresh, "selectors");
+        }
+        if !fresh["relationship"]["parent_repo_id"].is_null() {
+            let parent = fresh["relationship"]["parent_repo_id"].clone();
+            set_parent(metadata, &parent);
+        } else if !metadata["relationship"]["parent_repo_id"].is_null() {
+            set_parent(&mut fresh, &metadata["relationship"]["parent_repo_id"]);
+        }
+        for key in ["name", "description", "selectors", "kind"] {
+            copy_key(&mut fresh, metadata, key);
+        }
+        union_proof(&mut fresh, retained_proof(prior, &deployment));
+        if fresh == *metadata {
+            continue;
+        }
+        let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+        let previous = update_observation(old, kind, prior, old_clock, false)?;
+        if let Some(reason) = keep_observation(&measurement, &previous, old_clock) {
+            not_applied(&mut skipped, "sources", original, reason);
+        } else {
+            *metadata = fresh;
+            applied.insert(target, measurement.key.unwrap());
+        }
+    }
+
+    let mut folded = BTreeMap::new();
+    for record in &incoming.fields {
+        let original = id(record);
+        let target = ids.fields[original].as_str();
+        let source_id = ids.sources[record["source_id"].as_str().unwrap()].as_str();
+        let mut fresh = record.clone();
+        fresh["id"] = Value::String(target.into());
+        fresh["source_id"] = Value::String(source_id.into());
+        rewrite_proof(&mut fresh, &ids.provenance);
+        let matches = ids.field_matches.get(original);
+        if restricted.contains(source_id) {
+            if matches.is_none_or(|indices| retained.fields[indices[0]] != fresh) {
+                not_applied(&mut skipped, "fields", original, SELECTOR_KEPT);
+            }
+            continue;
+        }
+        let kind = UpdatedRecord::Field;
+        let Some(matches) = matches else {
+            let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+            data.fields.push(fresh);
+            additions.push((kind, record, target, measurement.key));
+            continue;
+        };
+        let first = matches[0];
+        let metadata = &mut data.fields[first];
+        for key in ["description", "schema_variant"] {
+            if !fresh[key].is_null() {
+                copy_key(metadata, &fresh, key);
+            }
+            copy_key(&mut fresh, metadata, key);
+        }
+        if metadata["data_type"] == "unknown" && fresh["data_type"] != "array" {
+            copy_key(metadata, &fresh, "data_type");
+        }
+        if fresh["data_type"] == "unknown" && metadata["data_type"] != "array" {
+            copy_key(&mut fresh, metadata, "data_type");
+        }
+        union_proof(
+            &mut fresh,
+            retained_proof(&retained.fields[first], &deployment),
+        );
+        if fresh == *metadata {
+            continue;
+        }
+        let measurement = update_observation(candidate, kind, record, input_clock, true)?;
+        let mut reason = None;
+        for &index in matches {
+            let previous =
+                update_observation(old, kind, &retained.fields[index], old_clock, false)?;
+            reason = keep_observation(&measurement, &previous, old_clock);
+            if reason.is_some() {
+                break;
+            }
+        }
+        if let Some(reason) = reason {
+            not_applied(&mut skipped, "fields", original, reason);
+            continue;
+        }
+        for &index in &matches[1..] {
+            let prior = &retained.fields[index];
+            union_proof(&mut fresh, retained_proof(prior, &deployment));
+        }
+        for &index in &matches[1..] {
+            folded.insert(id(&retained.fields[index]), target);
+        }
+        fresh.as_object_mut().unwrap().remove("refresh_status");
+        *metadata = fresh;
+        applied.insert(target, measurement.key.unwrap());
+    }
+
+    let (clock, date_blocked) = protect_update_clock(
+        old,
+        candidate,
+        &mut data,
+        &applied,
+        &folded,
+        &additions,
+        &mut skipped,
+    )?;
+    for record in &mut data.values {
+        if let Some(&survivor) = folded.get(record["field_id"].as_str().unwrap()) {
+            record["field_id"] = Value::String(survivor.into());
+        }
+    }
+
+    let old_values = record_indices(&retained.values);
+    let incoming_field_indices = record_indices(&incoming.fields);
+    for record in &incoming.values {
+        let original = id(record);
+        let target = ids.values[original].as_str();
+        let field = record["field_id"].as_str().unwrap();
+        let field_record = &incoming.fields[incoming_field_indices[field]];
+        let source = ids.sources[field_record["source_id"].as_str().unwrap()].as_str();
+        let mut fresh = record.clone();
+        fresh["id"] = Value::String(target.into());
+        fresh["field_id"] = Value::String(ids.fields[field].clone());
+        rewrite_proof(&mut fresh, &ids.provenance);
+        let index = old_values.get(target).copied();
+        let reason = if restricted.contains(source) {
+            Some(SELECTOR_KEPT)
+        } else {
+            date_blocked
+                .contains(ids.fields[field].as_str())
+                .then_some("date-inconsistent")
+        };
+        if let Some(reason) = reason {
+            if index.is_none_or(|i| data.values[i] != fresh) {
+                not_applied(&mut skipped, "values", original, reason);
+            }
+        } else if let Some(i) = index {
+            for key in ["meaning", "sanitized"] {
+                if !fresh[key].is_null() {
+                    copy_key(&mut data.values[i], &fresh, key);
+                }
+            }
+            union_proof(
+                &mut data.values[i],
+                fresh["provenance_ids"].as_array().unwrap().iter().cloned(),
+            );
+        } else {
+            data.values.push(fresh);
+        }
+    }
+
+    let old_annotations: BTreeMap<_, _> = retained
+        .annotations
+        .iter()
+        .map(|v| (v["source_id"].as_str().unwrap(), v))
+        .collect();
+    for record in &incoming.annotations {
+        let original = record["source_id"].as_str().unwrap();
+        let target = ids.sources[original].as_str();
+        let mut fresh = record.clone();
+        fresh["source_id"] = Value::String(target.into());
+        let prior = old_annotations.get(target);
+        if prior.is_some_and(|v| **v == fresh) {
+            continue;
+        }
+        if restricted.contains(target) {
+            not_applied(&mut skipped, "annotations", original, SELECTOR_KEPT);
+        } else if date_blocked.contains(target) {
+            not_applied(&mut skipped, "annotations", original, "date-inconsistent");
+        } else if prior.is_some() {
+            not_applied(
+                &mut skipped,
+                "annotations",
+                original,
+                "retained-annotation-kept",
+            );
+        } else {
+            data.annotations.push(fresh);
+        }
+    }
+
+    let mut counts = ImportCounts {
+        reidentified: ids.reidentified,
+        sources_added: data.sources[retained.sources.len()..]
+            .iter()
+            .filter(|v| !date_blocked.contains(id(v)))
+            .count(),
+        fields_added: data.fields[retained.fields.len()..]
+            .iter()
+            .filter(|v| !date_blocked.contains(id(v)))
+            .count(),
+        values_updated: retained
+            .values
+            .iter()
+            .zip(&data.values)
+            .filter(|(a, b)| a != b)
+            .count(),
+        values_added: data.values.len() - retained.values.len(),
+        annotations_added: data.annotations.len() - retained.annotations.len(),
+        ..ImportCounts::default()
+    };
+    for (incoming, indices, before, after, updated, unchanged) in [
+        (
+            &ids.sources,
+            &old_sources,
+            &retained.sources,
+            &data.sources,
+            &mut counts.sources_updated,
+            &mut counts.sources_unchanged,
+        ),
+        (
+            &ids.fields,
+            &record_indices(&retained.fields),
+            &retained.fields,
+            &data.fields,
+            &mut counts.fields_updated,
+            &mut counts.fields_unchanged,
+        ),
+    ] {
+        for target in incoming.values() {
+            if let Some(&index) = indices.get(target.as_str()) {
+                if before[index] == after[index] {
+                    *unchanged += 1;
+                } else {
+                    *updated += 1;
+                }
+            }
+        }
+    }
+    data.sources.retain(|v| !date_blocked.contains(id(v)));
+    data.fields
+        .retain(|v| !folded.contains_key(id(v)) && !date_blocked.contains(id(v)));
+    let referenced: BTreeSet<_> = [&data.sources, &data.fields, &data.values]
+        .into_iter()
+        .flatten()
+        .flat_map(|v| v["provenance_ids"].as_array().unwrap())
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    let old_proofs = record_indices(&retained.provenance);
+    for record in &incoming.provenance {
+        let target = ids.provenance[id(record)].as_str();
+        if referenced.contains(target) && !old_proofs.contains_key(target) {
+            let mut proof = record.clone();
+            proof["id"] = Value::String(target.into());
+            data.provenance.push(proof);
+        }
+    }
+
+    let pack = if data == old.data {
+        old.clone()
+    } else {
+        let created_at = if clock == old_clock {
+            old.created_at.clone()
+        } else {
+            clock
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| invalid("Cannot represent the cumulative pack creation time."))?
+        };
+        Pack::new(old.environment.clone(), created_at, data)?
+    };
+    Ok(ImportUpdateResult {
+        pack,
+        counts,
+        not_applied: skipped,
+    })
 }
 
 fn merge_id(

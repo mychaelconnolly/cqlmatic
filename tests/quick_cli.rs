@@ -318,6 +318,7 @@ fn strict_grounding_fails_closed_when_selected_active_pack_disappears() {
             .to_string_lossy()
             .into_owned(),
         content_digest: "0".repeat(64),
+        input_content_digest: None,
         imported_at: "2026-01-02T00:00:00Z".into(),
         discovery_run: None,
     };
