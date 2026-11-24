@@ -754,6 +754,13 @@
           "format": "uint32",
           "minimum": 0
         },
+        "search_tool_available": {
+          "description": "Whether the saved host report listed the available search tool.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "selection": {
           "anyOf": [
             {

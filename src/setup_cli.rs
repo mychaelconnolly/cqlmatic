@@ -942,9 +942,35 @@ fn config_hash(path: &Path) -> Result<Option<String>, Diagnostic> {
         MAX_CONFIG_BYTES,
     )?)))
 }
+/// Client configuration can be linked into place by a dotfile manager. Follow that link
+/// for inspection only. Protected files and native write paths use their own checks.
+fn read_client_config(path: &Path) -> Result<Option<Vec<u8>>, Diagnostic> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = fs::canonicalize(path).map_err(|error| {
+                let reason = if error.kind() == io::ErrorKind::NotFound {
+                    "MCP configuration is a broken link."
+                } else {
+                    "Cannot resolve the MCP configuration link."
+                };
+                err("SETUP_NATIVE_CONFIG", reason)
+            })?;
+            storage::read_bytes(&target, MAX_CONFIG_BYTES).map(Some)
+        }
+        Ok(_) => storage::read_bytes(path, MAX_CONFIG_BYTES).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(err(
+            "SETUP_NATIVE_CONFIG",
+            "Cannot inspect the MCP configuration file.",
+        )),
+    }
+}
+fn client_config_hash(path: &Path) -> Result<Option<String>, Diagnostic> {
+    Ok(read_client_config(path)?.map(|bytes| sha256_hex(&bytes)))
+}
 /// Hosts read their MCP files as JSON with comments and trailing commas. Remove both outside
 /// strings so setup can read such a file; anything else that is not JSON still fails to parse.
-fn strip_jsonc(raw: &[u8]) -> Vec<u8> {
+fn strip_jsonc(raw: &[u8]) -> Result<Vec<u8>, Diagnostic> {
     let mut plain = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {
@@ -968,7 +994,13 @@ fn strip_jsonc(raw: &[u8]) -> Vec<u8> {
                 while i < raw.len() && !(raw[i] == b'*' && raw.get(i + 1) == Some(&b'/')) {
                     i += 1;
                 }
-                i = (i + 2).min(raw.len());
+                if i == raw.len() {
+                    return Err(err(
+                        "SETUP_NATIVE_CONFIG",
+                        "MCP configuration contains an unterminated block comment.",
+                    ));
+                }
+                i += 2;
                 plain.push(b' ');
             }
             (byte, _) => {
@@ -1000,34 +1032,31 @@ fn strip_jsonc(raw: &[u8]) -> Vec<u8> {
         }
         i += 1;
     }
-    out
+    Ok(out)
 }
 fn strict_json(raw: &[u8]) -> bool {
     serde_json::from_slice::<serde::de::IgnoredAny>(raw).is_ok()
 }
 fn read_json_config(path: &Path) -> Result<Value, Diagnostic> {
-    let value = if path.exists() {
-        let raw = storage::read_bytes(path, MAX_CONFIG_BYTES)?;
-        let raw = if strict_json(&raw) {
-            raw
-        } else {
-            strip_jsonc(&raw)
-        };
-        mcp::parse_saved_result(&raw).map_err(|_| {
-            err(
-                "SETUP_NATIVE_CONFIG",
-                "MCP configuration has duplicate keys or invalid JSON; inspect it in the host before changing it.",
-            )
-        })?;
-        serde_json::from_slice(&raw).map_err(|_| {
-            err(
-                "SETUP_NATIVE_CONFIG",
-                "MCP configuration is not strict JSON; inspect it in the host before changing it.",
-            )
-        })?
-    } else {
-        serde_json::json!({})
+    let Some(raw) = read_client_config(path)? else {
+        return Ok(serde_json::json!({}));
     };
+    let raw = if strict_json(&raw) {
+        raw
+    } else {
+        strip_jsonc(&raw)?
+    };
+    let invalid = || {
+        err(
+            "SETUP_NATIVE_CONFIG",
+            "MCP configuration has duplicate keys or invalid JSON; inspect it in the host before changing it.",
+        )
+    };
+    // Require one JSON value as well as unique keys. Saved MCP results can contain repeats.
+    if !strict_json(&raw) {
+        return Err(invalid());
+    }
+    let value = mcp::parse_saved_result(&raw).map_err(|_| invalid())?;
     if !value.is_object() {
         return Err(err(
             "SETUP_NATIVE_CONFIG",
@@ -1197,9 +1226,7 @@ fn check_portable_shadow_from(cwd: &Path, name: &str, copilot: bool) -> Result<(
             &[".mcp.json"][..]
         } {
             let path = directory.join(relative);
-            if path.exists()
-                && server_entry(&read_json_config(&path)?, "mcpServers", name)?.is_some()
-            {
+            if server_entry(&read_json_config(&path)?, "mcpServers", name)?.is_some() {
                 return Err(err(
                     "SETUP_CONFIG_SHADOW",
                     "A workspace MCP server with this name can override the selected user configuration. Choose another name or inspect that host entry.",
@@ -1275,106 +1302,180 @@ fn check_claude_project_shadow(config: &Value, cwd: &Path, name: &str) -> Result
     }
     Ok(())
 }
-/// Names of servers already pointing at the selected endpoint in the places this adapter reads.
-/// Advice only: `None` means a place could not be read. Codex is listed only through its
-/// detected executable, so callers that must run no client command pass no observation.
+#[derive(Default)]
+struct ServerAdvice {
+    usable: Vec<String>,
+    skipped: Vec<String>,
+    unusable: Vec<String>,
+}
+
+impl ServerAdvice {
+    fn message(&self, client: ClientKind, cloud: Cloud, selected: Option<&str>) -> Option<String> {
+        let endpoint = cloud.endpoint();
+        let mut lines = Vec::new();
+        if self.skipped.is_empty()
+            && selected.is_some_and(|name| self.usable.iter().any(|usable| usable == name))
+        {
+            lines.push(format!(
+                "'{}' already points at {endpoint} in {}; the selection uses it.",
+                selected.expect("A selected name matched"),
+                client.label(),
+            ));
+        } else if !self.usable.is_empty() {
+            let names = self
+                .usable
+                .iter()
+                .map(|name| format!("'{name}'"))
+                .collect::<Vec<_>>();
+            let verb = if names.len() == 1 { "points" } else { "point" };
+            let names = names.join(", ");
+            if self.skipped.is_empty() {
+                lines.push(format!(
+                    "{names} already {verb} at {endpoint} in {}. To use an existing server, select host-managed registration with its server_name.",
+                    client.label(),
+                ));
+            } else {
+                lines.push(format!(
+                    "{names} {verb} at {endpoint} in the readable configuration. Check the effective server in {} before selecting its name.",
+                    client.label(),
+                ));
+            }
+        }
+        lines.extend(self.unusable.iter().cloned());
+        lines.extend(self.skipped.iter().cloned());
+        (!lines.is_empty()).then(|| lines.join(" "))
+    }
+}
+
+/// Advice is based on all readable scopes. A same-name entry that points elsewhere
+/// can override an otherwise matching server, so leave that name for manual inspection.
 fn servers_at_endpoint(
     client: ClientKind,
     cloud: Cloud,
     codex: Option<&ClientObservation>,
     runner: &mut impl Runner,
-) -> Option<Vec<String>> {
+) -> ServerAdvice {
+    let mut advice = ServerAdvice::default();
+    let mut seen = std::collections::BTreeMap::<String, Vec<(bool, bool)>>::new();
     let endpoint = cloud.endpoint();
-    let points_here = |entry: &Value, pointer: &str| {
-        entry
+    let mut collect = |name: &str, entry: &Value, pointer: &str| {
+        let matches = entry
             .pointer(pointer)
             .and_then(Value::as_str)
-            .is_some_and(|url| url.trim_end_matches('/') == endpoint)
-    };
-    let mut names = Vec::new();
-    let mut collect = |servers: Option<&Value>, pointer: &str| {
-        for (name, entry) in servers.and_then(Value::as_object).into_iter().flatten() {
-            if points_here(entry, pointer) && !names.contains(name) {
-                names.push(name.clone());
-            }
-        }
+            .is_some_and(|url| url.trim_end_matches('/') == endpoint);
+        let enabled = entry["enabled"] != false && entry["disabled"] != true;
+        seen.entry(name.to_owned())
+            .or_default()
+            .push((matches, enabled));
     };
     let cwd = env::current_dir().ok();
-    let workspace = |files: &[&str]| -> Vec<PathBuf> {
-        cwd.iter()
-            .flat_map(|cwd| cwd.ancestors())
-            .flat_map(|directory| files.iter().map(move |file| directory.join(file)))
-            .filter(|path| path.exists())
-            .collect()
-    };
     match client {
         ClientKind::Codex => {
-            let codex = codex?;
-            let raw = probe(
+            let Some(codex) = codex else { return advice };
+            let list = probe(
                 runner,
                 Path::new(&codex.executable),
                 &["mcp", "list", "--json"],
             )
-            .ok()?;
-            let list: Value = serde_json::from_slice(&raw).ok()?;
-            for entry in list.as_array()? {
-                if let Some(name) = entry.get("name").and_then(Value::as_str)
-                    && points_here(entry, "/transport/url")
-                    && !names.iter().any(|known| known == name)
-                {
-                    names.push(name.to_owned());
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Vec<Value>>(&raw).ok());
+            if let Some(list) = list {
+                for entry in list {
+                    if let Some(name) = entry["name"].as_str() {
+                        collect(name, &entry, "/transport/url");
+                    }
                 }
             }
         }
-        ClientKind::VsCode => {
-            let config = read_json_config(&runner.config_path(client).ok()?).ok()?;
-            collect(config.get("servers"), "/url");
-        }
-        ClientKind::ClaudeCode => {
-            let config = read_json_config(&runner.config_path(client).ok()?).ok()?;
-            collect(config.get("mcpServers"), "/url");
-            let active = cwd.as_ref().and_then(|cwd| cwd.canonicalize().ok());
-            for (root, project) in config
-                .get("projects")
-                .and_then(Value::as_object)
-                .into_iter()
-                .flatten()
-            {
-                if Path::new(root)
-                    .canonicalize()
-                    .is_ok_and(|root| active.as_ref().is_some_and(|a| a.starts_with(root)))
-                {
-                    collect(project.get("mcpServers"), "/url");
+        ClientKind::External => return advice,
+        _ => {
+            let collection = if client == ClientKind::VsCode {
+                "servers"
+            } else {
+                "mcpServers"
+            };
+            let workspace_paths: &[&str] = match client {
+                ClientKind::ClaudeCode => &[".mcp.json"],
+                ClientKind::VsCode => &[],
+                _ => &[".mcp.json", ".github/mcp.json"],
+            };
+            let active = cwd.as_ref().and_then(|path| path.canonicalize().ok());
+            let mut inspect = |path: &Path, local_scopes: bool| {
+                let result = read_json_config(path).and_then(|value| {
+                    let mut scopes = vec![&value];
+                    if local_scopes {
+                        scopes.extend(
+                            value["projects"]
+                                .as_object()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|(root, project)| {
+                                    Path::new(root)
+                                        .canonicalize()
+                                        .ok()
+                                        .filter(|root| {
+                                            active
+                                                .as_ref()
+                                                .is_some_and(|path| path.starts_with(root))
+                                        })
+                                        .map(|_| project)
+                                }),
+                        );
+                    }
+                    for scope in scopes {
+                        if let Some(entries) = scope.get(collection) {
+                            let entries = entries.as_object().ok_or_else(|| {
+                                err(
+                                    "SETUP_NATIVE_CONFIG",
+                                    "MCP server collection must be a JSON object.",
+                                )
+                            })?;
+                            for (name, entry) in entries {
+                                collect(name, entry, "/url");
+                            }
+                        }
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    advice.skipped.push(format!(
+                        "Skipped MCP configuration at {}. {}",
+                        path.display(),
+                        error.message
+                    ));
+                }
+            };
+            let user_config = runner.config_path(client);
+            if let Ok(path) = &user_config {
+                inspect(path, client == ClientKind::ClaudeCode);
+            }
+            for directory in cwd.iter().flat_map(|path| path.ancestors()) {
+                for file in workspace_paths {
+                    inspect(&directory.join(file), false);
                 }
             }
-            for path in workspace(&[".mcp.json"]) {
-                collect(read_json_config(&path).ok()?.get("mcpServers"), "/url");
+            if let Err(error) = user_config {
+                advice.skipped.push(error.message);
             }
         }
-        ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode => {
-            let config = read_json_config(&runner.config_path(client).ok()?).ok()?;
-            collect(config.get("mcpServers"), "/url");
-            for path in workspace(&[".mcp.json", ".github/mcp.json"]) {
-                collect(read_json_config(&path).ok()?.get("mcpServers"), "/url");
-            }
-        }
-        ClientKind::External => return Some(Vec::new()),
     }
-    Some(names)
-}
-/// One sentence naming servers at the endpoint and how to select one; nothing when none is known.
-fn existing_server_advice(client: ClientKind, cloud: Cloud, names: &[String]) -> Option<String> {
-    let quoted: Vec<_> = names.iter().map(|name| format!("'{name}'")).collect();
-    (!quoted.is_empty()).then(|| {
-        format!(
-            "{} already {} at {} in {}. To use {} as configured instead of adding another, select host-managed registration with that server_name; setup then changes nothing in the client.",
-            quoted.join(", "),
-            if quoted.len() == 1 { "points" } else { "point" },
-            cloud.endpoint(),
-            client.label(),
-            if quoted.len() == 1 { "it" } else { "one of them" }
-        )
-    })
+    for (name, entries) in seen {
+        if !entries.iter().any(|(matches, _)| *matches) {
+            continue;
+        }
+        let reason = if !setup::accepts_host_managed_server_name(client, &name) {
+            "has an invalid name for setup"
+        } else if entries.iter().any(|(matches, _)| !matches) {
+            "may be overridden by a same-name entry for another endpoint or transport"
+        } else if entries.iter().any(|(_, enabled)| !enabled) {
+            "is disabled in the client configuration"
+        } else {
+            advice.usable.push(name);
+            continue;
+        };
+        advice.unusable.push(format!("Found '{}' at {endpoint}, but it {reason}. Check the server in the client before selecting it.", name.escape_debug()));
+    }
+    advice
 }
 fn configured_fingerprint(
     selection: &Selection,
@@ -1387,7 +1488,7 @@ fn configured_fingerprint(
             | ClientKind::CopilotApp
             | ClientKind::CopilotVscode
     ) {
-        return config_hash(path);
+        return client_config_hash(path);
     }
     let config = read_json_config(path)?;
     let entry = server_entry(&config, "mcpServers", &selection.server_name)?;
@@ -1458,7 +1559,23 @@ fn inspect_baseline_for(
         ));
     }
     let config = runner.config_path(selected.client)?;
-    let sha256 = config_hash(&config)?;
+    let sha256 = client_config_hash(&config)?;
+    let empty_headers = |entry: &Value, key: &str| {
+        entry
+            .get(key)
+            .is_none_or(|headers| headers.as_object().is_some_and(|map| map.is_empty()))
+    };
+    let exact_without_empty_headers = |entry: &Value, expected: &Value| {
+        if entry.get("headers").is_some() && empty_headers(entry, "headers") {
+            let mut normalized = entry.clone();
+            if let Some(object) = normalized.as_object_mut() {
+                object.remove("headers");
+            }
+            normalized == *expected
+        } else {
+            entry == expected
+        }
+    };
     let server = match selected.client {
         ClientKind::Codex => {
             let client = state
@@ -1496,7 +1613,8 @@ fn inspect_baseline_for(
                 if transport["url"].as_str() == Some(selected.cloud.endpoint())
                     && matches!(transport["type"].as_str(), Some("streamable_http" | "http"))
                     && entry["enabled"].as_bool() == Some(true)
-                    && transport.get("http_headers").is_none_or(Value::is_null)
+                    && (transport["http_headers"].is_null()
+                        || empty_headers(transport, "http_headers"))
                     && transport
                         .get("bearer_token_env_var")
                         .is_none_or(Value::is_null)
@@ -1530,13 +1648,7 @@ fn inspect_baseline_for(
             if sha256.is_none() {
                 ExistingServer::Absent
             } else {
-                let raw = storage::read_bytes(&config, MAX_CONFIG_BYTES)?;
-                let raw = if strict_json(&raw) {
-                    raw
-                } else {
-                    strip_jsonc(&raw)
-                };
-                let value: Value = serde_json::from_slice(&raw).map_err(|_| err("SETUP_NATIVE_CONFIG", "VS Code mcp.json is not valid JSON, even allowing comments and trailing commas. Fix it in VS Code, then preview again."))?;
+                let value = read_json_config(&config)?;
                 let object = value.as_object().ok_or_else(|| {
                     err(
                         "SETUP_NATIVE_CONFIG",
@@ -1562,7 +1674,7 @@ fn inspect_baseline_for(
                             && entry["url"].as_str() == Some(selected.cloud.endpoint())
                             && entry.pointer("/oauth/clientId").and_then(Value::as_str)
                                 == expected_id
-                            && entry.get("headers").is_none()
+                            && empty_headers(entry, "headers")
                         {
                             ExistingServer::Same
                         } else {
@@ -1589,7 +1701,9 @@ fn inspect_baseline_for(
             let expected = serde_json::json!({"type":"http","url":selected.cloud.endpoint()});
             match server_entry(&value, "mcpServers", &selected.server_name)? {
                 None => ExistingServer::Absent,
-                Some(entry) if *entry == expected => ExistingServer::Same,
+                Some(entry) if exact_without_empty_headers(entry, &expected) => {
+                    ExistingServer::Same
+                }
                 Some(_) => ExistingServer::Collision,
             }
         }
@@ -1599,7 +1713,9 @@ fn inspect_baseline_for(
             let expected = copilot_entry(selected)?;
             match server_entry(&value, "mcpServers", &selected.server_name)? {
                 None => ExistingServer::Absent,
-                Some(entry) if *entry == expected => ExistingServer::Same,
+                Some(entry) if exact_without_empty_headers(entry, &expected) => {
+                    ExistingServer::Same
+                }
                 Some(_) => ExistingServer::Collision,
             }
         }
@@ -1877,6 +1993,7 @@ fn perform(
                 && !s.host_managed()
                 && !state.clients.iter().any(|c| c.client == s.client)
             {
+                state.record_tool_availability_before_suspending();
                 state.phase = SetupPhase::InstallationRequired;
             }
             Ok(())
@@ -1891,37 +2008,11 @@ fn perform(
                     && s.client != ClientKind::Codex
             }) {
                 // Advice only: name servers at the endpoint so the report can use the right name.
-                state.last_notice = match servers_at_endpoint(s.client, s.cloud, None, runner) {
-                    None => Some(format!(
-                        "{}'s MCP configuration could not be read, so setup did not look for servers at {} there; nothing was changed. Check the server's name in the client.",
-                        s.client.label(),
-                        s.cloud.endpoint()
-                    )),
-                    Some(names) if names.contains(&s.server_name) => Some(format!(
-                        "'{}' already points at {} in {}; the selection uses it.",
-                        s.server_name,
-                        s.cloud.endpoint(),
-                        s.client.label()
-                    )),
-                    Some(names) if !names.is_empty() => Some(format!(
-                        "{} already {} at {} in {}, not '{}'. To use {}, select that name as server_name with host-managed registration.",
-                        names
-                            .iter()
-                            .map(|name| format!("'{name}'"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        if names.len() == 1 { "points" } else { "point" },
-                        s.cloud.endpoint(),
-                        s.client.label(),
-                        s.server_name,
-                        if names.len() == 1 {
-                            "it"
-                        } else {
-                            "one of them"
-                        }
-                    )),
-                    Some(_) => None,
-                };
+                state.last_notice = servers_at_endpoint(s.client, s.cloud, None, runner).message(
+                    s.client,
+                    s.cloud,
+                    Some(&s.server_name),
+                );
             }
             Ok(())
         }
@@ -1951,13 +2042,10 @@ fn perform(
                 state.clients.extend(clients);
             }
             state.invalidate_plan();
-            let baseline = inspect_operation_baseline(state, state_path, runner, operation)?;
-            let backup = if operation == PlanOperation::Configure {
-                backup_path(state_path, &baseline)?
-            } else {
-                None
-            };
-            let selected = state.selection.clone().expect("preview needs a selection");
+            let selected = state
+                .selection
+                .clone()
+                .ok_or_else(|| err("SETUP_SELECTION", "Choose a client and cloud first."))?;
             let codex = state
                 .clients
                 .iter()
@@ -1966,15 +2054,35 @@ fn perform(
             // Name a server already at the endpoint before adding another or refusing a collision.
             let find_advice = |runner: &mut _| {
                 servers_at_endpoint(selected.client, selected.cloud, codex.as_ref(), runner)
-                    .and_then(|names| {
-                        existing_server_advice(selected.client, selected.cloud, &names)
-                    })
+                    .message(selected.client, selected.cloud, None)
             };
             let with_advice = |mut diagnostic: Diagnostic, advice: &Option<String>| {
                 if let Some(advice) = advice {
                     diagnostic.message = format!("{} {advice}", diagnostic.message);
                 }
                 diagnostic
+            };
+            let baseline = inspect_operation_baseline(state, state_path, runner, operation)
+                .map_err(|diagnostic| {
+                    if selected.client != ClientKind::Codex
+                        && matches!(
+                            diagnostic.code.as_str(),
+                            "SETUP_NATIVE_CONFIG"
+                                | "SETUP_CONFIG_SHADOW"
+                                | "LOCAL_IO"
+                                | "LOCAL_FILE_TYPE"
+                                | "LOCAL_SIZE"
+                        )
+                    {
+                        with_advice(diagnostic, &find_advice(runner))
+                    } else {
+                        diagnostic
+                    }
+                })?;
+            let backup = if operation == PlanOperation::Configure {
+                backup_path(state_path, &baseline)?
+            } else {
+                None
             };
             let mut plan = match setup::build_plan(state, operation, baseline, backup) {
                 Err(diagnostic) if diagnostic.code == "SETUP_COLLISION" => {
@@ -2202,6 +2310,7 @@ fn perform(
                     configured_fingerprint(&plan.selection, Path::new(&actual.path))?;
                 state.authentication_evidence = AuthenticationEvidence::None;
                 state.discovery_sha256 = None;
+                state.search_tool_available = None;
                 state.last_notice = Some(if plan.selection.client == ClientKind::Codex {
                     "Configured HTTP entry matches protected provenance for reviewed native registration arguments and unchanged local configuration. Codex list output does not independently inspect OAuth identity or attest authentication."
                 } else if matches!(plan.selection.client, ClientKind::ClaudeCode | ClientKind::CopilotCli | ClientKind::CopilotApp | ClientKind::CopilotVscode) {
@@ -2223,6 +2332,7 @@ fn perform(
                 state.configured_sha256 = actual.sha256;
                 state.authentication_evidence = AuthenticationEvidence::None;
                 state.discovery_sha256 = None;
+                state.search_tool_available = None;
                 state.last_notice = Some("The reviewed explicit Codex CIMD login completed with unchanged HTTP configuration. Its protected receipt records that login, not a completed add or authentication attestation. Import a saved host tool-discovery report next.".into());
             } else {
                 state.last_notice = Some("Native authentication command completed, or native UI steps are pending. Its exit status does not attest authentication. Import a saved host tool-discovery report next.".into());
@@ -2246,6 +2356,7 @@ fn perform(
             }
             state.invalidate_plan();
             state.authentication_evidence = AuthenticationEvidence::UserConfirmed;
+            state.search_tool_available = None;
             state.phase = SetupPhase::AuthenticationRequired;
             state.last_notice = Some("User confirmed native-client sign-in. This is user confirmation, not tool-discovery or independent authentication evidence.".into());
             Ok(())
@@ -2331,6 +2442,7 @@ fn perform(
             reviewed.configured = false;
             reviewed.configured_sha256 = None;
             reviewed.discovery_sha256 = None;
+            reviewed.search_tool_available = None;
             reviewed.authentication_evidence = AuthenticationEvidence::None;
             reviewed.last_notice = Some("User acknowledged inspecting the pending native command. Preview the current configuration baseline before any further native action; no rollback was claimed.".into());
             if let Some(baseline) = restored {
@@ -2443,7 +2555,26 @@ fn interactive_action(
 ) -> Result<Option<SetupState>, Diagnostic> {
     let mut action_error = None;
     let state = with_state(state_path, |state, runner, writer| {
-        match perform(state, action, state_path, runner, writer, true) {
+        let perform_action = || {
+            if let SetupAction::Select { selection } = &action
+                && state.phase != SetupPhase::CommandPending
+                && selection.client.needs_executable()
+                && matches!(
+                    selection.registration,
+                    RegistrationMode::Manual { .. } | RegistrationMode::Cimd { .. }
+                )
+            {
+                selection.validate()?;
+                let client = selection.client;
+                let clients = runner.detect(Some(client))?;
+                state
+                    .clients
+                    .retain(|observation| observation.client != client);
+                state.clients.extend(clients);
+            }
+            perform(state, action, state_path, runner, writer, true)
+        };
+        match perform_action() {
             Err(diagnostic) if !fatal_interactive_error(&diagnostic.code) => {
                 action_error = Some(diagnostic);
                 Ok(())
@@ -2553,29 +2684,6 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                         continue;
                     }
                 };
-                if client.needs_executable() {
-                    let Some(clients) = interactive_action(state_path, SetupAction::Detect {})?
-                    else {
-                        continue;
-                    };
-                    for detected in &clients.clients {
-                        println!(
-                            "{}: {} ({})",
-                            detected.client.label(),
-                            detected.executable,
-                            detected.version
-                        );
-                    }
-                    if !clients.clients.iter().any(|c| c.client == client)
-                        && let Some(url) = client.install_url()
-                    {
-                        println!(
-                            "Install {} from {} and resume this wizard. No installer is run.",
-                            client.label(),
-                            url
-                        );
-                    }
-                }
                 let host_id = if client == ClientKind::External {
                     let Some(id) = prompt(&rx, "Host ID (1-64 ASCII letters/digits/_/-): ")? else {
                         continue;
@@ -2596,16 +2704,18 @@ fn interactive(state_path: &Path) -> Result<i32, Diagnostic> {
                         continue;
                     }
                 };
-                // Codex lists servers only through a client command; none runs before registration is chosen.
-                let found = if client.is_native() && client != ClientKind::Codex {
-                    servers_at_endpoint(client, cloud, None, &mut NativeRunner).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                if let Some(advice) = existing_server_advice(client, cloud, &found) {
+                // Advice uses file inspection here. The client executable is needed only for
+                // a native registration, after the mode has been chosen.
+                let found = servers_at_endpoint(client, cloud, None, &mut NativeRunner);
+                if let Some(advice) = found.message(client, cloud, None) {
                     println!("{advice}");
                 }
-                let default = found.first().cloned().unwrap_or_else(|| "cs-mcp".into());
+                let default = found
+                    .usable
+                    .first()
+                    .filter(|_| found.skipped.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| "cs-mcp".into());
                 let Some(server_name) = prompt(&rx, &format!("Server name [{default}]: "))? else {
                     continue;
                 };
@@ -4407,12 +4517,12 @@ mod tests {
           /* block */ "b": [1, 2,],
           "c": "quote \" and comma,}",
         }"#;
-        let value: Value = serde_json::from_slice(&strip_jsonc(raw)).unwrap();
+        let value: Value = serde_json::from_slice(&strip_jsonc(raw).unwrap()).unwrap();
         assert_eq!(
             value,
             json!({"a":"x // kept, /* kept */","b":[1,2],"c":"quote \" and comma,}"})
         );
-        assert!(serde_json::from_slice::<Value>(&strip_jsonc(b"{\"a\": }")).is_err());
+        assert!(serde_json::from_slice::<Value>(&strip_jsonc(b"{\"a\": }").unwrap()).is_err());
     }
     #[test]
     fn setup_partial_failure_is_durable_pending_and_never_blind_retried() {

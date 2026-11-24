@@ -293,6 +293,9 @@ pub struct SetupState {
     pub authentication_evidence: AuthenticationEvidence,
     pub configured_sha256: Option<String>,
     pub discovery_sha256: Option<String>,
+    /// Whether the saved host report listed the available search tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_tool_available: Option<bool>,
     pub last_notice: Option<String>,
     /// Original acknowledged fresh Codex CIMD add; eligibility is not dispatch proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,6 +314,7 @@ impl Default for SetupState {
             authentication_evidence: AuthenticationEvidence::None,
             configured_sha256: None,
             discovery_sha256: None,
+            search_tool_available: None,
             last_notice: None,
             recovery_origin: None,
         }
@@ -394,22 +398,7 @@ impl SetupState {
                 "A prior native command may have changed configuration. Review it before changing selection.",
             ));
         }
-        // Replaying the selection that saved configuration or host evidence belongs to changes nothing.
-        if self.selection.as_ref() == Some(&selection)
-            && (self.configured || self.authentication_evidence != AuthenticationEvidence::None)
-        {
-            return Ok(());
-        }
-        self.revision += 1;
-        self.selection = Some(selection.clone());
-        self.plan = None;
-        self.recovery_origin = None;
-        self.configured = false;
-        self.configured_sha256 = None;
-        self.discovery_sha256 = None;
-        self.authentication_evidence = AuthenticationEvidence::None;
-        self.last_notice = None;
-        self.phase = if matches!(selection.registration, RegistrationMode::ApiClient { .. }) {
+        let fresh_phase = if matches!(selection.registration, RegistrationMode::ApiClient { .. }) {
             SetupPhase::AdvancedPending
         } else if selection.host_managed()
             || !selection.client.needs_executable()
@@ -419,14 +408,62 @@ impl SetupState {
         } else {
             SetupPhase::InstallationRequired
         };
+        // Replaying a selection keeps evidence, including when it resumes interrupted setup.
+        if self.selection.as_ref() == Some(&selection)
+            && (self.configured || self.authentication_evidence != AuthenticationEvidence::None)
+        {
+            if matches!(
+                self.phase,
+                SetupPhase::Cancelled | SetupPhase::InstallationRequired
+            ) {
+                self.phase = if fresh_phase == SetupPhase::InstallationRequired {
+                    fresh_phase
+                } else {
+                    match self.authentication_evidence {
+                        AuthenticationEvidence::SavedHostToolDiscovery
+                            if self.search_tool_available == Some(true) =>
+                        {
+                            SetupPhase::ToolDiscoveryVerified
+                        }
+                        AuthenticationEvidence::SavedHostToolDiscovery => SetupPhase::Authenticated,
+                        AuthenticationEvidence::UserConfirmed => SetupPhase::AuthenticationRequired,
+                        AuthenticationEvidence::None if self.configured => {
+                            SetupPhase::AuthenticationRequired
+                        }
+                        AuthenticationEvidence::None => fresh_phase,
+                    }
+                };
+                self.last_notice = None;
+            }
+            return Ok(());
+        }
+        self.revision += 1;
+        self.selection = Some(selection.clone());
+        self.plan = None;
+        self.recovery_origin = None;
+        self.configured = false;
+        self.configured_sha256 = None;
+        self.discovery_sha256 = None;
+        self.search_tool_available = None;
+        self.authentication_evidence = AuthenticationEvidence::None;
+        self.last_notice = None;
+        self.phase = fresh_phase;
         Ok(())
     }
     pub fn invalidate_plan(&mut self) {
         self.revision += 1;
         self.plan = None;
     }
+    pub fn record_tool_availability_before_suspending(&mut self) {
+        match self.phase {
+            SetupPhase::ToolDiscoveryVerified => self.search_tool_available = Some(true),
+            SetupPhase::Authenticated => self.search_tool_available = Some(false),
+            _ => {}
+        }
+    }
     pub fn cancel(&mut self) {
         if self.phase != SetupPhase::CommandPending {
+            self.record_tool_availability_before_suspending();
             self.invalidate_plan();
             self.phase = SetupPhase::Cancelled;
         }
@@ -439,7 +476,10 @@ impl Selection {
         matches!(self.registration, RegistrationMode::HostManaged {})
     }
     pub fn validate(&self) -> Result<(), Diagnostic> {
-        if !identifier(&self.server_name) {
+        if !identifier(&self.server_name)
+            && !(self.host_managed()
+                && accepts_host_managed_server_name(self.client, &self.server_name))
+        {
             return Err(error(
                 "SETUP_SERVER_NAME",
                 "Server name must be 1-64 ASCII letters, digits, underscores or hyphens and start with a letter or digit.",
@@ -749,6 +789,7 @@ pub fn verify_discovery(
     }
     state.authentication_evidence = AuthenticationEvidence::SavedHostToolDiscovery;
     state.discovery_sha256 = Some(raw_sha256);
+    state.search_tool_available = Some(has_search_tool);
     state.phase = if has_search_tool {
         SetupPhase::ToolDiscoveryVerified
     } else {
@@ -1192,10 +1233,16 @@ pub fn is_digest(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
+pub fn accepts_host_managed_server_name(client: ClientKind, name: &str) -> bool {
+    identifier(name)
+        || client == ClientKind::ClaudeCode && name.starts_with('_') && identifier_bytes(name)
+}
+
 fn identifier(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.as_bytes()[0].is_ascii_alphanumeric()
+    s.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric) && identifier_bytes(s)
+}
+fn identifier_bytes(s: &str) -> bool {
+    s.len() <= 64
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
 }

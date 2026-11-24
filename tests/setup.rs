@@ -1315,3 +1315,80 @@ fn verified_setup_offers_the_capture_hook_where_the_installer_writes_settings() 
         assert!(handoff.contains("Where a capture hook or pass-through is registered"));
     }
 }
+
+#[test]
+fn identical_selection_resumes_inactive_verified_setup() {
+    for mut state in [selected(ClientKind::VsCode), {
+        let mut state = SetupState::default();
+        state
+            .select(host_selection(ClientKind::ClaudeCode, None))
+            .unwrap();
+        state
+    }] {
+        let selection = state.selection.clone().unwrap();
+        let report = HostToolDiscovery {
+            schema_version: 1,
+            client: selection.client,
+            host_id: None,
+            server_name: selection.server_name.clone(),
+            endpoint: selection.cloud.endpoint().into(),
+            authenticated: true,
+            effective_oauth_client_id: None,
+            effective_config_source: None,
+            tools: vec![DiscoveryTool {
+                name: SEARCH_TOOL.into(),
+                available: true,
+            }],
+        };
+        state.configured = true;
+        verify_discovery(&mut state, &report, "a".repeat(64)).unwrap();
+        state.cancel();
+        state.select(selection.clone()).unwrap();
+        assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+        assert_eq!(
+            state.discovery_sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        if selection.client.needs_executable() && !selection.host_managed() {
+            state.phase = SetupPhase::InstallationRequired;
+            state.clients.clear();
+            state.select(selection.clone()).unwrap();
+            assert_eq!(state.phase, SetupPhase::InstallationRequired);
+            state.clients.push(observation(selection.client));
+            state.select(selection).unwrap();
+            assert_eq!(state.phase, SetupPhase::ToolDiscoveryVerified);
+        }
+    }
+}
+
+#[test]
+fn claude_host_managed_accepts_an_existing_underscore_alias() {
+    let mut selection = host_selection(ClientKind::ClaudeCode, None);
+    selection.server_name = "_soc".into();
+    selection.validate().unwrap();
+    selection.server_name = "bad.name".into();
+    assert_eq!(selection.validate().unwrap_err().code, "SETUP_SERVER_NAME");
+}
+
+#[test]
+fn resuming_setup_does_not_promote_a_report_without_the_search_tool() {
+    let selection = host_selection(ClientKind::Codex, None);
+    let mut state = SetupState::default();
+    state.select(selection.clone()).unwrap();
+    let report = HostToolDiscovery {
+        schema_version: 1,
+        client: selection.client,
+        host_id: None,
+        server_name: selection.server_name.clone(),
+        endpoint: selection.cloud.endpoint().into(),
+        authenticated: true,
+        effective_oauth_client_id: None,
+        effective_config_source: None,
+        tools: vec![],
+    };
+    verify_discovery(&mut state, &report, "a".repeat(64)).unwrap();
+    assert_eq!(state.phase, SetupPhase::Authenticated);
+    state.cancel();
+    state.select(selection).unwrap();
+    assert_eq!(state.phase, SetupPhase::Authenticated);
+}
