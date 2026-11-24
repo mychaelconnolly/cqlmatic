@@ -342,6 +342,24 @@ fn prepare_discovery_says_what_a_source_id_is_and_when_no_source_is_expected() {
 }
 
 #[test]
+fn inventory_unknown_field_excludes_allowed_field_names() {
+    let dir = Temp::new();
+    for action in [
+        json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z",
+            "max_seconds":60,"max_queries":5,"window_end":true}),
+        json!({"kind":"reconcile","reviewed_at":"2026-01-01T00:00:00Z","window_end":true}),
+    ] {
+        let output = inventory_command(&dir.0, action).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(
+            error["message"],
+            "Inventory input has an unknown field \"window_end\". Remove it or use a field from the inventory schema."
+        );
+    }
+}
+
+#[test]
 fn a_request_missing_a_required_field_names_it_without_repeating_the_request() {
     let dir = Temp::new();
     assert_rejected(

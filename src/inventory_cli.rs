@@ -412,7 +412,7 @@ fn read_inventory_request(path: &Path) -> Result<InventoryRequest, Diagnostic> {
     serde_json::from_slice(&raw).map_err(|error| {
         let message = error.to_string();
         if let Some((field, _)) = message.strip_prefix("unknown field `")
-            .and_then(|rest| rest.rsplit_once("`, "))
+            .and_then(|rest| rest.split_once("`, "))
         {
             return fail(&format!(
                 "Inventory input has an unknown field {}. Remove it or use a field from the inventory schema.",
