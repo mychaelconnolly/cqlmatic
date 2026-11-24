@@ -76,7 +76,7 @@ fn call(dir: &Path, action: Value) -> Value {
     call_with(dir, action, &[])
 }
 fn environment() -> Value {
-    json!({"cloud":"us1","tenant":"00000000000000000000000000000000","view":"search-all"})
+    json!({"cloud":"us1","tenant":"0".repeat(32),"view":"search-all"})
 }
 /// Confirms one selected source and returns its inventory source ID.
 fn confirm_source(dir: &Path) -> String {
@@ -115,7 +115,7 @@ fn re_encoded(dir: &Path, name: &str, id: &str, script: &str) -> String {
         dir,
         name,
         format!(
-            r#"{{"meta":{{"trace_id":"second-capture"}},"resources":[{{"script":{script},"fields_to_tag":["event.kind"],"name":"Synthetic parser","id":"{id}"}}]}}"#
+            r#"{{"meta":{{"capture":"second"}},"resources":[{{"script":{script},"fields_to_tag":["event.kind"],"name":"Synthetic parser","id":"{id}"}}]}}"#
         )
         .as_bytes(),
     )
@@ -390,7 +390,15 @@ fn import_replies_count_review_work_in_full_summary_and_brief() {
 #[test]
 fn a_state_with_no_held_review_work_keeps_its_earlier_form_and_fingerprint() {
     let dir = Temp::new();
+    call(&dir.0, json!({"kind":"init"}));
+    let mut initial: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    initial["created_at"] = json!(RETRIEVED);
+    fs::write(dir.state(), serde_json::to_vec(&initial).unwrap()).unwrap();
     let (_, p1, _) = bound(&dir.0);
+    let mut confirmed: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    confirmed["target"]["confirmed_at"] = json!(RETRIEVED);
+    confirmed["refresh_reminder"]["baseline_at"] = json!(RETRIEVED);
+    fs::write(dir.state(), serde_json::to_vec(&confirmed).unwrap()).unwrap();
     let reconciled = call(
         &dir.0,
         json!({"kind":"reconcile","reviewed_at":"2026-01-02T00:01:00Z"}),
@@ -401,6 +409,11 @@ fn a_state_with_no_held_review_work_keeps_its_earlier_form_and_fingerprint() {
     assert!(saved.get("suspended_parser_reviews").is_none());
     assert!(saved.get("carried_parser_reviews").is_none());
     let state: InventoryState = serde_json::from_slice(&before).unwrap();
+    // Reconciled by the 0.1.13 CLI with these fixed fixture timestamps and captures.
+    assert_eq!(
+        state.evidence_digest().unwrap(),
+        "6680997137716905a2bdf398d8f1efd9a9cad52fb1b507d0b5fe084c08f6a2ac"
+    );
     let mut serialized = serde_json::to_vec_pretty(&state).unwrap();
     serialized.push(b'\n');
     assert!(
@@ -424,7 +437,7 @@ const START: &str = "2026-01-01T00:00:00Z";
 fn environment_id() -> EnvironmentId {
     EnvironmentId {
         cloud: Cloud::Us1,
-        tenant: "00000000000000000000000000000000".into(),
+        tenant: "0".repeat(32),
         view: "search-all".into(),
     }
 }
@@ -489,8 +502,7 @@ fn observed_pack() -> Pack {
     }).unwrap()
 }
 
-#[test]
-fn full_map_complete_is_false_while_a_binding_is_suspended() {
+fn full_with_parser(p1: &ParserSnapshot) -> (InventoryState, Pack) {
     let mut state = full_environment();
     state.sources[0].review = Some(SourceReview {
         purpose: "Synthetic source".into(),
@@ -498,7 +510,6 @@ fn full_map_complete_is_false_while_a_binding_is_suspended() {
         reviewed_at: NOW.into(),
         evidence: "Synthetic source contract".into(),
     });
-    let p1 = parser("p1", "user := \"a\"");
     state
         .import_parser_inventory(vec![catalog_page(&["p1"])], vec![p1.clone()])
         .unwrap();
@@ -520,6 +531,13 @@ fn full_map_complete_is_false_while_a_binding_is_suspended() {
     state.active_pack = Some(reference);
     state.discovery_runs.push(serde_json::from_value(json!({"state_path":"synthetic-run.json","pack_path":"synthetic-pack.json","receipt_path":"synthetic-receipt.json","start":START,"end":NOW,"source_ids":[state.sources[0].id],"value_fields":[],"max_queries":20,"max_seconds":300,"answered":5,"elapsed_seconds":1.0,"status":"complete"})).unwrap());
     state.reconciled_evidence_sha256 = Some(state.evidence_digest().unwrap());
+    (state, pack)
+}
+
+#[test]
+fn full_map_complete_is_false_while_a_binding_is_suspended() {
+    let p1 = parser("p1", "user := \"a\"");
+    let (mut state, pack) = full_with_parser(&p1);
     let status = assess(&state, std::slice::from_ref(&pack)).unwrap();
     assert!(status.full_map_complete, "positive control");
 
@@ -546,5 +564,502 @@ fn full_map_complete_is_false_while_a_binding_is_suspended() {
     assert_eq!(
         saved["suspended_parser_reviews"][0]["binding"]["parser_sha256"],
         p1.snapshot.sha256.as_str()
+    );
+}
+
+fn exclude(dir: &Path, parser: &str, sha256: &str) -> Value {
+    call(
+        dir,
+        json!({"kind":"exclude-parser","parser_id":parser,"parser_sha256":sha256,"reviewed_at":RETRIEVED,"reason":"Synthetic exclusion"}),
+    )
+}
+
+fn not_applicable(dir: &Path, source: &str) -> Value {
+    call(
+        dir,
+        json!({"kind":"parser-not-applicable","source_id":source,"reason":"platform-internal","reviewed_at":RETRIEVED,"evidence":"Synthetic native source"}),
+    )
+}
+
+fn status(dir: &Temp, flags: &[&str]) -> Output {
+    let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--state"])
+        .arg(dir.state())
+        .args(flags)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[test]
+fn missing_captures_are_refused_before_creating_a_state_directory() {
+    let dir = Temp::new();
+    let output = run(
+        &dir.0,
+        json!({"kind":"import-parsers","pages":[],"details":[],"retrieved_at":RETRIEVED}),
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("needs at least one capture"));
+    assert!(!dir.state().parent().unwrap().exists());
+}
+
+#[test]
+fn new_binding_or_exclusion_supersedes_a_suspended_exclusion() {
+    for bind_instead in [false, true] {
+        let dir = Temp::new();
+        let (source, p1, original) = {
+            let source = confirm_source(&dir.0);
+            let p1 = detail(&dir.0, "original.json", resource("p1", SCRIPT));
+            let imported = import(&dir.0, &["p1"], &[("p1", &p1)]);
+            (source, p1, sha(&imported, "p1"))
+        };
+        exclude(&dir.0, "p1", &original);
+        let changed = detail(
+            &dir.0,
+            "changed.json",
+            resource("p1", "other := true\nparseJson()"),
+        );
+        let current = import(&dir.0, &["p1"], &[("p1", &changed)]);
+        assert_eq!(current["action"]["parser_reviews"], counts(0, 0, 1, 0));
+        let current = sha(&current, "p1");
+        let reviewed = if bind_instead {
+            bind(&dir.0, &source, "p1", &current)
+        } else {
+            exclude(&dir.0, "p1", &current)
+        };
+        assert!(reviewed["status"].get("suspended_parser_reviews").is_none());
+        let rollback = import(&dir.0, &["p1"], &[("p1", &p1)]);
+        assert_eq!(rollback["action"]["parser_reviews"], counts(0, 0, 1, 0));
+        assert_eq!(rollback["status"]["unclassified_parser_ids"], json!(["p1"]));
+    }
+}
+
+#[test]
+fn carried_bindings_are_pruned_only_after_the_last_review_is_replaced() {
+    for replace_with_native in [false, true] {
+        let dir = Temp::new();
+        let (source, _, h1) = bound(&dir.0);
+        // Two sources can share a carried mapping.
+        let mut state: InventoryState =
+            serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+        let mut other = state.sources[0].clone();
+        other.selectors.repo = Some("another-synthetic-repo".into());
+        other.id = discovery::source_id(&other.selectors);
+        let other_id = other.id.clone();
+        state.sources.push(other);
+        fs::write(dir.state(), serde_json::to_vec(&state).unwrap()).unwrap();
+        let second = re_encoded(&dir.0, "second.json", "p1", SCRIPT);
+        let carried = import(&dir.0, &["p1"], &[("p1", &second)]);
+        assert_eq!(carried["action"]["parser_reviews"], counts(0, 2, 0, 0));
+        let saved = sha(&carried, "p1");
+        let rebound = bind(&dir.0, &source, "p1", &saved);
+        assert_eq!(
+            rebound["status"]["carried_parser_reviews"][0]["reviewed_sha256"],
+            h1
+        );
+        let replaced = if replace_with_native {
+            not_applicable(&dir.0, &other_id)
+        } else {
+            bind(&dir.0, &other_id, "p1", &saved)
+        };
+        assert!(replaced["status"].get("carried_parser_reviews").is_none());
+        let state: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+        assert!(state.get("carried_parser_reviews").is_none());
+    }
+}
+
+#[test]
+fn marking_a_source_not_applicable_clears_its_suspended_binding() {
+    let dir = Temp::new();
+    let (source, p1, _) = bound(&dir.0);
+    let partial = import(&dir.0, &["p1"], &[]);
+    assert_eq!(partial["action"]["parser_reviews"], counts(0, 0, 1, 0));
+    let native = not_applicable(&dir.0, &source);
+    assert!(native["status"].get("suspended_parser_reviews").is_none());
+    let returned = import(&dir.0, &["p1"], &[("p1", &p1)]);
+    assert_eq!(returned["action"]["parser_reviews"], counts(0, 0, 0, 0));
+    assert_eq!(
+        returned["status"]["sources"][0]["binding"]["kind"],
+        "not-applicable"
+    );
+}
+
+#[test]
+fn chaining_re_encodings_preserves_both_review_kinds_then_restores_them_by_value() {
+    let dir = Temp::new();
+    let source = confirm_source(&dir.0);
+    let first = detail(&dir.0, "first.json", resource("p1", SCRIPT));
+    let excluded = detail(&dir.0, "excluded.json", resource("p2", SCRIPT));
+    let ids = ["p1", "p2"];
+    let original = import(&dir.0, &ids, &[("p1", &first), ("p2", &excluded)]);
+    let h1 = sha(&original, "p1");
+    let h2 = sha(&original, "p2");
+    bind(&dir.0, &source, "p1", &h1);
+    exclude(&dir.0, "p2", &h2);
+    let b1 = re_encoded(&dir.0, "b1.json", "p1", SCRIPT);
+    let b2 = re_encoded(&dir.0, "b2.json", "p2", SCRIPT);
+    let b = import(&dir.0, &ids, &[("p1", &b1), ("p2", &b2)]);
+    assert_eq!(b["action"]["parser_reviews"], counts(0, 2, 0, 0));
+    let c1 = write(
+        &dir.0,
+        "c1.json",
+        &[fs::read(&b1).unwrap(), b"\n".to_vec()].concat(),
+    );
+    let c2 = write(
+        &dir.0,
+        "c2.json",
+        &[fs::read(&b2).unwrap(), b"\n".to_vec()].concat(),
+    );
+    let c = import(&dir.0, &ids, &[("p1", &c1), ("p2", &c2)]);
+    assert_eq!(c["action"]["parser_reviews"], counts(0, 2, 0, 0));
+    let saved = sha(&c, "p2");
+    assert_ne!(saved, sha(&b, "p2"));
+    assert_eq!(
+        c["status"]["carried_parser_reviews"],
+        json!([
+            {"parser_id":"p1","reviewed_sha256":h1,"saved_sha256":sha(&c, "p1")},
+            {"parser_id":"p2","reviewed_sha256":h2,"saved_sha256":saved}
+        ])
+    );
+
+    let partial = import(&dir.0, &ids, &[]);
+    assert_eq!(partial["action"]["parser_reviews"], counts(0, 0, 2, 0));
+    assert!(partial["status"].get("carried_parser_reviews").is_none());
+    let returned = import(&dir.0, &ids, &[("p1", &c1), ("p2", &c2)]);
+    assert_eq!(returned["action"]["parser_reviews"], counts(0, 2, 0, 0));
+    assert_eq!(
+        returned["status"]["carried_parser_reviews"],
+        c["status"]["carried_parser_reviews"]
+    );
+    let excluded = exclude(&dir.0, "p2", &saved);
+    let remaining = excluded["status"]["carried_parser_reviews"]
+        .as_array()
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["parser_id"], "p1");
+}
+
+#[test]
+fn changing_tag_values_or_array_order_suspends_a_binding() {
+    for tags in [["a", "c"], ["b", "a"]] {
+        let dir = Temp::new();
+        let source = confirm_source(&dir.0);
+        let mut parser = resource("p1", SCRIPT);
+        parser["fields_to_tag"] = json!(["a", "b"]);
+        let original = detail(&dir.0, "original.json", parser.clone());
+        let imported = import(&dir.0, &["p1"], &[("p1", &original)]);
+        bind(&dir.0, &source, "p1", &sha(&imported, "p1"));
+        parser["fields_to_tag"] = json!(tags);
+        let changed = detail(&dir.0, "changed.json", parser);
+        let reviewed = import(&dir.0, &["p1"], &[("p1", &changed)]);
+        assert_eq!(
+            reviewed["action"]["parser_reviews"],
+            counts(0, 0, 1, 0),
+            "{tags:?}"
+        );
+    }
+}
+
+#[test]
+fn exclusions_return_to_their_original_order_and_reconciliation() {
+    let dir = Temp::new();
+    confirm_source(&dir.0);
+    let a = detail(&dir.0, "a.json", resource("p1", SCRIPT));
+    let b = detail(&dir.0, "b.json", resource("p2", SCRIPT));
+    let ids = ["p1", "p2"];
+    let original = import(&dir.0, &ids, &[("p1", &a), ("p2", &b)]);
+    exclude(&dir.0, "p1", &sha(&original, "p1"));
+    exclude(&dir.0, "p2", &sha(&original, "p2"));
+    let reconciled = call(&dir.0, json!({"kind":"reconcile","reviewed_at":NOW}));
+    assert_eq!(reconciled["status"]["reconciliation"], "done");
+    let before: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    import(&dir.0, &ids, &[("p2", &b)]);
+    let restored = import(&dir.0, &ids, &[("p1", &a), ("p2", &b)]);
+    assert_eq!(restored["status"]["reconciliation"], "done");
+    let after: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    assert_eq!(after["parser_exclusions"], before["parser_exclusions"]);
+}
+
+#[test]
+fn standalone_status_reports_suspended_exclusions_without_exposing_them_in_brief() {
+    let dir = Temp::new();
+    confirm_source(&dir.0);
+    let id = "synthetic-private-parser";
+    let file = detail(&dir.0, "original.json", resource(id, SCRIPT));
+    let imported = import(&dir.0, &[id], &[(id, &file)]);
+    let hash = sha(&imported, id);
+    exclude(&dir.0, id, &hash);
+    import(&dir.0, &[id], &[]);
+    for flags in [&["--json"][..], &["--json", "--summary"][..]] {
+        let output = status(&dir, flags);
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if flags.contains(&"--summary") {
+            assert_eq!(value["counts"]["suspended_parser_exclusions"], 1);
+        } else {
+            assert_eq!(value["suspended_parser_exclusions"], 1);
+            assert_eq!(
+                value["suspended_parser_reviews"].as_array().unwrap().len(),
+                1
+            );
+        }
+        assert!(
+            value["next_actions"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(SUSPENDED_REPLY))
+        );
+    }
+    let brief = status(&dir, &["--json", "--brief"]);
+    assert!(brief.stdout.len() <= 4096);
+    let text = String::from_utf8(brief.stdout).unwrap();
+    for secret in [id, &hash, &file] {
+        assert!(!text.contains(secret));
+    }
+    let brief: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(brief["counts"]["suspended_parser_exclusions"], 1);
+    assert!(brief["notices"].as_array().unwrap().iter().any(|notice| {
+        notice["code"] == "SUSPENDED_PARSER_REVIEWS"
+            && notice["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("restore")
+    }));
+
+    let human = String::from_utf8(status(&dir, &[]).stdout).unwrap();
+    assert!(human.contains("Suspended parser exclusions: 1"));
+    assert!(human.contains("Import or fetch"));
+}
+
+fn number_parser(value: &str) -> ParserSnapshot {
+    let raw = format!(
+        r#"{{"resources":[{{"id":"p1","script":"user := true","extra":{{"revision":[{value}]}}}}]}}"#
+    );
+    parse_parser("p1", RawSnapshot::new(raw.as_bytes(), NOW).unwrap()).unwrap()
+}
+
+fn review_numeric_parser(value: &str) -> InventoryState {
+    let mut state = full_environment();
+    let parser = number_parser(value);
+    state
+        .import_parser_inventory(vec![catalog_page(&["p1"])], vec![parser.clone()])
+        .unwrap();
+    state.sources[0].binding = Some(ParserBinding::Parser {
+        parser_id: parser.id,
+        parser_sha256: parser.snapshot.sha256,
+        reviewed_at: NOW.into(),
+        evidence: "Synthetic numeric parser review".into(),
+        semantics: vec![],
+    });
+    state
+}
+
+#[test]
+fn equivalent_decimal_spellings_carry_review() {
+    for (left, right) in [
+        ("1000", "1e3"),
+        ("1000.0", "1e+0003"),
+        ("-0", "0"),
+        ("0.50", "5e-1"),
+        ("-12.30", "-123e-1"),
+        (
+            "100e99999999999999999999999999",
+            "1e100000000000000000000000001",
+        ),
+        (
+            "100e-100000000000000000000000001",
+            "1e-99999999999999999999999999",
+        ),
+    ] {
+        let mut state = review_numeric_parser(left);
+        let counts = state
+            .import_parser_inventory(vec![catalog_page(&["p1"])], vec![number_parser(right)])
+            .unwrap();
+        assert_eq!(
+            (counts.carried, counts.suspended),
+            (1, 0),
+            "{left} vs {right}"
+        );
+    }
+}
+
+#[test]
+fn distinct_exact_numbers_suspend_reviews() {
+    for (left, right) in [
+        ("9007199254740992.0", "9007199254740993.0"),
+        ("18446744073709551616", "18446744073709551617"),
+        (
+            "0.123456789123456789123456789",
+            "0.123456789123456789123456788",
+        ),
+        (
+            "1e99999999999999999999999999",
+            "1e99999999999999999999999998",
+        ),
+    ] {
+        let mut state = review_numeric_parser(left);
+        let counts = state
+            .import_parser_inventory(vec![catalog_page(&["p1"])], vec![number_parser(right)])
+            .unwrap();
+        assert_eq!(
+            (counts.carried, counts.suspended),
+            (0, 1),
+            "{left} vs {right}"
+        );
+    }
+}
+
+fn assert_invalid_review(state: &Value, label: &str) {
+    let state: InventoryState = serde_json::from_value(state.clone()).unwrap();
+    assert!(state.validate().is_err(), "accepted {label}");
+}
+
+#[test]
+fn validation_rejects_corrupt_held_bindings_exclusions_and_carries() {
+    let dir = Temp::new();
+    let (_, p1, _) = bound(&dir.0);
+    let partial = import(&dir.0, &["p1"], &[]);
+    let held = partial["status"]["suspended_parser_reviews"][0].clone();
+    let suspended: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    for (path, value) in [
+        ("/binding/parser_id", json!("")),
+        ("/binding/parser_sha256", json!("not-a-digest")),
+        ("/binding/parser_sha256", json!("A".repeat(64))),
+        ("/binding/semantics/0/line", json!(0)),
+        ("/resource_sha256", json!("A".repeat(64))),
+    ] {
+        let mut invalid = suspended.clone();
+        *invalid["suspended_parser_reviews"][0]
+            .pointer_mut(path)
+            .unwrap() = value;
+        assert_invalid_review(&invalid, path);
+    }
+    let mut exclusion = json!({
+        "kind":"exclusion","resource_sha256": held["resource_sha256"],
+        "exclusion":{"parser_id":"p1","parser_sha256":held["binding"]["parser_sha256"],
+           "reviewed_at":NOW,"reason":"Synthetic exclusion"}
+    });
+    let mut conflict = suspended.clone();
+    conflict["suspended_parser_reviews"] = json!([held, exclusion]);
+    assert_invalid_review(&conflict, "binding and exclusion of the same held hash");
+    let mut different_hash = conflict.clone();
+    different_hash["suspended_parser_reviews"][1]["exclusion"]["parser_sha256"] =
+        json!("a".repeat(64));
+    assert_invalid_review(
+        &different_hash,
+        "binding and exclusion of the same held resource",
+    );
+    conflict["suspended_parser_reviews"] = json!([exclusion, exclusion]);
+    assert_invalid_review(&conflict, "duplicate held exclusions");
+    exclusion["exclusion"]["parser_id"] = json!("");
+    conflict["suspended_parser_reviews"] = json!([exclusion]);
+    assert_invalid_review(&conflict, "empty held exclusion ID");
+
+    import(&dir.0, &["p1"], &[("p1", &p1)]);
+    let active: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    let mut invalid = active.clone();
+    invalid["sources"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("binding");
+    invalid["suspended_parser_reviews"] = json!([held]);
+    invalid["suspended_parser_reviews"][0]["binding"]["parser_sha256"] = json!("a".repeat(64));
+    assert_invalid_review(
+        &invalid,
+        "held resource already saved under a different hash",
+    );
+    let mut exclusion = json!({"parser_id":"p1","parser_sha256":held["binding"]["parser_sha256"],"reviewed_at":NOW,"reason":"Synthetic exclusion"});
+    let mut invalid = active;
+    invalid["parser_exclusions"] = json!([exclusion]);
+    assert_invalid_review(&invalid, "active binding and exclusion");
+    invalid["sources"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("binding");
+    invalid["parser_exclusions"] = json!([exclusion, exclusion]);
+    assert_invalid_review(&invalid, "duplicate active exclusions");
+    invalid["parser_exclusions"] = json!([exclusion]);
+    exclusion["parser_sha256"] = json!("a".repeat(64));
+    invalid["suspended_parser_reviews"] = json!([{
+        "kind":"exclusion","resource_sha256":"b".repeat(64),"exclusion":exclusion
+    }]);
+    assert_invalid_review(&invalid, "duplicate active and held exclusions");
+
+    let second = re_encoded(&dir.0, "second.json", "p1", SCRIPT);
+    import(&dir.0, &["p1"], &[("p1", &second)]);
+    let carried: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    for (field, value) in [
+        ("reviewed_sha256", json!("not-even-hex")),
+        ("saved_sha256", json!("A".repeat(64))),
+        ("parser_id", json!("")),
+    ] {
+        let mut invalid = carried.clone();
+        invalid["carried_parser_reviews"][0][field] = value;
+        assert_invalid_review(&invalid, field);
+    }
+    let mut invalid = carried;
+    invalid["sources"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("binding");
+    assert_invalid_review(&invalid, "unreferenced carried review");
+}
+
+#[test]
+fn changed_numeric_metadata_cannot_complete_the_full_map_or_resolve_pending_fields() {
+    let (mut state, pack) = full_with_parser(&number_parser("9007199254740992.0"));
+    let run = state.discovery_runs.pop().unwrap();
+    state
+        .record_inventory_hints(
+            &environment_id(),
+            vec![InventoryHint {
+                source: selectors(),
+                fields: vec!["user".into()],
+            }],
+        )
+        .unwrap();
+    state.discovery_runs.push(run);
+    let evidence = [InventoryRunEvidence {
+        run: "synthetic-run.json".into(),
+        request_sha256: "a".repeat(64),
+        captures: vec![serde_json::from_value(json!({
+            "probe":{"kind":"population","source":selectors(),"query":"synthetic count","start":START,"end":NOW,"fields":["user"]},
+            "retrieved_at":NOW,
+            "receipt":{"query":"synthetic count","start":START,"end":NOW,"job_id":"job","completion":"complete","cleanup":"delegated","polls":1,"events":[{"total":10,"c0":10}],"metadata":null,"diagnostic":null}
+        })).unwrap()],
+    }];
+    state.reconciled_evidence_sha256 = Some(state.evidence_digest().unwrap());
+    let status = assess(&state, std::slice::from_ref(&pack)).unwrap();
+    assert!(status.full_map_complete);
+    let mut control = state.clone();
+    control
+        .resolve_inventoried_work_with_evidence(&status, &evidence)
+        .unwrap();
+    assert!(control.pending_inventory[0].resolution.is_some());
+
+    let counts = state
+        .import_parser_inventory(
+            vec![catalog_page(&["p1"])],
+            vec![number_parser("9007199254740993.0")],
+        )
+        .unwrap();
+    state.reconciled_evidence_sha256 = Some(state.evidence_digest().unwrap());
+    let status = assess(&state, std::slice::from_ref(&pack)).unwrap();
+    state
+        .resolve_inventoried_work_with_evidence(&status, &evidence)
+        .unwrap();
+    assert_eq!(
+        (
+            counts.suspended,
+            status.sources[0].parser,
+            status.full_map_complete,
+            state.pending_inventory[0].resolution.is_some()
+        ),
+        (1, Progress::Pending, false, false),
     );
 }

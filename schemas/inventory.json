@@ -2677,6 +2677,15 @@
               "type": "string",
               "const": "exclusion"
             },
+            "position": {
+              "description": "Zero-based slot in the combined active and suspended exclusion order.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            },
             "resource_sha256": {
               "type": "string"
             }

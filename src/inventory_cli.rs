@@ -8,7 +8,7 @@ use cqlmatic::{
     mcp, network, storage,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::BTreeSet,
     io::{self, BufRead, IsTerminal, Read, Write},
@@ -489,6 +489,10 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         status.reconciliation
     )
     .map_err(|_| fail("Cannot emit inventory status."))?;
+    if let Some(count) = status.suspended_parser_exclusions {
+        writeln!(out, "Suspended parser exclusions: {count}")
+            .map_err(|_| fail("Cannot emit inventory status."))?;
+    }
     for source in &status.sources {
         let selectors = [
             source
@@ -1017,6 +1021,14 @@ fn apply_and_store_with_work_budget(
     action: InventoryAction,
     work_budget: u64,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
+    if let InventoryAction::ImportParsers { pages, details, .. } = &action
+        && pages.is_empty()
+        && details.is_empty()
+    {
+        return Err(fail(
+            "An import replaces the saved parser inventory and needs at least one capture. Supply the saved catalog pages and parser details; a catalog page that lists no parsers is a valid capture.",
+        ));
+    }
     let writer = inventory_writer(path)?;
     apply_locked(path, action, work_budget, &writer)
 }
@@ -2417,11 +2429,6 @@ fn apply(
                     "Saved parser import exceeds 100 pages / 10000 parser details.",
                 ));
             }
-            if pages.is_empty() && details.is_empty() {
-                return Err(fail(
-                    "An import replaces the saved parser inventory and needs at least one capture. Supply the saved catalog pages and parser details; a catalog page that lists no parsers is a valid capture.",
-                ));
-            }
             let mut captured_pages = Vec::new();
             let mut captured_details = Vec::new();
             for page in pages {
@@ -2475,21 +2482,7 @@ fn apply(
             )?;
             let mut client = network::FalconClient::new(&target.environment, credentials)?;
             let outcome = fetch_parsers(&mut client, max_pages, max_parsers, max_seconds)?;
-            let counts = state.import_parser_inventory(outcome.pages, outcome.details)?;
-            state.parser_runs.push(outcome.run.clone());
-            if let Some(diagnostic) = &outcome.run.failure {
-                state.failures.push(InventoryFailure {
-                    stage: "parser-inventory".into(),
-                    source_id: None,
-                    message: diagnostic.message.clone(),
-                    recorded_at: now.into(),
-                });
-            }
-            let mut reply = json!({"parser_count":state.parsers.len(),"run":outcome.run,"credentials_persisted":false,"parser_reviews":counts});
-            if counts.suspended > 0 {
-                reply["next_action"] = json!(SUSPENDED_PARSER_REVIEWS);
-            }
-            Ok(reply)
+            apply_parser_fetch(state, outcome, now)
         }
         InventoryAction::BindParser {
             source_id,
@@ -2507,7 +2500,7 @@ fn apply(
                 semantics,
             };
             state.validate_binding(&binding)?;
-            state.parser_exclusions.retain(|e| e.parser_id != parser_id);
+            state.remove_parser_exclusion(&parser_id);
             state.set_binding(&source_id, binding)?;
             Ok(Value::Null)
         }
@@ -2546,13 +2539,14 @@ fn apply(
             {
                 return Ok(Value::Null);
             }
-            state.parser_exclusions.retain(|e| e.parser_id != parser_id);
+            state.remove_parser_exclusion(&parser_id);
             state.parser_exclusions.push(ParserExclusion {
                 parser_id,
                 parser_sha256,
                 reviewed_at,
                 reason,
             });
+            state.prune_unused_carried_parser_reviews();
             Ok(Value::Null)
         }
         InventoryAction::PrepareDiscovery {
@@ -2892,14 +2886,14 @@ fn absolute_path(path: &Path) -> Result<String, Diagnostic> {
 
 trait ParserBackend {
     fn list(&mut self, offset: u32, limit: u32, deadline: Instant) -> Result<Value, Diagnostic>;
-    fn detail(&mut self, id: &str, deadline: Instant) -> Result<Value, Diagnostic>;
+    fn detail(&mut self, id: &str, deadline: Instant) -> Result<Box<RawValue>, Diagnostic>;
 }
 impl ParserBackend for network::FalconClient {
     fn list(&mut self, offset: u32, limit: u32, deadline: Instant) -> Result<Value, Diagnostic> {
         self.list_parsers(offset, limit, deadline)
     }
-    fn detail(&mut self, id: &str, deadline: Instant) -> Result<Value, Diagnostic> {
-        self.parser(id, false, deadline)
+    fn detail(&mut self, id: &str, deadline: Instant) -> Result<Box<RawValue>, Diagnostic> {
+        self.raw_parser(id, deadline)
     }
 }
 fn capture(value: &Value) -> Result<RawSnapshot, Diagnostic> {
@@ -2912,6 +2906,40 @@ struct ParserFetch {
     pages: Vec<ParserPage>,
     details: Vec<ParserSnapshot>,
     run: ParserRun,
+}
+fn apply_parser_fetch(
+    state: &mut InventoryState,
+    outcome: ParserFetch,
+    now: &str,
+) -> Result<Value, Diagnostic> {
+    let counts = if outcome.pages.is_empty() && outcome.details.is_empty() {
+        ParserReviewCounts {
+            kept: state.parser_exclusions.len()
+                + state
+                    .sources
+                    .iter()
+                    .filter(|source| matches!(source.binding, Some(ParserBinding::Parser { .. })))
+                    .count(),
+            suspended: state.suspended_parser_reviews.len(),
+            ..ParserReviewCounts::default()
+        }
+    } else {
+        state.import_parser_inventory(outcome.pages, outcome.details)?
+    };
+    state.parser_runs.push(outcome.run.clone());
+    if let Some(diagnostic) = &outcome.run.failure {
+        state.failures.push(InventoryFailure {
+            stage: "parser-inventory".into(),
+            source_id: None,
+            message: diagnostic.message.clone(),
+            recorded_at: now.into(),
+        });
+    }
+    let mut reply = json!({"parser_count":state.parsers.len(),"run":outcome.run,"credentials_persisted":false,"parser_reviews":counts});
+    if counts.suspended > 0 {
+        reply["next_action"] = json!(SUSPENDED_PARSER_REVIEWS);
+    }
+    Ok(reply)
 }
 fn fetch_parsers(
     backend: &mut impl ParserBackend,
@@ -2978,7 +3006,10 @@ fn fetch_parsers(
             }
             details.push(parse_parser(
                 &id,
-                capture(&backend.detail(&id, deadline)?)?,
+                RawSnapshot::new(
+                    backend.detail(&id, deadline)?.get().as_bytes(),
+                    &discovery::timestamp(),
+                )?,
             )?);
         }
         Ok(())
@@ -4158,10 +4189,10 @@ mod tests {
                 json!({"resources":["synthetic-id"],"meta":{"pagination":{"offset":offset,"total":1}}}),
             )
         }
-        fn detail(&mut self, id: &str, _: Instant) -> Result<Value, Diagnostic> {
+        fn detail(&mut self, id: &str, _: Instant) -> Result<Box<RawValue>, Diagnostic> {
             self.calls.push(format!("detail:{id}"));
             Ok(
-                json!({"resources":[{"id":id,"name":"synthetic","script":"user := \"synthetic\"","fields_to_tag":[]}]}),
+                serde_json::value::to_raw_value(&json!({"resources":[{"id":id,"name":"synthetic","script":"user := \"synthetic\"","fields_to_tag":[]}]})).unwrap(),
             )
         }
     }
@@ -4185,14 +4216,17 @@ mod tests {
                     json!({"resources":[{"ID":"one","Name":"One"},{"ID":"two","Name":"Two"}],"meta":{"pagination":{"offset":offset,"total":2}}}),
                 )
             }
-            fn detail(&mut self, id: &str, _: Instant) -> Result<Value, Diagnostic> {
+            fn detail(&mut self, id: &str, _: Instant) -> Result<Box<RawValue>, Diagnostic> {
                 if id == "two" {
                     return Err(Diagnostic::error(
                         "HTTP_DEADLINE",
                         "Synthetic later deadline",
                     ));
                 }
-                Ok(json!({"resources":[{"id":id,"script":"user := \"synthetic\""}]}))
+                Ok(serde_json::value::to_raw_value(
+                    &json!({"resources":[{"id":id,"script":"user := \"synthetic\""}]}),
+                )
+                .unwrap())
             }
         }
         let capture = fetch_parsers(&mut Partial, 2, 10, 10).unwrap();
@@ -4201,5 +4235,93 @@ mod tests {
         assert_eq!(capture.run.pages_completed, 1);
         assert_eq!(capture.run.parsers_completed, 1);
         assert_eq!(capture.run.failure.unwrap().code, "HTTP_DEADLINE");
+    }
+    #[test]
+    fn native_parser_fetch_preserves_review_on_zero_capture_and_reports_partial_suspension() {
+        struct Interrupted {
+            first_page: bool,
+        }
+        impl ParserBackend for Interrupted {
+            fn list(&mut self, _: u32, _: u32, _: Instant) -> Result<Value, Diagnostic> {
+                if self.first_page {
+                    Ok(json!({"resources":["first","second"],"meta":{"pagination":{"total":2}}}))
+                } else {
+                    Err(fail("Synthetic catalog failure"))
+                }
+            }
+            fn detail(&mut self, id: &str, _: Instant) -> Result<Box<RawValue>, Diagnostic> {
+                if id == "first" {
+                    Ok(RawValue::from_string(r#"{"resources":[{"id":"first","script":"user := true","revision":9007199254740993.0}]}"#.into()).unwrap())
+                } else {
+                    Err(fail("Synthetic detail failure"))
+                }
+            }
+        }
+        let now = "2026-01-02T00:00:00Z";
+        let mut state = InventoryState::new(now).unwrap();
+        state.parser_pages.push(ParserPage {
+            offset: 0,
+            limit: 100,
+            snapshot: RawSnapshot::new(
+                br#"{"resources":["second"],"meta":{"pagination":{"total":1}}}"#,
+                now,
+            )
+            .unwrap(),
+        });
+        let parser = parse_parser(
+            "second",
+            RawSnapshot::new(
+                br#"{"resources":[{"id":"second","script":"user := true"}]}"#,
+                now,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        state.parser_exclusions.push(ParserExclusion {
+            parser_id: parser.id.clone(),
+            parser_sha256: parser.snapshot.sha256.clone(),
+            reviewed_at: now.into(),
+            reason: "Synthetic exclusion".into(),
+        });
+        state.parsers.push(parser);
+        let before = serde_json::to_value(&state).unwrap();
+
+        let failed = fetch_parsers(&mut Interrupted { first_page: false }, 1, 2, 10).unwrap();
+        let mut preserved = state.clone();
+        let reply = apply_parser_fetch(&mut preserved, failed, now).unwrap();
+        assert_eq!(preserved.parser_runs.len(), 1);
+        assert_eq!(preserved.failures.len(), 1);
+        let after = serde_json::to_value(&preserved).unwrap();
+        for field in [
+            "parser_pages",
+            "parsers",
+            "parser_exclusions",
+            "suspended_parser_reviews",
+            "carried_parser_reviews",
+        ] {
+            assert_eq!(after[field], before[field], "{field}");
+        }
+        assert_eq!(
+            reply["parser_reviews"],
+            json!({"kept":1,"carried":0,"suspended":0,"restored":0})
+        );
+
+        let partial = fetch_parsers(&mut Interrupted { first_page: true }, 1, 2, 10).unwrap();
+        let reply = apply_parser_fetch(&mut state, partial, now).unwrap();
+        assert_eq!(state.parsers[0].id, "first");
+        assert!(
+            String::from_utf8(state.parsers[0].snapshot.bytes().unwrap())
+                .unwrap()
+                .contains("9007199254740993.0")
+        );
+        assert!(state.parser_exclusions.is_empty());
+        assert_eq!(state.suspended_parser_reviews.len(), 1);
+        for view in [&reply, &action_summary(&reply), &action_brief(&reply)] {
+            assert_eq!(
+                view["parser_reviews"],
+                json!({"kept":0,"carried":0,"suspended":1,"restored":0})
+            );
+            assert_eq!(view["next_action"], SUSPENDED_PARSER_REVIEWS);
+        }
     }
 }

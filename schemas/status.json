@@ -612,6 +612,14 @@
             "$ref": "#/$defs/SourceStatus"
           }
         },
+        "suspended_parser_exclusions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
         "suspended_parser_reviews": {
           "type": "array",
           "items": {
@@ -1634,6 +1642,15 @@
             "kind": {
               "type": "string",
               "const": "exclusion"
+            },
+            "position": {
+              "description": "Zero-based slot in the combined active and suspended exclusion order.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
             },
             "resource_sha256": {
               "type": "string"
