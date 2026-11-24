@@ -441,21 +441,19 @@ pub fn admit(
             "The active pack was created at {created_at}, after the current time {now}, so no new discovery pack can follow it yet. Prepare discovery after that time."
         )));
     }
-    if let Some(expected) = expected_searches(r)
-        && expected.minimum_all_live > MAX_QUERIES
-    {
-        return Err(fail(&format!(
-            "The {} searches needed when every selected source has events exceed the {MAX_QUERIES}-query ceiling. Select fewer sources or population fields.",
-            expected.minimum_all_live
-        )));
-    }
-    if let Some(expected) = expected_searches(r)
-        && r.max_queries < expected.minimum_all_live
-    {
-        return Err(fail(&format!(
-            "The query limit {} is below the {} searches needed when every selected source has events. Set max_queries to at least {}.",
-            r.max_queries, expected.minimum_all_live, expected.minimum_all_live
-        )));
+    if let Some(expected) = try_expected_searches(r)? {
+        if expected.minimum_all_live > MAX_QUERIES {
+            return Err(fail(&format!(
+                "The {} searches needed when every selected source has events exceed the {MAX_QUERIES}-query ceiling. Select fewer sources or population fields.",
+                expected.minimum_all_live
+            )));
+        }
+        if r.max_queries < expected.minimum_all_live {
+            return Err(fail(&format!(
+                "The query limit {} is below the {} searches needed when every selected source has events. Set max_queries to at least {}.",
+                r.max_queries, expected.minimum_all_live, expected.minimum_all_live
+            )));
+        }
     }
     Ok(())
 }
@@ -511,7 +509,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
                 json!("volume checks for requested sources after the census"),
             );
     }
-    if let Some(expected) = expected_searches(r) {
+    if let Some(expected) = try_expected_searches(r)? {
         // The query limit always applies; below the high figure a run can exhaust it.
         result["searches"] = json!({"expected_low":expected.low,"minimum_all_live":expected.minimum_all_live,"expected_high":expected.high,"limit":r.max_queries,"below_expected_high":r.max_queries < expected.high});
     }
@@ -1269,6 +1267,23 @@ fn stratified_source(
         tag_window: Some(window(r, !full_window)?),
         ..SourceMeasurements::default()
     };
+    let mut early_observed: BTreeSet<String> = sampled.iter().cloned().collect();
+    if record_kind_candidates(r).contains(&"#event.dataset")
+        && kind_facet(dataset_rows, "#event.dataset", None)?
+            .values
+            .iter()
+            .any(|(_, count)| *count > 0)
+    {
+        early_observed.insert("#event.dataset".into());
+    }
+    early_observed.extend(
+        measured
+            .tags
+            .iter()
+            .filter(|(_, (count, _))| *count > 0)
+            .map(|(field, _)| field.clone()),
+    );
+    validate_mandatory_population(r, s, &early_observed)?;
     let kinds = record_kind_probes(r, s, sampled, &measured.tags, answered)?;
     let pending = unanswered(r, &kinds, answered);
     if !pending.is_empty() {
@@ -1396,22 +1411,26 @@ pub struct ExpectedSearches {
 }
 /// A census names its own sources, so it has no figures.
 pub fn expected_searches(r: &DiscoverRequest) -> Option<ExpectedSearches> {
+    try_expected_searches(r).ok().flatten()
+}
+
+fn try_expected_searches(r: &DiscoverRequest) -> Result<Option<ExpectedSearches>, Diagnostic> {
     if r.census || r.sources.is_empty() {
-        return None;
+        return Ok(None);
     }
     let (mut cheapest, mut all_live, mut high) = (usize::MAX, 0, 0);
     for s in &r.sources {
-        let (low, most) = live_source_searches(r, s).ok()?;
+        let (low, most) = live_source_searches(r, s)?;
         cheapest = cheapest.min(low);
         all_live += low;
         high += most;
     }
     let count = |searches: usize| u32::try_from(searches).unwrap_or(u32::MAX);
-    Some(ExpectedSearches {
+    Ok(Some(ExpectedSearches {
         low: count(r.sources.len() - 1 + cheapest),
         minimum_all_live: count(all_live),
         high: count(high),
-    })
+    }))
 }
 /// The cheapest and the most expensive successful path of one source with events. Every branch
 /// is counted on one path: a fieldset fallback puts every field on the full window, a facet is
@@ -1453,72 +1472,146 @@ fn live_source_searches(r: &DiscoverRequest, s: &Scope) -> Result<(usize, usize)
         }
         _ => true,
     };
-    let most_facets = match (capped, selection) {
-        (Some(cap), None) => {
-            let required = facets.iter().filter(|f| mandatory.contains(**f)).count();
-            facets.len() - required + required.min(cap)
-        }
-        _ => facets.iter().filter(|field| legal(field)).count(),
-    };
-    let rare = if capped.is_some()
-        && record_kind_candidates(r)
-            .into_iter()
-            .any(|field| !(singleton && field == "#type") && legal(field))
-    {
-        RARE_KIND_LIMIT
-    } else {
-        0
-    };
     let (fewest, most) = match selection {
-        // The listing decides the fields: one tag listed alone costs nothing more, and the
-        // fallback listing puts the most fields on one window at one more search.
-        None => (
-            0,
-            usize::from(split) + chunks(capped.unwrap_or(MAX_FIELDS_PER_SOURCE)),
-        ),
+        // The listing decides the fields: one non-kind tag listed alone costs nothing more.
+        None => {
+            let most = if let Some(cap) = capped {
+                let rare = if record_kind_candidates(r)
+                    .into_iter()
+                    .any(|field| !(singleton && field == "#type"))
+                {
+                    RARE_KIND_LIMIT
+                } else {
+                    0
+                };
+                let mandatory_tagged = facets
+                    .iter()
+                    .filter(|field| mandatory.contains(**field) && tagged.contains(**field))
+                    .count();
+                let mandatory_plain = facets
+                    .iter()
+                    .filter(|field| mandatory.contains(**field) && !tagged.contains(**field))
+                    .count();
+                let optional_facets = facets.len() - mandatory_tagged - mandatory_plain;
+                // On equal windows or after a sparse fallback, observed mandatory tags reuse
+                // the tag batch and occupy slots inside the cap.
+                let same_window = (0..=mandatory_tagged.min(cap))
+                    .map(|m_t| {
+                        let m_p = mandatory_plain.min(cap - m_t);
+                        usize::from(split) + optional_facets + m_t + m_p + rare + chunks(cap - m_t)
+                    })
+                    .max()
+                    .unwrap_or(0);
+                // On a split window without fallback, listed plain fields use the sample window
+                // and unlisted fields (including unlisted mandatory tags) use the full window.
+                let split_direct = if split {
+                    (0..=cap)
+                        .map(|listed| {
+                            optional_facets
+                                + mandatory_plain.min(listed)
+                                + mandatory_tagged.min(cap - listed)
+                                + rare
+                                + chunks(listed)
+                                + chunks(cap - listed)
+                        })
+                        .max()
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                same_window.max(split_direct)
+            } else {
+                usize::from(split) + facets.len() + chunks(MAX_FIELDS_PER_SOURCE)
+            };
+            (0, most)
+        }
         Some(selected) => {
-            let (tags, plain): (Vec<&String>, Vec<&String>) = selected
+            let (sel_tags, sel_plain): (Vec<&String>, Vec<&String>) = selected
                 .iter()
                 .partition(|field| tagged.contains(field.as_str()));
+            let legal_tagged_facets = facets
+                .iter()
+                .filter(|field| tagged.contains(**field) && legal(field))
+                .count();
+            let sel_plain_facets = sel_plain
+                .iter()
+                .filter(|field| facets.contains(&field.as_str()))
+                .count();
+            let unsel_plain_facets = facets
+                .iter()
+                .filter(|field| {
+                    !tagged.contains(**field)
+                        && legal(field)
+                        && !sel_plain.iter().any(|name| name.as_str() == **field)
+                })
+                .count();
+            let has_other_rare = capped.is_some()
+                && record_kind_candidates(r).into_iter().any(|field| {
+                    !(singleton && field == "#type")
+                        && legal(field)
+                        && !sel_plain.iter().any(|name| name.as_str() == field)
+                });
+            let rare_for = |listed_pf: usize| {
+                if capped.is_some() && (has_other_rare || listed_pf > 0) {
+                    RARE_KIND_LIMIT
+                } else {
+                    0
+                }
+            };
+            let same_window_low = usize::from(split) + chunks(sel_plain.len());
+            let same_window_high = usize::from(split)
+                + legal_tagged_facets
+                + unsel_plain_facets
+                + sel_plain_facets
+                + rare_for(sel_plain_facets)
+                + chunks(sel_plain.len());
             if split {
-                // A tag listed in the sample window reuses its batch count; an unlisted one is
-                // counted again over the full window, and so is a plain field.
-                let fallback = 1 + chunks(plain.len());
-                let most = (0..=plain.len())
-                    .map(|listed| chunks(listed) + chunks(plain.len() - listed + tags.len()))
+                // Plain kind facets require their fields to appear in the sample listing, so
+                // facet count and split-window population chunks share one assignment.
+                let split_high = (0..=sel_plain.len())
+                    .map(|listed| {
+                        let listed_pf = listed.min(sel_plain_facets);
+                        legal_tagged_facets
+                            + unsel_plain_facets
+                            + listed_pf
+                            + rare_for(listed_pf)
+                            + chunks(listed)
+                            + chunks(sel_plain.len() - listed + sel_tags.len())
+                    })
                     .max()
                     .unwrap_or(0);
                 // A listed kind candidate takes its facet; left unlisted it is counted over the
                 // full window instead. A capped run's dataset facet and a Full one with a short
                 // dataset listing come from the base measurement.
-                let kinds = tags
+                let sel_tag_facets = sel_tags
                     .iter()
                     .filter(|field| {
                         facets.contains(&field.as_str()) && field.as_str() != "#event.dataset"
                     })
                     .count();
-                let plain_kinds = plain
-                    .iter()
-                    .filter(|field| facets.contains(&field.as_str()))
-                    .count();
-                let others = plain.len() - plain_kinds;
-                let fewest = (0..=others)
+                let others = sel_plain.len() - sel_plain_facets;
+                let split_low = (0..=others)
                     .flat_map(|listed| {
-                        (0..=kinds).map(move |faceted| {
+                        (0..=sel_tag_facets).map(move |faceted| {
                             faceted
                                 + chunks(listed)
-                                + chunks(others - listed + plain_kinds + kinds - faceted)
+                                + chunks(
+                                    others - listed + sel_plain_facets + sel_tag_facets - faceted,
+                                )
                         })
                     })
                     .min()
                     .unwrap_or(0);
-                (fewest.min(fallback), most.max(fallback))
+                (
+                    split_low.min(same_window_low),
+                    split_high.max(same_window_high),
+                )
             } else {
-                (chunks(plain.len()), chunks(plain.len()))
+                (same_window_low, same_window_high)
             }
         }
     };
-    Ok((fixed + fewest, fixed + most_facets + rare + most))
+    Ok((fixed + fewest, fixed + most))
 }
 /// The figures of a checkpoint of the earlier plan, which counted each tag candidate in its own
 /// search. The earlier graph is not executed.

@@ -1607,3 +1607,320 @@ fn reachable_cost_matrix() {
     assert_eq!(emitted.len(), 1000);
     assert!(result.is_err());
 }
+
+#[test]
+fn positive_omitted_requested_tag_refuses_immediately_after_tag_batch() {
+    // Finding 1: Quick explicit selection omitting a requested kind fails right after
+    // the tag batch proves it positive (4 charges), never reserving facets or rare fieldsets.
+    let dir = Temp::new();
+    confirm(&dir, "sources-and-fields", &[json!({"repo":"demo"})]);
+    let ids = source_ids(&dir);
+    let kinds_req = vec![
+        "#type",
+        "#event.dataset",
+        "event.kind",
+        "#event_simpleName",
+        "#event.module",
+        "#event.kind",
+    ];
+    let mut action = prepare_action(&[&ids[0]], SHORT_START, END, 32);
+    action["kind_fields"] = json!(kinds_req);
+    action["population_fields"] = json!([{"source":{"repo":"demo"},"fields":["user"]}]);
+    let prepared = call(&dir, action);
+    assert_eq!(
+        prepared["action"]["relay"]["cost"]["searches"]["expected_high"], 5,
+        "{prepared}"
+    );
+
+    let answer_file = dir.path("answer.json");
+    let mut used = 0usize;
+    let mut last_reply = Value::Null;
+    for step in 0..8 {
+        let reply = if step == 0 {
+            next_probe(&dir, None, false)
+        } else {
+            next_probe(
+                &dir,
+                Some((&last_reply["probe"]["probe_id"], &answer_file)),
+                false,
+            )
+        };
+        if reply["state"] == "failed" {
+            assert_eq!(reply["cost"]["searches"]["used"], 4, "{reply}");
+            assert_eq!(
+                reply["diagnostics"][0]["code"], "DISCOVERY_EVIDENCE",
+                "{reply}"
+            );
+            assert_eq!(used, 4);
+            break;
+        }
+        assert_eq!(reply["state"], "probe", "{reply}");
+        used += 1;
+        let query = reply["probe"]["arguments"]["query_string"]
+            .as_str()
+            .unwrap();
+        let rows = if query.contains("groupBy(") {
+            json!({"result":[]})
+        } else if query.contains("count(as=events)") {
+            json!({"result":[{"events":1000}]})
+        } else if query.contains("fieldset()") {
+            json!({"result":[{"field":"user"}]})
+        } else if query.contains("count(field=\"#type\"") {
+            let count = query.matches("as=c").count();
+            let mut row = json!({"total":1000});
+            for index in 0..count {
+                let needle = format!("count(field=\"#type\", as=c{index})");
+                row[format!("c{index}")] = json!(if query.contains(&needle) { 1000 } else { 0 });
+            }
+            json!({"result":[row]})
+        } else {
+            panic!("unexpected probe after tag batch: {query} ({reply})");
+        };
+        write(&answer_file, &rows);
+        last_reply = reply;
+    }
+    assert_eq!(used, 4);
+    assert!(read(&dir.state())["active_pack"].is_null());
+
+    // Native execution also stops after exactly 4 searches.
+    let mut r = short(quick(
+        &["demo"],
+        json!({"kind_fields":kinds_req,"max_queries":32}),
+    ));
+    r.population_fields =
+        serde_json::from_value(json!([{"source":{"repo":"demo"},"fields":["user"]}])).unwrap();
+    let mut source = Source::live(&["user"]).w(&[("#type", 1000)]);
+    let types: Vec<(&str, u64)> = vec![
+        ("t1", 100),
+        ("t2", 100),
+        ("t3", 100),
+        ("t4", 100),
+        ("t5", 100),
+        ("t6", 100),
+        ("t7", 100),
+        ("t8", 100),
+        ("t9", 100),
+        ("t10", 100),
+    ];
+    source = source.facet("#type", &types);
+    let world = World::of(&[("demo", source)]);
+    assert!(plan(&r, &world).is_err());
+    // Feed the first 4 base+tag probes directly into native backend and verify stop at 4.
+    let mut answers = BTreeMap::new();
+    let mut first_four = Vec::new();
+    while let Ok(pending) = discovery::frontier(&r, &answers) {
+        if pending.is_empty() {
+            break;
+        }
+        for probe in pending {
+            answers.insert(discovery::probe_id(VIEW, &probe), world.rows(&r, &probe));
+            first_four.push(probe);
+        }
+    }
+    assert_eq!(first_four.len(), 4);
+    let (emitted, result, _) = native(&r, &world, &first_four);
+    assert_eq!(emitted.len(), 4);
+    assert!(result.unwrap_err().message.contains(
+        "Explicit population selections must include observed requested kind/value fields."
+    ));
+}
+
+#[test]
+fn coupled_maxima_and_extra_plain_kind_are_exact_and_witnessed() {
+    // Full with explicit 22 fields (event.kind, custom.kind, 18 plain, #Vendor, #ecs.version):
+    // proven max is 12 across fallback, 2-listed-kind, and 1-listed-kind paths.
+    let mut selected = vec!["event.kind".to_string(), "custom.kind".to_string()];
+    selected.extend(plain("ord.", 18));
+    selected.push("#Vendor".into());
+    selected.push("#ecs.version".into());
+    let mut r = request(
+        &["demo"],
+        json!({"kind_fields":["custom.kind"],"max_queries":12}),
+    );
+    r.population_fields =
+        serde_json::from_value(json!([{"source":{"repo":"demo"},"fields":selected}])).unwrap();
+    assert_eq!(estimate(&r), (5, 5, 12));
+    let shown = discovery::initial_plan(&r).unwrap();
+    assert_eq!(shown["searches"]["expected_high"], 12);
+    assert_eq!(shown["searches"]["below_expected_high"], false);
+
+    // Path 1: sparse fallback (4 + 1 + 6 + 1 = 12).
+    let mut fallback = Source::live(&[]).full(vec!["event.kind".into(), "custom.kind".into()]);
+    fallback = fallback
+        .w(&[
+            ("#type", 10),
+            ("#event.module", 10),
+            ("#event.kind", 10),
+            ("#event_simpleName", 10),
+            ("event.kind", 10),
+            ("custom.kind", 10),
+        ])
+        .facet("#type", &[("a", 10)])
+        .facet("#event.module", &[("a", 10)])
+        .facet("#event.kind", &[("a", 10)])
+        .facet("#event_simpleName", &[("a", 10)])
+        .facet("event.kind", &[("a", 10)])
+        .facet("custom.kind", &[("a", 10)]);
+    assert_eq!(searches(&r, &World::of(&[("demo", fallback)])), 12);
+
+    // Path 2: recent listing names both plain kinds (4 + 0 + 6 + 2 = 12).
+    let mut both = Source::live(&["event.kind", "custom.kind"])
+        .a(&[
+            ("#type", 10),
+            ("#event.module", 10),
+            ("#event.kind", 10),
+            ("#event_simpleName", 10),
+            ("event.kind", 10),
+            ("custom.kind", 10),
+        ])
+        .facet("#type", &[("a", 10)])
+        .facet("#event.module", &[("a", 10)])
+        .facet("#event.kind", &[("a", 10)])
+        .facet("#event_simpleName", &[("a", 10)])
+        .facet("event.kind", &[("a", 10)])
+        .facet("custom.kind", &[("a", 10)]);
+    both.w.insert("#Vendor".into(), 1);
+    both.w.insert("#ecs.version".into(), 1);
+    assert_eq!(searches(&r, &World::of(&[("demo", both)])), 12);
+
+    // Path 3: recent listing names 1 plain kind (4 + 0 + 5 + 3 = 12).
+    let one = Source::live(&["event.kind"])
+        .a(&[
+            ("#type", 10),
+            ("#event.module", 10),
+            ("#event.kind", 10),
+            ("#event_simpleName", 10),
+            ("event.kind", 10),
+        ])
+        .facet("#type", &[("a", 10)])
+        .facet("#event.module", &[("a", 10)])
+        .facet("#event.kind", &[("a", 10)])
+        .facet("#event_simpleName", &[("a", 10)])
+        .facet("event.kind", &[("a", 10)]);
+    assert_eq!(searches(&r, &World::of(&[("demo", one)])), 12);
+
+    // Capped automatic over a 15-minute window with `cap` custom tagged kinds:
+    // mandatory same-window tags occupy slots and reuse the tag batch.
+    for (cap, expected_max) in [
+        (1usize, 20u32),
+        (2, 21),
+        (19, 39),
+        (20, 40),
+        (21, 41),
+        (40, 61),
+    ] {
+        let custom_tags: Vec<String> = (1..=cap).map(|i| format!("#custom.tag{i:02}")).collect();
+        let r = short(request(
+            &["demo"],
+            json!({"max_population_fields_per_source":cap,"kind_fields":custom_tags}),
+        ));
+        assert_eq!(estimate(&r).2, expected_max, "cap={cap}");
+        let mut src = Source::live(&["event.kind"]);
+        for tag in [
+            "#type",
+            "#event.module",
+            "#event.kind",
+            "#event_simpleName",
+            "event.kind",
+        ] {
+            src.w.insert(tag.into(), 100);
+        }
+        for tag in &custom_tags {
+            src.w.insert(tag.clone(), 100);
+            src = src.facet(tag, &[("v1", 10)]);
+        }
+        let rare_vals: Vec<(String, u64)> = (1..=10).map(|i| (format!("r{i}"), 10)).collect();
+        let rare_refs: Vec<(&str, u64)> = rare_vals.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        src = src
+            .facet("#type", &rare_refs)
+            .facet("#event.module", &[("m1", 10)])
+            .facet("#event.kind", &[("k1", 10)])
+            .facet("#event_simpleName", &[("s1", 10)])
+            .facet("event.kind", &[("e1", 10)]);
+        src.rare = vec!["extra.plain".into()];
+        assert_eq!(
+            searches(&r, &World::of(&[("demo", src)])),
+            expected_max as usize,
+            "cap={cap}"
+        );
+    }
+
+    // Over a split window, unlisted mandatory tags go to full-window population and reach 63 at cap=40.
+    let custom_tags: Vec<String> = (1..=40).map(|i| format!("#custom.tag{i:02}")).collect();
+    let split_40 = request(
+        &["demo"],
+        json!({"max_population_fields_per_source":40,"kind_fields":custom_tags}),
+    );
+    assert_eq!(estimate(&split_40).2, 63);
+    let mut src = Source::live(&["event.kind"]);
+    for tag in [
+        "#type",
+        "#event.module",
+        "#event.kind",
+        "#event_simpleName",
+        "event.kind",
+    ] {
+        src.a.insert(tag.into(), 100);
+        src.w.insert(tag.into(), 100);
+    }
+    for tag in &custom_tags {
+        src.a.insert(tag.clone(), 100);
+        src.w.insert(tag.clone(), 100);
+        src = src.facet(tag, &[("v1", 10)]);
+    }
+    let rare_vals: Vec<(String, u64)> = (1..=10).map(|i| (format!("r{i}"), 10)).collect();
+    let rare_refs: Vec<(&str, u64)> = rare_vals.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    src = src
+        .facet("#type", &rare_refs)
+        .facet("#event.module", &[("m1", 10)])
+        .facet("#event.kind", &[("k1", 10)])
+        .facet("#event_simpleName", &[("s1", 10)])
+        .facet("event.kind", &[("e1", 10)]);
+    assert_eq!(searches(&split_40, &World::of(&[("demo", src)])), 63);
+
+    // Quick with one additional plain kind activates at 22 and matches expected_high = 22.
+    let r = quick(&["demo"], json!({"kind_fields":["custom.kind"]}));
+    assert_eq!(estimate(&r).2, 22);
+    let mut src = Source::live(&[]).full(vec!["event.kind".into(), "custom.kind".into()]);
+    for tag in [
+        "#type",
+        "#event.module",
+        "#event.kind",
+        "#event_simpleName",
+        "event.kind",
+        "custom.kind",
+    ] {
+        src.w.insert(tag.into(), 100);
+    }
+    src = src
+        .facet("#type", &rare_refs)
+        .facet("#event.module", &[("m1", 10)])
+        .facet("#event.kind", &[("k1", 10)])
+        .facet("#event_simpleName", &[("s1", 10)])
+        .facet("event.kind", &[("e1", 10)])
+        .facet("custom.kind", &[("c1", 10)]);
+    assert_eq!(searches(&r, &World::of(&[("demo", src)])), 22);
+}
+
+#[test]
+fn unbuildable_tag_query_is_refused_by_offline_plan_and_read_only_admission() {
+    let dir = Temp::new();
+    confirm(&dir, "sources-and-fields", &[json!({"repo":"demo"})]);
+    let ids = source_ids(&dir);
+    let (_, sibling) = unowned_paused_run(&dir, &[&ids[0]], 8);
+    let before = Untouched::new(&dir, &sibling);
+
+    let huge_tag = format!("#{}", "a".repeat(66_000));
+    let mut r = short(quick(
+        &["demo"],
+        json!({"max_queries":1,"kind_fields":[huge_tag]}),
+    ));
+    r.max_queries = 1;
+    assert!(discovery::initial_plan(&r).is_err());
+
+    let mut action = prepare_action(&[&ids[0]], SHORT_START, END, 1);
+    action["kind_fields"] = json!([huge_tag]);
+    let error = refused_with(&dir, &action, &[]);
+    assert!(!error["message"].as_str().unwrap().is_empty(), "{error}");
+    before.check(&dir, &sibling, "oversized tag query");
+}
