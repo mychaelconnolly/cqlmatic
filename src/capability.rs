@@ -505,15 +505,27 @@ impl CapabilityRun {
             || case_ids.len() != case_ids.iter().collect::<BTreeSet<_>>().len()
             || !(1..=MAX_ATTEMPTS).contains(&max_queries)
             || !(1..=MAX_SECONDS).contains(&max_seconds)
-            || index >= MAX_RUNS
         {
             return Err(fail(
                 "Choose distinct reviewed cases and finite capability budgets.",
             ));
         }
+        if index >= MAX_RUNS {
+            return Err(fail(&format!(
+                "This inventory already retains {MAX_RUNS} capability checkpoints, its limit, and keeps their history. Use a separately initialized inventory (another --state path) for further capability checks."
+            )));
+        }
         let host: RefreshHostEvidence = serde_json::from_slice(host_raw)
             .map_err(|_| fail("Expected strict protected provider-lifetime evidence."))?;
         inventory::validate_refresh_host(&host, &environment, &session_id, false, now)?;
+        // Dispatch needs remaining >= lifetime, and any later dispatch sees less than max_seconds.
+        if max_seconds <= host.max_search_seconds {
+            return Err(fail(&format!(
+                "max_seconds must exceed the host evidence's max_search_seconds ({lifetime}): every dispatch needs that much active time left, and active time counts from preparation. Use at least {}; the time above {lifetime} is what remains for reaching each dispatch.",
+                host.max_search_seconds + 1,
+                lifetime = host.max_search_seconds,
+            )));
+        }
         let mut run = Self {
             id: String::new(),
             environment,
@@ -553,7 +565,37 @@ impl CapabilityRun {
     pub fn matches_current_cases(&self) -> bool {
         self.case_ids
             .iter()
-            .all(|case_id| self.case_revision(*case_id) == Some(case_id.revision().as_str()))
+            .all(|case_id| self.holds_current(*case_id))
+    }
+
+    /// Whether this run holds the case at its current revision.
+    pub fn holds_current(&self, case_id: CaseId) -> bool {
+        self.case_revision(case_id) == Some(case_id.revision().as_str())
+    }
+
+    /// Whether every case held at its current revision has a verified latest attempt; such a run
+    /// dispatches no further attempts, and a later revision of another case does not reopen it.
+    pub fn complete(&self) -> bool {
+        let status = self.status();
+        let mut current = status
+            .cases
+            .iter()
+            .filter(|case| self.holds_current(case.case_id))
+            .peekable();
+        current.peek().is_some()
+            && current.all(|case| case.last_outcome == Some(CapabilityOutcome::Verified))
+    }
+
+    /// Whether this run could still reserve an attempt for a case it holds, after resuming if paused.
+    pub fn can_dispatch_again(&self, now: &str) -> Result<bool, Diagnostic> {
+        Ok(!self.complete()
+            && self.attempts.len() < self.max_queries as usize
+            && !(self.paused() && self.periods.len() >= 4096)
+            && self
+                .case_ids
+                .iter()
+                .any(|case_id| self.holds_current(*case_id))
+            && self.allowance_covers_search(now)?)
     }
 
     pub fn paused(&self) -> bool {
@@ -593,6 +635,20 @@ impl CapabilityRun {
             .saturating_mul(1_000_000_000)
             .saturating_sub(self.active_nanos(now)?) as f64)
             / 1_000_000_000.0)
+    }
+
+    /// Whether the remaining active time covers one host search lifetime at the next dispatch:
+    /// now for an active run, and strictly later for a paused run, which must resume first.
+    pub fn allowance_covers_search(&self, now: &str) -> Result<bool, Diagnostic> {
+        let host: RefreshHostEvidence = serde_json::from_slice(&self.host_evidence.bytes()?)
+            .map_err(|_| fail("Invalid saved capability host evidence."))?;
+        let remaining = self.remaining_seconds(now)?;
+        let lifetime = host.max_search_seconds as f64;
+        Ok(if self.paused() {
+            remaining > lifetime
+        } else {
+            remaining >= lifetime
+        })
     }
 
     fn ensure_now(&self, now: &str) -> Result<(), Diagnostic> {
@@ -750,6 +806,37 @@ impl CapabilityRun {
         Ok(())
     }
 
+    /// The first condition, in fixed order, that stops this run from reserving the case now.
+    pub fn dispatch_refusal(
+        &self,
+        case_id: CaseId,
+        execution_context_id: &str,
+        session_id: &str,
+        now: &str,
+    ) -> Result<Option<DispatchRefusal>, Diagnostic> {
+        Ok(if self.blocked() {
+            Some(DispatchRefusal::Unresolved)
+        } else if execution_context_id != self.execution_context_id {
+            Some(DispatchRefusal::OtherContext)
+        } else if session_id != self.session_id {
+            Some(DispatchRefusal::OtherSession)
+        } else if !self.case_ids.contains(&case_id) {
+            Some(DispatchRefusal::NotInRun)
+        } else if !self.holds_current(case_id) {
+            Some(DispatchRefusal::EarlierRevision)
+        } else if self.complete() {
+            Some(DispatchRefusal::Complete)
+        } else if self.attempts.len() >= self.max_queries as usize {
+            Some(DispatchRefusal::NoAttempts)
+        } else if !self.allowance_covers_search(now)? {
+            Some(DispatchRefusal::BelowLifetime)
+        } else if self.paused() {
+            Some(DispatchRefusal::Paused)
+        } else {
+            None
+        })
+    }
+
     pub fn dispatch(
         &mut self,
         case_id: CaseId,
@@ -758,20 +845,10 @@ impl CapabilityRun {
         now: &str,
     ) -> Result<&CapabilityAttempt, Diagnostic> {
         self.validate(self.ordinal)?;
-        let host: RefreshHostEvidence = serde_json::from_slice(&self.host_evidence.bytes()?)
-            .map_err(|_| fail("Invalid saved capability host evidence."))?;
-        if self.blocked()
-            || self.paused()
-            || !self.case_ids.contains(&case_id)
-            || self.case_revision(case_id) != Some(case_id.revision().as_str())
-            || execution_context_id != self.execution_context_id
-            || session_id != self.session_id
-            || self.attempts.len() >= self.max_queries as usize
-            || self.remaining_seconds(now)? < host.max_search_seconds as f64
+        if let Some(refusal) =
+            self.dispatch_refusal(case_id, execution_context_id, session_id, now)?
         {
-            return Err(fail(
-                "Dispatch requires the prepared context, reviewed case, settled prior attempts and remaining original budget.",
-            ));
+            return Err(fail(refusal.message()));
         }
         if self
             .attempts
@@ -878,12 +955,17 @@ impl CapabilityRun {
             ));
         }
         if let Some(previous) = attempt.reservation.settlement.take() {
-            if attempt.reservation.settlement_history.len() >= 20 {
-                return Err(fail(
-                    "Capability reconciliation history reached its finite limit.",
-                ));
+            let history = &mut attempt.reservation.settlement_history;
+            if history.len() >= 20 {
+                if report.termination == RefreshTermination::Unresolved {
+                    return Err(fail(
+                        "Capability reconciliation history reached its finite limit. Submit the attempt's terminal settlement with submit-capability.",
+                    ));
+                }
+                // A terminal settlement is always recorded, in place of the oldest unresolved report.
+                history.remove(0);
             }
-            attempt.reservation.settlement_history.push(previous);
+            history.push(previous);
         }
         attempt.reservation.phase = if report.termination == RefreshTermination::Unresolved {
             RefreshPhase::Unresolved
@@ -931,14 +1013,14 @@ impl CapabilityRun {
 
     pub fn resume(&mut self, execution_context_id: &str, now: &str) -> Result<(), Diagnostic> {
         self.validate(self.ordinal)?;
-        if self.blocked()
-            || execution_context_id != self.execution_context_id
-            || self.remaining_seconds(now)? <= 0.0
-            || self.attempts.len() >= self.max_queries as usize
-            || self.periods.len() >= 4096
-        {
+        if self.blocked() || execution_context_id != self.execution_context_id {
             return Err(fail(
                 "Resume requires safe termination, the same authorization context and remaining original allowance.",
+            ));
+        }
+        if !self.can_dispatch_again(now)? {
+            return Err(fail(
+                "This capability checkpoint cannot dispatch again: every case it holds at its current revision is verified, it holds no case at its current revision, its max_queries attempts are used, its remaining active time does not exceed the host evidence's max_search_seconds, or it has been resumed its limit of 4,095 times. Use prepare-capabilities for a new run; the checkpoint keeps its history.",
             ));
         }
         if self.paused() {
@@ -948,6 +1030,66 @@ impl CapabilityRun {
             });
         }
         Ok(())
+    }
+}
+
+/// Why a run cannot reserve a case, each with fixed text naming the next action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchRefusal {
+    Unresolved,
+    OtherContext,
+    OtherSession,
+    NotInRun,
+    EarlierRevision,
+    Complete,
+    NoAttempts,
+    BelowLifetime,
+    Paused,
+}
+
+impl DispatchRefusal {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Unresolved => {
+                "An earlier attempt in this capability checkpoint is unresolved. Reconcile it with submit-capability and its terminal settlement before another dispatch."
+            }
+            Self::OtherContext => {
+                "The execution_context_id differs from the one this capability checkpoint was prepared with. Dispatch with that context; its cases cannot be prepared again under another context while this checkpoint can still dispatch them."
+            }
+            Self::OtherSession => {
+                "The session_id differs from the host session this capability checkpoint was prepared with. Dispatch with that session, or use prepare-capabilities with host evidence for the new session."
+            }
+            Self::NotInRun => {
+                "This case is not in the capability checkpoint. Pause the checkpoint with pause-capabilities, then use prepare-capabilities for the cases it does not hold."
+            }
+            Self::EarlierRevision => {
+                "The capability checkpoint holds an earlier revision of this case. Pause the checkpoint with pause-capabilities if it is active, then use prepare-capabilities to prepare the current revision."
+            }
+            Self::Complete => {
+                "Every case this capability checkpoint holds at its current revision is verified, so it dispatches no further attempts. Use prepare-capabilities to check a case again; the checkpoint keeps its history."
+            }
+            Self::NoAttempts => {
+                "The capability checkpoint has used all of its max_queries attempts. Use prepare-capabilities for a new run; the checkpoint keeps its history."
+            }
+            Self::BelowLifetime => {
+                "The capability checkpoint's remaining active time does not cover the host evidence's max_search_seconds for another dispatch; a paused checkpoint needs more than that, because it must resume first. Use prepare-capabilities for a new run; the checkpoint keeps its history."
+            }
+            Self::Paused => {
+                "The capability checkpoint is paused. Resume it with resume-capabilities and its execution_context_id before dispatching."
+            }
+        }
+    }
+
+    /// Whether the next action is a new preparation for the case.
+    pub fn leads_to_preparation(self) -> bool {
+        matches!(
+            self,
+            Self::NotInRun
+                | Self::EarlierRevision
+                | Self::Complete
+                | Self::NoAttempts
+                | Self::BelowLifetime
+        )
     }
 }
 
@@ -1160,9 +1302,11 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        assert!(
+        assert_eq!(
             run.dispatch(CaseId::ArrayUnion, "auth", "host", settled)
-                .is_err()
+                .unwrap_err()
+                .message,
+            "The capability checkpoint holds an earlier revision of this case. Pause the checkpoint with pause-capabilities if it is active, then use prepare-capabilities to prepare the current revision."
         );
     }
 }
