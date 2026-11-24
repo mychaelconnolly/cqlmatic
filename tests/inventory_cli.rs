@@ -330,11 +330,7 @@ fn prepare_discovery_says_what_a_source_id_is_and_when_no_source_is_expected() {
     confirm_quick_source(&dir.0, "synthetic");
     let mut named = window.clone();
     named["source_ids"] = json!(["synthetic"]);
-    assert_rejected(
-        &dir.0,
-        named,
-        "1 valid inventory source IDs",
-    );
+    assert_rejected(&dir.0, named, "1 valid inventory source IDs");
     // With nothing expected yet, omitting source_ids cannot help.
     let dir = Temp::new();
     call(&dir.0, json!({"kind":"set-discovery-mode","mode":"full"}));
@@ -1844,6 +1840,15 @@ fn next_probe_names_bad_fields_in_full_and_protects_result_text() {
         attempt["rejected_results"][0]["diagnostic"]["message"],
         format!("MCP search tool error: {marker}")
     );
+    let wrong = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":"wrong-probe","result_file":result}}),
+    );
+    assert_eq!(
+        wrong["action"]["diagnostics"][0]["code"],
+        "MCP_UNKNOWN_PROBE"
+    );
+    assert_eq!(wrong["action"]["state"], "cleanup-pending");
     let reread = call(&dir.0, json!({"kind":"next-probe"}));
     assert_eq!(reread["action"]["state"], "cleanup-pending");
     assert_eq!(

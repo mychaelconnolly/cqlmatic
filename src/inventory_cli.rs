@@ -1017,7 +1017,11 @@ fn next_probe(
     let mut phase = run.phase.clone();
     let mut terminal_failure = run.relay.failure.as_ref().map(relay_failure);
     if phase == "cleanup-pending" {
-        diagnostics = cleanup_diagnostics(&run.relay);
+        for diagnostic in cleanup_diagnostics(&run.relay) {
+            if !diagnostics.contains(&diagnostic) {
+                diagnostics.push(diagnostic);
+            }
+        }
     } else if diagnostics.is_empty()
         && let Some(refusal) = run.refusal.take()
     {
@@ -1290,6 +1294,31 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
             "The discovery pack did not pass integrity checks.",
             "Review the imported pack and discovery scope before preparing discovery again.",
         ),
+        ("PACK_ENVIRONMENT_MISMATCH", _) => (
+            "PACK_ENVIRONMENT_MISMATCH",
+            "The saved pack is for a different target.",
+            "Select the matching inventory before preparing discovery again.",
+        ),
+        ("LOCAL_IO", _) => (
+            "LOCAL_IO",
+            "A discovery artifact could not be read or saved.",
+            "Check access to the saved artifacts before preparing discovery again.",
+        ),
+        ("PACK_JSON", _) => (
+            "PACK_JSON",
+            "The saved pack could not be decoded.",
+            "Recover a valid pack before preparing discovery again.",
+        ),
+        ("PACK_DIGEST", _) => (
+            "PACK_DIGEST",
+            "The saved pack did not match its digest.",
+            "Recover the intact pack before preparing discovery again.",
+        ),
+        ("PACK_VERSION", _) => (
+            "PACK_VERSION",
+            "The saved pack uses an unsupported format.",
+            "Use a compatible pack before preparing discovery again.",
+        ),
         _ => (
             "DISCOVERY_FAILED",
             "The discovery run failed before pack promotion.",
@@ -1327,6 +1356,18 @@ fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
         "MCP_SHAPE" => (
             "MCP_SHAPE",
             "The response has an unsupported shape. Use the original complete tool result.",
+        ),
+        "MCP_INCOMPLETE" => (
+            "MCP_INCOMPLETE",
+            "The search response reports incomplete results. Settle the outstanding attempt before continuing.",
+        ),
+        "MCP_DEADLINE" => (
+            "MCP_DEADLINE",
+            "The search response reports a timeout. Follow the run's settlement or resume guidance.",
+        ),
+        "DISCOVERY_EVIDENCE" => (
+            "DISCOVERY_EVIDENCE",
+            "The result did not provide the evidence required by this probe. Review the saved response before resuming.",
         ),
         "MCP_TOO_LARGE" => (
             "MCP_TOO_LARGE",

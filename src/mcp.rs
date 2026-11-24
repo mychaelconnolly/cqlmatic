@@ -28,14 +28,7 @@ pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
 
 // `hosted` classifies an error object inside `result`; without it such an answer is a shape error.
 fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
-    if raw.len() > MAX_RESULT_BYTES {
-        return Err(Diagnostic::error(
-            "MCP_TOO_LARGE",
-            "MCP search result exceeds the maximum size",
-        ));
-    }
-
-    let value = parse_repeated_json(raw, "MCP search result must be valid UTF-8 JSON")?;
+    let value = result_frame(parse_saved_result(raw)?)?;
     let object = value
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
@@ -48,13 +41,42 @@ fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnost
     parse_result(body, raw, hosted)
 }
 
-fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
-    // structuredContent is optional; when present it must equal the parsed text payload.
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "content" | "isError" | "structuredContent"))
+fn result_frame(mut value: Value) -> Result<Value, Diagnostic> {
+    if let Some(wrapper) = value
+        .as_object_mut()
+        .filter(|object| object.contains_key("jsonrpc"))
     {
-        return Err(shape("MCP text envelope has unexpected fields"));
+        if wrapper.len() != 3
+            || wrapper["jsonrpc"] != "2.0"
+            || !wrapper
+                .get("id")
+                .is_some_and(|id| id.is_number() || id.is_string() || id.is_null())
+            || !wrapper.get("result").is_some_and(Value::is_object)
+        {
+            return Err(shape("Expected one JSON-RPC result response"));
+        }
+        value = wrapper.remove("result").expect("Result object was checked");
+    }
+    if let Value::Array(items) = value {
+        return Ok(Value::Object(Map::from_iter([(
+            "content".into(),
+            Value::Array(items),
+        )])));
+    }
+    Ok(value)
+}
+
+fn envelope_text(object: &Map<String, Value>) -> Result<(bool, &str), Diagnostic> {
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "content" | "isError" | "structuredContent" | "_meta"
+        )
+    }) || object.get("_meta").is_some_and(|meta| !meta.is_object())
+    {
+        return Err(shape(
+            "MCP text envelope has unexpected fields or invalid metadata",
+        ));
     }
     let is_error = match object.get("isError") {
         None => false,
@@ -68,11 +90,23 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
         .ok_or_else(|| shape("MCP text envelope must contain one text item"))?;
     let item = content[0]
         .as_object()
-        .filter(|item| item.len() == 2 && item.get("type").and_then(Value::as_str) == Some("text"))
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("text")
+                && item
+                    .keys()
+                    .all(|key| matches!(key.as_str(), "type" | "text" | "annotations"))
+                && item.get("annotations").is_none_or(Value::is_object)
+        })
         .ok_or_else(|| shape("MCP text envelope must contain a text item"))?;
-    let text = item["text"]
-        .as_str()
+    let text = item
+        .get("text")
+        .and_then(Value::as_str)
         .ok_or_else(|| shape("MCP text envelope text must be a string"))?;
+    Ok((is_error, text))
+}
+
+fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
+    let (is_error, text) = envelope_text(object)?;
 
     if is_error {
         if let Ok(Value::Object(inner)) = serde_json::from_str::<Value>(text) {
@@ -246,38 +280,20 @@ pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
 }
 
 fn hosted_answer_body(raw: &[u8]) -> Option<Value> {
-    if raw.len() > MAX_RESULT_BYTES {
+    let value = result_frame(parse_saved_result(raw).ok()?).ok()?;
+    let object = value.as_object()?;
+    if !object.contains_key("content") {
+        return Some(value);
+    }
+    let (_, text) = envelope_text(object).ok()?;
+    let body = parse_repeated_json(text.as_bytes(), "Invalid hosted answer").ok()?;
+    if object
+        .get("structuredContent")
+        .is_some_and(|copy| *copy != body)
+    {
         return None;
     }
-    let mut value = parse_repeated_json(raw, "Invalid hosted answer").ok()?;
-    if value.as_object()?.contains_key("content") {
-        let object = value.as_object()?;
-        if object
-            .keys()
-            .any(|k| !matches!(k.as_str(), "content" | "isError" | "structuredContent"))
-            || object.get("isError").is_some_and(|v| !v.is_boolean())
-        {
-            return None;
-        }
-        let content = object.get("content")?.as_array()?;
-        if content.len() != 1 {
-            return None;
-        }
-        let item = content[0].as_object()?;
-        if item.len() != 2 || item.get("type")?.as_str()? != "text" {
-            return None;
-        }
-        let body = parse_repeated_json(
-            item.get("text")?.as_str()?.as_bytes(),
-            "Invalid hosted answer",
-        )
-        .ok()?;
-        if object.get("structuredContent").is_some_and(|v| *v != body) {
-            return None;
-        }
-        value = body;
-    }
-    Some(value)
+    Some(body)
 }
 
 fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
@@ -374,7 +390,10 @@ pub fn parse_saved_result(raw: &[u8]) -> Result<Value, Diagnostic> {
             "MCP search result exceeds the maximum size",
         ));
     }
-    parse_repeated_json(raw, "MCP search result must be valid UTF-8 JSON")
+    parse_repeated_json(
+        raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw),
+        "MCP search result must be valid UTF-8 JSON",
+    )
 }
 
 /// Agent hosts can render one MCP result more than once (GitHub Copilot CLI shows the text content
@@ -1910,6 +1929,49 @@ mod recovery_tests {
             sha256_hex(&fs::read(&run.receipt).unwrap()),
             intent.receipt_sha256
         );
+    }
+
+    #[test]
+    fn saved_result_frames_preserve_rows_and_raw_hash_and_refuse_invalid_bodies() {
+        let body = json!({"result":[{"events":10}]});
+        let expected = normalize(&serde_json::to_vec(&body).unwrap()).unwrap().rows;
+        for (payload, code) in [
+            (body, None),
+            (
+                json!({"result":[{"events":10}],"partial":true}),
+                Some("MCP_INCOMPLETE"),
+            ),
+            (json!({"result":[7]}), Some("MCP_SHAPE")),
+            (
+                json!({"result":{"error":"Synthetic result failure"}}),
+                Some("MCP_TOOL_ERROR"),
+            ),
+        ] {
+            let item = json!({"type":"text","text":payload.to_string()});
+            let frames = [
+                json!({"content":[item], "_meta":{"progressToken":3}}),
+                json!({"jsonrpc":"2.0","id":1,"result":{"content":[item]}}),
+                json!([item]),
+                json!({"content":[{"type":"text","text":payload.to_string(),
+                    "annotations":{"audience":["assistant"]}}]}),
+            ];
+            let mut bom = b"\xef\xbb\xbf".to_vec();
+            bom.extend(serde_json::to_vec(&payload).unwrap());
+            for raw in frames
+                .into_iter()
+                .map(|frame| frame.to_string().into_bytes())
+                .chain([bom])
+            {
+                match code {
+                    Some(code) => assert_eq!(normalize(&raw).unwrap_err().code, code),
+                    None => {
+                        let normalized = normalize(&raw).unwrap();
+                        assert_eq!(normalized.rows, expected);
+                        assert_eq!(normalized.raw_sha256, sha256_hex(&raw));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
