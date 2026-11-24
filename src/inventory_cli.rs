@@ -1021,13 +1021,18 @@ fn apply_and_store_with_work_budget(
     action: InventoryAction,
     work_budget: u64,
 ) -> Result<(InventoryStatus, Value), Diagnostic> {
-    if let InventoryAction::ImportParsers { pages, details, .. } = &action
-        && pages.is_empty()
-        && details.is_empty()
+    if let InventoryAction::ImportParsers {
+        pages,
+        details,
+        retrieved_at,
+    } = &action
     {
-        return Err(fail(
-            "An import replaces the saved parser inventory and needs at least one capture. Supply the saved catalog pages and parser details; a catalog page that lists no parsers is a valid capture.",
-        ));
+        cqlmatic::environment::parse_time(retrieved_at)?;
+        if pages.is_empty() && details.is_empty() {
+            return Err(fail(
+                "An import replaces the saved parser inventory and needs at least one capture. Supply the saved catalog pages and parser details; a catalog page that lists no parsers is a valid capture.",
+            ));
+        }
     }
     let writer = inventory_writer(path)?;
     apply_locked(path, action, work_budget, &writer)
@@ -2423,7 +2428,6 @@ fn apply(
             details,
             retrieved_at,
         } => {
-            cqlmatic::environment::parse_time(&retrieved_at)?;
             if pages.len() > 100 || details.len() > 10_000 {
                 return Err(fail(
                     "Saved parser import exceeds 100 pages / 10000 parser details.",
