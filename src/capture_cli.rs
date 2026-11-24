@@ -22,7 +22,7 @@ use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -36,7 +36,7 @@ const MAX_AUDIT_BYTES: u64 = 1_048_576;
 /// finishes well within it.
 const UNREFERENCED_AFTER: Duration = Duration::from_secs(600);
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct CaptureArgs {
     #[arg(long, value_enum, help = "Client whose hook payload arrives on stdin")]
     client: Client,
@@ -123,16 +123,81 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
         .is_ok()
         && payload.len() as u64 <= MAX_PAYLOAD_BYTES
         && let Ok(hook) = serde_json::from_slice::<Value>(&payload)
+        && hook.is_object()
     {
         if hook["hook_event_name"] == GUARD_EVENT && guards(args.client) {
             if let Some(answer) = guard(&args, &hook) {
                 let _ = crate::line(&answer);
             }
-        } else {
-            let _ = capture(&args, &hook, &payload);
+        } else if capture(&args, &hook, &payload).is_err() {
+            count_failure(args.state, "hook-not-saved");
         }
+    } else {
+        count_failure(args.state, "hook-input-unreadable");
     }
     Ok(0)
+}
+
+/// Counts a failure of the hook itself in the state's tally, still printing nothing: a hook's
+/// output can reach the model. Nothing is counted for a state file that does not exist.
+fn count_failure(state: Option<PathBuf>, reason: &str) {
+    let Ok(path) = inventory_cli::state_path(state) else {
+        return;
+    };
+    if path.is_file()
+        && let Some(directory) = captures_directory(&path)
+        && setup_cli::protect_directory(&directory).is_ok()
+    {
+        let _ = tally(&directory, reason);
+    }
+}
+
+/// Whether the payload is a search on a server other than `--server`: the search tool, or the
+/// gateway running it, under a tool name the client gives another server.
+fn search_on_other_server(hook: &Value, client: Client) -> bool {
+    let (name, arguments) = match client {
+        Client::CopilotApp | Client::CopilotCli | Client::CopilotVscode => {
+            (&hook["toolName"], &hook["toolArgs"])
+        }
+        Client::GeminiCli => (&hook["mcp_context"]["tool_name"], &hook["tool_input"]),
+        Client::Cline => match &hook["tool_result"] {
+            Value::Null => (
+                &hook["postToolUse"]["toolName"],
+                &hook["postToolUse"]["parameters"],
+            ),
+            record => (&record["name"], &record["input"]),
+        },
+        _ => (&hook["tool_name"], &hook["tool_input"]),
+    };
+    let arguments = match arguments {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        value => value.clone(),
+    };
+    let tool = |name: &str, tool: &str| {
+        let Some(server) = name.strip_suffix(tool) else {
+            return false;
+        };
+        match client {
+            Client::Cursor | Client::GeminiCli => server.is_empty(),
+            Client::CopilotApp | Client::CopilotCli | Client::CopilotVscode => server
+                .strip_suffix('-')
+                .is_some_and(|name| !name.is_empty()),
+            Client::Kiro => {
+                server.starts_with("mcp_") && server.ends_with('_')
+                    || server.starts_with('@') && server.ends_with('/')
+            }
+            Client::Cline => server
+                .strip_suffix("__")
+                .is_some_and(|name| !name.is_empty()),
+            _ => server
+                .strip_prefix("mcp__")
+                .and_then(|name| name.strip_suffix("__"))
+                .is_some_and(|name| !name.is_empty()),
+        }
+    };
+    name.as_str().is_some_and(|name| {
+        tool(name, SEARCH_TOOL) || tool(name, "execute_tool") && arguments["name"] == SEARCH_TOOL
+    })
 }
 
 const GUARD_EVENT: &str = "PreToolUse";
@@ -149,8 +214,11 @@ fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
     let repository = arguments["repository"]
         .as_str()
         .unwrap_or(DEFAULT_REPOSITORY);
-    let state = inventory_cli::state_path(args.state.clone()).ok();
-    note(&crate::guard_check(query, state.as_deref(), repository)).map(answer)
+    let state = inventory_cli::state_path(args.state.clone()).ok()?;
+    if state.file_name().is_none() || state.is_dir() {
+        return None;
+    }
+    note(&crate::guard_check(query, Some(&state), repository)).map(answer)
 }
 
 fn note(analysis: &Analysis) -> Option<String> {
@@ -226,8 +294,13 @@ fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize,
 
 fn capture(args: &CaptureArgs, hook: &Value, payload: &[u8]) -> Result<(), Diagnostic> {
     match call(hook, Some(payload), &args.server, args.client) {
-        Some(call) => record(args.state.clone(), call),
-        None => Ok(()),
+        Some(call) if search_arguments(&call).is_some() => record(args.state.clone(), call),
+        _ => {
+            if search_on_other_server(hook, args.client) {
+                count_failure(args.state.clone(), "hook-server-not-matched");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -243,13 +316,9 @@ pub(crate) fn record(state: Option<PathBuf>, call: Call) -> Result<(), Diagnosti
     let Some(environment) = state.target.as_ref().map(|target| &target.environment) else {
         return Ok(());
     };
-    // Each state file has its own folder, so states sharing a directory keep separate copies.
-    let mut name = path
-        .file_name()
-        .expect("A state path names a file")
-        .to_os_string();
-    name.push(".captures");
-    let directory = path.with_file_name(name);
+    let Some(directory) = captures_directory(&path) else {
+        return Ok(());
+    };
     setup_cli::protect_directory(&directory)?;
     let outcome = match answer_probe(&path, &directory, &state, &search) {
         Some(outcome) => outcome,
@@ -462,43 +531,56 @@ fn tidy(path: &Path, directory: &Path) {
                 .any(|capture| copy_name(&capture.retrieved_at, &capture.result_sha256) == stem)
         })
         .collect::<Vec<_>>();
-    // Audit records of this state's captures that no saved observation refers to. Records of
-    // imports and of other states' captures are left alone.
     let audits = path
         .parent()
         .map(|parent| files(&parent.join("query-observations"), &["json"]))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|audit| {
-            !observations().any(|observation| Path::new(&observation.audit_path) == audit)
-                && record(audit).is_some_and(|record| {
-                    record["observation"]["caller_assertion"] == "client-hook-capture"
-                        && record["query_file"]
-                            .as_str()
-                            .is_some_and(|query| Path::new(query).parent() == Some(&directory))
-                })
-        })
-        .collect::<Vec<_>>();
+        .unwrap_or_default();
     if copies.is_empty() && audits.is_empty() {
         return;
     }
 
-    // An audit record names the files its observation refers to. Those stay, whichever
-    // observation it is; when one record cannot be read, nothing is removed.
-    let mut named = BTreeSet::new();
+    // Resolve the retained references before removing anything. A hook can be
+    // reinstalled through an alias, and an unreadable record may still own a file.
+    let mut retained_audits = BTreeSet::new();
+    let mut retained_copies = BTreeSet::new();
     for observation in observations() {
-        let Some(record) = record(Path::new(&observation.audit_path)) else {
+        let Ok(audit) = fs::canonicalize(&observation.audit_path) else {
             return;
         };
-        for file in ["query_file", "result_file"] {
-            named.insert(record[file].as_str().map(PathBuf::from));
+        let Some(record) = record(&audit) else {
+            return;
+        };
+        retained_audits.insert(audit);
+        for name in ["query_file", "result_file"] {
+            let Some(file) = record[name].as_str() else {
+                continue;
+            };
+            let file = match fs::canonicalize(file) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return,
+            };
+            retained_copies.insert(file);
         }
     }
     for copy in copies {
-        if !named.contains(&Some(copy.clone())) {
+        if fs::canonicalize(&copy).is_ok_and(|path| !retained_copies.contains(&path)) {
             let _ = fs::remove_file(copy);
         }
     }
+
+    // Audit records for imports and for other states' captures are left alone.
+    let audits = audits.into_iter().filter(|audit| {
+        fs::canonicalize(audit).is_ok_and(|path| !retained_audits.contains(&path))
+            && record(audit).is_some_and(|record| {
+                record["observation"]["caller_assertion"] == "client-hook-capture"
+                    && record["query_file"]
+                        .as_str()
+                        .and_then(|query| Path::new(query).parent())
+                        .and_then(|parent| fs::canonicalize(parent).ok())
+                        .is_some_and(|parent| parent == directory)
+            })
+    });
     for audit in audits {
         let _ = fs::remove_file(&audit);
         // The writer that created the record left its lock file beside it.
@@ -574,6 +656,13 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), Diagnostic> {
         })
 }
 
+/// Each state file has its own folder, so states sharing a directory keep separate copies.
+fn captures_directory(state: &Path) -> Option<PathBuf> {
+    let mut name = state.file_name()?.to_os_string();
+    name.push(".captures");
+    Some(state.with_file_name(name))
+}
+
 fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
     let path = directory.join("tally.json");
     let writer = patiently(|| storage::Writer::acquire(&path))?;
@@ -581,7 +670,8 @@ fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    *counts.entry(outcome.into()).or_default() += 1;
+    let count = counts.entry(outcome.into()).or_default();
+    *count = count.saturating_add(1);
     let bytes = serde_json::to_vec_pretty(&counts).expect("A string-keyed count map serializes");
     writer.commit_bytes(&bytes, MAX_TALLY_BYTES)
 }

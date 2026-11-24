@@ -3,6 +3,10 @@
   "title": "SetupContract",
   "type": "object",
   "properties": {
+    "host_tool_discovery": {
+      "description": "The saved host report that `import-discovery` reads from `file`.",
+      "$ref": "#/$defs/HostToolDiscovery"
+    },
     "request": {
       "$ref": "#/$defs/SetupRequest"
     },
@@ -16,7 +20,8 @@
   "required": [
     "request",
     "result",
-    "state"
+    "state",
+    "host_tool_discovery"
   ],
   "$defs": {
     "AuthenticationEvidence": {
@@ -156,12 +161,83 @@
         "message"
       ]
     },
+    "DiscoveryTool": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "available"
+      ]
+    },
     "ExistingServer": {
       "type": "string",
       "enum": [
         "absent",
         "same",
         "collision"
+      ]
+    },
+    "HostToolDiscovery": {
+      "type": "object",
+      "properties": {
+        "authenticated": {
+          "type": "boolean"
+        },
+        "client": {
+          "$ref": "#/$defs/ClientKind"
+        },
+        "effective_config_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effective_oauth_client_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "host_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "server_name": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DiscoveryTool"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "client",
+        "server_name",
+        "endpoint",
+        "authenticated",
+        "tools"
       ]
     },
     "NativeCommand": {
@@ -677,6 +753,13 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "search_tool_available": {
+          "description": "Whether the saved host report listed the available search tool.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "selection": {
           "anyOf": [

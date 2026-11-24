@@ -559,10 +559,42 @@ fn select_inventory(
             Ok((None, false))
         };
     }
-    let data = storage::read_bytes(&path, inventory::MAX_STATE_BYTES)?;
-    let state = match parse_inventory_state(&data) {
+    let (selection, active_pack) = inventory_cli::read_with_pack_reload(
+        &path,
+        |data| {
+            let mut candidate_context = context.clone();
+            let (selection, applied) = prepare_inventory_selection(
+                &path,
+                data,
+                selected_path.is_some(),
+                &mut candidate_context,
+                pack,
+            )?;
+            Ok((selection, applied, candidate_context))
+        },
+        |(selection, _, _)| match selection {
+            Some(quick) => load_active_pack(&quick.state),
+            None => Ok(None),
+        },
+    )?;
+    let (mut quick, target_applied, candidate_context) = selection;
+    if let Some(quick) = &mut quick {
+        quick.active_pack = active_pack;
+    }
+    *context = candidate_context;
+    Ok((quick, target_applied))
+}
+
+fn prepare_inventory_selection(
+    path: &Path,
+    data: &[u8],
+    strict: bool,
+    context: &mut Context,
+    pack: Option<&Pack>,
+) -> Result<(Option<SavedInventory>, bool), Diagnostic> {
+    let state = match parse_inventory_state(data) {
         Ok(state) => state,
-        Err(d) if selected_path.is_none() && pack.is_some() => {
+        Err(d) if !strict && pack.is_some() => {
             return Err(Diagnostic::warning(
                 "CQL_QUICK_INVENTORY_IGNORED",
                 format!(
@@ -573,7 +605,7 @@ fn select_inventory(
         }
         Err(d) => return Err(d),
     };
-    if selected_path.is_none() && state.target.is_none() {
+    if !strict && state.target.is_none() {
         return Ok((None, false));
     }
     if state.active_pack.is_none() && !state.packs.is_empty() {
@@ -611,13 +643,12 @@ fn select_inventory(
         }
         return Ok((None, false));
     }
-    let mut quick = SavedInventory {
-        path,
+    let quick = SavedInventory {
+        path: path.to_path_buf(),
         state,
         active_pack: None,
     };
     let target_applied = apply_inventory_target(context, pack, &quick)?;
-    quick.active_pack = load_active_pack(&quick.state)?;
     Ok((Some(quick), target_applied))
 }
 
@@ -1275,6 +1306,11 @@ fn analyze_assess(
     args: &AssessArgs,
     pack: Option<&Pack>,
 ) -> AssessResult {
+    if let Some(identity) = &request.context.environment
+        && let Err(diagnostic) = environment::validate_identity(identity)
+    {
+        return failed_assessment(request.id, &request.query, diagnostic);
+    }
     let (quick, target_applied, notice) =
         match select_inventory(args.inventory_state.as_deref(), &mut request.context, pack) {
             Ok((quick, applied)) => (quick, applied, None),
@@ -1764,7 +1800,11 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let legacy = from.is_dir();
             let p = if legacy {
                 let e=explicit.clone().ok_or_else(||input_error("Legacy import requires --environment FILE with explicit cloud/account/view."))?;
-                Pack::new(e, discovery::timestamp(), storage::legacy_data(&from)?)?
+                Pack::new(
+                    environment::normalize_identity(e)?,
+                    discovery::timestamp(),
+                    storage::legacy_data(&from)?,
+                )?
             } else {
                 let p = storage::read_pack(&from)?;
                 if explicit.as_ref().is_some_and(|e| e != &p.environment) {
@@ -1960,6 +2000,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 request.ok_or_else(|| input_error("Discovery requires --request FILE."))?;
             let r: discovery::DiscoverRequest = json_file(&request)?;
             discovery::validate_request(&r)?;
+            let r = r.normalize_inputs()?;
             if !execute {
                 output(&discovery::initial_plan(&r)?, true)?;
                 return Ok(0);
@@ -1999,11 +2040,15 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let (candidate, mut report) = discovery::execute(&r, &mut client);
             if let Some(candidate) = candidate {
                 let merged = if let Some(old) = old {
-                    environment::merge(&old, &candidate)
+                    environment::merge_with_notices(&old, &candidate)
                 } else {
-                    Ok(candidate)
+                    environment::validate_incoming_fields(&candidate)
+                        .map(|()| (candidate, Vec::new()))
                 };
-                match merged.and_then(|p| writer.commit(&p)) {
+                match merged.and_then(|(pack, notices)| {
+                    report.diagnostics.extend(notices);
+                    writer.commit(&pack)
+                }) {
                     Ok(()) => report.active_pack_updated = true,
                     Err(d) => {
                         report.active_pack_updated = d.code == "PACK_DURABILITY";
@@ -2034,15 +2079,12 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let credentials = network::Credentials::load(credentials_file.as_deref(), &e)?;
             let mut client = network::FalconClient::new(&e, credentials)?;
             let deadline = Instant::now() + Duration::from_secs(30);
-            let result = if let Some(id) = id {
-                client.parser(&id, template, deadline)?
-            } else {
-                if template {
-                    return Err(input_error("--template requires --id."));
-                }
-                client.list_parsers(offset, limit, deadline)?
-            };
-            output(&result, true)?;
+            match (id, template) {
+                (Some(id), false) => output(&client.raw_parser(&id, deadline)?, true)?,
+                (Some(id), true) => output(&client.parser(&id, true, deadline)?, true)?,
+                (None, false) => output(&client.list_parsers(offset, limit, deadline)?, true)?,
+                (None, true) => return Err(input_error("--template requires --id.")),
+            }
             Ok(0)
         }
     }
