@@ -1362,6 +1362,39 @@ fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn import_clamps_extra_parent_steps_at_the_filesystem_root() {
+    let temp = Temp::new();
+    let directory = temp.0.canonicalize().unwrap();
+    let input = directory.join("original.json");
+    let output = directory.join("output.json");
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    save_pack(&input, &pack);
+    let original = fs::read(&input).unwrap();
+    let mut destination = directory.join("missing");
+    for _ in 0..directory.components().count() + 1 {
+        destination.push("..");
+    }
+    destination.extend(output.components().skip(1));
+    let result = temp
+        .binary()
+        .args(["env", "import", "--from"])
+        .arg(&input)
+        .arg("--out")
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(fs::read(&input).unwrap(), original);
+    assert_eq!(
+        cqlmatic::storage::read_pack(&output)
+            .unwrap()
+            .content_digest,
+        pack.content_digest
+    );
+}
+
 #[test]
 fn import_replace_accepts_an_environment_from_standard_input() {
     let temp = Temp::new();

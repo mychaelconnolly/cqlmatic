@@ -1489,12 +1489,8 @@ fn prospective_path(path: &Path) -> io::Result<PathBuf> {
     };
     for component in suffix.into_iter().rev() {
         if component == Component::ParentDir {
-            if !resolved.pop() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "path escapes its root",
-                ));
-            }
+            // The resolved path is absolute. Parent steps at its root stay there.
+            resolved.pop();
         } else {
             resolved.push(component.as_os_str());
             // Traversing ".." can bring the suffix back to an existing directory.
