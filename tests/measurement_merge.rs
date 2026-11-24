@@ -506,8 +506,12 @@ fn an_unorderable_legacy_negative_cannot_be_promoted_by_snapshot_creation_time()
         true,
         None,
     );
+    let (merged, notices) = environment::merge_with_notices(&old, &candidate).unwrap();
+    assert_eq!(field(&merged), field(&old));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].code, "FIELD_MEASUREMENT_NOT_APPLIED");
     assert!(
-        environment::merge(&old, &candidate)
+        environment::merge_historical(&old, &candidate)
             .unwrap_err()
             .message
             .contains("orderable")
@@ -777,7 +781,11 @@ fn undated_historical_markers_require_a_measurement_window_after_the_retained_sn
         true,
         None,
     );
-    assert!(environment::merge(&old, &candidate).is_err());
+    let (kept, notices) = environment::merge_with_notices(&old, &candidate).unwrap();
+    assert_eq!(field(&kept), field(&old));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].code, "FIELD_MEASUREMENT_NOT_APPLIED");
+    assert!(environment::merge_historical(&old, &candidate).is_err());
     let mut candidate = pack(
         "2026-07-02T00:00:00Z",
         "2026-07-02T00:00:00Z",
@@ -963,7 +971,11 @@ fn a_compatible_old_zero_cannot_remove_a_historical_boundary_before_a_second_ref
             None,
         );
         set_start(&mut positive, "2026-05-01T00:00:00Z");
-        assert!(environment::merge(&retained, &positive).is_err());
+        let (kept, notices) = environment::merge_with_notices(&retained, &positive).unwrap();
+        assert_eq!(field(&kept), field(&old));
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].code, "FIELD_MEASUREMENT_NOT_APPLIED");
+        assert!(environment::merge_historical(&retained, &positive).is_err());
         assert_eq!(field(&retained), field(&old));
     }
 }

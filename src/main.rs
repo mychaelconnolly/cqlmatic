@@ -1999,11 +1999,15 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let (candidate, mut report) = discovery::execute(&r, &mut client);
             if let Some(candidate) = candidate {
                 let merged = if let Some(old) = old {
-                    environment::merge(&old, &candidate)
+                    environment::merge_with_notices(&old, &candidate)
                 } else {
-                    Ok(candidate)
+                    environment::validate_incoming_fields(&candidate)
+                        .map(|()| (candidate, Vec::new()))
                 };
-                match merged.and_then(|p| writer.commit(&p)) {
+                match merged.and_then(|(pack, notices)| {
+                    report.diagnostics.extend(notices);
+                    writer.commit(&pack)
+                }) {
                     Ok(()) => report.active_pack_updated = true,
                     Err(d) => {
                         report.active_pack_updated = d.code == "PACK_DURABILITY";
