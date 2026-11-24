@@ -1,0 +1,1 @@
+- List valid inventory source IDs with their selectors when a source selection fails. Brief output reports the number of valid IDs.

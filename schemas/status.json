@@ -214,6 +214,9 @@
           "format": "uint",
           "minimum": 0
         },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "elapsed_seconds": {
           "type": "number",
           "format": "double"
@@ -237,6 +240,12 @@
         },
         "pack_path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "quick_depth": {
           "$ref": "#/$defs/QuickDepth",
@@ -738,6 +747,9 @@
     "PackReference": {
       "type": "object",
       "properties": {
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "content_digest": {
           "type": "string"
         },
@@ -750,8 +762,20 @@
         "imported_at": {
           "type": "string"
         },
+        "input_content_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,
@@ -1427,6 +1451,30 @@
         "info"
       ]
     },
+    "SourceRestrictions": {
+      "type": "object",
+      "properties": {
+        "discovery_compatible": {
+          "type": "boolean"
+        },
+        "event_family": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sourcetype": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "discovery_compatible"
+      ]
+    },
     "SourceReview": {
       "type": "object",
       "properties": {
@@ -1496,6 +1544,16 @@
           "items": {
             "$ref": "#/$defs/RecordKind"
           }
+        },
+        "retained_restrictions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceRestrictions"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "review": {
           "anyOf": [

@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     io::{self, BufRead, Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -559,10 +559,42 @@ fn select_inventory(
             Ok((None, false))
         };
     }
-    let data = storage::read_bytes(&path, inventory::MAX_STATE_BYTES)?;
-    let state = match parse_inventory_state(&data) {
+    let (selection, active_pack) = inventory_cli::read_with_pack_reload(
+        &path,
+        |data| {
+            let mut candidate_context = context.clone();
+            let (selection, applied) = prepare_inventory_selection(
+                &path,
+                data,
+                selected_path.is_some(),
+                &mut candidate_context,
+                pack,
+            )?;
+            Ok((selection, applied, candidate_context))
+        },
+        |(selection, _, _)| match selection {
+            Some(quick) => load_active_pack(&quick.state),
+            None => Ok(None),
+        },
+    )?;
+    let (mut quick, target_applied, candidate_context) = selection;
+    if let Some(quick) = &mut quick {
+        quick.active_pack = active_pack;
+    }
+    *context = candidate_context;
+    Ok((quick, target_applied))
+}
+
+fn prepare_inventory_selection(
+    path: &Path,
+    data: &[u8],
+    strict: bool,
+    context: &mut Context,
+    pack: Option<&Pack>,
+) -> Result<(Option<SavedInventory>, bool), Diagnostic> {
+    let state = match parse_inventory_state(data) {
         Ok(state) => state,
-        Err(d) if selected_path.is_none() && pack.is_some() => {
+        Err(d) if !strict && pack.is_some() => {
             return Err(Diagnostic::warning(
                 "CQL_QUICK_INVENTORY_IGNORED",
                 format!(
@@ -573,6 +605,9 @@ fn select_inventory(
         }
         Err(d) => return Err(d),
     };
+    if !strict && state.target.is_none() {
+        return Ok((None, false));
+    }
     if state.active_pack.is_none() && !state.packs.is_empty() {
         return Err(input_error(
             "Inventory has retained packs but no active pack for evidence checks.",
@@ -584,7 +619,10 @@ fn select_inventory(
             || !state.captured_observations.is_empty()
             || state.scout_plan.is_some()
             || !state.scouting.is_empty()
-            || !state.sources.is_empty()
+            || (state.scouting.is_empty() && !state.sources.is_empty())
+            || state.sources.iter().any(|source| {
+                source.expected || source.review.is_some() || source.binding.is_some()
+            })
             || !state.parser_pages.is_empty()
             || !state.parsers.is_empty()
             || !state.parser_exclusions.is_empty()
@@ -605,13 +643,12 @@ fn select_inventory(
         }
         return Ok((None, false));
     }
-    let mut quick = SavedInventory {
-        path,
+    let quick = SavedInventory {
+        path: path.to_path_buf(),
         state,
         active_pack: None,
     };
     let target_applied = apply_inventory_target(context, pack, &quick)?;
-    quick.active_pack = load_active_pack(&quick.state)?;
     Ok((Some(quick), target_applied))
 }
 
@@ -1407,11 +1444,14 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
     } else if args.recipes {
         output(&app::recipe_catalog(), true)?;
     } else if args.functions {
-        let matches = catalog::FUNCTIONS
-            .iter()
-            .filter(|f| {
-                args.term.is_empty() || f.name.to_lowercase().contains(&args.term.to_lowercase())
-            })
+        let exact = catalog::function(&args.term);
+        let needle = args.term.to_lowercase();
+        let partial = catalog::FUNCTIONS.iter().filter(|f| {
+            !f.name.eq_ignore_ascii_case(&args.term) && f.name.to_lowercase().contains(&needle)
+        });
+        let matches = exact
+            .into_iter()
+            .chain(partial)
             .take(args.limit as usize)
             .map(|f| {
                 let mut value = serde_json::to_value(f).expect("function serializes");
@@ -1427,13 +1467,119 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
             .collect::<Vec<_>>();
         output(&matches, true)?;
     } else {
-        output(
-            &catalog::search(&args.term, args.limit as usize, args.full),
-            args.full,
-        )?;
+        let limit = args.limit as usize;
+        let mut matches = catalog::search(&args.term, limit, args.full);
+        if let Some(function) = catalog::function(&args.term)
+            && let Some(exact) = catalog::search(function.reference_id, 1, args.full).pop()
+        {
+            matches.retain(|row| row["id"] != function.reference_id);
+            matches.insert(0, exact);
+            matches.truncate(limit);
+        }
+        output(&matches, args.full)?;
     }
     Ok(0)
 }
+fn add_inventory_source_id(row: &mut Value) {
+    let selectors = &row["selectors"];
+    let repo = selectors["repo"].as_str();
+    let type_ = selectors["type"].as_str();
+    if (repo.is_some() || type_.is_some())
+        && selectors["event_family"].is_null()
+        && selectors["sourcetype"]
+            .as_str()
+            .is_none_or(|value| Some(value) == type_)
+        && repo.into_iter().chain(type_).all(|value| {
+            !value.trim().is_empty() && cqlmatic::language::plan::checked_text(value).is_ok()
+        })
+    {
+        row["inventory_source_id"] = json!(discovery::source_id(&Scope {
+            repo: repo.map(str::to_owned),
+            type_: type_.map(str::to_owned),
+            event: None,
+        }));
+    }
+}
+
+fn prospective_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    let mut resolved = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(existing) => break existing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(parent) = ancestor.parent() else {
+                    return Err(error);
+                };
+                suffix.extend(ancestor.components().next_back());
+                ancestor = parent;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    for component in suffix.into_iter().rev() {
+        if component == Component::ParentDir {
+            // The resolved path is absolute. Parent steps at its root stay there.
+            resolved.pop();
+        } else {
+            resolved.push(component.as_os_str());
+            // Traversing ".." can bring the suffix back to an existing directory.
+            match std::fs::canonicalize(&resolved) {
+                Ok(existing) => resolved = existing,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn protect_import_inputs(
+    out: &Path,
+    from: &Path,
+    descriptor: Option<&Path>,
+    legacy: bool,
+) -> Result<(), Diagnostic> {
+    let destination = prospective_path(out).map_err(|error| {
+        input_error(&format!(
+            "Cannot resolve output path {out:?}: {error}. Choose an accessible output path."
+        ))
+    })?;
+    let mut inputs: Vec<_> = descriptor
+        .filter(|path| *path != Path::new("-"))
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
+    if legacy {
+        // Match the directory and component names read by storage::legacy_data.
+        let dir = if from.join("sources.jsonl").exists() {
+            from.to_path_buf()
+        } else {
+            from.join("environment")
+        };
+        inputs.extend(
+            ["sources", "fields", "provenance", "values", "annotations"]
+                .map(|name| dir.join(format!("{name}.jsonl"))),
+        );
+    } else {
+        inputs.push(from.to_path_buf());
+    }
+    for input in inputs {
+        let original = prospective_path(&input).map_err(|error| {
+            input_error(&format!(
+                "Cannot resolve import input {input:?}: {error}. Check the input path and retry."
+            ))
+        })?;
+        if destination == original {
+            return Err(input_error(&format!(
+                "Output resolves to import input {input:?}. Choose a separate output path."
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
     match command {
         EnvCommand::Inventory(args) => inventory_cli::run(args),
@@ -1458,6 +1604,18 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             limit,
         } => {
             let mut p = storage::read_pack(&file)?;
+            let source_matches = |row: &Value| {
+                source.as_deref().is_none_or(|q| {
+                    row["id"].as_str() == Some(q)
+                        || row["name"].as_str() == Some(q)
+                        || row.pointer("/selectors/repo").and_then(Value::as_str) == Some(q)
+                })
+            };
+            let field_matches = |row: &Value| {
+                field
+                    .as_deref()
+                    .is_none_or(|q| row["path"].as_str().is_some_and(|path| path.contains(q)))
+            };
             if summary {
                 if full || field.is_some() || source.is_some() {
                     return Err(input_error(
@@ -1470,9 +1628,11 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                     .iter()
                     .map(|source| {
                         let id = source["id"].as_str().unwrap_or("");
-                        json!({"id":id,"name":source["name"],"selectors":source["selectors"],
+                        let mut row = json!({"id":id,"name":source["name"],"selectors":source["selectors"],
                             "inventory_status":source["inventory_status"],
-                            "field_count":p.data.fields.iter().filter(|field| field["source_id"] == id).count()})
+                            "field_count":p.data.fields.iter().filter(|field| field["source_id"] == id).count()});
+                        add_inventory_source_id(&mut row);
+                        row
                     })
                     .collect::<Vec<_>>();
                 output(
@@ -1485,13 +1645,8 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 )?;
             } else if full {
                 if source.is_some() || field.is_some() {
-                    p.data.sources.retain(|s| {
-                        source.as_ref().is_none_or(|q| {
-                            s["id"].as_str() == Some(q)
-                                || s["name"].as_str() == Some(q)
-                                || s.pointer("/selectors/repo").and_then(Value::as_str) == Some(q)
-                        })
-                    });
+                    p.data.sources.retain(source_matches);
+                    let source_hits = p.data.sources.len();
                     let ids = p
                         .data
                         .sources
@@ -1500,9 +1655,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                         .collect::<BTreeSet<_>>();
                     p.data.fields.retain(|f| {
                         f["source_id"].as_str().is_some_and(|id| ids.contains(id))
-                            && field.as_ref().is_none_or(|q| {
-                                f["path"].as_str().is_some_and(|path| path.contains(q))
-                            })
+                            && field_matches(f)
                     });
                     if field.is_some() {
                         let with_fields = p
@@ -1548,50 +1701,82 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                             .as_str()
                             .is_some_and(|id| provenance_ids.contains(id))
                     });
+                    let matched_sources = if source.is_some() {
+                        source_hits
+                    } else {
+                        p.data.sources.len()
+                    };
+                    let matched_fields = p.data.fields.len();
+                    let mut view = serde_json::to_value(&p).expect("pack serializes");
+                    let object = view.as_object_mut().expect("pack serializes as an object");
+                    object.remove("content_digest");
+                    object.extend([
+                        ("source_pack_digest".into(), json!(p.content_digest)),
+                        ("filtered".into(), json!(true)),
+                        ("filter".into(), json!({"source":source,"field":field})),
+                        ("matched_sources".into(), json!(matched_sources)),
+                        ("matched_fields".into(), json!(matched_fields)),
+                    ]);
+                    output(&view, true)?;
+                    return Ok(0);
                 }
                 output(&p, true)?;
             } else if field.is_some() || source.is_some() {
-                let ids = p
+                let ids: BTreeSet<_> = p
                     .data
                     .sources
                     .iter()
-                    .filter(|s| {
-                        source.as_ref().is_none_or(|q| {
-                            s["id"].as_str() == Some(q)
-                                || s["name"].as_str() == Some(q)
-                                || s.pointer("/selectors/repo").and_then(Value::as_str) == Some(q)
-                        })
-                    })
-                    .filter_map(|s| s["id"].as_str())
-                    .collect::<Vec<_>>();
-                let fields = p
+                    .filter(|row| source_matches(row))
+                    .filter_map(|row| row["id"].as_str())
+                    .collect();
+                let matched: Vec<_> = p
                     .data
                     .fields
                     .iter()
-                    .filter(|f| {
-                        ids.contains(&f["source_id"].as_str().unwrap_or(""))
-                            && field
-                                .as_ref()
-                                .is_none_or(|q| f["path"].as_str().is_some_and(|p| p.contains(q)))
+                    .filter(|row| {
+                        row["source_id"].as_str().is_some_and(|id| ids.contains(id))
+                            && field_matches(row)
                     })
-                    .take(limit as usize)
-                    .collect::<Vec<_>>();
-                let fids = fields
-                    .iter()
-                    .filter_map(|f| f["id"].as_str())
-                    .collect::<Vec<_>>();
-                let values = p
-                    .data
-                    .values
-                    .iter()
-                    .filter(|v| fids.contains(&v["field_id"].as_str().unwrap_or("")))
-                    .take(limit as usize)
-                    .collect::<Vec<_>>();
+                    .collect();
+                let matched_sources = if source.is_some() {
+                    ids.len()
+                } else {
+                    matched
+                        .iter()
+                        .filter_map(|row| row["source_id"].as_str())
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                };
+                let fields = &matched[..matched.len().min(limit as usize)];
+                let field_ids = |rows: &[&Value]| {
+                    rows.iter()
+                        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                        .collect::<BTreeSet<_>>()
+                };
+                let matched_ids = field_ids(&matched);
+                let returned_ids = field_ids(fields);
+                let mut matched_values = 0;
+                let mut values = Vec::new();
+                for value in &p.data.values {
+                    if let Some(id) = value["field_id"].as_str()
+                        && matched_ids.contains(id)
+                    {
+                        matched_values += 1;
+                        if values.len() < limit as usize && returned_ids.contains(id) {
+                            values.push(value);
+                        }
+                    }
+                }
                 output(
-                    &json!({"environment":p.environment,"pack_id":p.content_digest,"fields":fields,"values":values}),
+                    &json!({"environment":p.environment,"pack_id":p.content_digest,"fields":fields,"values":values,
+                        "matched_sources":matched_sources,"matched_fields":matched.len(),
+                        "omitted_fields":matched.len() - fields.len(),"omitted_values":matched_values - values.len()}),
                     true,
                 )?;
             } else {
+                for row in &mut p.data.sources {
+                    add_inventory_source_id(row);
+                }
                 output(
                     &json!({"format_version":p.format_version,"environment":p.environment,"pack_id":p.content_digest,"created_at":p.created_at,"sources":p.data.sources,"field_count":p.data.fields.len(),"value_count":p.data.values.len(),"annotations":p.data.annotations}),
                     true,
@@ -1607,7 +1792,8 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
         } => {
             let explicit: Option<EnvironmentId> =
                 environment.as_deref().map(json_file).transpose()?;
-            let p = if from.is_dir() {
+            let legacy = from.is_dir();
+            let p = if legacy {
                 let e=explicit.clone().ok_or_else(||input_error("Legacy import requires --environment FILE with explicit cloud/account/view."))?;
                 Pack::new(e, discovery::timestamp(), storage::legacy_data(&from)?)?
             } else {
@@ -1619,6 +1805,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 }
                 p
             };
+            protect_import_inputs(&out, &from, environment.as_deref(), legacy)?;
             let writer = storage::Writer::acquire(&out)?;
             if out.exists() && !replace {
                 return Err(input_error(
@@ -1843,11 +2030,15 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let (candidate, mut report) = discovery::execute(&r, &mut client);
             if let Some(candidate) = candidate {
                 let merged = if let Some(old) = old {
-                    environment::merge(&old, &candidate)
+                    environment::merge_with_notices(&old, &candidate)
                 } else {
-                    Ok(candidate)
+                    environment::validate_incoming_fields(&candidate)
+                        .map(|()| (candidate, Vec::new()))
                 };
-                match merged.and_then(|p| writer.commit(&p)) {
+                match merged.and_then(|(pack, notices)| {
+                    report.diagnostics.extend(notices);
+                    writer.commit(&pack)
+                }) {
                     Ok(()) => report.active_pack_updated = true,
                     Err(d) => {
                         report.active_pack_updated = d.code == "PACK_DURABILITY";

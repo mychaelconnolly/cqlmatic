@@ -1,0 +1,1 @@
+- Report the search row ceiling in discovery replies, polls and status. Report both causes when a capped answer arrives after the run deadline.

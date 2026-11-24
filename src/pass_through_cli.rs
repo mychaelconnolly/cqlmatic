@@ -5,7 +5,7 @@
 use crate::capture_cli::{self, Call};
 use clap::Args;
 use cqlmatic::{contracts::Diagnostic, mcp};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -74,19 +74,27 @@ impl Pending {
         if self.0.is_empty() {
             return None;
         }
-        let mut message: Value = serde_json::from_slice(line).ok()?;
+        let message: Value = serde_json::from_slice(line).ok()?;
         if !message["method"].is_null() {
             return None;
         }
         let (tool, arguments) = self.0.remove(&message["id"].to_string())?;
-        let result = match message["result"].take() {
-            Value::Object(mut result) => {
+        let result = message["result"]
+            .is_object()
+            .then(|| {
+                let reply: BTreeMap<String, &RawValue> = serde_json::from_slice(line).ok()?;
+                let raw = *reply.get("result")?;
                 // Protocol metadata is not part of the tool's result.
-                result.remove("_meta");
-                Some(Value::Object(result))
-            }
-            _ => None,
-        };
+                if message["result"].get("_meta").is_some() {
+                    let mut fields: BTreeMap<String, &RawValue> =
+                        serde_json::from_str(raw.get()).ok()?;
+                    fields.remove("_meta");
+                    serde_json::value::to_raw_value(&fields).ok()
+                } else {
+                    Some(raw.to_owned())
+                }
+            })
+            .flatten();
         Some(Call::on_connection(tool, arguments, result))
     }
 }
@@ -283,8 +291,8 @@ mod tests {
         assert!(!gateway("another_tool").may_be_search());
         assert_eq!(finished.arguments, json!({"query_string": "x"}));
         assert_eq!(
-            finished.response,
-            Some(json!({"content": [{"type": "text", "text": "{}"}]}))
+            serde_json::from_str::<Value>(finished.response.unwrap().get()).unwrap(),
+            json!({"content": [{"type": "text", "text": "{}"}]})
         );
         // The string id "1" is a different request from the number 1.
         let failed = pending
@@ -292,7 +300,7 @@ mod tests {
                 json!({"jsonrpc": "2.0", "id": "1", "error": {"code": -32000, "message": "x"}}),
             ))
             .unwrap();
-        assert_eq!(failed.response, None);
+        assert!(failed.response.is_none());
         assert_eq!(pending.0.len(), 1);
         assert!(
             pending

@@ -538,8 +538,11 @@ fn full_with_parser(p1: &ParserSnapshot) -> (InventoryState, Pack) {
     });
     let pack = observed_pack();
     let reference = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: "synthetic-pack.json".into(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: NOW.into(),
         discovery_run: Some("synthetic-run.json".into()),
     };

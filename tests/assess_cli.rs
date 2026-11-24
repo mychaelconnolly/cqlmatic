@@ -742,10 +742,18 @@ fn full_env_inspect_filters_synthetic_pack_and_preserves_metadata() {
             "profile_id",
             "knowledge_revision",
             "created_at",
-            "content_digest",
         ] {
             assert_eq!(inspected[key], original[key], "{source}: {field}: {key}");
         }
+        assert!(inspected.get("content_digest").is_none());
+        assert_eq!(inspected["source_pack_digest"], original["content_digest"]);
+        assert_eq!(inspected["filtered"], true);
+        assert_eq!(inspected["filter"], json!({"source":source,"field":field}));
+        assert_eq!(
+            inspected["matched_sources"],
+            usize::from(source == "example")
+        );
+        assert_eq!(inspected["matched_fields"], usize::from(expected));
         for key in ["sources", "fields", "provenance"] {
             assert_eq!(
                 inspected["data"][key].as_array().unwrap().len(),

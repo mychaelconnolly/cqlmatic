@@ -747,7 +747,7 @@ fn record_kind_guard_unions_active_and_explicit_evidence_in_both_directions() {
 }
 
 #[test]
-fn active_source_ambiguity_and_invalid_observations_fail_closed() {
+fn exact_active_namespace_resolves_ambiguity_without_crediting_invalid_observations() {
     let mut d = data();
     let mut other_source = d.sources[0].clone();
     other_source["id"] = json!("env:repo:other-type");
@@ -765,8 +765,10 @@ fn active_source_ambiguity_and_invalid_observations_fail_closed() {
         Some(&active),
         std::slice::from_ref(&observation),
     );
-    assert_eq!(result.outcome, Outcome::NeedsContext);
-    assert!(result.grounding.basis["synthetic:*:user"].contains("not interchangeable"));
+    assert_eq!(result.outcome, Outcome::Ready);
+    assert!(
+        result.grounding.basis["synthetic:*:user"].starts_with("caller-attested query observation")
+    );
     let mut invalid = observation;
     invalid.fields[0].positive_rows = 0;
     let result = checked("#repo=synthetic | user=*", None, None, &[invalid]);
