@@ -1271,3 +1271,47 @@ fn handoff_points_at_the_saved_report_schema() {
     let handoff = result(state, None).handoff.unwrap();
     assert!(handoff.contains("host_tool_discovery property of `cqlmatic --schema setup`"));
 }
+#[test]
+fn verified_setup_offers_the_capture_hook_where_the_installer_writes_settings() {
+    for client in [
+        ClientKind::Codex,
+        ClientKind::VsCode,
+        ClientKind::ClaudeCode,
+        ClientKind::CopilotCli,
+        ClientKind::CopilotApp,
+        ClientKind::CopilotVscode,
+        ClientKind::External,
+    ] {
+        let state = SetupState {
+            phase: SetupPhase::ToolDiscoveryVerified,
+            selection: Some(Selection {
+                server_name: "crowdstrike".into(),
+                ..host_selection(
+                    client,
+                    (client == ClientKind::External).then_some("synthetic-host"),
+                )
+            }),
+            ..SetupState::default()
+        };
+        let result = result(state, None);
+        let actions = result.next_actions.join(" ");
+        let name = serde_json::to_value(client).unwrap();
+        let command = format!(
+            "cqlmatic env capture --client {} --server crowdstrike --install",
+            name.as_str().unwrap()
+        );
+        if matches!(client, ClientKind::VsCode | ClientKind::External) {
+            assert!(!actions.contains("env capture"), "{client:?}: {actions}");
+            assert!(
+                actions.contains("capture hook table and the pass-through in docs/INVENTORY.md"),
+                "{actions}"
+            );
+        } else {
+            assert!(actions.contains(&command), "{client:?}: {actions}");
+            assert!(actions.contains("the one in the client's tool names"));
+            assert!(actions.contains("without the agent saving them"));
+        }
+        let handoff = result.handoff.unwrap();
+        assert!(handoff.contains("Where a capture hook or pass-through is registered"));
+    }
+}

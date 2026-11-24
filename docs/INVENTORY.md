@@ -389,7 +389,11 @@ Where the installer will not edit the settings, the report gives the entry to ad
 
 If the installer cannot create its lock file or write the new file, it reports the error and still gives the entry. When another install holds the lock, it only asks you to retry. The entry holds absolute paths for this machine: the inventory state, and the program unless `--program` is given. A settings file shared between machines whose paths differ therefore gets one entry from each machine.
 
-The installer does not coordinate with the client. If the client saves its settings in the instant between the installer's last check and the swap, that save is lost, so close the client first. It recognizes an entry as its own only when the whole entry equals the one it writes, keeps one copy of an entry that appears several times, and replaces the `claude-code` or `codex` capture entry that 0.1.10 wrote for the same program, server and state. An entry that runs the same command but differs, such as one you edited, and one that a copy of CQLmatic in another folder wrote for the same client, server and state, are listed in `next_actions` with their commands and left in place. Remove it, and any capture entry you added by hand with a different launcher, or each search is captured twice.
+The installer does not coordinate with the client. If the client saves its settings in the instant between the installer's last check and the swap, that save is lost, so close the client first. It recognizes an entry as its own when the whole entry equals the one it writes, apart from the program or `--program` launcher that comes before `env capture`. It keeps one copy of an entry that appears several times, replaces entries that a copy of CQLmatic in another folder, or with another launcher, wrote for the same client, server and state, and replaces the `claude-code` or `codex` capture entry that 0.1.10 wrote for the same program, server and state. So one set remains however many folders you install from, and `--hooks none` removes them all. An entry that runs the same command but differs in anything else, such as one you edited, is listed in `next_actions` with its command and left in place. Remove it, and any capture entry you added by hand in another form, or each search is captured twice. Entries of other programs are never changed.
+
+The report's last next action names the tool name the hook matches, such as `mcp__SERVER__falcon_search_ngsiem` for `claude-code`. If the client's tool names spell the server another way, as a server provided by a plugin or connector can, install again with that spelling as `--server`.
+
+When an installation leaves the capture hook in place for a client whose settings it writes, it notes that beside the inventory state in `state.json.captures/hooks.json`, as `{"client": CLIENT, "server": SERVER, "hooks": ["capture", "guard"]}` with the hooks it left. An installation that leaves no capture hook, with `--hooks none` or `--hooks guard`, removes the note when it names the same client. `--dry-run` writes no note. The note is advisory: a hook removed by hand leaves it behind.
 
 The registered command names the absolute path of the inventory state, given or default, so the hook records into the same inventory whatever directory and environment the client starts it with. For `claude-code` and `codex` the command runs inside a wrapper that ends every failure with exit status 0: `/bin/sh -c` on macOS and Linux, which passes on the command's output only when the command succeeded, `Invoke-Expression` in PowerShell for `claude-code` on Windows, and `& exit 0` after the command for `codex` on Windows. On Windows the `claude-code` entries also set `"shell": "powershell"`, so the hooks run the same way with or without Git Bash. The `codex` entry on Windows is written for `cmd.exe`, which Codex starts hooks with. `cmd.exe` cannot pass a double quote inside a quoted value and may expand a percent sign as a variable, so an executable path, server name or state path that contains either is refused with an error and nothing is written. The three Copilot clients read the same file and share one entry.
 
@@ -514,6 +518,14 @@ The search is `falcon_search_ngsiem` called directly or through the hosted serve
 | Completed without rows | None | `no-rows` |
 | Failed, was cut off, or its result could not be read | None | `search-failed` |
 | Used another repository | None | `other-view` |
+
+The hook also counts its own failures in `tally.json`, still printing nothing and exiting 0. They are counted only when the state file exists.
+
+| Failure | Count in `tally.json` |
+| --- | --- |
+| The hook's input could not be read as JSON | `hook-input-unreadable` |
+| A call of the search tool, or of a gateway running it, under a tool name that places it on a server other than `--server` | `hook-server-not-matched` |
+| A search the hook could not record, for example because the inventory state could not be read | `hook-not-saved` |
 
 Captured observations are listed in full status as `captured_observations` and counted in compact status. They differ from imported query observations in four ways:
 

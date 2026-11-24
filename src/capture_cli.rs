@@ -128,11 +128,52 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
             if let Some(answer) = guard(&args, &hook) {
                 let _ = crate::line(&answer);
             }
-        } else {
-            let _ = capture(&args, &hook);
+        } else if capture(&args, &hook).is_err() {
+            count_failure(args.state, "hook-not-saved");
         }
+    } else {
+        count_failure(args.state, "hook-input-unreadable");
     }
     Ok(0)
+}
+
+/// Counts a failure of the hook itself in the state's tally, still printing nothing: a hook's
+/// output can reach the model. Nothing is counted for a state file that does not exist.
+fn count_failure(state: Option<PathBuf>, reason: &str) {
+    let Ok(path) = inventory_cli::state_path(state) else {
+        return;
+    };
+    let directory = captures_directory(&path);
+    if path.is_file() && setup_cli::protect_directory(&directory).is_ok() {
+        let _ = tally(&directory, reason);
+    }
+}
+
+/// Whether the payload is a search on a server other than `--server`: the search tool, or the
+/// gateway running it, under a tool name the client gives another server.
+fn search_on_other_server(hook: &Value, client: Client) -> bool {
+    let (name, arguments) = match client {
+        Client::CopilotApp | Client::CopilotCli | Client::CopilotVscode => {
+            (&hook["toolName"], &hook["toolArgs"])
+        }
+        Client::GeminiCli => (&hook["mcp_context"]["tool_name"], &hook["tool_input"]),
+        Client::Cline => match &hook["tool_result"] {
+            Value::Null => (
+                &hook["postToolUse"]["toolName"],
+                &hook["postToolUse"]["parameters"],
+            ),
+            record => (&record["name"], &record["input"]),
+        },
+        _ => (&hook["tool_name"], &hook["tool_input"]),
+    };
+    let arguments = match arguments {
+        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+        value => value.clone(),
+    };
+    name.as_str().is_some_and(|name| {
+        name.ends_with(SEARCH_TOOL)
+            || (name.ends_with("execute_tool") && arguments["name"] == SEARCH_TOOL)
+    })
 }
 
 const GUARD_EVENT: &str = "PreToolUse";
@@ -227,7 +268,12 @@ fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize,
 fn capture(args: &CaptureArgs, hook: &Value) -> Result<(), Diagnostic> {
     match call(hook, &args.server, args.client) {
         Some(call) => record(args.state.clone(), call),
-        None => Ok(()),
+        None => {
+            if search_on_other_server(hook, args.client) {
+                count_failure(args.state.clone(), "hook-server-not-matched");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -243,13 +289,7 @@ pub(crate) fn record(state: Option<PathBuf>, call: Call) -> Result<(), Diagnosti
     let Some(environment) = state.target.as_ref().map(|target| &target.environment) else {
         return Ok(());
     };
-    // Each state file has its own folder, so states sharing a directory keep separate copies.
-    let mut name = path
-        .file_name()
-        .expect("A state path names a file")
-        .to_os_string();
-    name.push(".captures");
-    let directory = path.with_file_name(name);
+    let directory = captures_directory(&path);
     setup_cli::protect_directory(&directory)?;
     let outcome = match answer_probe(&path, &directory, &state, &search) {
         Some(outcome) => outcome,
@@ -572,6 +612,16 @@ fn private_file(path: &Path, bytes: &[u8]) -> Result<(), Diagnostic> {
             let _ = fs::remove_file(path);
             failed()
         })
+}
+
+/// Each state file has its own folder, so states sharing a directory keep separate copies.
+fn captures_directory(state: &Path) -> PathBuf {
+    let mut name = state
+        .file_name()
+        .expect("A state path names a file")
+        .to_os_string();
+    name.push(".captures");
+    state.with_file_name(name)
 }
 
 fn tally(directory: &Path, outcome: &str) -> Result<(), Diagnostic> {
