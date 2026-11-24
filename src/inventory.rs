@@ -1497,6 +1497,8 @@ impl QueryObservation {
         audit_path: String,
     ) -> Result<Self, Diagnostic> {
         use crate::language::ast::{Filter, Pattern, Step, Value as AstValue};
+        let start = environment::normalize_request_time(&start)?;
+        let end = environment::normalize_request_time(&end)?;
         scope_ok(&source)?;
         let query_text = std::str::from_utf8(query)
             .map_err(|_| fail("Query file must contain exact UTF-8 CQL."))?;
@@ -3764,13 +3766,14 @@ impl InventoryState {
                 "Quick scouting requires an explicit host search budget of 1..600 seconds.",
             ));
         }
+        let environment = environment::normalize_identity(environment)?;
         self.validate_scout_environment(&environment)?;
         let plan = ScoutPlan {
             arguments: SearchArguments {
                 repository: self.scout_repository(&environment).into(),
                 query_string: SCOUT_QUERY.into(),
-                start,
-                end,
+                start: environment::normalize_request_time(&start)?,
+                end: environment::normalize_request_time(&end)?,
             },
             environment,
             query_sha256: sha256_hex(SCOUT_QUERY.as_bytes()),
@@ -3913,7 +3916,7 @@ impl InventoryState {
         expected: Vec<Scope>,
         now: &str,
     ) -> Result<(), Diagnostic> {
-        environment::validate_identity(&environment)?;
+        let mut environment = environment::normalize_identity(environment)?;
         text(&context)?;
         environment::parse_time(now)?;
         if self
@@ -3928,6 +3931,10 @@ impl InventoryState {
             return Err(fail(
                 "Confirmed environment must match existing scouting; use a new state to change it.",
             ));
+        }
+        if let Some(target) = &self.target {
+            // Preserve the spelling already bound to this inventory and its fingerprints.
+            environment = target.environment.clone();
         }
         if scope == TargetScope::SelectedSources && expected.is_empty() {
             return Err(fail(
@@ -4522,7 +4529,7 @@ impl InventoryState {
             }
         }
         discovery::validate_request(&request)?;
-        Ok(request)
+        request.normalize_inputs()
     }
 }
 

@@ -148,7 +148,7 @@ A retained run can still dispatch while it has attempts left, a case at its curr
 
 ## Action inputs and evidence boundaries
 
-All requests use `schema_version: 1` and `action.kind`; unknown fields fail. Dates are absolute timestamps; search `start` and `end` must be valid absolute UTC windows with start before end and a window of at most seven days. Use exact IDs from status, never names reconstructed by the assistant. A source selector requires nonempty `repo` or `type` (or both), and no event selector; tagged and ordinary field namespaces remain distinct.
+All requests use `schema_version: 1` and `action.kind`; unknown fields fail. Supply search windows as increasing RFC 3339 timestamps with explicit offsets and a window of at most seven days. Scout and discovery preparation emit UTC `Z` timestamps. Repeat emitted search arguments exactly where an import asks for them. Use exact IDs from status, never names reconstructed by the assistant. A source selector requires nonempty `repo` or `type` (or both), and no event selector; tagged and ordinary field namespaces remain distinct.
 
 | Action | Required inputs and effect |
 | --- | --- |
@@ -566,7 +566,7 @@ The search is `falcon_search_ngsiem` called directly or through the hosted serve
 | --- | --- | --- |
 | Completed, and used exactly the tool arguments of the outstanding discovery probe, with nothing passed beside them through `execute_tool` | Settles that probe as its answer. No captured observation is made and no copy is kept | `probe-answered`, or `probe-not-answered` when the result was not accepted |
 | Names one confirmed expected source and meets every saved-query rule above | Captured observation, labelled `caller_assertion: "client-hook-capture"`; private copies of the query and complete result are kept in `state.json.captures/`, a folder named after the state file and beside it | `recorded` |
-| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window without UTC `Z` times, or 10,000 rows or more | None; nothing is written | `not-creditable` |
+| Names one confirmed expected source but is not creditable: an aggregate, join or derived field, a window without explicit RFC 3339 offsets, or 10,000 rows or more | None; nothing is written | `not-creditable` |
 | Is creditable, but later-starting captures of the same source already show every field it returned | None; nothing is written | `already-covered` |
 | Is creditable but could not be saved: the capture list is full, the inventory stayed busy, or a file could not be written | None | `not-recorded` |
 | Returned rows and names one source that is not a confirmed expected source | Pending inventory work for that source and the query's input fields, as `record-inventory-hints` | `new-source-lead`, `nothing-new` when already queued, or `not-recorded` when the state refused the change |
@@ -587,7 +587,7 @@ The hook also counts its own failures in `tally.json`, still printing nothing an
 Captured observations are listed in full status as `captured_observations` and counted in compact status. They differ from imported query observations in four ways:
 
 - **Lighter evidence.** They support `generate`/`check --require-observed` for their exact positive fields, source and target under the same ordering rules as an import, with the basis `captured search observation` and the warning `CQL_CAPTURED_OBSERVATION`. They are not inventory evidence: recording one does not change the reconciliation fingerprint, update the active pack, complete discovery or confirm a pending source.
-- **Any window length.** A search without `end` is recorded with the capture time as its end, and the window may be longer than the seven days an import allows. Times still need the UTC `Z` form.
+- **Any window length.** A search without `end` is recorded with the capture time as its end, and the window may be longer than the seven days an import allows. Captured observation windows with explicit RFC 3339 offsets are stored in UTC with `Z`.
 - **Replacement.** When a capture is recorded, an earlier capture of the same source is dropped once captures with the same or a later window start show every field it showed. The list holds at most 1000 captures, separately from the import ledger.
 - **Tidying.** After a capture is recorded, copies in that folder and audit records of this state's captures are removed once they are ten minutes old and no saved observation's audit record names them. Other states in the same directory are untouched. This also clears what an interrupted capture left behind.
 

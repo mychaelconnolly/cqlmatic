@@ -915,8 +915,10 @@ impl CapabilityRun {
             ));
         }
         self.validate(self.ordinal)?;
+        let canonical_retrieved_at = environment::normalize_request_time(retrieved_at)?;
+        let retrieved = environment::exact_time_key(&canonical_retrieved_at)?;
         if execution_context_id != self.execution_context_id
-            || environment::parse_time(retrieved_at)? > environment::parse_time(now)?
+            || retrieved > environment::exact_time_key(now)?
         {
             return Err(fail(
                 "Capability submission requires the exact context and actual retrieval time.",
@@ -940,7 +942,9 @@ impl CapabilityRun {
             .is_some_and(|snapshot| snapshot.sha256 == sha256_hex(settlement_raw))
             && raw.is_none_or(|raw| {
                 attempt.capture.as_ref().is_some_and(|capture| {
-                    capture.sha256 == sha256_hex(raw) && capture.retrieved_at == retrieved_at
+                    capture.sha256 == sha256_hex(raw)
+                        && environment::exact_time_key(&capture.retrieved_at)
+                            .is_ok_and(|saved| saved == retrieved)
                 })
             })
         {
@@ -974,15 +978,18 @@ impl CapabilityRun {
         };
         attempt.reservation.settlement = Some(RawSnapshot::new(settlement_raw, now)?);
         if let Some(raw) = raw {
-            let capture = RawSnapshot::new_search_result(raw, retrieved_at)?;
-            if attempt.capture.as_ref().is_some_and(|old| {
-                old.sha256 != capture.sha256 || old.retrieved_at != capture.retrieved_at
-            }) {
-                return Err(fail(
-                    "Capability capture conflicts with the retained exact result.",
-                ));
+            let capture = RawSnapshot::new_search_result(raw, &canonical_retrieved_at)?;
+            if let Some(old) = &attempt.capture {
+                if old.sha256 != capture.sha256
+                    || environment::exact_time_key(&old.retrieved_at)? != retrieved
+                {
+                    return Err(fail(
+                        "Capability capture conflicts with the retained exact result.",
+                    ));
+                }
+            } else {
+                attempt.capture = Some(capture);
             }
-            attempt.capture.get_or_insert(capture);
         }
         attempt.outcome = attempt.outcome()?;
         if candidate.pause_requested && !candidate.blocked() {

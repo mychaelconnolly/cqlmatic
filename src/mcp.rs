@@ -1698,6 +1698,7 @@ pub fn init(
     receipt_path: &Path,
 ) -> Result<StepOutput, Diagnostic> {
     discovery::validate_request(&request)?;
+    let request = request.normalize_inputs()?;
     distinct_paths(&[state_path, pack_path, receipt_path])?;
     let state_path = path_identity(state_path)?;
     let pack_path = path_identity(pack_path)?;

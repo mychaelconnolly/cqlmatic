@@ -1306,6 +1306,11 @@ fn analyze_assess(
     args: &AssessArgs,
     pack: Option<&Pack>,
 ) -> AssessResult {
+    if let Some(identity) = &request.context.environment
+        && let Err(diagnostic) = environment::validate_identity(identity)
+    {
+        return failed_assessment(request.id, &request.query, diagnostic);
+    }
     let (quick, target_applied, notice) =
         match select_inventory(args.inventory_state.as_deref(), &mut request.context, pack) {
             Ok((quick, applied)) => (quick, applied, None),
@@ -1795,7 +1800,11 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let legacy = from.is_dir();
             let p = if legacy {
                 let e=explicit.clone().ok_or_else(||input_error("Legacy import requires --environment FILE with explicit cloud/account/view."))?;
-                Pack::new(e, discovery::timestamp(), storage::legacy_data(&from)?)?
+                Pack::new(
+                    environment::normalize_identity(e)?,
+                    discovery::timestamp(),
+                    storage::legacy_data(&from)?,
+                )?
             } else {
                 let p = storage::read_pack(&from)?;
                 if explicit.as_ref().is_some_and(|e| e != &p.environment) {
@@ -1991,6 +2000,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 request.ok_or_else(|| input_error("Discovery requires --request FILE."))?;
             let r: discovery::DiscoverRequest = json_file(&request)?;
             discovery::validate_request(&r)?;
+            let r = r.normalize_inputs()?;
             if !execute {
                 output(&discovery::initial_plan(&r)?, true)?;
                 return Ok(0);

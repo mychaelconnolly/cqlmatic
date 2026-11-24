@@ -4161,7 +4161,7 @@ fn observation_replay<'a>(
     audit: &ObservationAudit,
     remaining: &mut u64,
 ) -> Result<Option<&'a QueryObservation>, Diagnostic> {
-    use cqlmatic::environment::parse_time;
+    use cqlmatic::environment::exact_time_key;
 
     let imported = &audit.observation;
     if observations.iter().any(|saved| saved.id == imported.id) {
@@ -4169,9 +4169,9 @@ fn observation_replay<'a>(
         return Ok(None);
     }
     let (start, end, retrieved_at) = (
-        parse_time(&imported.start)?,
-        parse_time(&imported.end)?,
-        parse_time(&imported.retrieved_at)?,
+        exact_time_key(&imported.start)?,
+        exact_time_key(&imported.end)?,
+        exact_time_key(&imported.retrieved_at)?,
     );
     let mut conflicting_time = false;
     for saved in observations.iter().filter(|saved| {
@@ -4181,7 +4181,7 @@ fn observation_replay<'a>(
             && saved.result_sha256 == imported.result_sha256
             && saved.caller_assertion == imported.caller_assertion
     }) {
-        if parse_time(&saved.start)? != start || parse_time(&saved.end)? != end {
+        if exact_time_key(&saved.start)? != start || exact_time_key(&saved.end)? != end {
             continue;
         }
         key["start"] = json!(saved.start);
@@ -4212,7 +4212,7 @@ fn observation_replay<'a>(
             ));
         }
         if previous.query_file == audit.query_file && previous.result_file == audit.result_file {
-            if parse_time(&saved.retrieved_at)? == retrieved_at {
+            if exact_time_key(&saved.retrieved_at)? == retrieved_at {
                 return Ok(Some(saved));
             }
             conflicting_time = true;
@@ -4239,21 +4239,27 @@ fn import_query_observations(
     retrieved_at: String,
     caller_assertion: QueryResultAssertion,
 ) -> Result<Value, Diagnostic> {
+    use cqlmatic::environment::normalize_request_time;
+    let canonical_start = normalize_request_time(&start)?;
+    let canonical_end = normalize_request_time(&end)?;
+    let canonical_retrieved_at = normalize_request_time(&retrieved_at)?;
     let query_file = Path::new(query_file);
     let result_file = Path::new(result_file);
     distinct_from_state(path, query_file)?;
     distinct_from_state(path, result_file)?;
     let query = observation_input(query_file, OBSERVATION_FILE_BYTES)?;
     let result = observation_input(result_file, OBSERVATION_FILE_BYTES)?;
-    if state
+    let Some(target) = state
         .target
         .as_ref()
-        .is_none_or(|t| t.environment != environment)
-    {
+        .filter(|target| target.environment == environment)
+    else {
         return Err(fail(
             "Confirm the exact query target environment before importing observations.",
         ));
-    }
+    };
+    // The bound spelling is part of retained observation audit paths.
+    let environment = target.environment.clone();
     let source_id = discovery::source_id(&source);
     if !state
         .sources
@@ -4264,27 +4270,70 @@ fn import_query_observations(
             "Query observations require an exact confirmed expected source.",
         ));
     }
-    let key = json!({
-        "query_sha256":cqlmatic::sha256_hex(&query),"result_sha256":cqlmatic::sha256_hex(&result),
-        "environment":environment,"source":source,"start":start,"end":end,"retrieved_at":retrieved_at,
-        "caller_assertion":caller_assertion
-    });
     let parent = path
         .parent()
         .ok_or_else(|| fail("Inventory state requires a parent directory."))?;
     let directory = parent.join("query-observations");
+    let ledger = if caller_assertion == QueryResultAssertion::ClientHookCapture {
+        &state.captured_observations
+    } else {
+        &state.query_observations
+    };
+    let mut key = json!({
+        "query_sha256":cqlmatic::sha256_hex(&query),"result_sha256":cqlmatic::sha256_hex(&result),
+        "environment":environment,"source":source,"start":canonical_start,"end":canonical_end,
+        "retrieved_at":canonical_retrieved_at,
+        "caller_assertion":caller_assertion
+    });
+    // An exact retry can restore a missing legacy audit at its original path.
+    let legacy_start = if start.ends_with('Z') {
+        &start
+    } else {
+        &canonical_start
+    };
+    let legacy_end = if end.ends_with('Z') {
+        &end
+    } else {
+        &canonical_end
+    };
+    let mut retained = None;
+    if *legacy_start != canonical_start
+        || *legacy_end != canonical_end
+        || retrieved_at != canonical_retrieved_at
+    {
+        let mut legacy_key = key.clone();
+        legacy_key["start"] = json!(legacy_start);
+        legacy_key["end"] = json!(legacy_end);
+        legacy_key["retrieved_at"] = json!(retrieved_at);
+        let legacy_path = absolute_path(&observation_audit_path(&directory, &legacy_key)?)?;
+        retained = ledger.iter().find(|saved| saved.audit_path == legacy_path);
+        if retained.is_some() {
+            key = legacy_key;
+        }
+    }
     let audit_path = observation_audit_path(&directory, &key)?;
-    let observation = QueryObservation::from_result(
+    let mut observation = QueryObservation::from_result(
         &query,
         &result,
         environment,
         source,
-        start,
-        end,
-        retrieved_at,
+        canonical_start,
+        canonical_end,
+        canonical_retrieved_at,
         caller_assertion,
         absolute_path(&audit_path)?,
     )?;
+    if let Some(saved) = retained {
+        observation.start.clone_from(&saved.start);
+        observation.end.clone_from(&saved.end);
+        observation.retrieved_at.clone_from(&saved.retrieved_at);
+        observation.id.clone_from(&saved.id);
+        if observation != *saved {
+            return Err(fail(
+                "Retained query observation differs from this exact import.",
+            ));
+        }
+    }
     let query_text = std::str::from_utf8(&query).expect("Observation query was validated as UTF-8");
     let uncredited_fields =
         cqlmatic::app::uncredited_observation_fields(query_text, &observation.fields)?;
@@ -4295,11 +4344,6 @@ fn import_query_observations(
         observation,
     };
     let mut remaining = MAX_STATE_BYTES;
-    let ledger = if caller_assertion == QueryResultAssertion::ClientHookCapture {
-        &state.captured_observations
-    } else {
-        &state.query_observations
-    };
     let observation =
         if let Some(saved) = observation_replay(ledger, &directory, key, &audit, &mut remaining)? {
             saved.clone()
@@ -4624,10 +4668,7 @@ fn preflight_foreign_run(
             *max_queries,
             *max_seconds,
         )?;
-        let fingerprint = serde_json::to_vec(&request)
-            .map(|bytes| cqlmatic::sha256_hex(&bytes))
-            .map_err(|_| fail("Cannot fingerprint discovery request."))?;
-        if relay.request_sha256 == fingerprint
+        if matches_discovery_request(relay, &request)?
             && relay
                 .session
                 .as_ref()
@@ -4645,6 +4686,28 @@ fn preflight_foreign_run(
         }
     }
     Ok(earlier_ended)
+}
+
+fn matches_discovery_request(
+    relay: &mcp::State,
+    request: &discovery::DiscoverRequest,
+) -> Result<bool, Diagnostic> {
+    use cqlmatic::environment::{exact_time_key, normalize_identity};
+
+    let mut retained = relay.request.clone();
+    if exact_time_key(&retained.start)? != exact_time_key(&request.start)?
+        || exact_time_key(&retained.end)? != exact_time_key(&request.end)?
+    {
+        return Ok(false);
+    }
+    // Use the incoming spelling for comparison while keeping the checkpoint and its digest exact.
+    retained.start.clone_from(&request.start);
+    retained.end.clone_from(&request.end);
+    retained.environment = normalize_identity(retained.environment)?;
+    let serialize = |request: &discovery::DiscoverRequest| {
+        serde_json::to_vec(request).map_err(|_| fail("Cannot compare discovery requests."))
+    };
+    Ok(serialize(&retained)? == serialize(request)?)
 }
 
 const CAPABILITY_HELD_ELSEWHERE: &str = "A retained capability checkpoint for this host session can still dispatch a requested case, so preparing it again would renew its allowance. Use that checkpoint's run_id and execution_context_id from status, resuming it first if it is paused.";
@@ -4885,10 +4948,6 @@ fn check_retained_searches(
     now: &str,
 ) -> Result<(), Diagnostic> {
     check_capability_attempts_settled(state)?;
-    let fingerprint = request
-        .map(|r| serde_json::to_vec(r).map(|bytes| cqlmatic::sha256_hex(&bytes)))
-        .transpose()
-        .map_err(|_| fail("Cannot fingerprint discovery request."))?;
     let environment = state.target.as_ref().map(|t| &t.environment);
     if request.is_some_and(|r| environment != Some(&r.environment)) {
         return Err(fail(
@@ -4924,7 +4983,9 @@ fn check_retained_searches(
             && !mcp::time_limit_passed(&relay, now)
             && mcp::has_discovery_work_after_resume(&relay)
             && selected_run.is_none()
-            && fingerprint.as_ref() == Some(&relay.request_sha256)
+            && let Some(request) = request
+            && matches_discovery_request(&relay, request)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
         {
             let predecessor = relay
                 .session

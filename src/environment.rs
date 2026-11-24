@@ -1,6 +1,6 @@
 //! Pure pack contracts, validation, grounding and evidence-preserving merge.
 use crate::{
-    contracts::{Diagnostic, EnvironmentId, PROFILE},
+    contracts::{Diagnostic, EnvironmentId, PROFILE, falcon_cid},
     sha256_hex,
 };
 use serde::{Deserialize, Serialize};
@@ -114,8 +114,46 @@ pub fn parse_time(s: &str) -> Result<time::OffsetDateTime, Diagnostic> {
         )
     })
 }
+/// Sort RFC 3339 timestamps by UTC instant without truncating fractional seconds.
+pub fn exact_time_key(s: &str) -> Result<(i64, bool, &str), Diagnostic> {
+    let time = parse_time(s)?;
+    let offset_len = if s.ends_with(['Z', 'z']) { 1 } else { 6 };
+    let fraction = s[19..s.len() - offset_len]
+        .trim_start_matches('.')
+        .trim_end_matches('0');
+    // The parser represents a leap second at the end of the previous Unix second.
+    Ok((time.unix_timestamp(), &s[17..19] == "60", fraction))
+}
+
+pub fn normalize_request_time(s: &str) -> Result<String, Diagnostic> {
+    let separator = s.as_bytes().get(10);
+    if !matches!(separator, Some(b'T' | b't' | b' ')) {
+        return Err(Diagnostic::error(
+            "PACK_TIME",
+            "Use T, t or a space between the date and time in an RFC 3339 timestamp with an explicit offset.",
+        ));
+    }
+    let time = parse_time(s)?;
+    if separator == Some(&b'T') && s.ends_with('Z') {
+        return Ok(s.into());
+    }
+    let utc = time
+        .checked_to_offset(time::UtcOffset::UTC)
+        .and_then(|utc| {
+            utc.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .ok_or_else(|| {
+            Diagnostic::error("PACK_TIME", "Timestamp is outside the UTC RFC 3339 range.")
+        })?;
+    // An RFC 3339 offset changes the date, hour and minute. Keep the original seconds and
+    // fractional digits, including any trailing zeros that the formatter would remove.
+    let offset_len = if s.ends_with(['Z', 'z']) { 1 } else { 6 };
+    Ok(format!("{}{}Z", &utc[..17], &s[17..s.len() - offset_len]))
+}
+
 pub fn validate_identity(e: &EnvironmentId) -> Result<(), Diagnostic> {
-    let cid = e.tenant.len() == 32 && e.tenant.bytes().all(|c| c.is_ascii_hexdigit());
+    let cid = falcon_cid(&e.tenant).is_some();
     let client = e
         .tenant
         .strip_prefix("api-client:")
@@ -123,7 +161,7 @@ pub fn validate_identity(e: &EnvironmentId) -> Result<(), Diagnostic> {
     if !cid && !client {
         return Err(Diagnostic::error(
             "ENV_TENANT",
-            "Account binding must be an explicit Falcon CID or api-client:<SHA-256> fingerprint.",
+            "Supply a Falcon CID of 32 hexadecimal digits with an optional two-digit hexadecimal checksum suffix (-XX), or an api-client:<SHA-256> fingerprint.",
         ));
     }
     if e.view.trim().is_empty() || e.view.len() > 256 || e.view.chars().any(char::is_control) {
@@ -133,6 +171,14 @@ pub fn validate_identity(e: &EnvironmentId) -> Result<(), Diagnostic> {
         ));
     }
     Ok(())
+}
+
+pub fn normalize_identity(mut identity: EnvironmentId) -> Result<EnvironmentId, Diagnostic> {
+    validate_identity(&identity)?;
+    if let Some(cid) = falcon_cid(&identity.tenant) {
+        identity.tenant = cid.to_ascii_lowercase();
+    }
+    Ok(identity)
 }
 
 // Typed legacy records validate structure; original JSON is stored to preserve absent/null values.
