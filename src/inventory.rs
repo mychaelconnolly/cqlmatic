@@ -1150,6 +1150,10 @@ pub struct InventoryFailure {
     pub recorded_at: String,
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1186,6 +1190,9 @@ pub struct InventoryState {
     #[serde(default)]
     pub pending_inventory: Vec<PendingInventoryWork>,
     pub scout_plan: Option<ScoutPlan>,
+    /// Set when a scout plan is prepared and cleared when a reply to it is imported.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scout_plan_pending: bool,
     pub scouting: Vec<ScoutEvidence>,
     pub target: Option<ConfirmedTarget>,
     pub sources: Vec<InventorySource>,
@@ -1231,6 +1238,10 @@ pub struct FieldStatus {
     pub status: Progress,
     pub values: Progress,
     pub values_requested: bool,
+    /// The retained pack holds at least one observed value for this field. This describes
+    /// cumulative evidence. A later sample can return no values while this flag stays true.
+    #[serde(default)]
+    pub values_saved: bool,
     pub evidence_dates: Vec<String>,
     pub not_reobserved: bool,
 }
@@ -1329,6 +1340,8 @@ pub struct InventoryStatus {
     pub scouting: Progress,
     pub parser_catalog: Progress,
     pub reconciliation: Progress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_detail: Option<CompletionDetail>,
     pub parser_count: usize,
     pub parser_page_count: usize,
     pub parsers: Vec<ParserSummary>,
@@ -1347,6 +1360,57 @@ pub struct InventoryStatus {
     pub next_actions: Vec<String>,
     pub covered_queries_usable: bool,
     pub active_pack: Option<PackReference>,
+    /// The retained discovery run that blocks another search, when the caller checked it.
+    #[serde(skip)]
+    pub(crate) retained_run_blocker: Option<RetainedRun>,
+}
+
+/// What the progress words cover and what is still open, derived from the rest of the status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CompletionDetail {
+    /// Review time of the current evidence fingerprint; null unless reconciliation is done.
+    pub evidence_reviewed_at: Option<String>,
+    pub reconciliation_meaning: String,
+    pub expected_sources_open: OpenSourceCounts,
+    pub parser_catalog_captured: bool,
+    /// A prepared census has no saved capture yet.
+    pub scout_awaiting_capture: bool,
+    /// The most recently imported census; null before any census is saved.
+    pub latest_census: Option<CensusSize>,
+    /// The first step status and reconcile advise; null when no listed step is open.
+    #[serde(default)]
+    pub next_action: Option<String>,
+}
+
+/// A retained discovery run that must be handled before another search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedRun {
+    /// Its checkpoint is readable, so it can be continued or paused.
+    Settle(usize),
+    /// Its checkpoint is missing or cannot be read.
+    Unreadable(usize),
+    /// Its checkpoint was written by a different release, which alone can settle it.
+    ProducerMismatch(usize),
+}
+
+/// Expected sources whose work in each category is not done.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct OpenSourceCounts {
+    pub interpretation_review: usize,
+    pub parser_review_or_binding: usize,
+    pub measurements: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CensusSize {
+    pub rows: usize,
+    pub at_row_ceiling: bool,
 }
 
 impl QueryObservation {
@@ -1700,6 +1764,7 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "quick_scope_complete":status.quick_scope_complete,"discovery_mode":status.discovery_mode,"quick_depth":status.quick_depth,
         "message":status.message,"environment":status.environment,"target_scope":status.target_scope,
         "progress":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "completion_detail":status.completion_detail,
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "suspended_parser_exclusions":status.suspended_parser_exclusions.unwrap_or_default(),
@@ -1795,8 +1860,24 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
             Some(_) if prepared_for_current_session => "reserved-for-current-session",
             Some(_) => "reserved-for-other-or-unidentified-session",
             None if status.environment.is_none() => "target-required",
-            None if discovery_recovery > 0 => "recorded-discovery-recovery-required",
-            None if !discovery_work.is_empty() => "recorded-discovery-unfinished",
+            None if discovery_recovery > 0
+                || matches!(
+                    status.retained_run_blocker,
+                    Some(RetainedRun::Unreadable(_) | RetainedRun::ProducerMismatch(_))
+                ) =>
+            {
+                "recorded-discovery-recovery-required"
+            }
+            None if !discovery_work.is_empty() || status.retained_run_blocker.is_some() => {
+                "recorded-discovery-unfinished"
+            }
+            None if status
+                .completion_detail
+                .as_ref()
+                .is_some_and(|detail| detail.scout_awaiting_capture) =>
+            {
+                "pending-scouting"
+            }
             None => "manual-refresh-available",
         }
     };
@@ -1811,7 +1892,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
-            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later."}));
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost, client-wait, transport or unrecognized errors stay unresolved. Use timed-out for a hosted cutoff, not-started for a start rejection, or for a poll failure set search_started_at to the answer's arrival time and lifetime-expired after the provider lifetime."}));
     } else if blocker == "awaiting-host-settlement" {
         notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
             "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
@@ -1828,14 +1909,18 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if discovery_recovery > 0 {
         notices.push(json!({"code":"DISCOVERY_RECOVERY_RECORDED","severity":"warning",
-            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the exact saved attempt before another search. Recorded state does not establish current backend execution. Runs written by 0.1.6 or 0.1.7 are rechecked from their saved checkpoints on the next inventory search action."}));
+            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the saved attempt before another search; recorded state does not prove live execution. 0.1.6/0.1.7 runs are rechecked from their saved checkpoints on the next search."}));
     } else if !discovery_work.is_empty() {
         notices.push(json!({"code":"DISCOVERY_UNFINISHED_RECORDED","severity":"info",
             "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
     }
     if reminder.is_some_and(|reminder| reminder.show_startup_notice) {
-        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info",
-            "message":"Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."}));
+        let message = if blocker == "manual-refresh-available" {
+            "Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."
+        } else {
+            "Inventory refresh is due. Settle the blocker before manual refresh, or defer 30 days; acknowledgement does not complete refresh."
+        };
+        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info","message":message}));
     }
     if !status.pending_inventory.is_empty() {
         notices.push(json!({"code":"INVENTORY_WORK_PENDING","severity":"warning",
@@ -1902,6 +1987,10 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "refresh_blocked":status.refresh_blocked,
         "capability_blocked":status.capability_blocked,"capability_run_count":status.capabilities.len(),
         "readiness":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "completion_detail":status.completion_detail.as_ref().map(|detail| json!({
+            "expected_sources_open":detail.expected_sources_open,"parser_catalog_captured":detail.parser_catalog_captured,
+            "scout_awaiting_capture":detail.scout_awaiting_capture,"latest_census":detail.latest_census,
+            "next_action":detail.next_action})),
         "settings_attention":status.settings_attention,"settings_label":if status.settings_attention { "Settings *" } else { "Settings" },
         "refresh":{"automatic":status.refresh_settings.automatic,"automatic_available":status.automatic_refresh_available,"lookback":status.refresh_settings.lookback,
             "recorded_phase":recorded.map(|attempt| attempt.phase),"known_termination":recorded.and_then(|attempt| attempt.termination),
@@ -2920,11 +3009,7 @@ impl InventoryState {
                 "Refresh history reached its finite limit; retain it and use a new explicitly selected workflow state.",
             ));
         }
-        if self
-            .scout_plan
-            .as_ref()
-            .is_some_and(|p| !self.scouting.iter().any(|s| &s.plan == p))
-        {
+        if self.scout_awaiting_capture() {
             return Err(fail(
                 "Finish or safely reconcile pending scouting before preparing refresh; its progress is retained.",
             ));
@@ -3183,6 +3268,7 @@ impl InventoryState {
             source_metadata: vec![],
             pending_inventory: vec![],
             scout_plan: None,
+            scout_plan_pending: false,
             scouting: vec![],
             target: None,
             sources: vec![],
@@ -3200,10 +3286,17 @@ impl InventoryState {
             reconciled_at: None,
         })
     }
+    pub fn scout_awaiting_capture(&self) -> bool {
+        self.scout_plan
+            .as_ref()
+            .is_some_and(|p| self.scout_plan_pending || !self.scouting.iter().any(|s| &s.plan == p))
+    }
+
     pub fn evidence_digest(&self) -> Result<String, Diagnostic> {
         let mut copy = self.clone();
         copy.reconciled_evidence_sha256 = None;
         copy.reconciled_at = None;
+        copy.scout_plan_pending = false;
         copy.updated_at.clear();
         // Preserve historical reconciliation commitments when the runtime preference default changes.
         copy.refresh_settings = RefreshSettings {
@@ -3685,6 +3778,7 @@ impl InventoryState {
         };
         validate_scout_plan(&plan)?;
         self.scout_plan = Some(plan.clone());
+        self.scout_plan_pending = true;
         Ok(plan)
     }
     pub fn import_scout(
@@ -3758,6 +3852,7 @@ impl InventoryState {
                 && environment::parse_time(&scout.snapshot.retrieved_at)
                     .is_ok_and(|time| time == retrieval_time)
         }) {
+            self.scout_plan_pending = false;
             return Ok(());
         }
         let mut candidate = self.clone();
@@ -3785,6 +3880,7 @@ impl InventoryState {
             }
         }
         candidate.scouting.push(evidence);
+        candidate.scout_plan_pending = false;
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -5061,6 +5157,18 @@ fn mask_literals(line: &str) -> String {
     result
 }
 
+impl InventoryState {
+    /// Whether the saved plan is eligible for import under the current target and mode.
+    pub fn scout_plan_matches_target_and_mode(&self) -> bool {
+        self.scout_plan.as_ref().is_some_and(|plan| {
+            // State validation checks the plan itself. Import also checks these current-state rules.
+            self.validate_scout_environment(&plan.environment).is_ok()
+                && plan.arguments.repository == self.scout_repository(&plan.environment)
+                && (self.discovery_mode != DiscoveryMode::Quick || plan.max_seconds.is_some())
+        })
+    }
+}
+
 pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus, Diagnostic> {
     state.validate()?;
     let target = state.target.as_ref();
@@ -5121,6 +5229,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     let scoped_complete = !expected_sources.is_empty()
         && expected_sources.iter().all(|s| s.status == Progress::Done)
         && reconciliation == Progress::Done;
+    let (_, full_census_qualifies) = full_census(state);
     let complete = state.discovery_mode == DiscoveryMode::Full
         && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
         && state.active_pack.is_some()
@@ -5129,6 +5238,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             .scouting
             .iter()
             .any(|s| s.plan.arguments.repository == "search-all")
+        && full_census_qualifies
         && catalog_complete
         && unclassified.is_empty()
         && sources.iter().all(|s| s.expected)
@@ -5138,69 +5248,36 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             .all(|w| w.resolution.is_some() || !w.new_source && w.source_types.is_empty())
         && scoped_complete
         && reconciliation == Progress::Done;
-    let mut next_actions = Vec::new();
-    if !state.suspended_parser_reviews.is_empty() {
-        next_actions.push(SUSPENDED_PARSER_REVIEWS.into());
-    }
-    if state.capability_blocked() {
-        next_actions.push("A capability search has unresolved termination. Submit exact settlement before dispatching any further inventory search.".into());
-    } else if state.active_pack.is_some() && state.capability_runs.is_empty() {
-        next_actions.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
-    }
-    if state
-        .refresh_attempts
-        .iter()
-        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
-    {
-        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
-    }
-    let prepared = state
-        .refresh_attempts
-        .iter()
-        .find(|a| a.phase == RefreshPhase::Prepared);
-    if prepared.is_some_and(|attempt| attempt.automatic) {
-        next_actions.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started before preparing explicit manual refresh.".into());
-    }
-    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
-        next_actions.push(format!("A manual refresh is prepared for recorded host session {:?}; dispatch only from that exact verified session.", attempt.session_id));
-    }
-    if target.is_none() {
-        next_actions.push("Confirm CID, cloud, searchable view, target scope and context.".into());
-    }
-    if scout != Progress::Done && state.discovery_mode == DiscoveryMode::Full {
-        next_actions.push("Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result.".into());
-    }
-    if !catalog_complete && state.discovery_mode == DiscoveryMode::Full {
-        next_actions.push("Complete the native parser catalog and retrieve each exact parser ID; API credentials stay in the supplied protected file.".into());
-    }
-    if !unclassified.is_empty() {
-        next_actions.push("Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence.".into());
-    }
-    if target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
-        && sources.iter().any(|s| !s.expected)
-    {
-        next_actions.push("Confirm the known source selectors within the target scope before completing a full environment map.".into());
-    }
-    if target.is_some_and(|t| t.scope == TargetScope::SelectedSources) {
-        next_actions
-            .push("Selected-source coverage cannot establish a full environment map.".into());
-    }
-    if reconciliation != Progress::Done {
-        next_actions.push(
-            "Reconcile after completing the applicable source measurements and parser reviews."
-                .into(),
-        );
-    }
     let pending_inventory: Vec<_> = state
         .pending_inventory
         .iter()
         .filter(|w| w.resolution.is_none())
         .cloned()
         .collect();
-    if !pending_inventory.is_empty() {
-        next_actions.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
-    }
-    Ok(InventoryStatus {
+    let open =
+        |is_open: fn(&SourceStatus) -> bool| expected_sources.iter().filter(|s| is_open(s)).count();
+    let completion_detail = CompletionDetail {
+        evidence_reviewed_at: state
+            .reconciled_at
+            .clone()
+            .filter(|_| reconciliation == Progress::Done),
+        reconciliation_meaning: "reconciliation done means a review of the current evidence fingerprint is recorded. It is not a completion claim; read full_map_complete, selected_scope_complete or quick_scope_complete for completion.".into(),
+        expected_sources_open: OpenSourceCounts {
+            interpretation_review: open(|s| s.interpretation != Progress::Done),
+            parser_review_or_binding: open(|s| {
+                !matches!(s.parser, Progress::Done | Progress::NotApplicable)
+            }),
+            measurements: open(|s| s.measurements != Progress::Done),
+        },
+        parser_catalog_captured: catalog_complete,
+        scout_awaiting_capture: state.scout_awaiting_capture(),
+        latest_census: state.scouting.last().map(|s| CensusSize {
+            rows: s.rows,
+            at_row_ceiling: s.rows >= 10_000,
+        }),
+        next_action: None,
+    };
+    let mut status = InventoryStatus {
         schema_version: 1,
         blank_canvas: target.is_none()
             && state.scouting.is_empty()
@@ -5280,6 +5357,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         scouting: scout,
         parser_catalog,
         reconciliation,
+        completion_detail: Some(completion_detail),
         parser_count: state.parsers.len(),
         parser_page_count: state.parser_pages.len(),
         parsers: state
@@ -5321,10 +5399,236 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         discovery_runs: state.discovery_runs.clone(),
         parser_runs: state.parser_runs.clone(),
         failures: state.failures.clone(),
-        next_actions,
+        next_actions: vec![],
         covered_queries_usable: true,
         active_pack: state.active_pack.clone(),
-    })
+        retained_run_blocker: None,
+    };
+    advise(state, &mut status, None);
+    Ok(status)
+}
+
+/// The saved search-all censuses, oldest first, and whether any of them qualifies.
+fn full_census(state: &InventoryState) -> (Vec<&ScoutEvidence>, bool) {
+    let census: Vec<_> = state
+        .scouting
+        .iter()
+        .filter(|s| s.plan.arguments.repository == "search-all")
+        .collect();
+    // The refresh freshness check decides whether a census is a complete, uncapped capture.
+    let qualifies = census.iter().any(|s| {
+        s.snapshot
+            .bytes()
+            .is_ok_and(|raw| refresh_rows(&raw, s.snapshot.extended_result_framing).is_ok())
+    });
+    (census, qualifies)
+}
+
+/// Sets the next steps that status and reconcile share. Steps come in one order: the target,
+/// then blockers, then the work the confirmed mode and scope require. While a blocker is open
+/// only blockers are listed, so no step prepares or runs another search. Steps are fixed text;
+/// notes with recorded detail follow them.
+pub fn advise(state: &InventoryState, status: &mut InventoryStatus, retained: Option<RetainedRun>) {
+    let quick = state.discovery_mode == DiscoveryMode::Quick;
+    let scope = state.target.as_ref().map(|t| t.scope);
+    let selected_full = !quick && scope == Some(TargetScope::SelectedSources);
+    // Source review and parser work are Full discovery steps.
+    let full = if quick { "Full discovery: " } else { "" };
+    // A complete selected scope leaves only optional work towards a full-environment map.
+    let optional_map = selected_full && status.selected_scope_complete;
+    let (census, census_qualifies) = full_census(state);
+    status.retained_run_blocker = retained;
+    let detail = status
+        .completion_detail
+        .as_ref()
+        .expect("assessed status carries its completion detail");
+    let open = &detail.expected_sources_open;
+    let selected_work_done = open.measurements == 0
+        && open.interpretation_review == 0
+        && open.parser_review_or_binding == 0;
+    // Once the selected sources need only reconciliation, catalog and census work is optional.
+    let map = if selected_full && (status.selected_scope_complete || selected_work_done) {
+        "Full-environment map: "
+    } else {
+        full
+    };
+    let prepared = state
+        .refresh_attempts
+        .iter()
+        .find(|a| a.phase == RefreshPhase::Prepared);
+    let unresolved = state
+        .refresh_attempts
+        .iter()
+        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved));
+
+    let mut steps: Vec<String> = Vec::new();
+    if state.target.is_none() {
+        steps.push("Use confirm-target to record the CID, cloud, searchable view, target scope and context before continuing inventory work.".into());
+    } else if quick && scope == Some(TargetScope::FullEnvironment) {
+        steps.push("Quick discovery covers selected sources only. Use confirm-target with scope selected-sources before Quick discovery, or set-discovery-mode full to keep the full-environment target.".into());
+    }
+    if state.capability_blocked() {
+        steps.push("A capability search has unresolved termination. Use submit-capability with exact settlement for that attempt before another inventory search.".into());
+    }
+    if unresolved {
+        steps.push("Refresh search termination is unresolved. Use settle-refresh for the exact attempt with safe settlement before another search; full status says which termination to record.".into());
+    }
+    if prepared.is_some_and(|attempt| attempt.automatic) {
+        steps.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started with settle-refresh before preparing explicit manual refresh.".into());
+    } else if prepared.is_some() {
+        steps.push("A manual refresh is prepared and reserved. Dispatch it only from that exact verified session, or use settle-refresh with not-started after confirming it never ran.".into());
+    }
+    match retained {
+        Some(RetainedRun::Settle(index)) => steps.push(format!("Discovery run_index {index} must be continued or paused before another search. Use discovery-step with run_index {index} for its saved answer, or pause-discovery with run_index {index} and settle any outstanding attempt.")),
+        Some(RetainedRun::Unreadable(index)) => steps.push(format!("The checkpoint of discovery run_index {index} is missing or cannot be read, so the run cannot be continued or paused. Restore that file at the state_path shown in full status, then reconcile again.")),
+        Some(RetainedRun::ProducerMismatch(index)) => steps.push(format!("The checkpoint of discovery run_index {index} was written by a different CQLmatic release, so this executable cannot continue or pause it. Preserve the inventory and checkpoint files and settle the run with its producing release before another search.")),
+        None => {}
+    }
+    // A pending scout is only advised when nothing above blocks another search.
+    if steps.is_empty() && detail.scout_awaiting_capture {
+        steps.push(if !state.scout_plan_matches_target_and_mode() {
+            format!(
+                "{}Use prepare-scout for the confirmed target and current mode, with a finite host budget in Quick.",
+                if optional_map { "Full-environment map: " } else { "" }
+            )
+        } else if optional_map {
+            "Full-environment map: Import any saved response with import-scout. The selected scope is complete, so running this census is optional; run the exact plan once only with authorization and a finite host budget.".into()
+        } else {
+            "Import any saved response with import-scout first. Otherwise confirm whether the search already ran. If it did not, get authorization and run the exact plan once with a finite host budget.".into()
+        });
+    }
+    let blocked = !steps.is_empty();
+    if !blocked {
+        if open.measurements > 0 {
+            steps.push("Expected sources need measurements. Resume a paused run with resume-discovery or use prepare-discovery, then relay with next-probe.".into());
+        }
+        let review = format!(
+            "{full}Expected sources still need interpretation review. Record each with review-source, then reconcile again."
+        );
+        let parser = format!(
+            "{full}Use parser-not-applicable for a supported native source. For others, import any missing parser evidence and use bind-parser with the required line reviews."
+        );
+        let catalog = format!(
+            "{map}Capture the native parser catalog: save its complete pages and exact parser details with import-parsers, or use fetch-parsers with API credentials in the supplied protected file."
+        );
+        let unclassified = format!(
+            "{map}Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence."
+        );
+        let reconcile =
+            "Reconcile after completing the applicable source measurements and parser reviews.";
+        let reconciled = status.reconciliation == Progress::Done;
+        if quick || selected_full {
+            // The confirmed mode and scope require these; reconcile follows them.
+            if !quick && open.interpretation_review > 0 {
+                steps.push(review.clone());
+            }
+            if !quick && open.parser_review_or_binding > 0 {
+                steps.push(parser.clone());
+            }
+            if !reconciled {
+                steps.push(reconcile.into());
+            }
+            // Broader work that the confirmed mode and scope do not require.
+            if quick && open.interpretation_review > 0 {
+                steps.push(review);
+            }
+            if !detail.parser_catalog_captured {
+                steps.push(catalog);
+            }
+            if quick && open.parser_review_or_binding > 0 {
+                steps.push(parser);
+            }
+            if !status.unclassified_parser_ids.is_empty() {
+                steps.push(unclassified);
+            }
+        } else {
+            if open.interpretation_review > 0 {
+                steps.push(review);
+            }
+            if !census_qualifies {
+                let reason = match census.last() {
+                    None => {
+                        "A full-environment map needs a search-all census, and none is saved. Use prepare-scout, relay the emitted census through the existing CrowdStrike MCP and import its entire response with import-scout."
+                    }
+                    Some(latest) if latest.rows >= 10_000 => {
+                        "The latest saved search-all census reached the 10,000-row ceiling. Use prepare-scout over a shorter window and import its entire response with import-scout."
+                    }
+                    Some(_) => {
+                        "The latest saved search-all census rows did not pass census validation. Use prepare-scout for a fresh capture and import its entire response with import-scout."
+                    }
+                };
+                steps.push(format!(
+                    "{reason} full_map_complete stays false until a census qualifies."
+                ));
+            } else if status.sources.is_empty() {
+                steps.push("A full-environment map needs at least one source. Use confirm-target with the expected sources, or capture a non-empty search-all census with prepare-scout and import-scout; full_map_complete stays false until a source is measured.".into());
+            }
+            if !detail.parser_catalog_captured {
+                steps.push(catalog);
+            }
+            if open.parser_review_or_binding > 0 {
+                steps.push(parser);
+            }
+            if !status.unclassified_parser_ids.is_empty() {
+                steps.push(unclassified);
+            }
+            if status.sources.iter().any(|s| !s.expected) {
+                steps.push("Use confirm-target to confirm the known source selectors within the target scope before completing a full environment map.".into());
+            }
+            if !reconciled {
+                steps.push(reconcile.into());
+            }
+        }
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if !state.suspended_parser_reviews.is_empty() {
+        notes.push(SUSPENDED_PARSER_REVIEWS.into());
+    }
+    if unresolved {
+        notes.push("Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
+    }
+    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
+        notes.push(format!(
+            "The prepared manual refresh belongs to recorded host session {:?}.",
+            attempt.session_id
+        ));
+    }
+    if !blocked && state.active_pack.is_some() && state.capability_runs.is_empty() {
+        notes.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
+    }
+    if !blocked && selected_full && status.scouting != Progress::Done {
+        notes.push(format!("{map}Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result."));
+    }
+    if scope == Some(TargetScope::SelectedSources) {
+        notes.push("Selected-source coverage cannot establish a full environment map.".into());
+    }
+    if state
+        .pending_inventory
+        .iter()
+        .any(|w| w.resolution.is_none())
+    {
+        notes.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
+    }
+    if status
+        .refresh_reminder
+        .as_ref()
+        .is_some_and(|reminder| reminder.due)
+    {
+        notes.push(
+            if blocked {
+                "Inventory refresh is due. Settle the blocking item above before running an explicit manual refresh, or choose Remind me in 30 days; acknowledgement does not complete refresh."
+            } else {
+                "Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."
+            }
+            .into(),
+        );
+    }
+    if let Some(detail) = status.completion_detail.as_mut() {
+        detail.next_action = steps.first().cloned();
+    }
+    steps.extend(notes);
+    status.next_actions = steps;
 }
 
 pub fn assess_at(
@@ -5340,7 +5644,7 @@ pub fn assess_at(
         .is_some_and(|reminder| reminder.due)
     {
         status.settings_attention = true;
-        status.next_actions.push("Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh.".into());
+        advise(state, &mut status, None);
     }
     Ok(status)
 }
@@ -5493,6 +5797,7 @@ fn assess_source(
                 .any(|v| v["field_id"] == field.id && v["evidence_kind"] == "observed")
             {
                 entry.values = Progress::Done;
+                entry.values_saved = true;
             }
         }
     }
@@ -5653,6 +5958,7 @@ fn field_entry<'a>(
         status: Progress::Unknown,
         values: Progress::NotApplicable,
         values_requested: false,
+        values_saved: false,
         evidence_dates: vec![],
         not_reobserved: false,
     })
