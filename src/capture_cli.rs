@@ -18,7 +18,7 @@ use cqlmatic::{
     setup::SEARCH_TOOL,
     storage,
 };
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -129,7 +129,7 @@ pub fn run(args: CaptureArgs) -> Result<i32, Diagnostic> {
             if let Some(answer) = guard(&args, &hook) {
                 let _ = crate::line(&answer);
             }
-        } else if capture(&args, &hook).is_err() {
+        } else if capture(&args, &hook, &payload).is_err() {
             count_failure(args.state, "hook-not-saved");
         }
     } else {
@@ -208,7 +208,7 @@ fn guards(client: Client) -> bool {
 }
 
 fn guard(args: &CaptureArgs, hook: &Value) -> Option<String> {
-    let call = call(hook, &args.server, args.client)?;
+    let call = call(hook, None, &args.server, args.client)?;
     let arguments = search_arguments(&call)?;
     let query = arguments["query_string"].as_str()?.to_owned();
     let repository = arguments["repository"]
@@ -292,8 +292,8 @@ fn fit(heading: &str, lines: Vec<String>, (most_lines, most_characters): (usize,
     }
 }
 
-fn capture(args: &CaptureArgs, hook: &Value) -> Result<(), Diagnostic> {
-    match call(hook, &args.server, args.client) {
+fn capture(args: &CaptureArgs, hook: &Value, payload: &[u8]) -> Result<(), Diagnostic> {
+    match call(hook, Some(payload), &args.server, args.client) {
         Some(call) if search_arguments(&call).is_some() => record(args.state.clone(), call),
         _ => {
             if search_on_other_server(hook, args.client) {
@@ -347,7 +347,7 @@ fn answer_probe(
     // Most searches answer no probe: find that out before waiting for any lock.
     let index = inventory_cli::run_awaiting(state, arguments)?;
     // A failed search stays with the agent, which can run it again on the same reservation.
-    mcp::normalize(body).ok()?;
+    mcp::normalize_fresh(body).ok()?;
     // Named like a capture's copy, so one left by a stopped hook is tidied with them.
     let file = directory.join(format!(
         "probe-{}-{}.json",
@@ -682,7 +682,7 @@ pub(crate) struct Call {
     pub(crate) tool: String,
     pub(crate) arguments: Value,
     /// The result as the client handed it over; absent when the call failed.
-    pub(crate) response: Option<Value>,
+    pub(crate) response: Option<Box<RawValue>>,
     saved: Option<Saved>,
 }
 
@@ -694,7 +694,11 @@ impl Call {
     }
     /// A call seen on the server's own connection: `result` is the MCP result object, absent
     /// when the server answered with an error.
-    pub(crate) fn on_connection(tool: String, arguments: Value, result: Option<Value>) -> Self {
+    pub(crate) fn on_connection(
+        tool: String,
+        arguments: Value,
+        result: Option<Box<RawValue>>,
+    ) -> Self {
         Self {
             tool,
             arguments,
@@ -726,7 +730,21 @@ fn codex_server(client: Client, server: &str) -> String {
     }
 }
 
-fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
+fn raw_response(payload: &[u8], path: &[&str]) -> Option<Box<RawValue>> {
+    let mut value = serde_json::from_slice::<&RawValue>(payload).ok()?;
+    for key in path {
+        value = if value.get().starts_with('[') {
+            let items: Vec<&RawValue> = serde_json::from_str(value.get()).ok()?;
+            *items.get(key.parse::<usize>().ok()?)?
+        } else {
+            let fields: BTreeMap<String, &RawValue> = serde_json::from_str(value.get()).ok()?;
+            *fields.get(*key)?
+        };
+    }
+    Some(value.to_owned())
+}
+
+fn call(hook: &Value, payload: Option<&[u8]>, server: &str, client: Client) -> Option<Call> {
     let server = codex_server(client, server);
     let server = server.as_str();
     let text = |name: &str| hook[name].as_str();
@@ -734,6 +752,14 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
     let parsed = |value: &Value| match value {
         Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| value.clone()),
         value => value.clone(),
+    };
+    let response = |path: &[&str]| raw_response(payload?, path);
+    let parsed_response = |path: &[&str]| {
+        let value = response(path)?;
+        let nested = serde_json::from_str::<String>(value.get())
+            .ok()
+            .and_then(|text| serde_json::from_str::<Box<RawValue>>(&text).ok());
+        Some(nested.unwrap_or(value))
     };
     // The tool's own name, when `name` places it on this server.
     let on_server = |name: &str, before: &str, after: &str| {
@@ -747,8 +773,11 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
             tool: on_server(text("tool_name")?, "mcp__", "__")?,
             arguments: hook["tool_input"].clone(),
             // Claude Code reports a failed call as a different event without a result.
-            response: (text("hook_event_name") != Some("PostToolUseFailure"))
-                .then(|| hook["tool_response"].clone()),
+            response: if text("hook_event_name") == Some("PostToolUseFailure") {
+                None
+            } else {
+                response(&["tool_response"])
+            },
             saved: text("transcript_path")
                 .filter(|_| client == Client::ClaudeCode)
                 .map(|transcript| Saved {
@@ -769,20 +798,24 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
                         &legacy["toolName"],
                         &legacy["parameters"],
                         legacy["success"] == false,
-                        &legacy["result"],
+                        ["postToolUse", "result"],
                     )
                 }
                 record => (
                     &record["name"],
                     &record["input"],
                     !record["error"].is_null(),
-                    &record["output"],
+                    ["tool_result", "output"],
                 ),
             };
             Call {
                 tool: on_server(name.as_str()?, "", "__")?,
                 arguments: arguments.clone(),
-                response: (!failed).then(|| parsed(output)),
+                response: if failed {
+                    None
+                } else {
+                    parsed_response(&output)
+                },
                 saved: None,
             }
         }
@@ -792,7 +825,7 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
             // A failed call carries `error` in place of a result.
             response: hook["toolResult"]["textResultForLlm"]
                 .as_str()
-                .map(|text| text.into()),
+                .and_then(|_| response(&["toolResult", "textResultForLlm"])),
             saved: Some(Saved {
                 notice: "Output too large to read at once",
                 before_path: "Saved to: ",
@@ -805,7 +838,7 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
                 .filter(|_| text("mcp_server_name") == Some(server))?
                 .into(),
             arguments: parsed(&hook["tool_input"]),
-            response: Some(parsed(&hook["result_json"])),
+            response: parsed_response(&["result_json"]),
             saved: None,
         },
         Client::GeminiCli => {
@@ -817,9 +850,11 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
                     .into(),
                 arguments: hook["tool_input"].clone(),
                 // `returnDisplay` holds the result text without the wrapper added for the model.
-                response: hook["tool_response"]["error"]
-                    .is_null()
-                    .then(|| hook["tool_response"]["returnDisplay"].clone()),
+                response: if hook["tool_response"]["error"].is_null() {
+                    response(&["tool_response", "returnDisplay"])
+                } else {
+                    None
+                },
                 saved: None,
             }
         }
@@ -828,16 +863,24 @@ fn call(hook: &Value, server: &str, client: Client) -> Option<Call> {
             Call {
                 tool: on_server(name, "mcp_", "_").or_else(|| on_server(name, "@", "/"))?,
                 arguments: hook["tool_input"].clone(),
-                response: (hook["tool_response"]["success"] != false)
-                    .then(|| hook["tool_response"]["result"][0].clone()),
+                response: if hook["tool_response"]["success"] == false
+                    || !hook["tool_response"]["result"].is_array()
+                {
+                    None
+                } else {
+                    response(&["tool_response", "result", "0"])
+                },
                 saved: None,
             }
         }
         Client::QwenCode => Call {
             tool: on_server(text("tool_name")?, "mcp__", "__")?,
             arguments: hook["tool_input"].clone(),
-            response: (text("hook_event_name") != Some("PostToolUseFailure"))
-                .then(|| hook["tool_response"]["returnDisplay"].clone()),
+            response: if text("hook_event_name") == Some("PostToolUseFailure") {
+                None
+            } else {
+                response(&["tool_response", "returnDisplay"])
+            },
             saved: None,
         },
     })
@@ -876,23 +919,25 @@ fn search(call: Call) -> Option<Search> {
 /// The bytes `mcp::normalize` judges: the result text, or the whole MCP result object so that
 /// its error flag and structured copy are checked with it.
 fn body(call: &Call) -> Option<Vec<u8>> {
-    match call.response.as_ref()? {
-        Value::String(text) => match &call.saved {
-            Some(saved) if text.starts_with(saved.notice) => {
-                let (_, rest) = text.split_once(saved.before_path)?;
-                let path = Path::new(rest.lines().next()?.trim_end_matches('.'));
-                (path.parent() == Some(&saved.directory)
-                    && path.file_name()?.to_string_lossy().contains(saved.name))
-                .then(|| saved_result(path))
-                .flatten()
+    let raw = call.response.as_deref()?.get();
+    match raw.as_bytes().first()? {
+        b'"' => {
+            let text = serde_json::from_str::<String>(raw).ok()?;
+            match &call.saved {
+                Some(saved) if text.starts_with(saved.notice) => {
+                    let (_, rest) = text.split_once(saved.before_path)?;
+                    let path = Path::new(rest.lines().next()?.trim_end_matches('.'));
+                    (path.parent() == Some(&saved.directory)
+                        && path.file_name()?.to_string_lossy().contains(saved.name))
+                    .then(|| saved_result(path))
+                    .flatten()
+                }
+                _ => Some(text.into_bytes()),
             }
-            _ => Some(text.clone().into_bytes()),
-        },
-        // A bare content list is the MCP result object without its wrapper.
-        blocks @ Value::Array(_) => {
-            serde_json::to_vec(&serde_json::json!({ "content": blocks })).ok()
         }
-        result @ Value::Object(_) => serde_json::to_vec(result).ok(),
+        // A bare content list is the MCP result object without its wrapper.
+        b'[' => Some(format!(r#"{{"content":{raw}}}"#).into_bytes()),
+        b'{' => Some(raw.as_bytes().to_vec()),
         _ => None,
     }
 }

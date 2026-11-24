@@ -1,0 +1,1 @@
+- Inventory pack imports can update matched records while preserving discovery scope, observation ordering, and earlier snapshots. Append imports recognize previously submitted packs even after discovery.

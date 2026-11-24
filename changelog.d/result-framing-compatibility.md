@@ -1,0 +1,1 @@
+- Preserve recorded discovery and capability verdicts when opening saved evidence. Accept text block metadata and null optional metadata in newly submitted results.

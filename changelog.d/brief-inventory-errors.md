@@ -1,0 +1,2 @@
+- Preserve known inventory error codes in brief output with fixed guidance. When an inventory reply cannot be written, check status before repeating the action.
+- Include recognized relay diagnostics in brief discovery-step replies.
