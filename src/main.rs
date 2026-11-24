@@ -1437,6 +1437,27 @@ fn catalog(args: CatalogArgs) -> Result<i32, Diagnostic> {
     }
     Ok(0)
 }
+fn add_inventory_source_id(row: &mut Value) {
+    let selectors = &row["selectors"];
+    let repo = selectors["repo"].as_str();
+    let type_ = selectors["type"].as_str();
+    if (repo.is_some() || type_.is_some())
+        && selectors["event_family"].is_null()
+        && selectors["sourcetype"]
+            .as_str()
+            .is_none_or(|value| Some(value) == type_)
+        && repo.into_iter().chain(type_).all(|value| {
+            !value.trim().is_empty() && cqlmatic::language::plan::checked_text(value).is_ok()
+        })
+    {
+        row["inventory_source_id"] = json!(discovery::source_id(&Scope {
+            repo: repo.map(str::to_owned),
+            type_: type_.map(str::to_owned),
+            event: None,
+        }));
+    }
+}
+
 fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
     match command {
         EnvCommand::Inventory(args) => inventory_cli::run(args),
@@ -1461,6 +1482,18 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             limit,
         } => {
             let mut p = storage::read_pack(&file)?;
+            let source_matches = |row: &Value| {
+                source.as_deref().is_none_or(|q| {
+                    row["id"].as_str() == Some(q)
+                        || row["name"].as_str() == Some(q)
+                        || row.pointer("/selectors/repo").and_then(Value::as_str) == Some(q)
+                })
+            };
+            let field_matches = |row: &Value| {
+                field
+                    .as_deref()
+                    .is_none_or(|q| row["path"].as_str().is_some_and(|path| path.contains(q)))
+            };
             if summary {
                 if full || field.is_some() || source.is_some() {
                     return Err(input_error(
@@ -1473,9 +1506,11 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                     .iter()
                     .map(|source| {
                         let id = source["id"].as_str().unwrap_or("");
-                        json!({"id":id,"name":source["name"],"selectors":source["selectors"],
+                        let mut row = json!({"id":id,"name":source["name"],"selectors":source["selectors"],
                             "inventory_status":source["inventory_status"],
-                            "field_count":p.data.fields.iter().filter(|field| field["source_id"] == id).count()})
+                            "field_count":p.data.fields.iter().filter(|field| field["source_id"] == id).count()});
+                        add_inventory_source_id(&mut row);
+                        row
                     })
                     .collect::<Vec<_>>();
                 output(
@@ -1488,13 +1523,8 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 )?;
             } else if full {
                 if source.is_some() || field.is_some() {
-                    p.data.sources.retain(|s| {
-                        source.as_ref().is_none_or(|q| {
-                            s["id"].as_str() == Some(q)
-                                || s["name"].as_str() == Some(q)
-                                || s.pointer("/selectors/repo").and_then(Value::as_str) == Some(q)
-                        })
-                    });
+                    p.data.sources.retain(source_matches);
+                    let source_hits = p.data.sources.len();
                     let ids = p
                         .data
                         .sources
@@ -1503,9 +1533,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                         .collect::<BTreeSet<_>>();
                     p.data.fields.retain(|f| {
                         f["source_id"].as_str().is_some_and(|id| ids.contains(id))
-                            && field.as_ref().is_none_or(|q| {
-                                f["path"].as_str().is_some_and(|path| path.contains(q))
-                            })
+                            && field_matches(f)
                     });
                     if field.is_some() {
                         let with_fields = p
@@ -1551,50 +1579,82 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                             .as_str()
                             .is_some_and(|id| provenance_ids.contains(id))
                     });
+                    let matched_sources = if source.is_some() {
+                        source_hits
+                    } else {
+                        p.data.sources.len()
+                    };
+                    let matched_fields = p.data.fields.len();
+                    let mut view = serde_json::to_value(&p).expect("pack serializes");
+                    let object = view.as_object_mut().expect("pack serializes as an object");
+                    object.remove("content_digest");
+                    object.extend([
+                        ("source_pack_digest".into(), json!(p.content_digest)),
+                        ("filtered".into(), json!(true)),
+                        ("filter".into(), json!({"source":source,"field":field})),
+                        ("matched_sources".into(), json!(matched_sources)),
+                        ("matched_fields".into(), json!(matched_fields)),
+                    ]);
+                    output(&view, true)?;
+                    return Ok(0);
                 }
                 output(&p, true)?;
             } else if field.is_some() || source.is_some() {
-                let ids = p
+                let ids: BTreeSet<_> = p
                     .data
                     .sources
                     .iter()
-                    .filter(|s| {
-                        source.as_ref().is_none_or(|q| {
-                            s["id"].as_str() == Some(q)
-                                || s["name"].as_str() == Some(q)
-                                || s.pointer("/selectors/repo").and_then(Value::as_str) == Some(q)
-                        })
-                    })
-                    .filter_map(|s| s["id"].as_str())
-                    .collect::<Vec<_>>();
-                let fields = p
+                    .filter(|row| source_matches(row))
+                    .filter_map(|row| row["id"].as_str())
+                    .collect();
+                let matched: Vec<_> = p
                     .data
                     .fields
                     .iter()
-                    .filter(|f| {
-                        ids.contains(&f["source_id"].as_str().unwrap_or(""))
-                            && field
-                                .as_ref()
-                                .is_none_or(|q| f["path"].as_str().is_some_and(|p| p.contains(q)))
+                    .filter(|row| {
+                        row["source_id"].as_str().is_some_and(|id| ids.contains(id))
+                            && field_matches(row)
                     })
-                    .take(limit as usize)
-                    .collect::<Vec<_>>();
-                let fids = fields
-                    .iter()
-                    .filter_map(|f| f["id"].as_str())
-                    .collect::<Vec<_>>();
-                let values = p
-                    .data
-                    .values
-                    .iter()
-                    .filter(|v| fids.contains(&v["field_id"].as_str().unwrap_or("")))
-                    .take(limit as usize)
-                    .collect::<Vec<_>>();
+                    .collect();
+                let matched_sources = if source.is_some() {
+                    ids.len()
+                } else {
+                    matched
+                        .iter()
+                        .filter_map(|row| row["source_id"].as_str())
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                };
+                let fields = &matched[..matched.len().min(limit as usize)];
+                let field_ids = |rows: &[&Value]| {
+                    rows.iter()
+                        .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                        .collect::<BTreeSet<_>>()
+                };
+                let matched_ids = field_ids(&matched);
+                let returned_ids = field_ids(fields);
+                let mut matched_values = 0;
+                let mut values = Vec::new();
+                for value in &p.data.values {
+                    if let Some(id) = value["field_id"].as_str()
+                        && matched_ids.contains(id)
+                    {
+                        matched_values += 1;
+                        if values.len() < limit as usize && returned_ids.contains(id) {
+                            values.push(value);
+                        }
+                    }
+                }
                 output(
-                    &json!({"environment":p.environment,"pack_id":p.content_digest,"fields":fields,"values":values}),
+                    &json!({"environment":p.environment,"pack_id":p.content_digest,"fields":fields,"values":values,
+                        "matched_sources":matched_sources,"matched_fields":matched.len(),
+                        "omitted_fields":matched.len() - fields.len(),"omitted_values":matched_values - values.len()}),
                     true,
                 )?;
             } else {
+                for row in &mut p.data.sources {
+                    add_inventory_source_id(row);
+                }
                 output(
                     &json!({"format_version":p.format_version,"environment":p.environment,"pack_id":p.content_digest,"created_at":p.created_at,"sources":p.data.sources,"field_count":p.data.fields.len(),"value_count":p.data.values.len(),"annotations":p.data.annotations}),
                     true,

@@ -221,7 +221,9 @@ cqlmatic env inspect .local/pack.json --full
 
 `FILE` is required. `--source TEXT` matches an exact source ID, display name, or repository selector; it does not directly match a type selector. Prefer a source ID. `--field TEXT` is a case-sensitive path substring. `--limit N` defaults to `20` (range 1–100), independently bounding field and value records in compact filtered output.
 
-Without filters the default view includes all source records, field/value counts, annotations, identity, digest, and date. `--summary` returns a smaller source-selector/count overview; it cannot be combined with `--full`, `--source`, or `--field`. With filters the detailed view returns `environment`, `pack_id`, selected fields and their sampled values. `--full` returns the pack-shaped view and ignores `--limit`; optional filters still apply, retaining only related records and provenance. A filtered full view retains the original digest and is **not** an importable replacement snapshot. Use the original unfiltered file for import. Inspection is offline and never reads credentials.
+Without filters the default view includes all source records, field/value counts, annotations, identity, digest, and date. `--summary` returns a smaller source-selector/count overview. Both views include `inventory_source_id` for sources that map directly to an inventory selector. Use that ID in inventory actions and the original `id` for pack inspection. `--summary` cannot be combined with `--full`, `--source`, or `--field`.
+
+Filtered output reports `matched_sources` and `matched_fields`, so an unmatched source is visible even when the field list is empty. Compact filtered output also reports `omitted_fields` and `omitted_values`. Use `--full` with a filter to inspect all related records and provenance without the limit. That view carries `filtered: true` and `source_pack_digest`. Use the original pack file for import. Unfiltered `--full` returns the pack itself. Inspection is offline and never reads credentials.
 
 ### Import
 

@@ -85,6 +85,19 @@ impl Temp {
         assert_eq!(rows.len(), 1);
         (code, rows.remove(0))
     }
+
+    fn document(&self, args: &[&str]) -> (i32, Value) {
+        let output = self.binary().args(args).output().unwrap();
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            output.status.code().unwrap(),
+            serde_json::from_slice(&output.stdout).unwrap(),
+        )
+    }
 }
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -1096,4 +1109,122 @@ fn default_unconfirmed_scout_leaves_offline_query_commands_unchanged() {
     scout(json!({"kind":"import-scout","result_file":scout_result,
         "arguments":plan["action"]["arguments"],"retrieved_at":"2026-01-02T00:00:00Z"}));
     compare("imported");
+}
+
+#[test]
+fn inspect_bridges_exact_inventory_source_ids() {
+    let temp = Temp::new();
+    let mut data = pack(true, "2026-01-02T00:00:00Z").data;
+    data.sources[0]["id"] = json!("env:repo:legacy-slug");
+    data.fields[0]["source_id"] = json!("env:repo:legacy-slug");
+    for (id, selectors) in [
+        (
+            "typed",
+            json!({"repo":"sample","type":"logs","sourcetype":"logs"}),
+        ),
+        ("type-only", json!({"type":"logs"})),
+        (
+            "narrow",
+            json!({"repo":"sample","type":"other","sourcetype":"parser-alias"}),
+        ),
+        (
+            "family",
+            json!({"repo":"other","event_family":"ProcessEvent"}),
+        ),
+    ] {
+        let mut row = data.sources[0].clone();
+        row["id"] = json!(format!("env:repo:{id}"));
+        row["selectors"] = selectors;
+        data.sources.push(row);
+    }
+    let input = Pack::new(environment(), "2026-01-02T00:00:00Z".into(), data).unwrap();
+    let file = temp.0.join("pack.json");
+    save_pack(&file, &input);
+    let file = file.to_str().unwrap();
+    for flag in [None, Some("--summary")] {
+        let args = ["env", "inspect", file].into_iter().chain(flag);
+        let (code, view) = temp.document(&args.collect::<Vec<_>>());
+        assert_eq!(code, 0);
+        let sources = view["sources"].as_array().unwrap();
+        assert_eq!(sources[0]["id"], "env:repo:legacy-slug");
+        for (row, scope) in sources.iter().take(3).zip([
+            source(),
+            Scope {
+                type_: Some("logs".into()),
+                ..source()
+            },
+            Scope {
+                type_: Some("logs".into()),
+                ..Scope::default()
+            },
+        ]) {
+            assert_eq!(row["inventory_source_id"], discovery::source_id(&scope));
+        }
+        for row in &sources[3..] {
+            assert!(row.get("inventory_source_id").is_none(), "{row}");
+        }
+    }
+    let (code, full) = temp.document(&["env", "inspect", file, "--full"]);
+    assert_eq!(code, 0);
+    assert_eq!(full, serde_json::to_value(&input).unwrap());
+}
+
+#[test]
+fn inspect_distinguishes_filtered_views_misses_and_truncation() {
+    let temp = Temp::new();
+    let mut data = pack(true, "2026-01-02T00:00:00Z").data;
+    let mut second = data.fields[0].clone();
+    second["id"] = json!("env:field:sample:host");
+    second["path"] = json!("host");
+    data.fields.push(second);
+    for (index, field_id) in [
+        "env:field:sample:user",
+        "env:field:sample:user",
+        "env:field:sample:host",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        data.values.push(json!({
+            "id":format!("env:value:sample:{index}"),"field_id":field_id,"value_kind":"sample",
+            "vocabulary":"sampled","evidence_kind":"observed","provenance_ids":["prov:sample"],"value":index
+        }));
+    }
+
+    let input = Pack::new(environment(), "2026-01-02T00:00:00Z".into(), data).unwrap();
+    let file = temp.0.join("pack.json");
+    save_pack(&file, &input);
+    let file = file.to_str().unwrap();
+    let (code, full) = temp.document(&[
+        "env", "inspect", file, "--full", "--source", "sample", "--limit", "1",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(full["filtered"], true);
+    assert!(full.get("content_digest").is_none());
+    assert_eq!(full["source_pack_digest"], input.content_digest);
+    assert_eq!(full["filter"]["source"], "sample");
+    assert_eq!(full["matched_sources"], 1);
+    assert_eq!(full["matched_fields"], 2);
+    assert_eq!(full["data"]["fields"].as_array().unwrap().len(), 2);
+    let (code, compact) =
+        temp.document(&["env", "inspect", file, "--source", "sample", "--limit", "1"]);
+    assert_eq!(code, 0);
+    assert_eq!(compact["matched_sources"], 1);
+    assert_eq!(compact["omitted_fields"], 1);
+    assert_eq!(compact["omitted_values"], 2);
+    assert_eq!(compact["values"].as_array().unwrap().len(), 1);
+    assert_eq!(compact["fields"].as_array().unwrap().len(), 1);
+    for flag in [None, Some("--full")] {
+        for (source, count) in [("sample", 1), ("missing", 0)] {
+            let args = [
+                "env", "inspect", file, "--source", source, "--field", "absent",
+            ]
+            .into_iter()
+            .chain(flag);
+            let (code, view) = temp.document(&args.collect::<Vec<_>>());
+            assert_eq!(code, 0);
+            assert_eq!(view["matched_sources"], count);
+            assert_eq!(view["matched_fields"], 0);
+        }
+    }
 }
