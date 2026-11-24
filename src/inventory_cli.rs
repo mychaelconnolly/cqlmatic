@@ -1348,6 +1348,19 @@ fn action_brief(action: &Value) -> Value {
             compact["cost"]["answer_bytes"] = json!(bytes);
         }
     }
+    // Parser review counts are numbers and their guidance is fixed text.
+    if let Some(reviews) = action.get("parser_reviews") {
+        let mut counts = serde_json::Map::new();
+        for key in ["kept", "carried", "suspended", "restored"] {
+            if let Some(count) = reviews[key].as_u64() {
+                counts.insert(key.into(), json!(count));
+            }
+        }
+        if reviews["suspended"].as_u64().is_some_and(|count| count > 0) {
+            compact["next_action"] = json!(SUSPENDED_PARSER_REVIEWS);
+        }
+        compact["parser_reviews"] = Value::Object(counts);
+    }
     let mut notices = Vec::new();
     if action["inventory_work_evidence_limited"] == true {
         notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}));
@@ -2404,6 +2417,11 @@ fn apply(
                     "Saved parser import exceeds 100 pages / 10000 parser details.",
                 ));
             }
+            if pages.is_empty() && details.is_empty() {
+                return Err(fail(
+                    "An import replaces the saved parser inventory and needs at least one capture. Supply the saved catalog pages and parser details; a catalog page that lists no parsers is a valid capture.",
+                ));
+            }
             let mut captured_pages = Vec::new();
             let mut captured_details = Vec::new();
             for page in pages {
@@ -2429,8 +2447,12 @@ fn apply(
                     RawSnapshot::new(&raw, &retrieved_at)?,
                 )?);
             }
-            state.import_parser_inventory(captured_pages, captured_details)?;
-            Ok(Value::Null)
+            let counts = state.import_parser_inventory(captured_pages, captured_details)?;
+            let mut reply = json!({"parser_reviews":counts});
+            if counts.suspended > 0 {
+                reply["next_action"] = json!(SUSPENDED_PARSER_REVIEWS);
+            }
+            Ok(reply)
         }
         InventoryAction::FetchParsers {
             credentials_file,
@@ -2453,7 +2475,7 @@ fn apply(
             )?;
             let mut client = network::FalconClient::new(&target.environment, credentials)?;
             let outcome = fetch_parsers(&mut client, max_pages, max_parsers, max_seconds)?;
-            state.import_parser_inventory(outcome.pages, outcome.details)?;
+            let counts = state.import_parser_inventory(outcome.pages, outcome.details)?;
             state.parser_runs.push(outcome.run.clone());
             if let Some(diagnostic) = &outcome.run.failure {
                 state.failures.push(InventoryFailure {
@@ -2463,9 +2485,11 @@ fn apply(
                     recorded_at: now.into(),
                 });
             }
-            Ok(
-                json!({"parser_count":state.parsers.len(),"run":outcome.run,"credentials_persisted":false}),
-            )
+            let mut reply = json!({"parser_count":state.parsers.len(),"run":outcome.run,"credentials_persisted":false,"parser_reviews":counts});
+            if counts.suspended > 0 {
+                reply["next_action"] = json!(SUSPENDED_PARSER_REVIEWS);
+            }
+            Ok(reply)
         }
         InventoryAction::BindParser {
             source_id,
@@ -2484,7 +2508,7 @@ fn apply(
             };
             state.validate_binding(&binding)?;
             state.parser_exclusions.retain(|e| e.parser_id != parser_id);
-            state.source_mut(&source_id)?.binding = Some(binding);
+            state.set_binding(&source_id, binding)?;
             Ok(Value::Null)
         }
         InventoryAction::ParserNotApplicable {
@@ -2499,7 +2523,7 @@ fn apply(
                 evidence,
             };
             state.validate_binding(&binding)?;
-            state.source_mut(&source_id)?.binding = Some(binding);
+            state.set_binding(&source_id, binding)?;
             Ok(Value::Null)
         }
         InventoryAction::ExcludeParser {

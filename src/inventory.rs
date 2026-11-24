@@ -868,6 +868,48 @@ pub struct ParserExclusion {
     pub reason: String,
 }
 
+/// A binding or exclusion whose reviewed parser definition is not in the latest saved capture.
+/// It satisfies nothing until a capture saves that definition again, as the same bytes or as
+/// the same parsed resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SuspendedParserReview {
+    Binding {
+        source_id: String,
+        /// SHA-256 of the reviewed parser resource after JSON parsing.
+        resource_sha256: String,
+        binding: ParserBinding,
+    },
+    Exclusion {
+        resource_sha256: String,
+        exclusion: ParserExclusion,
+    },
+}
+
+/// The latest capture saved a reviewed parser definition again as other bytes with the same
+/// parsed resource, so the review made against `reviewed_sha256` stands on `saved_sha256`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CarriedParserReview {
+    pub parser_id: String,
+    pub reviewed_sha256: String,
+    pub saved_sha256: String,
+}
+
+/// How a parser import settled the bindings and exclusions that existed before it.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ParserReviewCounts {
+    pub kept: usize,
+    pub carried: usize,
+    pub suspended: usize,
+    pub restored: usize,
+}
+
+pub const SUSPENDED_PARSER_REVIEWS: &str = "Some parser bindings or exclusions are suspended: the latest capture lacks the exact parser definition each was reviewed against, so they count for nothing until restored. They are kept with their line reviews and reasons. Import or fetch a capture that includes those definitions to restore them; where a parser has changed, review its new definition and bind or exclude it again.";
+const SUSPENDED_SOURCE_BINDING: &str = "This source's parser binding is suspended: the latest capture lacks the exact parser definition it was reviewed against, so it counts for nothing until restored. Import or fetch a capture that includes that definition to restore it with its line reviews, or review the source's current parser definition and bind it again.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -952,6 +994,10 @@ pub struct InventoryState {
     pub parser_pages: Vec<ParserPage>,
     pub parsers: Vec<ParserSnapshot>,
     pub parser_exclusions: Vec<ParserExclusion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspended_parser_reviews: Vec<SuspendedParserReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_parser_reviews: Vec<CarriedParserReview>,
     pub packs: Vec<PackReference>,
     #[serde(default)]
     pub active_pack: Option<PackReference>,
@@ -1077,6 +1123,10 @@ pub struct InventoryStatus {
     pub parsers: Vec<ParserSummary>,
     pub scouting_evidence: Vec<ScoutSummary>,
     pub unclassified_parser_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspended_parser_reviews: Vec<SuspendedParserReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_parser_reviews: Vec<CarriedParserReview>,
     pub sources: Vec<SourceStatus>,
     pub discovery_runs: Vec<DiscoveryRun>,
     pub parser_runs: Vec<ParserRun>,
@@ -2894,6 +2944,8 @@ impl InventoryState {
             parser_pages: vec![],
             parsers: vec![],
             parser_exclusions: vec![],
+            suspended_parser_reviews: vec![],
+            carried_parser_reviews: vec![],
             packs: vec![],
             active_pack: None,
             discovery_runs: vec![],
@@ -3082,6 +3134,86 @@ impl InventoryState {
             self.parser_version(&exclusion.parser_id, &exclusion.parser_sha256)?;
             environment::parse_time(&exclusion.reviewed_at)?;
             text(&exclusion.reason)?;
+        }
+        let mut carried = BTreeSet::new();
+        for carry in &self.carried_parser_reviews {
+            if carry.reviewed_sha256 == carry.saved_sha256
+                || !carried.insert((&carry.parser_id, &carry.reviewed_sha256))
+                || !self
+                    .parsers
+                    .iter()
+                    .any(|p| p.id == carry.parser_id && p.snapshot.sha256 == carry.saved_sha256)
+            {
+                return Err(fail(
+                    "A carried parser review must name its saved re-encoded definition.",
+                ));
+            }
+        }
+        let mut held_sources = BTreeSet::new();
+        for held in &self.suspended_parser_reviews {
+            let (parser_id, parser_sha256, resource_sha256) = match held {
+                SuspendedParserReview::Binding {
+                    source_id,
+                    resource_sha256,
+                    binding:
+                        ParserBinding::Parser {
+                            parser_id,
+                            parser_sha256,
+                            reviewed_at,
+                            evidence,
+                            semantics,
+                        },
+                } => {
+                    // One binding record per source: a held binding waits on a source with none.
+                    if !held_sources.insert(source_id)
+                        || self
+                            .sources
+                            .iter()
+                            .find(|s| &s.id == source_id)
+                            .is_none_or(|s| s.binding.is_some())
+                    {
+                        return Err(fail(
+                            "A suspended parser binding must belong to a saved source without an active binding.",
+                        ));
+                    }
+                    environment::parse_time(reviewed_at)?;
+                    text(evidence)?;
+                    let mut lines = BTreeSet::new();
+                    for semantic in semantics {
+                        text(&semantic.interpretation)?;
+                        text(&semantic.evidence)?;
+                        if !lines.insert(semantic.line) {
+                            return Err(fail(
+                                "Semantic review must refer to distinct pending parser lines.",
+                            ));
+                        }
+                    }
+                    (parser_id, parser_sha256, resource_sha256)
+                }
+                SuspendedParserReview::Binding { .. } => {
+                    return Err(fail("Only a parser binding can be suspended."));
+                }
+                SuspendedParserReview::Exclusion {
+                    resource_sha256,
+                    exclusion,
+                } => {
+                    environment::parse_time(&exclusion.reviewed_at)?;
+                    text(&exclusion.reason)?;
+                    (
+                        &exclusion.parser_id,
+                        &exclusion.parser_sha256,
+                        resource_sha256,
+                    )
+                }
+            };
+            if self.parser_version(parser_id, parser_sha256).is_ok()
+                || resource_sha256.len() != 64
+                || !resource_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err(fail(
+                    "A suspended parser review must name a definition absent from the saved capture.",
+                ));
+            }
         }
         Ok(())
     }
@@ -3456,10 +3588,28 @@ impl InventoryState {
             .find(|s| s.id == id)
             .ok_or_else(|| fail("Unknown source ID; use the status source IDs."))
     }
+    /// An explicit binding replaces the source's binding, active or suspended.
+    pub fn set_binding(
+        &mut self,
+        source_id: &str,
+        binding: ParserBinding,
+    ) -> Result<(), Diagnostic> {
+        self.source_mut(source_id)?.binding = Some(binding);
+        self.suspended_parser_reviews.retain(|held| {
+            !matches!(held, SuspendedParserReview::Binding { source_id: id, .. } if id == source_id)
+        });
+        Ok(())
+    }
     pub fn parser_version(&self, id: &str, hash: &str) -> Result<&ParserSnapshot, Diagnostic> {
+        // A carried review names the bytes it was made against; the saved re-encoding stands in.
+        let saved = self
+            .carried_parser_reviews
+            .iter()
+            .find(|c| c.parser_id == id && c.reviewed_sha256 == hash)
+            .map_or(hash, |c| c.saved_sha256.as_str());
         self.parsers
             .iter()
-            .find(|p| p.id == id && p.snapshot.sha256 == hash)
+            .find(|p| p.id == id && p.snapshot.sha256 == saved)
             .ok_or_else(|| {
                 fail("Binding must identify an exact saved parser ID and SHA-256 snapshot.")
             })
@@ -3504,34 +3654,138 @@ impl InventoryState {
         &mut self,
         pages: Vec<ParserPage>,
         parsers: Vec<ParserSnapshot>,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<ParserReviewCounts, Diagnostic> {
+        enum Review {
+            Binding(String, ParserBinding),
+            Exclusion(ParserExclusion),
+        }
+        enum Standing {
+            Exact,
+            Carried(String),
+            Suspended(String),
+        }
         let mut candidate = self.clone();
         candidate.parser_pages = pages;
         candidate.parsers = parsers;
-        // Snapshot changes deliberately invalidate old bindings and exclusions.
+        candidate.carried_parser_reviews.clear();
+        // Every parser binding and exclusion, active or suspended, settles against the new
+        // capture. A review keeps the exact hash it was made against and is never dropped.
+        let mut reviews = Vec::new();
         for source in &mut candidate.sources {
             if let Some(ParserBinding::Parser {
                 parser_id,
                 parser_sha256,
                 ..
             }) = &source.binding
-                && !candidate
-                    .parsers
-                    .iter()
-                    .any(|p| &p.id == parser_id && &p.snapshot.sha256 == parser_sha256)
             {
-                source.binding = None;
+                let key = (parser_id.clone(), parser_sha256.clone(), None);
+                let binding = source.binding.take().expect("parser binding");
+                reviews.push((key, Review::Binding(source.id.clone(), binding)));
             }
         }
-        candidate.parser_exclusions.retain(|e| {
-            candidate
-                .parsers
-                .iter()
-                .any(|p| p.id == e.parser_id && p.snapshot.sha256 == e.parser_sha256)
-        });
+        for exclusion in std::mem::take(&mut candidate.parser_exclusions) {
+            let key = (
+                exclusion.parser_id.clone(),
+                exclusion.parser_sha256.clone(),
+                None,
+            );
+            reviews.push((key, Review::Exclusion(exclusion)));
+        }
+        for held in std::mem::take(&mut candidate.suspended_parser_reviews) {
+            reviews.push(match held {
+                SuspendedParserReview::Binding {
+                    source_id,
+                    resource_sha256,
+                    binding,
+                } => {
+                    let ParserBinding::Parser {
+                        parser_id,
+                        parser_sha256,
+                        ..
+                    } = &binding
+                    else {
+                        return Err(fail("Only a parser binding can be suspended."));
+                    };
+                    let key = (
+                        parser_id.clone(),
+                        parser_sha256.clone(),
+                        Some(resource_sha256),
+                    );
+                    (key, Review::Binding(source_id, binding))
+                }
+                SuspendedParserReview::Exclusion {
+                    resource_sha256,
+                    exclusion,
+                } => {
+                    let key = (
+                        exclusion.parser_id.clone(),
+                        exclusion.parser_sha256.clone(),
+                        Some(resource_sha256),
+                    );
+                    (key, Review::Exclusion(exclusion))
+                }
+            });
+        }
+        let mut counts = ParserReviewCounts::default();
+        for ((parser_id, reviewed, held), review) in reviews {
+            let saved = candidate.parsers.iter().find(|p| p.id == parser_id);
+            let standing = match saved {
+                Some(p) if p.snapshot.sha256 == reviewed => Standing::Exact,
+                _ => {
+                    let resource = match &held {
+                        Some(resource) => resource.clone(),
+                        None => parser_resource_sha256(
+                            &self.parser_version(&parser_id, &reviewed)?.snapshot,
+                        )?,
+                    };
+                    match saved {
+                        Some(p) if parser_resource_sha256(&p.snapshot)? == resource => {
+                            Standing::Carried(p.snapshot.sha256.clone())
+                        }
+                        _ => Standing::Suspended(resource),
+                    }
+                }
+            };
+            match standing {
+                Standing::Suspended(resource_sha256) => {
+                    counts.suspended += 1;
+                    candidate.suspended_parser_reviews.push(match review {
+                        Review::Binding(source_id, binding) => SuspendedParserReview::Binding {
+                            source_id,
+                            resource_sha256,
+                            binding,
+                        },
+                        Review::Exclusion(exclusion) => SuspendedParserReview::Exclusion {
+                            resource_sha256,
+                            exclusion,
+                        },
+                    });
+                    continue;
+                }
+                Standing::Carried(saved_sha256) => {
+                    counts.carried += 1;
+                    let carry = CarriedParserReview {
+                        parser_id,
+                        reviewed_sha256: reviewed,
+                        saved_sha256,
+                    };
+                    if !candidate.carried_parser_reviews.contains(&carry) {
+                        candidate.carried_parser_reviews.push(carry);
+                    }
+                }
+                Standing::Exact if held.is_some() => counts.restored += 1,
+                Standing::Exact => counts.kept += 1,
+            }
+            match review {
+                Review::Binding(source_id, binding) => {
+                    candidate.source_mut(&source_id)?.binding = Some(binding);
+                }
+                Review::Exclusion(exclusion) => candidate.parser_exclusions.push(exclusion),
+            }
+        }
         candidate.validate()?;
         *self = candidate;
-        Ok(())
+        Ok(counts)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn discovery_request(
@@ -3949,6 +4203,22 @@ pub fn parse_parser(id: &str, snapshot: RawSnapshot) -> Result<ParserSnapshot, D
     })
 }
 
+/// SHA-256 of a saved parser detail's resource after JSON parsing. Key order, spacing and the
+/// response envelope do not count; any change to a field of the resource does.
+fn parser_resource_sha256(snapshot: &RawSnapshot) -> Result<String, Diagnostic> {
+    let value: Value = serde_json::from_slice(&snapshot.bytes()?)
+        .map_err(|_| fail("Native parser response must be JSON."))?;
+    let resource = value
+        .get("resources")
+        .and_then(Value::as_array)
+        .and_then(|resources| resources.first())
+        .ok_or_else(|| fail("Native parser detail requires resources."))?;
+    // serde_json objects keep their keys sorted, so equal resources serialize to equal bytes.
+    serde_json::to_vec(resource)
+        .map(|bytes| sha256_hex(&bytes))
+        .map_err(|_| fail("Cannot fingerprint a parser resource."))
+}
+
 /// Conservative lexical extraction. Conditional and unsupported lines need explicit review.
 pub fn extract_declarations(
     script: &str,
@@ -4284,6 +4554,8 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             })
             .collect(),
         unclassified_parser_ids: unclassified,
+        suspended_parser_reviews: state.suspended_parser_reviews.clone(),
+        carried_parser_reviews: state.carried_parser_reviews.clone(),
         sources,
         discovery_runs: state.discovery_runs.clone(),
         parser_runs: state.parser_runs.clone(),
@@ -4529,6 +4801,11 @@ fn assess_source(
         } else {
             "Resolve the explicit parser binding and all pending parser semantics.".into()
         });
+    }
+    if state.suspended_parser_reviews.iter().any(|held| {
+        matches!(held, SuspendedParserReview::Binding { source_id, .. } if source_id == &source.id)
+    }) {
+        next_actions.push(SUSPENDED_SOURCE_BINDING.into());
     }
     if !measured {
         next_actions.push("Complete a finite discovery run for this source; imported pack history alone is unknown.".into());
