@@ -6,7 +6,7 @@ use crate::{
     mcp, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const COMPLETION_MESSAGE: &str = "Complete full discovery + parser inventory to validate whether your environment has any remaining quiet or inaccessible sources.";
@@ -33,6 +33,18 @@ const MAX_PENDING_WORK: usize = 1000;
 // shortcut: retain 200 refresh attempts per state, add protected archival for longer histories.
 const MAX_REFRESH_ATTEMPTS: usize = 200;
 
+fn deserialize_keep_last<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    let value = usize::deserialize(deserializer)?;
+    if value > 1000 {
+        return Err(serde::de::Error::custom(
+            "keep_last must be between 0 and 1000",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -46,6 +58,14 @@ pub struct InventoryRequest {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum InventoryAction {
     Init {},
+    Prune {
+        dry_run: bool,
+        #[serde(default, deserialize_with = "deserialize_keep_last")]
+        #[cfg_attr(test, schemars(range(min = 0, max = 1000)))]
+        keep_last: usize,
+        #[serde(default)]
+        include_failed: bool,
+    },
     SetDiscoveryMode {
         mode: DiscoveryMode,
         #[serde(default)]
@@ -241,6 +261,10 @@ pub enum InventoryAction {
     },
     ImportPack {
         pack_file: String,
+        #[serde(default)]
+        mode: ImportPackMode,
+        #[serde(default)]
+        supersede_runs: bool,
     },
     Reconcile {
         reviewed_at: String,
@@ -251,6 +275,145 @@ pub enum InventoryAction {
         message: String,
         recorded_at: String,
     },
+    Batch {
+        #[cfg_attr(test, schemars(length(min = 1, max = 32), transform = reconcile_last))]
+        actions: Vec<BatchAction>,
+    },
+}
+
+pub const MAX_BATCH_ACTIONS: usize = 32;
+
+/// Refuses `reconcile` at any position but the last of a batch.
+#[cfg(test)]
+fn reconcile_last(schema: &mut schemars::Schema) {
+    let reconcile = json!({"properties":{"kind":{"const":"reconcile"}}});
+    let positions: Vec<Value> = (0..MAX_BATCH_ACTIONS - 1)
+        .map(|index| {
+            let mut prefix = vec![Value::Bool(true); index];
+            prefix.push(reconcile.clone());
+            json!({"minItems":index + 2,"prefixItems":prefix})
+        })
+        .collect();
+    schema.insert("not".into(), json!({"anyOf":positions}));
+}
+
+/// The local actions one `batch` request can apply together. None reserves, dispatches or
+/// settles a search, reads the network or imports a pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum BatchAction {
+    ReviewSource {
+        source_id: String,
+        purpose: String,
+        data_model: String,
+        reviewed_at: String,
+        evidence: String,
+    },
+    BindParser {
+        source_id: String,
+        parser_id: String,
+        parser_sha256: String,
+        reviewed_at: String,
+        evidence: String,
+        semantics: Vec<SemanticReview>,
+    },
+    ExcludeParser {
+        parser_id: String,
+        parser_sha256: String,
+        reviewed_at: String,
+        reason: String,
+    },
+    ParserNotApplicable {
+        source_id: String,
+        reason: NativeSourceReason,
+        reviewed_at: String,
+        evidence: String,
+    },
+    ImportParsers {
+        pages: Vec<ParserPageInput>,
+        details: Vec<ParserDetailInput>,
+        retrieved_at: String,
+    },
+    Reconcile {
+        reviewed_at: String,
+    },
+}
+
+impl From<BatchAction> for InventoryAction {
+    fn from(action: BatchAction) -> Self {
+        match action {
+            BatchAction::ReviewSource {
+                source_id,
+                purpose,
+                data_model,
+                reviewed_at,
+                evidence,
+            } => Self::ReviewSource {
+                source_id,
+                purpose,
+                data_model,
+                reviewed_at,
+                evidence,
+            },
+            BatchAction::BindParser {
+                source_id,
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                evidence,
+                semantics,
+            } => Self::BindParser {
+                source_id,
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                evidence,
+                semantics,
+            },
+            BatchAction::ExcludeParser {
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                reason,
+            } => Self::ExcludeParser {
+                parser_id,
+                parser_sha256,
+                reviewed_at,
+                reason,
+            },
+            BatchAction::ParserNotApplicable {
+                source_id,
+                reason,
+                reviewed_at,
+                evidence,
+            } => Self::ParserNotApplicable {
+                source_id,
+                reason,
+                reviewed_at,
+                evidence,
+            },
+            BatchAction::ImportParsers {
+                pages,
+                details,
+                retrieved_at,
+            } => Self::ImportParsers {
+                pages,
+                details,
+                retrieved_at,
+            },
+            BatchAction::Reconcile { reviewed_at } => Self::Reconcile { reviewed_at },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportPackMode {
+    #[default]
+    Append,
+    Update,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -890,14 +1053,65 @@ pub struct ParserExclusion {
     pub reason: String,
 }
 
+/// A binding or exclusion whose reviewed parser definition is not in the latest saved capture.
+/// It satisfies nothing until a capture saves that definition again, as the same bytes or as
+/// the same parsed resource.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SuspendedParserReview {
+    Binding {
+        source_id: String,
+        /// SHA-256 of the reviewed parser resource after JSON parsing.
+        resource_sha256: String,
+        binding: ParserBinding,
+    },
+    Exclusion {
+        resource_sha256: String,
+        exclusion: ParserExclusion,
+        /// Zero-based slot in the combined active and suspended exclusion order.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<usize>,
+    },
+}
+
+/// The latest capture saved a reviewed parser definition again as other bytes with the same
+/// parsed resource, so the review made against `reviewed_sha256` stands on `saved_sha256`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CarriedParserReview {
+    pub parser_id: String,
+    pub reviewed_sha256: String,
+    pub saved_sha256: String,
+}
+
+/// How a parser import settled the bindings and exclusions that existed before it.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct ParserReviewCounts {
+    pub kept: usize,
+    pub carried: usize,
+    pub suspended: usize,
+    pub restored: usize,
+}
+
+pub const SUSPENDED_PARSER_REVIEWS: &str = "Some parser bindings or exclusions are suspended: the latest capture lacks the exact parser definition each was reviewed against, so they count for nothing until restored. They are kept with their line reviews and reasons. Import or fetch a capture that includes those definitions to restore them; where a parser has changed, review its new definition and bind or exclude it again.";
+const SUSPENDED_SOURCE_BINDING: &str = "This source's parser binding is suspended: the latest capture lacks the exact parser definition it was reviewed against, so it counts for nothing until restored. Import or fetch a capture that includes that definition to restore it with its line reviews, or review the source's current parser definition and bind it again.";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PackReference {
     pub path: String,
     pub content_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_content_digest: Option<String>,
     pub imported_at: String,
     pub discovery_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,6 +1138,10 @@ pub struct DiscoveryRun {
     /// order. Written only for runs of the current discovery plan.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quiet_source_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -934,6 +1152,10 @@ pub struct InventoryFailure {
     pub source_id: Option<String>,
     pub message: String,
     pub recorded_at: String,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -972,12 +1194,19 @@ pub struct InventoryState {
     #[serde(default)]
     pub pending_inventory: Vec<PendingInventoryWork>,
     pub scout_plan: Option<ScoutPlan>,
+    /// Set when a scout plan is prepared and cleared when a reply to it is imported.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scout_plan_pending: bool,
     pub scouting: Vec<ScoutEvidence>,
     pub target: Option<ConfirmedTarget>,
     pub sources: Vec<InventorySource>,
     pub parser_pages: Vec<ParserPage>,
     pub parsers: Vec<ParserSnapshot>,
     pub parser_exclusions: Vec<ParserExclusion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspended_parser_reviews: Vec<SuspendedParserReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_parser_reviews: Vec<CarriedParserReview>,
     pub packs: Vec<PackReference>,
     #[serde(default)]
     pub active_pack: Option<PackReference>,
@@ -1013,8 +1242,23 @@ pub struct FieldStatus {
     pub status: Progress,
     pub values: Progress,
     pub values_requested: bool,
+    /// The retained pack holds at least one observed value for this field. This describes
+    /// cumulative evidence. A later sample can return no values while this flag stays true.
+    #[serde(default)]
+    pub values_saved: bool,
     pub evidence_dates: Vec<String>,
     pub not_reobserved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SourceRestrictions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sourcetype: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_family: Option<String>,
+    pub discovery_compatible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1024,6 +1268,8 @@ pub struct SourceStatus {
     pub source_id: String,
     pub expected: bool,
     pub selectors: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_restrictions: Option<SourceRestrictions>,
     pub scouted_events: Option<u64>,
     pub review: Option<SourceReview>,
     pub binding: Option<ParserBinding>,
@@ -1148,11 +1394,19 @@ pub struct InventoryStatus {
     pub scouting: Progress,
     pub parser_catalog: Progress,
     pub reconciliation: Progress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_detail: Option<CompletionDetail>,
     pub parser_count: usize,
     pub parser_page_count: usize,
     pub parsers: Vec<ParserSummary>,
     pub scouting_evidence: Vec<ScoutSummary>,
     pub unclassified_parser_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suspended_parser_reviews: Vec<SuspendedParserReview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_parser_exclusions: Option<usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_parser_reviews: Vec<CarriedParserReview>,
     pub sources: Vec<SourceStatus>,
     pub discovery_runs: Vec<DiscoveryRun>,
     pub parser_runs: Vec<ParserRun>,
@@ -1160,6 +1414,57 @@ pub struct InventoryStatus {
     pub next_actions: Vec<String>,
     pub covered_queries_usable: bool,
     pub active_pack: Option<PackReference>,
+    /// The retained discovery run that blocks another search, when the caller checked it.
+    #[serde(skip)]
+    pub(crate) retained_run_blocker: Option<RetainedRun>,
+}
+
+/// What the progress words cover and what is still open, derived from the rest of the status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CompletionDetail {
+    /// Review time of the current evidence fingerprint; null unless reconciliation is done.
+    pub evidence_reviewed_at: Option<String>,
+    pub reconciliation_meaning: String,
+    pub expected_sources_open: OpenSourceCounts,
+    pub parser_catalog_captured: bool,
+    /// A prepared census has no saved capture yet.
+    pub scout_awaiting_capture: bool,
+    /// The most recently imported census; null before any census is saved.
+    pub latest_census: Option<CensusSize>,
+    /// The first step status and reconcile advise; null when no listed step is open.
+    #[serde(default)]
+    pub next_action: Option<String>,
+}
+
+/// A retained discovery run that must be handled before another search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedRun {
+    /// Its checkpoint is readable, so it can be continued or paused.
+    Settle(usize),
+    /// Its checkpoint is missing or cannot be read.
+    Unreadable(usize),
+    /// Its checkpoint was written by a different release, which alone can settle it.
+    ProducerMismatch(usize),
+}
+
+/// Expected sources whose work in each category is not done.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct OpenSourceCounts {
+    pub interpretation_review: usize,
+    pub parser_review_or_binding: usize,
+    pub measurements: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CensusSize {
+    pub rows: usize,
+    pub at_row_ceiling: bool,
 }
 
 impl QueryObservation {
@@ -1246,6 +1551,8 @@ impl QueryObservation {
         audit_path: String,
     ) -> Result<Self, Diagnostic> {
         use crate::language::ast::{Filter, Pattern, Step, Value as AstValue};
+        let start = environment::normalize_request_time(&start)?;
+        let end = environment::normalize_request_time(&end)?;
         scope_ok(&source)?;
         let query_text = std::str::from_utf8(query)
             .map_err(|_| fail("Query file must contain exact UTF-8 CQL."))?;
@@ -1513,8 +1820,10 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "quick_scope_complete":status.quick_scope_complete,"discovery_mode":status.discovery_mode,"quick_depth":status.quick_depth,
         "message":status.message,"environment":status.environment,"target_scope":status.target_scope,
         "progress":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "completion_detail":status.completion_detail,
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
+            "suspended_parser_exclusions":status.suspended_parser_exclusions.unwrap_or_default(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
             "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
             "pending_inventory":status.pending_inventory.len(),"inventory_notifications":status.inventory_notification_count},
@@ -1524,16 +1833,20 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "settings_attention":status.settings_attention,
         "refresh_attempts":status.refresh_attempts,
         "pending_inventory":status.pending_inventory,
-        "sources":status.sources.iter().map(|source| json!({"source_id":source.source_id,"selectors":source.selectors,
+        "sources":status.sources.iter().map(|source| {
+            let mut row = json!({"source_id":source.source_id,"selectors":source.selectors,
             "expected":source.expected,"status":source.status,"interpretation":source.interpretation,"parser":source.parser,
             "measurements":source.measurements,"observation":source.observation,"scouted_events":source.scouted_events,
             "fields":{"total":source.fields.len(),"declared":source.fields.iter().filter(|f|f.declared).count(),
                 "observed":source.fields.iter().filter(|f|f.observed).count(),"measured":source.fields.iter().filter(|f|f.measured).count(),
-                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).zip(&status.sources).map(|(mut entry, source)| {
+                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions});
             if let Some(quiet) = &source.quiet {
-                entry["quiet"] = json!(quiet);
+                row["quiet"] = json!(quiet);
             }
-            entry
+            if let Some(restrictions) = &source.retained_restrictions {
+                row["retained_restrictions"] = json!(restrictions);
+            }
+            row
         }).collect::<Vec<_>>(),
         "active_pack":status.active_pack,"covered_queries_usable":status.covered_queries_usable,"next_actions":status.next_actions
     })
@@ -1577,7 +1890,10 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     let mut discovery_work: Vec<_> = status
         .discovery_runs
         .iter()
-        .filter(|run| !matches!(run.status.as_str(), "complete" | "superseded" | "paused"))
+        .filter(|run| {
+            run.pruned_at.is_none()
+                && !matches!(run.status.as_str(), "complete" | "superseded" | "paused")
+        })
         .collect();
     discovery_work.sort_by_key(|run| {
         (
@@ -1603,19 +1919,39 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
             Some(_) if prepared_for_current_session => "reserved-for-current-session",
             Some(_) => "reserved-for-other-or-unidentified-session",
             None if status.environment.is_none() => "target-required",
-            None if discovery_recovery > 0 => "recorded-discovery-recovery-required",
-            None if !discovery_work.is_empty() => "recorded-discovery-unfinished",
+            None if discovery_recovery > 0
+                || matches!(
+                    status.retained_run_blocker,
+                    Some(RetainedRun::Unreadable(_) | RetainedRun::ProducerMismatch(_))
+                ) =>
+            {
+                "recorded-discovery-recovery-required"
+            }
+            None if !discovery_work.is_empty() || status.retained_run_blocker.is_some() => {
+                "recorded-discovery-unfinished"
+            }
+            None if status
+                .completion_detail
+                .as_ref()
+                .is_some_and(|detail| detail.scout_awaiting_capture) =>
+            {
+                "pending-scouting"
+            }
             None => "manual-refresh-available",
         }
     };
     let mut notices = Vec::new();
+    if !status.suspended_parser_reviews.is_empty() {
+        notices.push(json!({"code":"SUSPENDED_PARSER_REVIEWS","severity":"info",
+            "message":"Import or fetch the reviewed definitions to restore suspended parser reviews."}));
+    }
     if status.capability_blocked {
         notices.push(json!({"code":"CAPABILITY_SETTLEMENT_REQUIRED","severity":"warning",
             "message":"A capability search has unresolved termination. Submit exact settlement before another inventory dispatch."}));
     }
     if blocker == "termination-unresolved" {
         notices.push(json!({"code":"REFRESH_SETTLEMENT_REQUIRED","severity":"warning",
-            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later."}));
+            "message":"Refresh termination is unresolved. Reconcile the exact attempt before another search. Lost, client-wait, transport or unrecognized errors stay unresolved. Use timed-out for a hosted cutoff, not-started for a start rejection, or for a poll failure set search_started_at to the answer's arrival time and lifetime-expired after the provider lifetime."}));
     } else if blocker == "awaiting-host-settlement" {
         notices.push(json!({"code":"REFRESH_AWAITING_HOST_SETTLEMENT","severity":"info",
             "message":"Refresh dispatch was recorded. Await the original host result and exact settlement before another search. The recorded phase does not establish backend execution."}));
@@ -1632,14 +1968,18 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if discovery_recovery > 0 {
         notices.push(json!({"code":"DISCOVERY_RECOVERY_RECORDED","severity":"warning",
-            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the exact saved attempt before another search. Recorded state does not establish current backend execution. Runs written by 0.1.6 or 0.1.7 are rechecked from their saved checkpoints on the next inventory search action."}));
+            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the saved attempt before another search; recorded state does not prove live execution. 0.1.6/0.1.7 checkpoints recheck on the next search."}));
     } else if !discovery_work.is_empty() {
         notices.push(json!({"code":"DISCOVERY_UNFINISHED_RECORDED","severity":"info",
             "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
     }
     if reminder.is_some_and(|reminder| reminder.show_startup_notice) {
-        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info",
-            "message":"Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."}));
+        let message = if blocker == "manual-refresh-available" {
+            "Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."
+        } else {
+            "Inventory refresh is due. Settle the blocker before manual refresh, or defer 30 days; acknowledgement does not complete refresh."
+        };
+        notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info","message":message}));
     }
     let quiet_sources = status.sources.iter().filter(|s| s.quiet.is_some()).count();
     if quiet_sources > 0 {
@@ -1710,6 +2050,10 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "refresh_blocked":status.refresh_blocked,
         "capability_blocked":status.capability_blocked,"capability_run_count":status.capabilities.len(),
         "readiness":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "completion_detail":status.completion_detail.as_ref().map(|detail| json!({
+            "expected_sources_open":detail.expected_sources_open,"parser_catalog_captured":detail.parser_catalog_captured,
+            "scout_awaiting_capture":detail.scout_awaiting_capture,"latest_census":detail.latest_census,
+            "next_action":detail.next_action})),
         "settings_attention":status.settings_attention,"settings_label":if status.settings_attention { "Settings *" } else { "Settings" },
         "refresh":{"automatic":status.refresh_settings.automatic,"automatic_available":status.automatic_refresh_available,"lookback":status.refresh_settings.lookback,
             "recorded_phase":recorded.map(|attempt| attempt.phase),"known_termination":recorded.and_then(|attempt| attempt.termination),
@@ -1720,6 +2064,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "refresh_reminder":reminder,
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|source| source.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
+            "suspended_parser_exclusions":status.suspended_parser_exclusions.unwrap_or_default(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
             "discovery_recovery":discovery_recovery,"discovery_unfinished":discovery_work.len(),"quiet_sources":quiet_sources,
             "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
@@ -1791,21 +2136,36 @@ fn inventory_work_run(
     })
 }
 
+pub fn inventory_work_run_candidate(
+    index: usize,
+    run: &DiscoveryRun,
+    work: &PendingInventoryWork,
+) -> bool {
+    run.status == "complete"
+        && run.source_ids.contains(&work.id)
+        && !run.quiet_source_ids.contains(&work.id)
+        && (work.fields.is_empty()
+            || run.mode != DiscoveryMode::Quick
+            || run.quick_depth != QuickDepth::SourcesOnly)
+        && (index >= work.after_run
+            || work
+                .capture_boundary
+                .as_ref()
+                .is_some_and(|boundary| boundary.run == run.state_path))
+}
+
 fn inventory_work_run_eligible(
     index: usize,
     run: &DiscoveryRun,
     work: &PendingInventoryWork,
     request_sha256: Option<&str>,
 ) -> bool {
-    run.status == "complete"
-        && run.source_ids.contains(&work.id)
-        && !run.quiet_source_ids.contains(&work.id)
+    inventory_work_run_candidate(index, run, work)
         && (index >= work.after_run
-            || index + 1 == work.after_run
-                && work.capture_boundary.as_ref().is_some_and(|boundary| {
-                    boundary.run == run.state_path
-                        && request_sha256 == Some(boundary.request_sha256.as_str())
-                }))
+            || work
+                .capture_boundary
+                .as_ref()
+                .is_some_and(|boundary| request_sha256 == Some(boundary.request_sha256.as_str())))
 }
 
 fn validate_inventory_work_proof(
@@ -2342,7 +2702,8 @@ impl InventoryState {
                 .discovery_runs
                 .last()
                 .filter(|run| {
-                    run.state_path == boundary.run
+                    run.pruned_at.is_none()
+                        && run.state_path == boundary.run
                         && !matches!(run.status.as_str(), "complete" | "superseded")
                 })
                 .ok_or_else(|| {
@@ -2588,9 +2949,6 @@ impl InventoryState {
                     continue;
                 };
                 if !inventory_work_run_eligible(run_index, run, work, Some(&report.request_sha256))
-                    || !work.fields.is_empty()
-                        && run.mode == DiscoveryMode::Quick
-                        && run.quick_depth == QuickDepth::SourcesOnly
                 {
                     continue;
                 }
@@ -2715,11 +3073,7 @@ impl InventoryState {
                 "Refresh history reached its finite limit; retain it and use a new explicitly selected workflow state.",
             ));
         }
-        if self
-            .scout_plan
-            .as_ref()
-            .is_some_and(|p| !self.scouting.iter().any(|s| &s.plan == p))
-        {
+        if self.scout_awaiting_capture() {
             return Err(fail(
                 "Finish or safely reconcile pending scouting before preparing refresh; its progress is retained.",
             ));
@@ -2978,12 +3332,15 @@ impl InventoryState {
             source_metadata: vec![],
             pending_inventory: vec![],
             scout_plan: None,
+            scout_plan_pending: false,
             scouting: vec![],
             target: None,
             sources: vec![],
             parser_pages: vec![],
             parsers: vec![],
             parser_exclusions: vec![],
+            suspended_parser_reviews: vec![],
+            carried_parser_reviews: vec![],
             packs: vec![],
             active_pack: None,
             discovery_runs: vec![],
@@ -2993,10 +3350,17 @@ impl InventoryState {
             reconciled_at: None,
         })
     }
+    pub fn scout_awaiting_capture(&self) -> bool {
+        self.scout_plan
+            .as_ref()
+            .is_some_and(|p| self.scout_plan_pending || !self.scouting.iter().any(|s| &s.plan == p))
+    }
+
     pub fn evidence_digest(&self) -> Result<String, Diagnostic> {
         let mut copy = self.clone();
         copy.reconciled_evidence_sha256 = None;
         copy.reconciled_at = None;
+        copy.scout_plan_pending = false;
         copy.updated_at.clear();
         // Preserve historical reconciliation commitments when the runtime preference default changes.
         copy.refresh_settings = RefreshSettings {
@@ -3016,6 +3380,15 @@ impl InventoryState {
                 });
         copy.field_evidence_schema_version = None;
         copy.refresh_reminder = None;
+        for reference in copy.packs.iter_mut().chain(copy.active_pack.iter_mut()) {
+            reference.input_content_digest = None;
+            reference.pruned_at = None;
+            reference.cleanup_pending = false;
+        }
+        for run in &mut copy.discovery_runs {
+            run.pruned_at = None;
+            run.cleanup_pending = false;
+        }
         for work in &mut copy.pending_inventory {
             work.notified_revision = 0;
             work.deferred = false;
@@ -3024,6 +3397,99 @@ impl InventoryState {
             .map(|b| sha256_hex(&b))
             .map_err(|_| fail("Cannot serialize inventory evidence."))
     }
+    pub fn run_pack_claimants(
+        &self,
+        index: usize,
+    ) -> impl Iterator<Item = (usize, &PackReference)> {
+        let run = &self.discovery_runs[index];
+        self.packs.iter().enumerate().filter(|(_, reference)| {
+            reference.path == run.pack_path
+                || reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+        })
+    }
+
+    fn validate_prune_markers(&self) -> Result<(), Diagnostic> {
+        let check = |at: &Option<String>, pending: bool| {
+            if let Some(at) = at {
+                if self.schema_version != STATE_VERSION {
+                    return Err(fail("Pruned inventory history requires schema version 4."));
+                }
+                environment::parse_time(at)?;
+            } else if pending {
+                return Err(fail("Pending cleanup requires a pruning timestamp."));
+            }
+            Ok(())
+        };
+        let mut paths = BTreeMap::new();
+        let mut track = |path, marked| {
+            if paths
+                .insert(path, marked)
+                .is_some_and(|previous| previous != marked)
+            {
+                return Err(fail("Pruned and retained inventory paths overlap."));
+            }
+            Ok(())
+        };
+        let active = self.active_pack.as_ref();
+        if let Some(active) = active
+            && (active.pruned_at.is_some() || active.cleanup_pending)
+        {
+            return Err(fail("The active inventory snapshot cannot be pruned."));
+        }
+        let mut matched = BTreeSet::new();
+        for (index, run) in self.discovery_runs.iter().enumerate() {
+            check(&run.pruned_at, run.cleanup_pending)?;
+            let marked = run.pruned_at.is_some();
+            for path in [&run.state_path, &run.pack_path, &run.receipt_path] {
+                track(path, marked)?;
+            }
+            if !marked {
+                continue;
+            }
+            if active.is_some_and(|reference| {
+                reference.path == run.pack_path
+                    || reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+            }) || self.pending_inventory.iter().any(|work| {
+                work.resolution.is_none() && inventory_work_run_candidate(index, run, work)
+            }) {
+                return Err(fail(
+                    "Pruned discovery history is required by active inventory or pending work.",
+                ));
+            }
+            let mut claimants = self.run_pack_claimants(index);
+            match (run.status.as_str(), claimants.next()) {
+                ("complete", Some((pack_index, reference)))
+                    if claimants.next().is_none()
+                        && reference.path == run.pack_path
+                        && reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+                        && reference.pruned_at == run.pruned_at
+                        && reference.cleanup_pending == run.cleanup_pending
+                        && matched.insert(pack_index) => {}
+                ("superseded" | "failed", None) => {}
+                _ => {
+                    return Err(fail(
+                        "Pruned discovery history has inconsistent promotion references.",
+                    ));
+                }
+            }
+        }
+        for (index, reference) in self.packs.iter().enumerate() {
+            check(&reference.pruned_at, reference.cleanup_pending)?;
+            let marked = reference.pruned_at.is_some();
+            track(&reference.path, marked)?;
+            if marked
+                && (active.is_none_or(|active| {
+                    active.path == reference.path
+                        && active.content_digest == reference.content_digest
+                }) || !sha256_valid(&reference.content_digest)
+                    || (reference.discovery_run.is_some() && !matched.contains(&index)))
+            {
+                return Err(fail("Invalid pruned inventory snapshot reference."));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), Diagnostic> {
         if self.format != "cqlmatic-inventory-state"
             || !matches!(self.schema_version, 1..=STATE_VERSION)
@@ -3039,6 +3505,7 @@ impl InventoryState {
             return Err(fail("Invalid retained field-evidence schema version."));
         }
         self.validate_refresh()?;
+        self.validate_prune_markers()?;
         if self.schema_version < 4 && !self.capability_runs.is_empty() {
             return Err(fail(
                 "Legacy inventory states cannot attest capability checks.",
@@ -3067,6 +3534,17 @@ impl InventoryState {
             > 1
         {
             return Err(fail("Only one capability search may await termination."));
+        }
+        for reference in self.packs.iter().chain(self.active_pack.iter()) {
+            if let Some(digest) = &reference.input_content_digest
+                && (reference.discovery_run.is_some()
+                    || digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            {
+                return Err(fail("Invalid imported pack input_content_digest."));
+            }
         }
         if let Some(active) = &self.active_pack
             && !self
@@ -3184,10 +3662,165 @@ impl InventoryState {
             }
         }
         catalog(self)?;
+        let mut binding_keys: BTreeSet<_> = self
+            .sources
+            .iter()
+            .filter_map(|source| parser_binding_key(source.binding.as_ref()?))
+            .collect();
+        let active_ids: BTreeSet<_> = binding_keys.iter().map(|&(id, _)| id).collect();
+        let active_keys: BTreeSet<_> = self.active_parser_review_keys().collect();
+        let mut exclusion_ids = BTreeSet::new();
+        let mut exclusion_keys = BTreeSet::new();
         for exclusion in &self.parser_exclusions {
-            self.parser_version(&exclusion.parser_id, &exclusion.parser_sha256)?;
+            let (id, hash) = (
+                exclusion.parser_id.as_str(),
+                exclusion.parser_sha256.as_str(),
+            );
+            self.parser_version(id, hash)?;
+            if !exclusion_ids.insert(id) || active_ids.contains(id) {
+                return Err(fail(
+                    "A parser cannot have duplicate exclusions or be both actively bound and excluded.",
+                ));
+            }
+            exclusion_keys.insert((id, hash));
             environment::parse_time(&exclusion.reviewed_at)?;
             text(&exclusion.reason)?;
+        }
+        let mut carried = BTreeSet::new();
+        for carry in &self.carried_parser_reviews {
+            text(&carry.parser_id)?;
+            let key = (carry.parser_id.as_str(), carry.reviewed_sha256.as_str());
+            if !parser_digest_valid(&carry.reviewed_sha256)
+                || !parser_digest_valid(&carry.saved_sha256)
+                || carry.reviewed_sha256 == carry.saved_sha256
+                || !carried.insert(key)
+                || !active_keys.contains(&key)
+                || !self
+                    .parsers
+                    .iter()
+                    .any(|p| p.id == carry.parser_id && p.snapshot.sha256 == carry.saved_sha256)
+            {
+                return Err(fail(
+                    "A carried parser review must match an active review and its saved re-encoded definition.",
+                ));
+            }
+        }
+        let mut exclusion_positions = BTreeSet::new();
+        let exclusion_count = self.parser_exclusions.len()
+            + self
+                .suspended_parser_reviews
+                .iter()
+                .filter(|held| matches!(held, SuspendedParserReview::Exclusion { .. }))
+                .count();
+        let mut held_bindings = BTreeSet::new();
+        let mut held_exclusions = BTreeSet::new();
+        let mut held_resources = BTreeMap::new();
+        let mut saved_resources = BTreeMap::new();
+        let mut held_sources = BTreeSet::new();
+        for held in &self.suspended_parser_reviews {
+            let (parser_id, parser_sha256, resource_sha256) = match held {
+                SuspendedParserReview::Binding {
+                    source_id,
+                    resource_sha256,
+                    binding:
+                        ParserBinding::Parser {
+                            parser_id,
+                            parser_sha256,
+                            reviewed_at,
+                            evidence,
+                            semantics,
+                        },
+                } => {
+                    // One binding record per source: a held binding waits on a source with none.
+                    if !held_sources.insert(source_id)
+                        || self
+                            .sources
+                            .iter()
+                            .find(|s| &s.id == source_id)
+                            .is_none_or(|s| s.binding.is_some())
+                    {
+                        return Err(fail(
+                            "A suspended parser binding must belong to a saved source without an active binding.",
+                        ));
+                    }
+                    environment::parse_time(reviewed_at)?;
+                    text(evidence)?;
+                    let mut lines = BTreeSet::new();
+                    for semantic in semantics {
+                        text(&semantic.interpretation)?;
+                        text(&semantic.evidence)?;
+                        if semantic.line == 0 || !lines.insert(semantic.line) {
+                            return Err(fail(
+                                "Semantic review must refer to distinct pending parser lines.",
+                            ));
+                        }
+                    }
+                    binding_keys.insert((parser_id.as_str(), parser_sha256.as_str()));
+                    held_bindings.insert((parser_id.as_str(), resource_sha256.as_str()));
+                    (parser_id, parser_sha256, resource_sha256)
+                }
+                SuspendedParserReview::Binding { .. } => {
+                    return Err(fail("Only a parser binding can be suspended."));
+                }
+                SuspendedParserReview::Exclusion {
+                    resource_sha256,
+                    exclusion,
+                    position,
+                } => {
+                    let id = exclusion.parser_id.as_str();
+                    if !exclusion_ids.insert(id) {
+                        return Err(fail("A parser cannot have duplicate exclusions."));
+                    }
+                    if position.is_some_and(|position| {
+                        position >= exclusion_count || !exclusion_positions.insert(position)
+                    }) {
+                        return Err(fail("Invalid suspended parser exclusion position."));
+                    }
+                    exclusion_keys.insert((id, exclusion.parser_sha256.as_str()));
+                    held_exclusions.insert((id, resource_sha256.as_str()));
+                    environment::parse_time(&exclusion.reviewed_at)?;
+                    text(&exclusion.reason)?;
+                    (
+                        &exclusion.parser_id,
+                        &exclusion.parser_sha256,
+                        resource_sha256,
+                    )
+                }
+            };
+            text(parser_id)?;
+            if !saved_resources.contains_key(parser_id.as_str()) {
+                let digest = self
+                    .parsers
+                    .iter()
+                    .find(|parser| parser.id == *parser_id)
+                    .map(|parser| parser_resource_sha256(&parser.snapshot))
+                    .transpose()?;
+                saved_resources.insert(parser_id.as_str(), digest);
+            }
+            if !parser_digest_valid(parser_sha256)
+                || !parser_digest_valid(resource_sha256)
+                || self.parser_version(parser_id, parser_sha256).is_ok()
+                || saved_resources[parser_id.as_str()].as_ref() == Some(resource_sha256)
+            {
+                return Err(fail(
+                    "A suspended parser review must name a definition absent from the saved capture.",
+                ));
+            }
+            if held_resources
+                .insert((parser_id, parser_sha256), resource_sha256)
+                .is_some_and(|digest| digest != resource_sha256)
+            {
+                return Err(fail(
+                    "Suspended parser reviews disagree on the definition for the same reviewed bytes. Restore an intact inventory state from backup.",
+                ));
+            }
+        }
+        if !binding_keys.is_disjoint(&exclusion_keys)
+            || !held_bindings.is_disjoint(&held_exclusions)
+        {
+            return Err(fail(
+                "A parser definition cannot be both bound and excluded.",
+            ));
         }
         Ok(())
     }
@@ -3211,13 +3844,14 @@ impl InventoryState {
                 "Quick scouting requires an explicit host search budget of 1..600 seconds.",
             ));
         }
+        let environment = environment::normalize_identity(environment)?;
         self.validate_scout_environment(&environment)?;
         let plan = ScoutPlan {
             arguments: SearchArguments {
                 repository: self.scout_repository(&environment).into(),
                 query_string: SCOUT_QUERY.into(),
-                start,
-                end,
+                start: environment::normalize_request_time(&start)?,
+                end: environment::normalize_request_time(&end)?,
             },
             environment,
             query_sha256: sha256_hex(SCOUT_QUERY.as_bytes()),
@@ -3225,6 +3859,7 @@ impl InventoryState {
         };
         validate_scout_plan(&plan)?;
         self.scout_plan = Some(plan.clone());
+        self.scout_plan_pending = true;
         Ok(plan)
     }
     pub fn import_scout(
@@ -3298,6 +3933,7 @@ impl InventoryState {
                 && environment::parse_time(&scout.snapshot.retrieved_at)
                     .is_ok_and(|time| time == retrieval_time)
         }) {
+            self.scout_plan_pending = false;
             return Ok(());
         }
         let mut candidate = self.clone();
@@ -3325,6 +3961,7 @@ impl InventoryState {
             }
         }
         candidate.scouting.push(evidence);
+        candidate.scout_plan_pending = false;
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -3357,7 +3994,7 @@ impl InventoryState {
         expected: Vec<Scope>,
         now: &str,
     ) -> Result<(), Diagnostic> {
-        environment::validate_identity(&environment)?;
+        let mut environment = environment::normalize_identity(environment)?;
         text(&context)?;
         environment::parse_time(now)?;
         if self
@@ -3372,6 +4009,10 @@ impl InventoryState {
             return Err(fail(
                 "Confirmed environment must match existing scouting; use a new state to change it.",
             ));
+        }
+        if let Some(target) = &self.target {
+            // Preserve the spelling already bound to this inventory and its fingerprints.
+            environment = target.environment.clone();
         }
         if scope == TargetScope::SelectedSources && expected.is_empty() {
             return Err(fail(
@@ -3564,6 +4205,93 @@ impl InventoryState {
             .ok_or_else(|| self.source_selection_error(false))?;
         Ok(&mut self.sources[index])
     }
+    fn active_parser_review_keys(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.sources
+            .iter()
+            .filter_map(|source| parser_binding_key(source.binding.as_ref()?))
+            .chain(self.parser_exclusions.iter().map(|exclusion| {
+                (
+                    exclusion.parser_id.as_str(),
+                    exclusion.parser_sha256.as_str(),
+                )
+            }))
+    }
+
+    pub fn prune_unused_carried_parser_reviews(&mut self) {
+        let mut carries = std::mem::take(&mut self.carried_parser_reviews);
+        if !carries.is_empty() {
+            let used: BTreeSet<_> = self.active_parser_review_keys().collect();
+            carries.retain(|carry| {
+                used.contains(&(carry.parser_id.as_str(), carry.reviewed_sha256.as_str()))
+            });
+        }
+        self.carried_parser_reviews = carries;
+    }
+
+    /// Positions of active exclusions are the slots not occupied by suspended exclusions.
+    fn free_exclusion_positions(&self) -> impl Iterator<Item = usize> + use<> {
+        let held: BTreeSet<_> = self
+            .suspended_parser_reviews
+            .iter()
+            .filter_map(|review| match review {
+                SuspendedParserReview::Exclusion { position, .. } => *position,
+                _ => None,
+            })
+            .collect();
+        (0..).filter(move |position| !held.contains(position))
+    }
+
+    pub fn remove_parser_exclusion(&mut self, parser_id: &str) {
+        let mut removed = self
+            .parser_exclusions
+            .iter()
+            .zip(self.free_exclusion_positions())
+            .find_map(|(exclusion, position)| {
+                (exclusion.parser_id == parser_id).then_some(position)
+            });
+        self.parser_exclusions
+            .retain(|exclusion| exclusion.parser_id != parser_id);
+        self.suspended_parser_reviews.retain(|held| {
+            if let SuspendedParserReview::Exclusion {
+                exclusion,
+                position,
+                ..
+            } = held
+                && exclusion.parser_id == parser_id
+            {
+                removed = *position;
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(removed) = removed {
+            for held in &mut self.suspended_parser_reviews {
+                if let SuspendedParserReview::Exclusion {
+                    position: Some(position),
+                    ..
+                } = held
+                    && *position > removed
+                {
+                    *position -= 1;
+                }
+            }
+        }
+    }
+
+    /// An explicit binding replaces the source's binding, active or suspended.
+    pub fn set_binding(
+        &mut self,
+        source_id: &str,
+        binding: ParserBinding,
+    ) -> Result<(), Diagnostic> {
+        self.source_mut(source_id)?.binding = Some(binding);
+        self.suspended_parser_reviews.retain(|held| {
+            !matches!(held, SuspendedParserReview::Binding { source_id: id, .. } if id == source_id)
+        });
+        self.prune_unused_carried_parser_reviews();
+        Ok(())
+    }
 
     fn source_selection_error(&self, expected_only: bool) -> Diagnostic {
         let expected = self.sources.iter().filter(|source| source.expected);
@@ -3599,9 +4327,15 @@ impl InventoryState {
     }
 
     pub fn parser_version(&self, id: &str, hash: &str) -> Result<&ParserSnapshot, Diagnostic> {
+        // A carried review names the bytes it was made against; the saved re-encoding stands in.
+        let saved = self
+            .carried_parser_reviews
+            .iter()
+            .find(|c| c.parser_id == id && c.reviewed_sha256 == hash)
+            .map_or(hash, |c| c.saved_sha256.as_str());
         self.parsers
             .iter()
-            .find(|p| p.id == id && p.snapshot.sha256 == hash)
+            .find(|p| p.id == id && p.snapshot.sha256 == saved)
             .ok_or_else(|| {
                 fail("Binding must identify an exact saved parser ID and SHA-256 snapshot.")
             })
@@ -3646,34 +4380,168 @@ impl InventoryState {
         &mut self,
         pages: Vec<ParserPage>,
         parsers: Vec<ParserSnapshot>,
-    ) -> Result<(), Diagnostic> {
+    ) -> Result<ParserReviewCounts, Diagnostic> {
+        enum Review {
+            Binding(String, ParserBinding),
+            Exclusion(ParserExclusion, usize),
+        }
+        enum Standing {
+            Exact,
+            Carried(String),
+            Suspended(String),
+        }
+        fn suspended_key(review: &SuspendedParserReview) -> (u8, Option<usize>, &str) {
+            match review {
+                SuspendedParserReview::Binding { source_id, .. } => (0, None, source_id),
+                SuspendedParserReview::Exclusion {
+                    exclusion,
+                    position,
+                    ..
+                } => (1, *position, &exclusion.parser_id),
+            }
+        }
         let mut candidate = self.clone();
         candidate.parser_pages = pages;
         candidate.parsers = parsers;
-        // Snapshot changes deliberately invalidate old bindings and exclusions.
+        candidate.carried_parser_reviews.clear();
+        // Every parser binding and exclusion, active or suspended, settles against the new
+        // capture. A review keeps the exact hash it was made against and is never dropped.
+        let mut reviews = Vec::new();
         for source in &mut candidate.sources {
             if let Some(ParserBinding::Parser {
                 parser_id,
                 parser_sha256,
                 ..
             }) = &source.binding
-                && !candidate
-                    .parsers
-                    .iter()
-                    .any(|p| &p.id == parser_id && &p.snapshot.sha256 == parser_sha256)
             {
-                source.binding = None;
+                let key = (parser_id.clone(), parser_sha256.clone(), None);
+                let binding = source.binding.take().expect("parser binding");
+                reviews.push((key, Review::Binding(source.id.clone(), binding)));
             }
         }
-        candidate.parser_exclusions.retain(|e| {
-            candidate
-                .parsers
-                .iter()
-                .any(|p| p.id == e.parser_id && p.snapshot.sha256 == e.parser_sha256)
+        let mut positions = candidate.free_exclusion_positions();
+        for exclusion in std::mem::take(&mut candidate.parser_exclusions) {
+            let key = (
+                exclusion.parser_id.clone(),
+                exclusion.parser_sha256.clone(),
+                None,
+            );
+            reviews.push((key, Review::Exclusion(exclusion, positions.next().unwrap())));
+        }
+        for held in std::mem::take(&mut candidate.suspended_parser_reviews) {
+            reviews.push(match held {
+                SuspendedParserReview::Binding {
+                    source_id,
+                    resource_sha256,
+                    binding,
+                } => {
+                    let ParserBinding::Parser {
+                        parser_id,
+                        parser_sha256,
+                        ..
+                    } = &binding
+                    else {
+                        return Err(fail("Only a parser binding can be suspended."));
+                    };
+                    let key = (
+                        parser_id.clone(),
+                        parser_sha256.clone(),
+                        Some(resource_sha256),
+                    );
+                    (key, Review::Binding(source_id, binding))
+                }
+                SuspendedParserReview::Exclusion {
+                    resource_sha256,
+                    exclusion,
+                    position,
+                } => {
+                    let key = (
+                        exclusion.parser_id.clone(),
+                        exclusion.parser_sha256.clone(),
+                        Some(resource_sha256),
+                    );
+                    let position = position.unwrap_or_else(|| positions.next().unwrap());
+                    (key, Review::Exclusion(exclusion, position))
+                }
+            });
+        }
+        let mut counts = ParserReviewCounts::default();
+        let mut exclusions = Vec::new();
+        for ((parser_id, reviewed, held), review) in reviews {
+            let saved = candidate.parsers.iter().find(|p| p.id == parser_id);
+            let standing = match saved {
+                Some(p) if p.snapshot.sha256 == reviewed => Standing::Exact,
+                _ => {
+                    let resource = match &held {
+                        Some(resource) => resource.clone(),
+                        None => parser_resource_sha256(
+                            &self.parser_version(&parser_id, &reviewed)?.snapshot,
+                        )?,
+                    };
+                    match saved {
+                        Some(p) if parser_resource_sha256(&p.snapshot)? == resource => {
+                            Standing::Carried(p.snapshot.sha256.clone())
+                        }
+                        _ => Standing::Suspended(resource),
+                    }
+                }
+            };
+            match standing {
+                Standing::Suspended(resource_sha256) => {
+                    counts.suspended += 1;
+                    candidate.suspended_parser_reviews.push(match review {
+                        Review::Binding(source_id, binding) => SuspendedParserReview::Binding {
+                            source_id,
+                            resource_sha256,
+                            binding,
+                        },
+                        Review::Exclusion(exclusion, position) => {
+                            SuspendedParserReview::Exclusion {
+                                resource_sha256,
+                                exclusion,
+                                position: Some(position),
+                            }
+                        }
+                    });
+                    continue;
+                }
+                Standing::Carried(saved_sha256) => {
+                    counts.carried += 1;
+                    let carry = CarriedParserReview {
+                        parser_id,
+                        reviewed_sha256: reviewed,
+                        saved_sha256,
+                    };
+                    if !candidate.carried_parser_reviews.contains(&carry) {
+                        candidate.carried_parser_reviews.push(carry);
+                    }
+                }
+                Standing::Exact if held.is_some() => counts.restored += 1,
+                Standing::Exact => counts.kept += 1,
+            }
+            match review {
+                Review::Binding(source_id, binding) => {
+                    candidate.source_mut(&source_id)?.binding = Some(binding);
+                }
+                Review::Exclusion(exclusion, position) => exclusions.push((position, exclusion)),
+            }
+        }
+        exclusions.sort_unstable_by_key(|(position, _)| *position);
+        candidate.parser_exclusions = exclusions
+            .into_iter()
+            .map(|(_, exclusion)| exclusion)
+            .collect();
+        candidate.prune_unused_carried_parser_reviews();
+        // Reconciliation binds to the serialized reviews, regardless of which were suspended.
+        candidate.carried_parser_reviews.sort_unstable_by(|a, b| {
+            (&a.parser_id, &a.reviewed_sha256).cmp(&(&b.parser_id, &b.reviewed_sha256))
         });
+        candidate
+            .suspended_parser_reviews
+            .sort_unstable_by(|a, b| suspended_key(a).cmp(&suspended_key(b)));
         candidate.validate()?;
         *self = candidate;
-        Ok(())
+        Ok(counts)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn discovery_request(
@@ -3739,7 +4607,7 @@ impl InventoryState {
             }
         }
         discovery::validate_request(&request)?;
-        Ok(request)
+        request.normalize_inputs()
     }
 }
 
@@ -4081,61 +4949,205 @@ fn catalog(state: &InventoryState) -> Result<(bool, BTreeSet<String>), Diagnosti
     Ok((complete, ids))
 }
 
-pub fn parse_parser(id: &str, snapshot: RawSnapshot) -> Result<ParserSnapshot, Diagnostic> {
-    let value: Value = serde_json::from_slice(&snapshot.bytes()?)
-        .map_err(|_| fail("Native parser response must be JSON."))?;
-    if value
-        .get("errors")
-        .is_some_and(|e| !e.is_null() && e.as_array().is_none_or(|a| !a.is_empty()))
-    {
+fn parser_digest_valid(hash: &str) -> bool {
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn parser_binding_key(binding: &ParserBinding) -> Option<(&str, &str)> {
+    match binding {
+        ParserBinding::Parser {
+            parser_id,
+            parser_sha256,
+            ..
+        } => Some((parser_id, parser_sha256)),
+        ParserBinding::NotApplicable { .. } => None,
+    }
+}
+
+type RawJsonObject<'a> = BTreeMap<String, &'a RawValue>;
+
+fn parser_resource(raw: &[u8]) -> Result<&RawValue, Diagnostic> {
+    let envelope: RawJsonObject<'_> = serde_json::from_slice(raw)
+        .map_err(|_| fail("Native parser response must be a JSON object."))?;
+    if envelope.get("errors").is_some_and(|errors| {
+        errors.get() != "null"
+            && !serde_json::from_str::<Vec<&RawValue>>(errors.get())
+                .is_ok_and(|items| items.is_empty())
+    }) {
         return Err(fail("Native parser response returned errors."));
     }
-    let resources = value
+    let resources: Vec<&RawValue> = envelope
         .get("resources")
-        .and_then(Value::as_array)
+        .and_then(|resources| serde_json::from_str(resources.get()).ok())
         .ok_or_else(|| fail("Native parser detail requires resources."))?;
-    if resources.len() != 1 {
-        return Err(fail(
+    match resources.as_slice() {
+        [resource] => Ok(resource),
+        _ => Err(fail(
             "Each parser detail capture must contain exactly one resource.",
-        ));
+        )),
     }
-    let parser = &resources[0];
-    if parser.get("id").and_then(Value::as_str) != Some(id) {
+}
+
+pub fn parse_parser(id: &str, snapshot: RawSnapshot) -> Result<ParserSnapshot, Diagnostic> {
+    let raw = snapshot.bytes()?;
+    let resource = parser_resource(&raw)?;
+    let parser: RawJsonObject<'_> = serde_json::from_str(resource.get())
+        .map_err(|_| fail("Native parser resource must be a JSON object."))?;
+    let string = |field| {
+        parser
+            .get(field)
+            .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+    };
+    if string("id").as_deref() != Some(id) {
         return Err(fail(
             "Parser detail ID differs from the explicitly requested catalog ID.",
         ));
     }
-    let name = parser
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or(id)
-        .to_owned();
-    let script = parser
-        .get("script")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            fail("Native parser resource needs a script string; unsupported shapes remain pending.")
-        })?;
-    let mut tags = vec![];
-    if let Some(value) = parser.get("fields_to_tag") {
-        for tag in value
-            .as_array()
-            .ok_or_else(|| fail("fields_to_tag must be an array of field names."))?
-        {
-            tags.push(
-                tag.as_str()
-                    .ok_or_else(|| fail("fields_to_tag entries must be strings."))?
-                    .to_owned(),
-            );
-        }
-    }
-    let declarations = extract_declarations(script, &tags)?;
+    let name = string("name").unwrap_or_else(|| id.into());
+    let script = string("script").ok_or_else(|| {
+        fail("Native parser resource needs a script string; unsupported shapes remain pending.")
+    })?;
+    let tags: Vec<String> = parser
+        .get("fields_to_tag")
+        .map(|raw| {
+            serde_json::from_str(raw.get())
+                .map_err(|_| fail("fields_to_tag must be an array of field names."))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let declarations = extract_declarations(&script, &tags)?;
+    // Check the entire resource now, including strings and nesting in unknown fields.
+    canonical_parser_resource(resource)?;
     Ok(ParserSnapshot {
         id: id.into(),
         name,
         snapshot,
         declarations,
     })
+}
+
+/// SHA-256 of the exact parsed resource, excluding formatting and envelope metadata.
+fn parser_resource_sha256(snapshot: &RawSnapshot) -> Result<String, Diagnostic> {
+    let raw = snapshot.bytes()?;
+    let canonical = canonical_parser_resource(parser_resource(&raw)?)?;
+    Ok(sha256_hex(canonical.as_bytes()))
+}
+
+fn canonical_parser_resource(resource: &RawValue) -> Result<String, Diagnostic> {
+    let mut canonical = String::new();
+    canonical_parser_json(resource, &mut canonical, 0)?;
+    Ok(canonical)
+}
+
+// Borrow the original tokens at each level so no number is decoded through a float.
+fn canonical_parser_json(
+    raw: &RawValue,
+    output: &mut String,
+    depth: usize,
+) -> Result<(), Diagnostic> {
+    if depth >= 128 {
+        return Err(fail(
+            "Native parser resource exceeds the JSON nesting limit.",
+        ));
+    }
+    let invalid = |_| fail("Invalid JSON in the native parser resource.");
+    let json = raw.get();
+    match json.as_bytes()[0] {
+        b'{' => {
+            let fields: RawJsonObject<'_> = serde_json::from_str(json).map_err(invalid)?;
+            output.push('{');
+            for (index, (key, value)) in fields.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(&serde_json::to_string(&key).map_err(invalid)?);
+                output.push(':');
+                canonical_parser_json(value, output, depth + 1)?;
+            }
+            output.push('}');
+        }
+        b'[' => {
+            let values: Vec<&RawValue> = serde_json::from_str(json).map_err(invalid)?;
+            output.push('[');
+            for (index, value) in values.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                canonical_parser_json(value, output, depth + 1)?;
+            }
+            output.push(']');
+        }
+        b'"' => {
+            let value: String = serde_json::from_str(json).map_err(invalid)?;
+            output.push_str(&serde_json::to_string(&value).map_err(invalid)?);
+        }
+        b'-' | b'0'..=b'9' => canonical_parser_number(json, output),
+        _ => output.push_str(json), // true, false and null already have one spelling.
+    }
+    Ok(())
+}
+
+// Each nonzero number has one signed coefficient with no leading or trailing zeros
+// and one power of ten. Never expand the exponent into zero padding.
+fn canonical_parser_number(token: &str, output: &mut String) {
+    let (mantissa, exponent) = token.split_once(['e', 'E']).unwrap_or((token, "0"));
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.trim_start_matches('-');
+    let fraction_len = mantissa
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len());
+    let digits = mantissa.replace('.', "");
+    let coefficient = digits.trim_matches('0');
+    if coefficient.is_empty() {
+        output.push('0');
+        return;
+    }
+    let zeros = digits.len() - digits.trim_end_matches('0').len();
+    let power = offset_decimal_exponent(exponent, zeros as i64 - fraction_len as i64);
+    if negative {
+        output.push('-');
+    }
+    output.push_str(coefficient);
+    if power != "0" {
+        output.push('e');
+        output.push_str(&power);
+    }
+}
+
+fn offset_decimal_exponent(exponent: &str, offset: i64) -> String {
+    let negative = exponent.starts_with('-');
+    let digits = exponent
+        .trim_start_matches(['+', '-'])
+        .trim_start_matches('0');
+    if digits.is_empty() {
+        return offset.to_string();
+    }
+    // The shift is bounded by the capture size, even when the exponent is much larger.
+    if let Ok(magnitude) = digits.parse::<i64>() {
+        let signed = if negative { -magnitude } else { magnitude };
+        return (i128::from(signed) + i128::from(offset)).to_string();
+    }
+    let mut carry = if negative { -offset } else { offset };
+    let mut result = Vec::with_capacity(digits.len() + 2);
+    for digit in digits.bytes().rev() {
+        let sum = i64::from(digit - b'0') + carry;
+        result.push(b'0' + sum.rem_euclid(10) as u8);
+        carry = sum.div_euclid(10);
+    }
+    if carry > 0 {
+        result.push(b'0' + carry as u8);
+    }
+    while result.last() == Some(&b'0') {
+        result.pop();
+    }
+    if negative {
+        result.push(b'-');
+    }
+    result.reverse();
+    String::from_utf8(result).expect("decimal digits and sign are ASCII")
 }
 
 /// Conservative lexical extraction. Conditional and unsupported lines need explicit review.
@@ -4230,6 +5242,18 @@ fn mask_literals(line: &str) -> String {
     result
 }
 
+impl InventoryState {
+    /// Whether the saved plan is eligible for import under the current target and mode.
+    pub fn scout_plan_matches_target_and_mode(&self) -> bool {
+        self.scout_plan.as_ref().is_some_and(|plan| {
+            // State validation checks the plan itself. Import also checks these current-state rules.
+            self.validate_scout_environment(&plan.environment).is_ok()
+                && plan.arguments.repository == self.scout_repository(&plan.environment)
+                && (self.discovery_mode != DiscoveryMode::Quick || plan.max_seconds.is_some())
+        })
+    }
+}
+
 pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus, Diagnostic> {
     assess_inner(state, packs, true)
 }
@@ -4252,7 +5276,7 @@ pub fn verify_packs<'a>(
     if state
         .packs
         .iter()
-        .any(|r| !verified_packs.contains_key(&r.content_digest))
+        .any(|r| r.pruned_at.is_none() && !verified_packs.contains_key(&r.content_digest))
     {
         return Err(fail(
             "A referenced pack is missing or its digest changed; import the new snapshot explicitly.",
@@ -4330,6 +5354,7 @@ fn assess_inner(
     let scoped_complete = !expected_sources.is_empty()
         && expected_sources.iter().all(|s| s.status == Progress::Done)
         && reconciliation == Progress::Done;
+    let (_, full_census_qualifies) = full_census(state);
     let complete = state.discovery_mode == DiscoveryMode::Full
         && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
         && state.active_pack.is_some()
@@ -4338,6 +5363,7 @@ fn assess_inner(
             .scouting
             .iter()
             .any(|s| s.plan.arguments.repository == "search-all")
+        && full_census_qualifies
         && catalog_complete
         && unclassified.is_empty()
         && sources.iter().all(|s| s.expected)
@@ -4347,66 +5373,36 @@ fn assess_inner(
             .all(|w| w.resolution.is_some() || !w.new_source && w.source_types.is_empty())
         && scoped_complete
         && reconciliation == Progress::Done;
-    let mut next_actions = Vec::new();
-    if state.capability_blocked() {
-        next_actions.push("A capability search has unresolved termination. Submit exact settlement before dispatching any further inventory search.".into());
-    } else if state.active_pack.is_some() && state.capability_runs.is_empty() {
-        next_actions.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
-    }
-    if state
-        .refresh_attempts
-        .iter()
-        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
-    {
-        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
-    }
-    let prepared = state
-        .refresh_attempts
-        .iter()
-        .find(|a| a.phase == RefreshPhase::Prepared);
-    if prepared.is_some_and(|attempt| attempt.automatic) {
-        next_actions.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started before preparing explicit manual refresh.".into());
-    }
-    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
-        next_actions.push(format!("A manual refresh is prepared for recorded host session {:?}; dispatch only from that exact verified session.", attempt.session_id));
-    }
-    if target.is_none() {
-        next_actions.push("Confirm CID, cloud, searchable view, target scope and context.".into());
-    }
-    if scout != Progress::Done && state.discovery_mode == DiscoveryMode::Full {
-        next_actions.push("Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result.".into());
-    }
-    if !catalog_complete && state.discovery_mode == DiscoveryMode::Full {
-        next_actions.push("Complete the native parser catalog and retrieve each exact parser ID; API credentials stay in the supplied protected file.".into());
-    }
-    if !unclassified.is_empty() {
-        next_actions.push("Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence.".into());
-    }
-    if target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
-        && sources.iter().any(|s| !s.expected)
-    {
-        next_actions.push("Confirm the known source selectors within the target scope before completing a full environment map.".into());
-    }
-    if target.is_some_and(|t| t.scope == TargetScope::SelectedSources) {
-        next_actions
-            .push("Selected-source coverage cannot establish a full environment map.".into());
-    }
-    if reconciliation != Progress::Done {
-        next_actions.push(
-            "Reconcile after completing the applicable source measurements and parser reviews."
-                .into(),
-        );
-    }
     let pending_inventory: Vec<_> = state
         .pending_inventory
         .iter()
         .filter(|w| w.resolution.is_none())
         .cloned()
         .collect();
-    if !pending_inventory.is_empty() {
-        next_actions.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
-    }
-    Ok(InventoryStatus {
+    let open =
+        |is_open: fn(&SourceStatus) -> bool| expected_sources.iter().filter(|s| is_open(s)).count();
+    let completion_detail = CompletionDetail {
+        evidence_reviewed_at: state
+            .reconciled_at
+            .clone()
+            .filter(|_| reconciliation == Progress::Done),
+        reconciliation_meaning: "reconciliation done means a review of the current evidence fingerprint is recorded. It is not a completion claim; read full_map_complete, selected_scope_complete or quick_scope_complete for completion.".into(),
+        expected_sources_open: OpenSourceCounts {
+            interpretation_review: open(|s| s.interpretation != Progress::Done),
+            parser_review_or_binding: open(|s| {
+                !matches!(s.parser, Progress::Done | Progress::NotApplicable)
+            }),
+            measurements: open(|s| s.measurements != Progress::Done),
+        },
+        parser_catalog_captured: catalog_complete,
+        scout_awaiting_capture: state.scout_awaiting_capture(),
+        latest_census: state.scouting.last().map(|s| CensusSize {
+            rows: s.rows,
+            at_row_ceiling: s.rows >= 10_000,
+        }),
+        next_action: None,
+    };
+    let mut status = InventoryStatus {
         schema_version: 1,
         blank_canvas: target.is_none()
             && state.scouting.is_empty()
@@ -4486,6 +5482,7 @@ fn assess_inner(
         scouting: scout,
         parser_catalog,
         reconciliation,
+        completion_detail: Some(completion_detail),
         parser_count: state.parsers.len(),
         parser_page_count: state.parser_pages.len(),
         parsers: state
@@ -4513,14 +5510,250 @@ fn assess_inner(
             })
             .collect(),
         unclassified_parser_ids: unclassified,
+        suspended_parser_reviews: state.suspended_parser_reviews.clone(),
+        suspended_parser_exclusions: Some(
+            state
+                .suspended_parser_reviews
+                .iter()
+                .filter(|review| matches!(review, SuspendedParserReview::Exclusion { .. }))
+                .count(),
+        )
+        .filter(|&count| count > 0),
+        carried_parser_reviews: state.carried_parser_reviews.clone(),
         sources,
         discovery_runs: state.discovery_runs.clone(),
         parser_runs: state.parser_runs.clone(),
         failures: state.failures.clone(),
-        next_actions,
+        next_actions: vec![],
         covered_queries_usable: true,
         active_pack: state.active_pack.clone(),
-    })
+        retained_run_blocker: None,
+    };
+    advise(state, &mut status, None);
+    Ok(status)
+}
+
+/// The saved search-all censuses, oldest first, and whether any of them qualifies.
+fn full_census(state: &InventoryState) -> (Vec<&ScoutEvidence>, bool) {
+    let census: Vec<_> = state
+        .scouting
+        .iter()
+        .filter(|s| s.plan.arguments.repository == "search-all")
+        .collect();
+    // The refresh freshness check decides whether a census is a complete, uncapped capture.
+    let qualifies = census.iter().any(|s| {
+        s.snapshot
+            .bytes()
+            .is_ok_and(|raw| refresh_rows(&raw, s.snapshot.extended_result_framing).is_ok())
+    });
+    (census, qualifies)
+}
+
+/// Sets the next steps that status and reconcile share. Steps come in one order: the target,
+/// then blockers, then the work the confirmed mode and scope require. While a blocker is open
+/// only blockers are listed, so no step prepares or runs another search. Steps are fixed text;
+/// notes with recorded detail follow them.
+pub fn advise(state: &InventoryState, status: &mut InventoryStatus, retained: Option<RetainedRun>) {
+    let quick = state.discovery_mode == DiscoveryMode::Quick;
+    let scope = state.target.as_ref().map(|t| t.scope);
+    let selected_full = !quick && scope == Some(TargetScope::SelectedSources);
+    // Source review and parser work are Full discovery steps.
+    let full = if quick { "Full discovery: " } else { "" };
+    // A complete selected scope leaves only optional work towards a full-environment map.
+    let optional_map = selected_full && status.selected_scope_complete;
+    let (census, census_qualifies) = full_census(state);
+    status.retained_run_blocker = retained;
+    let detail = status
+        .completion_detail
+        .as_ref()
+        .expect("assessed status carries its completion detail");
+    let open = &detail.expected_sources_open;
+    let selected_work_done = open.measurements == 0
+        && open.interpretation_review == 0
+        && open.parser_review_or_binding == 0;
+    // Once the selected sources need only reconciliation, catalog and census work is optional.
+    let map = if selected_full && (status.selected_scope_complete || selected_work_done) {
+        "Full-environment map: "
+    } else {
+        full
+    };
+    let prepared = state
+        .refresh_attempts
+        .iter()
+        .find(|a| a.phase == RefreshPhase::Prepared);
+    let unresolved = state
+        .refresh_attempts
+        .iter()
+        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved));
+
+    let mut steps: Vec<String> = Vec::new();
+    if state.target.is_none() {
+        steps.push("Use confirm-target to record the CID, cloud, searchable view, target scope and context before continuing inventory work.".into());
+    } else if quick && scope == Some(TargetScope::FullEnvironment) {
+        steps.push("Quick discovery covers selected sources only. Use confirm-target with scope selected-sources before Quick discovery, or set-discovery-mode full to keep the full-environment target.".into());
+    }
+    if state.capability_blocked() {
+        steps.push("A capability search has unresolved termination. Use submit-capability with exact settlement for that attempt before another inventory search.".into());
+    }
+    if unresolved {
+        steps.push("Refresh search termination is unresolved. Use settle-refresh for the exact attempt with safe settlement before another search; full status says which termination to record.".into());
+    }
+    if prepared.is_some_and(|attempt| attempt.automatic) {
+        steps.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started with settle-refresh before preparing explicit manual refresh.".into());
+    } else if prepared.is_some() {
+        steps.push("A manual refresh is prepared and reserved. Dispatch it only from that exact verified session, or use settle-refresh with not-started after confirming it never ran.".into());
+    }
+    match retained {
+        Some(RetainedRun::Settle(index)) => steps.push(format!("Discovery run_index {index} must be continued or paused before another search. Use discovery-step with run_index {index} for its saved answer, or pause-discovery with run_index {index} and settle any outstanding attempt.")),
+        Some(RetainedRun::Unreadable(index)) => steps.push(format!("The checkpoint of discovery run_index {index} is missing or cannot be read, so the run cannot be continued or paused. Restore that file at the state_path shown in full status, then reconcile again.")),
+        Some(RetainedRun::ProducerMismatch(index)) => steps.push(format!("The checkpoint of discovery run_index {index} was written by a different CQLmatic release, so this executable cannot continue or pause it. Preserve the inventory and checkpoint files and settle the run with its producing release before another search.")),
+        None => {}
+    }
+    // A pending scout is only advised when nothing above blocks another search.
+    if steps.is_empty() && detail.scout_awaiting_capture {
+        steps.push(if !state.scout_plan_matches_target_and_mode() {
+            format!(
+                "{}Use prepare-scout for the confirmed target and current mode, with a finite host budget in Quick.",
+                if optional_map { "Full-environment map: " } else { "" }
+            )
+        } else if optional_map {
+            "Full-environment map: Import any saved response with import-scout. The selected scope is complete, so running this census is optional; run the exact plan once only with authorization and a finite host budget.".into()
+        } else {
+            "Import any saved response with import-scout first. Otherwise confirm whether the search already ran. If it did not, get authorization and run the exact plan once with a finite host budget.".into()
+        });
+    }
+    let blocked = !steps.is_empty();
+    if !blocked {
+        if open.measurements > 0 {
+            steps.push("Expected sources need measurements. Resume a paused run with resume-discovery or use prepare-discovery, then relay with next-probe.".into());
+        }
+        let review = format!(
+            "{full}Expected sources still need interpretation review. Record each with review-source, then reconcile again."
+        );
+        let parser = format!(
+            "{full}Use parser-not-applicable for a supported native source. For others, import any missing parser evidence and use bind-parser with the required line reviews."
+        );
+        let catalog = format!(
+            "{map}Capture the native parser catalog: save its complete pages and exact parser details with import-parsers, or use fetch-parsers with API credentials in the supplied protected file."
+        );
+        let unclassified = format!(
+            "{map}Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence."
+        );
+        let reconcile =
+            "Reconcile after completing the applicable source measurements and parser reviews.";
+        let reconciled = status.reconciliation == Progress::Done;
+        if quick || selected_full {
+            // The confirmed mode and scope require these; reconcile follows them.
+            if !quick && open.interpretation_review > 0 {
+                steps.push(review.clone());
+            }
+            if !quick && open.parser_review_or_binding > 0 {
+                steps.push(parser.clone());
+            }
+            if !reconciled {
+                steps.push(reconcile.into());
+            }
+            // Broader work that the confirmed mode and scope do not require.
+            if quick && open.interpretation_review > 0 {
+                steps.push(review);
+            }
+            if !detail.parser_catalog_captured {
+                steps.push(catalog);
+            }
+            if quick && open.parser_review_or_binding > 0 {
+                steps.push(parser);
+            }
+            if !status.unclassified_parser_ids.is_empty() {
+                steps.push(unclassified);
+            }
+        } else {
+            if open.interpretation_review > 0 {
+                steps.push(review);
+            }
+            if !census_qualifies {
+                let reason = match census.last() {
+                    None => {
+                        "A full-environment map needs a search-all census, and none is saved. Use prepare-scout, relay the emitted census through the existing CrowdStrike MCP and import its entire response with import-scout."
+                    }
+                    Some(latest) if latest.rows >= 10_000 => {
+                        "The latest saved search-all census reached the 10,000-row ceiling. Use prepare-scout over a shorter window and import its entire response with import-scout."
+                    }
+                    Some(_) => {
+                        "The latest saved search-all census rows did not pass census validation. Use prepare-scout for a fresh capture and import its entire response with import-scout."
+                    }
+                };
+                steps.push(format!(
+                    "{reason} full_map_complete stays false until a census qualifies."
+                ));
+            } else if status.sources.is_empty() {
+                steps.push("A full-environment map needs at least one source. Use confirm-target with the expected sources, or capture a non-empty search-all census with prepare-scout and import-scout; full_map_complete stays false until a source is measured.".into());
+            }
+            if !detail.parser_catalog_captured {
+                steps.push(catalog);
+            }
+            if open.parser_review_or_binding > 0 {
+                steps.push(parser);
+            }
+            if !status.unclassified_parser_ids.is_empty() {
+                steps.push(unclassified);
+            }
+            if status.sources.iter().any(|s| !s.expected) {
+                steps.push("Use confirm-target to confirm the known source selectors within the target scope before completing a full environment map.".into());
+            }
+            if !reconciled {
+                steps.push(reconcile.into());
+            }
+        }
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if !state.suspended_parser_reviews.is_empty() {
+        notes.push(SUSPENDED_PARSER_REVIEWS.into());
+    }
+    if unresolved {
+        notes.push("Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
+    }
+    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
+        notes.push(format!(
+            "The prepared manual refresh belongs to recorded host session {:?}.",
+            attempt.session_id
+        ));
+    }
+    if !blocked && state.active_pack.is_some() && state.capability_runs.is_empty() {
+        notes.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
+    }
+    if !blocked && selected_full && status.scouting != Progress::Done {
+        notes.push(format!("{map}Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result."));
+    }
+    if scope == Some(TargetScope::SelectedSources) {
+        notes.push("Selected-source coverage cannot establish a full environment map.".into());
+    }
+    if state
+        .pending_inventory
+        .iter()
+        .any(|w| w.resolution.is_none())
+    {
+        notes.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
+    }
+    if status
+        .refresh_reminder
+        .as_ref()
+        .is_some_and(|reminder| reminder.due)
+    {
+        notes.push(
+            if blocked {
+                "Inventory refresh is due. Settle the blocking item above before running an explicit manual refresh, or choose Remind me in 30 days; acknowledgement does not complete refresh."
+            } else {
+                "Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."
+            }
+            .into(),
+        );
+    }
+    if let Some(detail) = status.completion_detail.as_mut() {
+        detail.next_action = steps.first().cloned();
+    }
+    steps.extend(notes);
+    status.next_actions = steps;
 }
 
 pub fn assess_at(
@@ -4545,7 +5778,7 @@ pub fn assess_at_options(
         .is_some_and(|reminder| reminder.due)
     {
         status.settings_attention = true;
-        status.next_actions.push("Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh.".into());
+        advise(state, &mut status, None);
     }
     Ok(status)
 }
@@ -4559,6 +5792,7 @@ fn assess_source(
     let mut fields = BTreeMap::<String, FieldStatus>::new();
     let mut record_kinds = Vec::new();
     let mut observed_source = false;
+    let mut retained_restrictions = None;
     let mut parser_status = Progress::Pending;
     if let Some(binding) = &source.binding {
         match binding {
@@ -4628,6 +5862,27 @@ fn assess_source(
         else {
             continue;
         };
+        if let Some(selectors) = pack_source.selectors.as_ref() {
+            let mut merged = environment::Selectors {
+                repo: source.selectors.repo.clone(),
+                type_: source.selectors.type_.clone(),
+                sourcetype: retained_restrictions
+                    .as_ref()
+                    .and_then(|r: &SourceRestrictions| r.sourcetype.clone())
+                    .or_else(|| selectors.sourcetype.clone()),
+                event_family: retained_restrictions
+                    .as_ref()
+                    .and_then(|r: &SourceRestrictions| r.event_family.clone())
+                    .or_else(|| selectors.event_family.clone()),
+            };
+            if merged.sourcetype.is_some() || merged.event_family.is_some() {
+                retained_restrictions = Some(SourceRestrictions {
+                    discovery_compatible: environment::discovery_compatible_restrictions(&merged),
+                    sourcetype: merged.sourcetype.take(),
+                    event_family: merged.event_family.take(),
+                });
+            }
+        }
         observed_source = pack_source
             .evidence
             .as_ref()
@@ -4677,6 +5932,7 @@ fn assess_source(
                 .any(|v| v["field_id"] == field.id && v["evidence_kind"] == "observed")
             {
                 entry.values = Progress::Done;
+                entry.values_saved = true;
             }
         }
     }
@@ -4781,6 +6037,11 @@ fn assess_source(
             "Resolve the explicit parser binding and all pending parser semantics.".into()
         });
     }
+    if state.suspended_parser_reviews.iter().any(|held| {
+        matches!(held, SuspendedParserReview::Binding { source_id, .. } if source_id == &source.id)
+    }) {
+        next_actions.push(SUSPENDED_SOURCE_BINDING.into());
+    }
     if !measured {
         next_actions.push("Complete a finite discovery run for this source; imported pack history alone is unknown.".into());
     }
@@ -4794,6 +6055,7 @@ fn assess_source(
         source_id: source.id.clone(),
         expected: source.expected,
         selectors: source.selectors.clone(),
+        retained_restrictions,
         scouted_events: source.scouted_events,
         review: source.review.clone(),
         binding: source.binding.clone(),
@@ -5065,6 +6327,7 @@ fn field_entry<'a>(
         status: Progress::Unknown,
         values: Progress::NotApplicable,
         values_requested: false,
+        values_saved: false,
         evidence_dates: vec![],
         not_reobserved: false,
     })

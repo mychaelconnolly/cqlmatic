@@ -3,7 +3,7 @@ use crate::{
     contracts::*,
     environment::{self, Pack, PackData, ParserContract, Selectors},
     language::{ast::quote, plan},
-    network::{CANCELLED, JobPolicy, JobReceipt, SearchBackend, run_job},
+    network::{CANCELLED, JobPolicy, JobReceipt, SearchBackend, run_job_with_bounds},
     sha256_hex,
 };
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,14 @@ pub struct DiscoverRequest {
     pub max_queries: u32,
     #[serde(default = "time_budget")]
     pub max_seconds: u64,
+}
+impl DiscoverRequest {
+    pub fn normalize_inputs(mut self) -> Result<Self, Diagnostic> {
+        self.environment = environment::normalize_identity(self.environment)?;
+        self.start = environment::normalize_request_time(&self.start)?;
+        self.end = environment::normalize_request_time(&self.end)?;
+        Ok(self)
+    }
 }
 fn query_budget() -> u32 {
     200
@@ -196,13 +204,14 @@ pub fn validate_request(r: &DiscoverRequest) -> Result<(), Diagnostic> {
         return Err(fail("Unsupported discovery request version."));
     }
     environment::validate_identity(&r.environment)?;
-    let start = environment::parse_time(&r.start)?;
-    let end = environment::parse_time(&r.end)?;
-    if !r.start.ends_with('Z')
-        || !r.end.ends_with('Z')
-        || start >= end
-        || end - start > time::Duration::days(7)
-    {
+    let start = environment::exact_time_key(&r.start)?;
+    let end = environment::exact_time_key(&r.end)?;
+    let limit = (
+        start.0 + time::Duration::days(7).whole_seconds(),
+        start.1,
+        start.2,
+    );
+    if start >= end || end > limit {
         return Err(fail(
             "Use increasing absolute UTC windows of at most seven days.",
         ));
@@ -336,6 +345,7 @@ fn probe(
         } else {
             start
         }),
+        // New requests have UTC bounds. Retained checkpoints may use an older UTC spelling.
         end: r.end.clone(),
         fields,
         field,
@@ -377,6 +387,8 @@ pub fn quiet_census_query(s: &Scope) -> Result<Option<String>, Diagnostic> {
 }
 pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     validate_request(r)?;
+    let normalized = r.clone().normalize_inputs()?;
+    let r = &normalized;
     // The census answers first, then every source's volume, matching execution.
     let probes = if r.census {
         vec![census_probe(r)?]
@@ -1098,7 +1110,7 @@ pub fn frontier(
     r: &DiscoverRequest,
     answered: &BTreeMap<String, Vec<Value>>,
 ) -> Result<Vec<Probe>, Diagnostic> {
-    frontier_with_policy(r, answered, true)
+    frontier_with_policy(&r.clone().normalize_inputs()?, answered, true)
 }
 
 /// Sources whose accepted volume answer is zero, in request order. Only the exact volume probe
@@ -1348,7 +1360,7 @@ impl<B: SearchBackend> Run<'_, B> {
             .deadline
             .saturating_duration_since(Instant::now())
             .min(Duration::from_secs(180));
-        let receipt = run_job(
+        let receipt = run_job_with_bounds(
             self.backend,
             &self.request.environment.view,
             &probe.query,
@@ -1358,6 +1370,7 @@ impl<B: SearchBackend> Run<'_, B> {
                 timeout,
                 ..JobPolicy::default()
             },
+            false,
         );
         let capture = self.report.captures.push_mut(Capture {
             probe,
@@ -1738,7 +1751,20 @@ pub fn execute_with_origin(
     origin: Origin,
     remaining: Duration,
 ) -> (Option<Pack>, DiscoverReport) {
-    execute_with_policy(request, backend, origin, remaining, true)
+    match request.clone().normalize_inputs() {
+        Ok(request) => execute_with_policy(&request, backend, origin, remaining, true),
+        Err(diagnostic) => (
+            None,
+            DiscoverReport {
+                schema_version: 1,
+                environment: request.environment.clone(),
+                status: "error".into(),
+                active_pack_updated: false,
+                captures: vec![],
+                diagnostics: vec![diagnostic],
+            },
+        ),
+    }
 }
 
 pub(crate) fn execute_with_policy(
