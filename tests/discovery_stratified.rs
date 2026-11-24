@@ -164,10 +164,10 @@ fn execute(request: &DiscoverRequest, scenario: &Scenario) -> (Pack, Vec<Probe>)
     assert_eq!(backend.emitted.len(), backend.stops);
     assert_eq!(backend.emitted.len(), probes.len());
     // Every completed scenario stays within the range stated before its first search.
-    let (low, high) = discovery::expected_searches(request).unwrap();
+    let expected = discovery::expected_searches(request).unwrap();
     assert!(
-        low as usize <= probes.len() && probes.len() <= high.unwrap() as usize,
-        "{low}..{high:?} does not hold {} searches",
+        expected.low as usize <= probes.len() && probes.len() <= expected.high as usize,
+        "{expected:?} does not hold {} searches",
         probes.len()
     );
     (candidate.unwrap(), probes)
@@ -787,14 +787,11 @@ fn api_and_mcp_emit_identical_stratified_probes_and_population_rates() {
     let mut output = mcp::init(r.clone(), &state, &pack_path, &receipt).unwrap();
     let mut relayed = BTreeSet::new();
     let mut rounds = 0;
-    let (low, high) = discovery::expected_searches(&r).unwrap();
+    let expected = discovery::expected_searches(&r).unwrap();
     assert_eq!(output.cost.searches.used, 0);
     assert_eq!(output.cost.searches.ready, output.probes.len());
-    assert_eq!(output.cost.searches.expected_low, Some(low));
-    assert_eq!(
-        output.cost.searches.expected_high,
-        Some(high.unwrap().min(r.max_queries))
-    );
+    assert_eq!(output.cost.searches.expected_low, Some(expected.low));
+    assert_eq!(output.cost.searches.expected_high, Some(expected.high));
     assert_eq!(output.cost.searches.limit, r.max_queries);
     assert_eq!(output.cost.answer_bytes, Some(0));
     let mut answer_bytes = 0;
@@ -827,7 +824,7 @@ fn api_and_mcp_emit_identical_stratified_probes_and_population_rates() {
         assert_eq!(output.cost.answer_bytes, Some(answer_bytes));
     }
     assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
-    assert!((low as usize..=high.unwrap() as usize).contains(&relayed.len()));
+    assert!((expected.low as usize..=expected.high as usize).contains(&relayed.len()));
     let relayed_pack = storage::read_pack(&pack_path).unwrap();
     let (_, answers) = scenario.graph(&r);
     let mut backend = Backend::new(answers);
@@ -909,30 +906,31 @@ fn malformed_facets_budgets_and_timeouts_leave_the_active_pack_untouched() {
 #[test]
 fn expected_searches_follow_the_request_shape() {
     let capped = request();
-    // Three base searches, one tag batch and one population chunk at least.
-    let (low, high) = discovery::expected_searches(&capped).unwrap();
-    assert_eq!(low, 5);
-    assert!(high.unwrap() > low);
+    // Three base searches and one tag batch at least; at most five facets, ten rare-kind
+    // listings and 128 fields over the full window after a fallback listing.
+    let expected = discovery::expected_searches(&capped).unwrap();
+    assert_eq!(
+        (expected.low, expected.minimum_all_live, expected.high),
+        (4, 4, 27)
+    );
     let plan = discovery::initial_plan(&capped).unwrap();
     assert_eq!(
         plan["searches"],
-        json!({"expected_low":low,"expected_high":high.unwrap().min(capped.max_queries),"limit":capped.max_queries})
+        json!({"expected_low":4,"minimum_all_live":4,"expected_high":27,"limit":capped.max_queries,"below_expected_high":false})
     );
     let mut two = capped.clone();
     two.sources
         .push(serde_json::from_value(json!({"repo":"second"})).unwrap());
-    let (two_low, two_high) = discovery::expected_searches(&two).unwrap();
-    assert_eq!((two_low, two_high.unwrap()), (2 * low, 2 * high.unwrap()));
+    let two = discovery::expected_searches(&two).unwrap();
+    assert_eq!((two.low, two.minimum_all_live, two.high), (5, 8, 54));
     let mut valued = capped.clone();
     valued.value_fields = vec!["user".into()];
-    assert_eq!(discovery::expected_searches(&valued).unwrap().0, low + 1);
-    // An uncapped field run measures every field it finds, so it has no upper figure.
+    assert_eq!(discovery::expected_searches(&valued).unwrap().low, 5);
+    // An uncapped field run measures at most 4000 listed fields.
     let mut uncapped = capped.clone();
     uncapped.max_population_fields_per_source = None;
-    assert_eq!(
-        discovery::expected_searches(&uncapped).unwrap(),
-        (low, None)
-    );
+    let full = discovery::expected_searches(&uncapped).unwrap();
+    assert_eq!((full.low, full.high), (4, 210));
     // A census names its own sources.
     let mut census = uncapped.clone();
     census.census = true;
@@ -955,8 +953,13 @@ fn expected_searches_follow_the_request_shape() {
         "max_seconds":120
     }))
     .unwrap();
+    let sources_only = discovery::expected_searches(&sources_only).unwrap();
     assert_eq!(
-        discovery::expected_searches(&sources_only).unwrap(),
-        (2, Some(2))
+        (
+            sources_only.low,
+            sources_only.minimum_all_live,
+            sources_only.high
+        ),
+        (2, 2, 2)
     );
 }

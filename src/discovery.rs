@@ -42,6 +42,8 @@ const TAG_CANDIDATES: [&str; 9] = [
     "#event.kind",
 ];
 const MAX_FIELDS_PER_SOURCE: usize = 4000;
+const MAX_SOURCES: usize = 100;
+const MAX_QUERIES: u32 = 1000;
 const POPULATION_CHUNK: usize = 20;
 const KIND_FACET_LIMIT: usize = 50;
 const RARE_KIND_EVENTS: u64 = 50_000;
@@ -323,6 +325,19 @@ fn scope(s: &Scope) -> Result<String, Diagnostic> {
     })?
     .render())
 }
+/// The type of a source whose selector lowers `#type` to literal text equality, so that every
+/// event the source holds has that type. A type lowered to an anchored regular expression keeps
+/// its own facet.
+fn literal_type(s: &Scope) -> Result<Option<&str>, Diagnostic> {
+    let Some(value) = s.type_.as_deref() else {
+        return Ok(None);
+    };
+    let lowered = scope(&Scope {
+        type_: Some(value.into()),
+        ..Scope::default()
+    })?;
+    Ok((lowered == format!("#type = {}", quote(value))).then_some(value))
+}
 fn probe(
     r: &DiscoverRequest,
     s: &Scope,
@@ -395,8 +410,58 @@ pub fn quiet_census_query(s: &Scope) -> Result<Option<String>, Diagnostic> {
     };
     scoped_query(&repository, &facet_suffix("#type", 25)).map(Some)
 }
+/// Refuse more selected sources than one discovery run measures.
+pub fn check_source_count(r: &DiscoverRequest) -> Result<(), Diagnostic> {
+    if r.sources.len() > MAX_SOURCES {
+        return Err(fail(
+            "More than 100 sources require an explicitly narrowed discovery run.",
+        ));
+    }
+    Ok(())
+}
+/// Admission of a new run against one reading of the clock: the window has ended, the pack it
+/// would extend was not created later than now, and the query limit covers every selected source
+/// completing live. Activation still requires a candidate created after its predecessor.
+pub fn admit(
+    r: &DiscoverRequest,
+    predecessor_created_at: Option<&str>,
+    now: &str,
+) -> Result<(), Diagnostic> {
+    let clock = environment::parse_time(now)?;
+    if environment::parse_time(&r.end)? > clock {
+        return Err(fail(&format!(
+            "The discovery window ends at {}, after the current time {now}. Choose an end at or before the current time.",
+            r.end
+        )));
+    }
+    if let Some(created_at) = predecessor_created_at
+        && environment::parse_time(created_at)? > clock
+    {
+        return Err(fail(&format!(
+            "The active pack was created at {created_at}, after the current time {now}, so no new discovery pack can follow it yet. Prepare discovery after that time."
+        )));
+    }
+    if let Some(expected) = expected_searches(r)
+        && expected.minimum_all_live > MAX_QUERIES
+    {
+        return Err(fail(&format!(
+            "The {} searches needed when every selected source has events exceed the {MAX_QUERIES}-query ceiling. Select fewer sources or population fields.",
+            expected.minimum_all_live
+        )));
+    }
+    if let Some(expected) = expected_searches(r)
+        && r.max_queries < expected.minimum_all_live
+    {
+        return Err(fail(&format!(
+            "The query limit {} is below the {} searches needed when every selected source has events. Set max_queries to at least {}.",
+            r.max_queries, expected.minimum_all_live, expected.minimum_all_live
+        )));
+    }
+    Ok(())
+}
 pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     validate_request(r)?;
+    check_source_count(r)?;
     // The census answers first, then every source's volume, matching execution.
     let probes = if r.census {
         vec![census_probe(r)?]
@@ -446,12 +511,9 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
                 json!("volume checks for requested sources after the census"),
             );
     }
-    if let Some((low, high)) = expected_searches(r) {
-        // An estimate for sources that hold events; the query limit always applies.
-        result["searches"] = json!({"expected_low":low.min(r.max_queries),"limit":r.max_queries});
-        if let Some(high) = high {
-            result["searches"]["expected_high"] = json!(high.min(r.max_queries));
-        }
+    if let Some(expected) = expected_searches(r) {
+        // The query limit always applies; below the high figure a run can exhaust it.
+        result["searches"] = json!({"expected_low":expected.low,"minimum_all_live":expected.minimum_all_live,"expected_high":expected.high,"limit":r.max_queries,"below_expected_high":r.max_queries < expected.high});
     }
     if r.depth.is_full() {
         result["deferred_stages"].as_array_mut().expect("stages are an array").push(json!("one source-bound full-window fieldset fallback when positive source volume has an empty recent sample; affected population, tag and value probes use that full window"));
@@ -617,12 +679,9 @@ fn tag_counts(
     }
     Ok(Some(counts))
 }
-fn record_kind_probes(
-    r: &DiscoverRequest,
-    s: &Scope,
-    fields: &[String],
-    tags: &Counts,
-) -> Result<Vec<Probe>, Diagnostic> {
+/// Record-kind candidates the run measures: listed by the source or positive in its tag batch. A
+/// capped run takes its dataset facet from the base measurement.
+fn eligible_kinds<'a>(r: &'a DiscoverRequest, fields: &[String], tags: &Counts) -> Vec<&'a str> {
     record_kind_candidates(r)
         .into_iter()
         .filter(|field| r.max_population_fields_per_source.is_none() || *field != "#event.dataset")
@@ -630,16 +689,86 @@ fn record_kind_probes(
             fields.iter().any(|name| name == field)
                 || tags.get(*field).is_some_and(|(count, _)| *count > 0)
         })
-        .map(|field| {
-            probe(
-                r,
-                s,
-                "record-kind-facet",
-                &facet_suffix(field, KIND_FACET_LIMIT),
-                false,
-                vec![],
-                Some(field.into()),
-            )
+        .collect()
+}
+fn kind_probe(r: &DiscoverRequest, s: &Scope, field: &str) -> Result<Probe, Diagnostic> {
+    probe(
+        r,
+        s,
+        "record-kind-facet",
+        &facet_suffix(field, KIND_FACET_LIMIT),
+        false,
+        vec![],
+        Some(field.into()),
+    )
+}
+/// A record-kind facet that the base measurements over the request window already answer
+/// exactly, with no search of its own: the single type of a literal type selector, counted by
+/// the source volume, and a Full `#event.dataset` facet whose complete dataset listing has fewer
+/// rows than the facet limit, ordered as the facet search orders it.
+fn base_facet(
+    r: &DiscoverRequest,
+    s: &Scope,
+    field: &str,
+    answered: &BTreeMap<String, Vec<Value>>,
+) -> Result<Option<KindFacet>, Diagnostic> {
+    let id = |p: &Probe| probe_id(&r.environment.view, p);
+    if field == "#type"
+        && let Some(value) = literal_type(s)?
+    {
+        // Every facet follows the answered volume of its source.
+        let events = count_row(&answered[&id(&volume_probe(r, s)?)])?;
+        return Ok(Some(KindFacet {
+            field: field.into(),
+            values: vec![(value.into(), events)],
+            truncated: false,
+        }));
+    }
+    if field == "#event.dataset" && r.max_population_fields_per_source.is_none() {
+        let rows = &answered[&id(&base_probes(r, s)?[1])];
+        if rows.len() < KIND_FACET_LIMIT {
+            let mut facet = kind_facet(rows, field, None)?;
+            facet
+                .values
+                .sort_by(|(a, n), (b, m)| m.cmp(n).then_with(|| a.cmp(b)));
+            return Ok(Some(facet));
+        }
+    }
+    Ok(None)
+}
+fn record_kind_probes(
+    r: &DiscoverRequest,
+    s: &Scope,
+    fields: &[String],
+    tags: &Counts,
+    answered: &BTreeMap<String, Vec<Value>>,
+) -> Result<Vec<Probe>, Diagnostic> {
+    let mut probes = Vec::new();
+    for field in eligible_kinds(r, fields, tags) {
+        if base_facet(r, s, field, answered)?.is_none() {
+            probes.push(kind_probe(r, s, field)?);
+        }
+    }
+    Ok(probes)
+}
+/// Every measured record-kind facet in candidate order, from the base measurements or from the
+/// answer to its own search.
+fn kind_facets(
+    r: &DiscoverRequest,
+    s: &Scope,
+    fields: &[String],
+    tags: &Counts,
+    answered: &BTreeMap<String, Vec<Value>>,
+) -> Result<Vec<KindFacet>, Diagnostic> {
+    eligible_kinds(r, fields, tags)
+        .into_iter()
+        .map(|field| match base_facet(r, s, field, answered)? {
+            Some(facet) => Ok(facet),
+            None => kind_facet(
+                &answered[&probe_id(&r.environment.view, &kind_probe(r, s, field)?)],
+                field,
+                Some(KIND_FACET_LIMIT),
+            ),
         })
         .collect()
 }
@@ -852,6 +981,30 @@ fn field_captures_for(
         .filter(|capture| &capture.probe.source == source && capture.probe.kind == "population")
         .flat_map(|capture| capture.probe.fields.iter().map(String::as_str))
         .collect();
+    // A literal type selector's volume stands for the `#type` facet the run did not search for,
+    // where that facet was measured: listed by the source or positive in its tag batch.
+    let type_from_volume = current_plan
+        && literal_type(source)?.is_some()
+        && captures
+            .iter()
+            .filter(|capture| &capture.probe.source == source)
+            .map(|capture| {
+                Ok(match capture.probe.kind.as_str() {
+                    "fieldset" => capture
+                        .receipt
+                        .events
+                        .iter()
+                        .any(|row| fieldset_name(row) == Some("#type")),
+                    "tag-batch" => {
+                        let mut counts = BTreeMap::new();
+                        population_counts(&capture.probe, &capture.receipt.events, &mut counts)?;
+                        counts.get("#type").is_some_and(|(count, _)| *count > 0)
+                    }
+                    _ => false,
+                })
+            })
+            .collect::<Result<Vec<_>, Diagnostic>>()?
+            .contains(&true);
     let mut seen_by_key: BTreeMap<(String, CaptureOrderingKey), (bool, Option<f64>)> =
         BTreeMap::new();
     let mut result = FieldCaptures::new();
@@ -878,6 +1031,7 @@ fn field_captures_for(
                     })
                     .collect::<Vec<_>>()
             }
+            "volume" if type_from_volume => vec![("#type".into(), count_row(rows)? > 0, None)],
             "tag-detect" => vec![(
                 format!(
                     "#{}",
@@ -1115,23 +1269,15 @@ fn stratified_source(
         tag_window: Some(window(r, !full_window)?),
         ..SourceMeasurements::default()
     };
-    let kinds = record_kind_probes(r, s, sampled, &measured.tags)?;
+    let kinds = record_kind_probes(r, s, sampled, &measured.tags, answered)?;
     let pending = unanswered(r, &kinds, answered);
     if !pending.is_empty() {
         return Ok(SourceProgress::Pending(pending));
     }
-    let mut facets = BTreeMap::new();
-    for p in kinds {
-        let field = p.field.as_deref().expect("kind probe has a field");
-        facets.insert(
-            field.to_string(),
-            kind_facet(
-                &answered[&probe_id(&r.environment.view, &p)],
-                field,
-                Some(KIND_FACET_LIMIT),
-            )?,
-        );
-    }
+    let mut facets = kind_facets(r, s, sampled, &measured.tags, answered)?
+        .into_iter()
+        .map(|facet| (facet.field.clone(), facet))
+        .collect::<BTreeMap<_, _>>();
     facets.insert(
         "#event.dataset".into(),
         kind_facet(dataset_rows, "#event.dataset", None)?,
@@ -1235,19 +1381,148 @@ fn stratified_source(
     reuse_tag_counts(r, &mut measured)?;
     Ok(SourceProgress::Complete(Box::new(measured)))
 }
-/// Expected searches for a run whose sources hold events, counted with the builders the
-/// frontier uses: the fewest, and the most when that can be stated before the first answers.
-/// A census names its own sources, so it has no figure; an uncapped field run measures every
-/// field it finds, so it has no upper figure.
-pub fn expected_searches(r: &DiscoverRequest) -> Option<(u32, Option<u32>)> {
-    expected_searches_for_plan(r, false)
+/// Search counts stated before the first answer, counted with the builders execution uses. A
+/// quiet source costs its volume search alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpectedSearches {
+    /// The fewest searches of a run that activates: one source live on its cheapest path, every
+    /// other source quiet.
+    pub low: u32,
+    /// The fewest searches with which every selected source completes live; `prepare-discovery`
+    /// refuses a smaller query limit.
+    pub minimum_all_live: u32,
+    /// The most searches any run of the request can take, whatever the limit.
+    pub high: u32,
 }
-/// The same figures for a checkpoint of the earlier plan, which counted each tag candidate in its
-/// own search. Only the tag term differs; the earlier graph is not executed.
-pub(crate) fn expected_searches_for_plan(
-    r: &DiscoverRequest,
-    earlier_plan: bool,
-) -> Option<(u32, Option<u32>)> {
+/// A census names its own sources, so it has no figures.
+pub fn expected_searches(r: &DiscoverRequest) -> Option<ExpectedSearches> {
+    if r.census || r.sources.is_empty() {
+        return None;
+    }
+    let (mut cheapest, mut all_live, mut high) = (usize::MAX, 0, 0);
+    for s in &r.sources {
+        let (low, most) = live_source_searches(r, s).ok()?;
+        cheapest = cheapest.min(low);
+        all_live += low;
+        high += most;
+    }
+    let count = |searches: usize| u32::try_from(searches).unwrap_or(u32::MAX);
+    Some(ExpectedSearches {
+        low: count(r.sources.len() - 1 + cheapest),
+        minimum_all_live: count(all_live),
+        high: count(high),
+    })
+}
+/// The cheapest and the most expensive successful path of one source with events. Every branch
+/// is counted on one path: a fieldset fallback puts every field on the full window, a facet is
+/// counted only when a successful run can issue it, and rare-kind listings only when a
+/// discriminator can legally hold several values.
+fn live_source_searches(r: &DiscoverRequest, s: &Scope) -> Result<(usize, usize), Diagnostic> {
+    if r.depth == DiscoveryDepth::SourcesOnly {
+        return Ok((1, 1));
+    }
+    let tags = tag_probes(r, s, false)?;
+    let fixed = base_probes(r, s)?.len() + tags.len() + r.value_fields.len();
+    let tagged: BTreeSet<&str> = tags
+        .iter()
+        .flat_map(|p| p.fields.iter().map(String::as_str))
+        .collect();
+    // Over a window longer than the sample window, a listed field and an unlisted one are counted
+    // over different windows, and an empty sample listing takes the full-window fallback.
+    let split = window(r, true)? != window(r, false)?;
+    let chunks = |fields: usize| fields.div_ceil(POPULATION_CHUNK);
+    let singleton = literal_type(s)?.is_some();
+    let capped = r.max_population_fields_per_source;
+    let selection = field_selection(r, s);
+    // Candidates whose facet is a search of its own whenever it is measured.
+    let facets: Vec<&str> = record_kind_candidates(r)
+        .into_iter()
+        .filter(|field| capped.is_none() || *field != "#event.dataset")
+        .filter(|field| !(singleton && *field == "#type"))
+        .collect();
+    // A capped run fails when an observed requested kind or value field is left out.
+    let mandatory: BTreeSet<&str> = r
+        .kind_fields
+        .iter()
+        .chain(&r.value_fields)
+        .map(String::as_str)
+        .collect();
+    let legal = |field: &str| match (capped, selection) {
+        (Some(_), Some(selected)) => {
+            !mandatory.contains(field) || selected.iter().any(|name| name == field)
+        }
+        _ => true,
+    };
+    let most_facets = match (capped, selection) {
+        (Some(cap), None) => {
+            let required = facets.iter().filter(|f| mandatory.contains(**f)).count();
+            facets.len() - required + required.min(cap)
+        }
+        _ => facets.iter().filter(|field| legal(field)).count(),
+    };
+    let rare = if capped.is_some()
+        && record_kind_candidates(r)
+            .into_iter()
+            .any(|field| !(singleton && field == "#type") && legal(field))
+    {
+        RARE_KIND_LIMIT
+    } else {
+        0
+    };
+    let (fewest, most) = match selection {
+        // The listing decides the fields: one tag listed alone costs nothing more, and the
+        // fallback listing puts the most fields on one window at one more search.
+        None => (
+            0,
+            usize::from(split) + chunks(capped.unwrap_or(MAX_FIELDS_PER_SOURCE)),
+        ),
+        Some(selected) => {
+            let (tags, plain): (Vec<&String>, Vec<&String>) = selected
+                .iter()
+                .partition(|field| tagged.contains(field.as_str()));
+            if split {
+                // A tag listed in the sample window reuses its batch count; an unlisted one is
+                // counted again over the full window, and so is a plain field.
+                let fallback = 1 + chunks(plain.len());
+                let most = (0..=plain.len())
+                    .map(|listed| chunks(listed) + chunks(plain.len() - listed + tags.len()))
+                    .max()
+                    .unwrap_or(0);
+                // A listed kind candidate takes its facet; left unlisted it is counted over the
+                // full window instead. A capped run's dataset facet and a Full one with a short
+                // dataset listing come from the base measurement.
+                let kinds = tags
+                    .iter()
+                    .filter(|field| {
+                        facets.contains(&field.as_str()) && field.as_str() != "#event.dataset"
+                    })
+                    .count();
+                let plain_kinds = plain
+                    .iter()
+                    .filter(|field| facets.contains(&field.as_str()))
+                    .count();
+                let others = plain.len() - plain_kinds;
+                let fewest = (0..=others)
+                    .flat_map(|listed| {
+                        (0..=kinds).map(move |faceted| {
+                            faceted
+                                + chunks(listed)
+                                + chunks(others - listed + plain_kinds + kinds - faceted)
+                        })
+                    })
+                    .min()
+                    .unwrap_or(0);
+                (fewest.min(fallback), most.max(fallback))
+            } else {
+                (chunks(plain.len()), chunks(plain.len()))
+            }
+        }
+    };
+    Ok((fixed + fewest, fixed + most_facets + rare + most))
+}
+/// The figures of a checkpoint of the earlier plan, which counted each tag candidate in its own
+/// search. The earlier graph is not executed.
+pub(crate) fn earlier_plan_searches(r: &DiscoverRequest) -> Option<(u32, Option<u32>)> {
     if r.census {
         return None;
     }
@@ -1258,12 +1533,11 @@ pub(crate) fn expected_searches_for_plan(
             high = high.map(|high| high + 1);
             continue;
         }
-        let tags = tag_probes(r, s, false).ok()?;
-        let tag_searches = if earlier_plan {
-            tags.iter().map(|p| p.fields.len()).sum()
-        } else {
-            tags.len()
-        };
+        let tag_searches = tag_probes(r, s, false)
+            .ok()?
+            .iter()
+            .map(|p| p.fields.len())
+            .sum::<usize>();
         let fixed = base_probes(r, s).ok()?.len() + tag_searches + r.value_fields.len();
         // Fields are measured in chunks, over the sample window, the whole window or both.
         let selected = field_selection(r, s).map(|fields| fields.len().max(1));
@@ -1440,7 +1714,7 @@ pub(crate) fn frontier_with_policy(
         measured.tag_window = Some(window(r, !full_window)?);
         let pop_probes = selected_population_probes(r, s, &measured)?;
         let mut dependent = pop_probes.clone();
-        dependent.extend(record_kind_probes(r, s, &fields, &measured.tags)?);
+        dependent.extend(record_kind_probes(r, s, &fields, &measured.tags, answered)?);
         if unanswered(r, &pop_probes, answered).is_empty() {
             dependent.extend(value_probes(r, s, full_window)?);
         }
@@ -1623,12 +1897,13 @@ impl<B: SearchBackend> Run<'_, B> {
         }
         reuse_tag_counts(self.request, &mut measured)?;
         let sampled = measured.fieldset_seen.iter().cloned().collect::<Vec<_>>();
-        for p in record_kind_probes(self.request, source, &sampled, &measured.tags)? {
-            let field = p.field.clone().expect("kind probe has a field");
+        for p in record_kind_probes(self.request, source, &sampled, &measured.tags, &answered)? {
+            let id = probe_id(&self.request.environment.view, &p);
             let rows = self.execute(p)?;
-            measured
-                .record_kinds
-                .push(kind_facet(&rows, &field, Some(KIND_FACET_LIMIT))?.metadata());
+            answered.insert(id, rows);
+        }
+        for facet in kind_facets(self.request, source, &sampled, &measured.tags, &answered)? {
+            measured.record_kinds.push(facet.metadata());
         }
         Ok(measured)
     }

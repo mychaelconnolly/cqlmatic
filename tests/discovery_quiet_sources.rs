@@ -1366,20 +1366,22 @@ fn quiet_sources_cost_one_search_each() {
     assert_eq!(sources(&paused), sources(&straight));
     assert_eq!(sources(&paused), [json!(id("bravo"))]);
 
-    // A budget spent on the zero activates nothing.
+    // A limit below one volume search per source is refused before any search.
     let dir = Temp::new();
     confirm(&dir, Depth::SourcesOnly, &["alpha", "bravo"]);
-    prepare(&dir, 1, &[], &[]);
-    let run = drive(&dir, &World::new(&[("alpha", 0), ("bravo", 4)]), None);
-    assert_eq!(run.searches, ["alpha:volume"]);
-    let saved = last_run(&dir);
-    assert_eq!(saved["status"], "failed");
-    assert_eq!(saved["quiet_source_ids"], json!([id("alpha")]));
-    assert!(dir.saved()["active_pack"].is_null());
-    assert_eq!(
-        source_status(&status(&dir), &id("alpha"))["quiet"]["events"],
-        0
+    let before = dir.bytes();
+    let refusal = refused(
+        &dir,
+        json!({"kind":"prepare-discovery","start":START,"end":END,"max_queries":1,"max_seconds":600}),
     );
+    assert!(
+        refusal["message"]
+            .as_str()
+            .unwrap()
+            .contains("Set max_queries to at least 2."),
+        "{refusal}"
+    );
+    assert_eq!(dir.bytes(), before);
 }
 
 #[test]

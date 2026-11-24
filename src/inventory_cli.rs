@@ -347,6 +347,29 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ("DISCOVERY_EVIDENCE", "Use increasing absolute UTC windows of at most seven days.") => {
             "The discovery window is invalid."
         }
+        (
+            "DISCOVERY_EVIDENCE",
+            "More than 100 sources require an explicitly narrowed discovery run.",
+        ) => "More than 100 sources are selected.",
+        ("DISCOVERY_EVIDENCE", msg) if msg.starts_with("The discovery window ends at ") => {
+            "The discovery window ends after the current time."
+        }
+        ("DISCOVERY_EVIDENCE", msg) if msg.starts_with("The active pack was created at ") => {
+            "The active pack was created after the current time."
+        }
+        ("DISCOVERY_EVIDENCE", msg)
+            if msg.contains(
+                " searches needed when every selected source has events exceed the 1000-query ceiling.",
+            ) =>
+        {
+            "The searches needed when every selected source has events exceed the query ceiling."
+        }
+        ("DISCOVERY_EVIDENCE", msg)
+            if msg.starts_with("The query limit ")
+                && msg.contains(" searches needed when every selected source has events.") =>
+        {
+            "The query limit is below the searches needed when every selected source has events."
+        }
         ("PACK_TIME", _) => "A timestamp is invalid.",
         ("PACK_BUSY", _) => "Another writer holds the selected file.",
         ("LOCAL_IO", msg) if msg.starts_with("Cannot inspect input: ") => {
@@ -2136,6 +2159,9 @@ fn apply_locked_options(
                     "Reconcile the unresolved refresh before resuming discovery.",
                 ));
             }
+        }
+        admit_discovery(&state, &action, &now)?;
+        if !relay_guards.is_empty() {
             for (index, relay) in relay_guards.iter().enumerate() {
                 mcp::bind_inventory_owner(relay, writer)
                     .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
@@ -2528,10 +2554,20 @@ fn action_brief(action: &Value) -> Value {
     // The cost figures are counts, so they fit the brief budget whatever else the action holds.
     let cost = &action["relay"]["cost"];
     let mut searches = serde_json::Map::new();
-    for key in ["used", "ready", "expected_low", "expected_high", "limit"] {
+    for key in [
+        "used",
+        "ready",
+        "expected_low",
+        "minimum_all_live",
+        "expected_high",
+        "limit",
+    ] {
         if let Some(count) = cost["searches"][key].as_u64() {
             searches.insert(key.into(), json!(count));
         }
+    }
+    if let Some(below) = cost["searches"]["below_expected_high"].as_bool() {
+        searches.insert("below_expected_high".into(), json!(below));
     }
     if !searches.is_empty() {
         compact["cost"] = json!({"searches":searches});
@@ -3187,6 +3223,51 @@ fn preflight_foreign_run(
     Ok(earlier_ended)
 }
 
+/// Refuse a new discovery run before anything is written: no checkpoint owner binding, run
+/// folder, staged pack or inventory change.
+fn admit_discovery(
+    state: &InventoryState,
+    action: &InventoryAction,
+    now: &str,
+) -> Result<(), Diagnostic> {
+    let InventoryAction::PrepareDiscovery {
+        start,
+        end,
+        source_ids,
+        value_fields,
+        kind_fields,
+        population_fields,
+        max_queries,
+        max_seconds,
+    } = action
+    else {
+        return Ok(());
+    };
+    if state.refresh_blocked() {
+        return Err(fail(
+            "Reconcile the unresolved refresh before preparing a new discovery run.",
+        ));
+    }
+    let request = state.discovery_request(
+        start.clone(),
+        end.clone(),
+        source_ids,
+        value_fields.clone(),
+        kind_fields.clone(),
+        population_fields.clone(),
+        *max_queries,
+        *max_seconds,
+    )?;
+    discovery::check_source_count(&request)?;
+    check_retained_searches(state, Some(&request), None, now)?;
+    let predecessor = cumulative_pack(state)?;
+    discovery::admit(
+        &request,
+        predecessor.as_ref().map(|pack| pack.created_at.as_str()),
+        now,
+    )
+}
+
 fn check_retained_searches(
     state: &InventoryState,
     request: Option<&discovery::DiscoverRequest>,
@@ -3791,11 +3872,7 @@ fn apply(
             max_queries,
             max_seconds,
         } => {
-            if state.refresh_blocked() {
-                return Err(fail(
-                    "Reconcile the unresolved refresh before preparing a new discovery run.",
-                ));
-            }
+            // Admitted by the read-only preflight before any owner binding.
             let request = state.discovery_request(
                 start,
                 end,
@@ -3806,7 +3883,6 @@ fn apply(
                 max_queries,
                 max_seconds,
             )?;
-            check_retained_searches(state, Some(&request), None, now)?;
             let prior = cumulative_pack(state)?;
             let run_dir = snapshot_directory(path, "discovery", state.discovery_runs.len() + 1)?;
             let relay = run_dir.join("relay-state.json");

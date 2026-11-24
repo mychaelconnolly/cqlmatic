@@ -623,11 +623,12 @@ fn native_and_relay_share_facet_order_with_positive_tag_and_listed_field() {
     network::CANCELLED.store(false, Ordering::Relaxed);
     let sources = ["one"];
     let mut r = request(&sources, "2026-01-01T01:00:00Z", false);
-    r.kind_fields = vec!["#type".into()];
+    // The literal type selector's volume answers #type, so a positive module tag takes the facet.
+    r.kind_fields = vec!["#event.module".into()];
     let mut world = World::live(&sources);
     world.recent.insert("one".into(), vec!["event.kind".into()]);
     world.full.insert("one".into(), vec!["event.kind".into()]);
-    world.tags.insert(("one".into(), "type".into()), 5);
+    world.tags.insert(("one".into(), "event.module".into()), 5);
 
     let (relayed, failure) = relay(&r, &world);
     assert!(failure.is_none(), "{failure:?}");
@@ -637,7 +638,7 @@ fn native_and_relay_share_facet_order_with_positive_tag_and_listed_field() {
         .filter(|probe| probe.kind == "record-kind-facet")
         .filter_map(|probe| probe.field.as_deref())
         .collect();
-    assert_eq!(facet_fields, ["#type", "event.kind"]);
+    assert_eq!(facet_fields, ["#event.module", "event.kind"]);
 
     // Resumable MCP relay completes in exact frontier order.
     let run = Native::new(&r);
