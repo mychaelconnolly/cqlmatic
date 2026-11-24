@@ -25,7 +25,7 @@ const POPULATION: &str = include_str!("../examples/mcp/population.json");
 const VALUE: &str = include_str!("../examples/mcp/value.json");
 const KIND: &str = include_str!("../examples/mcp/kind.json");
 const SIMPLE_NAME: &str = include_str!("../examples/mcp/simple-name.json");
-const ZERO: &str = r#"{"result":[{"events":"0"}]}"#;
+const TAGS: &str = include_str!("../examples/mcp/tags.json");
 
 struct Temp(PathBuf);
 impl Temp {
@@ -55,8 +55,7 @@ fn fixture(kind: &str, field: Option<&str>) -> &'static str {
     match kind {
         "census" => CENSUS,
         "volume" => COUNT,
-        "tag-detect" if field == Some("event_simpleName") => COUNT,
-        "tag-detect" => ZERO,
+        "tag-batch" => TAGS,
         "dataset-facet" => DATASET,
         "fieldset" => FIELDSET,
         "population" => POPULATION,
@@ -177,11 +176,11 @@ fn census_discovery_finishes_in_five_batches() {
     let mut rounds = 0;
     while output.status == "needs-probes" {
         rounds += 1;
-        assert!(rounds <= 5);
+        assert!(rounds <= 6);
         output = answer_batch(dir.path(), &state, &output);
     }
-    // Census, volumes, listings, dependent measurements, then kind facets and values.
-    assert_eq!(rounds, 5);
+    // Census, volumes, listings, the tag batch, dependent measurements, then values.
+    assert_eq!(rounds, 6);
     assert_eq!(output.status, "complete", "{:?}", output.diagnostics);
     assert_eq!(storage::read_pack(&pack).unwrap().data.sources.len(), 1);
 }
@@ -271,26 +270,30 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
         batches += 1;
         assert!(batches <= 5);
         if batches == 3 {
-            assert!(initial.probes.iter().any(|probe| {
-                probe["kind"] == "record-kind-facet" && probe["field"] == "#type"
-            }));
+            // The tag batch answers alone, before population and the kind facets it gates.
+            assert!(
+                initial
+                    .probes
+                    .iter()
+                    .all(|probe| probe["kind"] == "tag-batch"),
+                "{:?}",
+                initial.probes
+            );
+        }
+        if batches == 4 {
+            for field in ["#type", "#event_simpleName"] {
+                assert!(initial.probes.iter().any(|probe| {
+                    probe["kind"] == "record-kind-facet" && probe["field"] == field
+                }));
+            }
             assert!(
                 initial
                     .probes
                     .iter()
                     .any(|probe| probe["kind"] == "population")
             );
-            assert!(
-                initial
-                    .probes
-                    .iter()
-                    .any(|probe| probe["kind"] == "tag-detect")
-            );
         }
-        if batches == 4 {
-            assert!(initial.probes.iter().any(|probe| {
-                probe["kind"] == "record-kind-facet" && probe["field"] == "#event_simpleName"
-            }));
+        if batches == 5 {
             assert!(
                 initial
                     .probes
@@ -310,7 +313,7 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
         }
         initial = answer_batch(dir.path(), &state, &initial);
     }
-    assert_eq!(batches, 4);
+    assert_eq!(batches, 5);
     assert_eq!(initial.status, "complete", "{:?}", initial.diagnostics);
     assert_eq!(initial.exit_code(), 0);
     assert!(initial.active_pack_updated);
@@ -323,7 +326,7 @@ fn synthetic_frontier_matches_api_probes_and_observed_pack() {
         sha256_hex(&serde_json::to_vec(&saved.request).unwrap())
     );
     assert_eq!(saved.status, "activated");
-    assert_eq!(saved.answers.len(), 16);
+    assert_eq!(saved.answers.len(), 8);
     let mcp_pack = storage::read_pack(&pack_path).unwrap();
     assert_eq!(mcp_pack.data.values[0]["value"], "synthetic-user");
     assert_eq!(
@@ -474,7 +477,8 @@ fn failed_record_kind_facet_answer_leaves_no_pack() {
         let (state, pack, receipt) = paths(dir.path());
         let first = mcp::init(request(), &state, &pack, &receipt).unwrap();
         let listed = answer_batch(dir.path(), &state, &first);
-        let second = answer_batch(dir.path(), &state, &listed);
+        let tagged = answer_batch(dir.path(), &state, &listed);
+        let second = answer_batch(dir.path(), &state, &tagged);
         let kind = second
             .probes
             .iter()
@@ -952,16 +956,17 @@ fn busy_activation_retries_without_receipt_or_repeating_answers() {
     let listed = answer_batch(dir.path(), &state, &first);
     let second = answer_batch(dir.path(), &state, &listed);
     let third = answer_batch(dir.path(), &state, &second);
-    assert_eq!(third.probes.len(), 2);
-    assert!(third.probes.iter().any(|p| p["kind"] == "value-facet"));
     assert!(
         third
             .probes
             .iter()
             .any(|p| p["kind"] == "record-kind-facet")
     );
+    let fourth = answer_batch(dir.path(), &state, &third);
+    assert_eq!(fourth.probes.len(), 1);
+    assert!(fourth.probes.iter().any(|p| p["kind"] == "value-facet"));
     let held = storage::Writer::acquire(&pack).unwrap();
-    let blocked = answer_batch(dir.path(), &state, &third);
+    let blocked = answer_batch(dir.path(), &state, &fourth);
     assert_eq!(blocked.status, "activation-blocked");
     assert_eq!(blocked.exit_code(), 3);
     assert_eq!(code(&blocked), "PACK_BUSY");

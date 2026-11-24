@@ -63,9 +63,18 @@ impl Scenario {
             "fieldset" => ["field.real", "hint.only", "paired", "#paired", "event.kind"]
                 .map(|f| json!({"field":f}))
                 .to_vec(),
-            "tag-detect" => vec![
-                json!({"events":if matches!(p.field.as_deref(),Some("type"|"event.dataset")){total}else{0}}),
-            ],
+            "tag-batch" => {
+                let mut row = json!({"total":if p.start == r.start {total} else {20}});
+                for (i, f) in p.fields.iter().enumerate() {
+                    row[format!("c{i}")] =
+                        json!(if matches!(f.as_str(), "#type" | "#event.dataset") {
+                            total
+                        } else {
+                            0
+                        });
+                }
+                vec![row]
+            }
             "record-kind-facet" if p.field.as_deref() == Some("#type") => {
                 vec![json!({"#type":"literal,type","events":total})]
             }

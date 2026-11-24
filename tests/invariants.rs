@@ -114,14 +114,36 @@ impl SearchBackend for Fake {
 fn discovery_request() -> DiscoverRequest {
     serde_json::from_value(json!({"schema_version":1,"environment":identity(),"start":"2026-01-01T00:00:00Z","end":"2026-01-01T01:00:00Z","sources":[{"repo":"selected"}],"value_fields":["peer","user"]})).unwrap()
 }
+const TAGS: [&str; 9] = [
+    "#event_simpleName",
+    "#event.dataset",
+    "#event.module",
+    "#event.outcome",
+    "#ecs.version",
+    "#Cps.version",
+    "#Vendor",
+    "#type",
+    "#event.kind",
+];
+/// The tag batch answer: three events, with the named tag columns present in all of them.
+fn tag_batch_row(present: &[&str]) -> Vec<Value> {
+    let mut row = json!({"total":"3"});
+    for (index, tag) in TAGS.iter().enumerate() {
+        row[format!("c{index}")] = json!(if present.contains(tag) { "3" } else { "0" });
+    }
+    vec![row]
+}
 fn kind_fake(field: &str, facet_rows: Vec<Value>) -> Fake {
     let mut rows = vec![
         vec![json!({"events":"3"})],
         vec![json!({"#event.dataset":"synthetic","events":"3"})],
         vec![json!({"field":field})],
-        vec![json!({"total":"3","c0":"3"})],
+        tag_batch_row(&[field]),
     ];
-    rows.extend((0..9).map(|_| vec![json!({"events":"0"})]));
+    // A listed tag candidate reuses its tag batch count; any other field is counted separately.
+    if !TAGS.contains(&field) {
+        rows.push(vec![json!({"total":"3","c0":"3"})]);
+    }
     rows.push(facet_rows);
     Fake {
         rows: rows.into(),
@@ -300,10 +322,9 @@ fn discovery_keeps_namespaces_unknown_shapes_and_duplicate_values_distinct() {
             json!({"field":"peer"}),
             json!({"field":"only_seen"}),
         ],
-        vec![json!({"total":"3","c0":"0","c1":"3","c2":"2"})],
-        vec![json!({"events":"3"})],
     ];
-    rows.extend((0..8).map(|_| vec![json!({"events":"0"})]));
+    rows.push(tag_batch_row(&["#event_simpleName"]));
+    rows.push(vec![json!({"total":"3","c0":"0","c1":"3","c2":"2"})]);
     rows.push(vec![json!({"#event_simpleName":"synthetic","events":"3"})]);
     rows.push(vec![json!({"peer":"same","events":"3"})]);
     rows.push(vec![json!({"user":"same","events":"2"})]);
@@ -586,24 +607,24 @@ fn frontier_skips_absent_kinds_and_emits_tag_kinds_with_value_probes() {
             answered.insert(discovery::probe_id(view, probe), rows);
         }
     }
+    // The tag batch answers alone, before population and any kind facet.
+    let tags = discovery::frontier(&request, &answered).unwrap();
+    assert_eq!(tags.len(), 1);
+    assert_eq!(tags[0].kind, "tag-batch");
+    assert_eq!(tags[0].fields, TAGS);
+    answered.insert(
+        discovery::probe_id(view, &tags[0]),
+        tag_batch_row(&["#event.module"]),
+    );
     let dependent = discovery::frontier(&request, &answered).unwrap();
     assert_eq!(
-        dependent
-            .iter()
-            .filter(|probe| probe.kind == "record-kind-facet")
-            .count(),
-        0
-    );
-    assert_eq!(
-        dependent.iter().filter(|p| p.kind == "tag-detect").count(),
-        9
+        dependent.iter().filter(|p| p.kind == "population").count(),
+        1
     );
     for probe in &dependent {
         let rows = match probe.kind.as_str() {
             "population" => vec![json!({"total":"3","c0":"3"})],
-            "tag-detect" => vec![json!({
-                "events": if probe.field.as_deref() == Some("event.module") {"3"} else {"0"}
-            })],
+            "record-kind-facet" => vec![json!({"#event.module":"synthetic","events":"3"})],
             _ => panic!("unexpected dependent probe"),
         };
         answered.insert(discovery::probe_id(view, probe), rows);
@@ -616,7 +637,7 @@ fn frontier_skips_absent_kinds_and_emits_tag_kinds_with_value_probes() {
             .count(),
         2
     );
-    let kinds = final_batch
+    let kinds = dependent
         .iter()
         .filter(|probe| probe.kind == "record-kind-facet")
         .collect::<Vec<_>>();

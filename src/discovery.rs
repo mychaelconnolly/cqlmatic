@@ -29,6 +29,18 @@ const STRATIFIED_KIND_CANDIDATES: [&str; 6] = [
     "#event.module",
     "#event.dataset",
 ];
+/// Tag namespaces every field run counts in its tag batch, before any tagged kind candidate.
+const TAG_CANDIDATES: [&str; 9] = [
+    "#event_simpleName",
+    "#event.dataset",
+    "#event.module",
+    "#event.outcome",
+    "#ecs.version",
+    "#Cps.version",
+    "#Vendor",
+    "#type",
+    "#event.kind",
+];
 const MAX_FIELDS_PER_SOURCE: usize = 4000;
 const POPULATION_CHUNK: usize = 20;
 const KIND_FACET_LIMIT: usize = 50;
@@ -320,8 +332,6 @@ fn probe(
     fields: Vec<String>,
     field: Option<String>,
 ) -> Result<Probe, Diagnostic> {
-    let start = environment::parse_time(&r.start)?;
-    let end = environment::parse_time(&r.end)?;
     let query = if kind == "census" {
         checked_query(suffix.to_string())?
     } else {
@@ -331,15 +341,25 @@ fn probe(
         kind: kind.into(),
         source: s.clone(),
         query,
-        start: stamp(if sample {
-            start.max(end - time::Duration::minutes(15))
-        } else {
-            start
-        }),
+        start: window(r, sample)?.0,
         end: r.end.clone(),
         fields,
         field,
     })
+}
+/// The concrete instants of the sample window (the final 15 minutes of the request window) or of
+/// the full request window. They are equal when the request window is 15 minutes or shorter.
+fn window(r: &DiscoverRequest, sample: bool) -> Result<Window, Diagnostic> {
+    let start = environment::parse_time(&r.start)?;
+    let end = environment::parse_time(&r.end)?;
+    Ok((
+        stamp(if sample {
+            start.max(end - time::Duration::minutes(15))
+        } else {
+            start
+        }),
+        r.end.clone(),
+    ))
 }
 fn checked_query(query: String) -> Result<String, Diagnostic> {
     let parsed = crate::language::parser::parse(&query).map_err(|e| e.diagnostic)?;
@@ -388,7 +408,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     };
     let listings =
         "dataset facet and fieldset for every source with events, after every source volume";
-    let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census",listings,"population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
+    let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census",listings,TAG_STAGE,"population chunks of at most 20 fields from fieldset, reusing tag batch counts over the same window","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
     if r.depth == DiscoveryDepth::SourcesOnly {
         result["depth"] = json!(r.depth);
         result["deferred_stages"] =
@@ -399,7 +419,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
         result["deferred_stages"] = json!([
             "base measurements for sources found by explicit census",
             listings,
-            "tag namespace checks",
+            TAG_STAGE,
             "record-kind facets over the full request window",
             "up to ten literal-filtered rare-kind fieldsets over the full request window",
             "capped population fields: requested, newly discovered, then sampled",
@@ -411,7 +431,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
         let stage = if r.max_population_fields_per_source.is_some() {
             5
         } else {
-            2
+            3
         };
         result["deferred_stages"][stage] = json!(
             "source-bound explicit population batches; sampled fields use the sample window and unsampled fields use the full request window"
@@ -438,6 +458,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     }
     Ok(result)
 }
+const TAG_STAGE: &str = "tag batches of at most 20 tag namespace counts over the sample window, or the full window after a fieldset fallback";
 fn census_probe(r: &DiscoverRequest) -> Result<Probe, Diagnostic> {
     probe(
         r,
@@ -507,14 +528,21 @@ fn contract_field<'a>(contract: &'a ParserContract, path: &str, tag: bool) -> Op
         })
         .map(String::as_str)
 }
+/// Field counts and their denominators, by namespaced field.
+type Counts = BTreeMap<String, (u64, u64)>;
+/// Concrete start and end instants.
+type Window = (String, String);
 #[derive(Clone, Copy)]
 enum PopulationWindow {
     Sample,
     Full,
 }
+/// Field counts in chunks of at most 20 columns, each chunk numbering its aliases from `c0` in
+/// `fields` order. Population searches and tag batches share this query shape.
 fn population_probes_in(
     r: &DiscoverRequest,
     s: &Scope,
+    kind: &str,
     fields: &[String],
     window: PopulationWindow,
 ) -> Result<Vec<Probe>, Diagnostic> {
@@ -530,7 +558,7 @@ fn population_probes_in(
             probe(
                 r,
                 s,
-                "population",
+                kind,
                 &format!("stats([count(as=total), {args}])"),
                 matches!(window, PopulationWindow::Sample),
                 chunk.to_vec(),
@@ -556,58 +584,51 @@ fn record_kind_candidates(r: &DiscoverRequest) -> Vec<&str> {
         .filter(|field| seen.insert(*field))
         .collect()
 }
+/// The tag batch: every tag candidate, then each further tagged kind candidate, counted over the
+/// sample window, or over the full window after a fieldset fallback.
 fn tag_probes(r: &DiscoverRequest, s: &Scope, full_window: bool) -> Result<Vec<Probe>, Diagnostic> {
-    let mut names = [
-        "event_simpleName",
-        "event.dataset",
-        "event.module",
-        "event.outcome",
-        "ecs.version",
-        "Cps.version",
-        "Vendor",
-        "type",
-        "event.kind",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
+    let mut fields = TAG_CANDIDATES.map(String::from).to_vec();
     for field in record_kind_candidates(r) {
-        if let Some(tag) = field.strip_prefix('#')
-            && !names.iter().any(|name| name == tag)
-        {
-            names.push(tag.into());
+        if field.starts_with('#') && !fields.iter().any(|name| name == field) {
+            fields.push(field.into());
         }
     }
-    names
-        .into_iter()
-        .map(|name| {
-            probe(
-                r,
-                s,
-                "tag-detect",
-                &format!("{}=* | count(as=events)", quote(&format!("#{name}"))),
-                !full_window,
-                vec![],
-                Some(name),
-            )
-        })
-        .collect()
+    population_probes_in(r, s, "tag-batch", &fields, sample_window(full_window))
+}
+fn sample_window(full_window: bool) -> PopulationWindow {
+    if full_window {
+        PopulationWindow::Full
+    } else {
+        PopulationWindow::Sample
+    }
+}
+/// Each tag candidate's count and denominator once every tag batch chunk is answered.
+fn tag_counts(
+    r: &DiscoverRequest,
+    probes: &[Probe],
+    answered: &BTreeMap<String, Vec<Value>>,
+) -> Result<Option<Counts>, Diagnostic> {
+    let mut counts = BTreeMap::new();
+    for p in probes {
+        let Some(rows) = answered.get(&probe_id(&r.environment.view, p)) else {
+            return Ok(None);
+        };
+        population_counts(p, rows, &mut counts)?;
+    }
+    Ok(Some(counts))
 }
 fn record_kind_probes(
     r: &DiscoverRequest,
     s: &Scope,
     fields: &[String],
-    tags: &BTreeMap<String, u64>,
+    tags: &Counts,
 ) -> Result<Vec<Probe>, Diagnostic> {
     record_kind_candidates(r)
         .into_iter()
         .filter(|field| r.max_population_fields_per_source.is_none() || *field != "#event.dataset")
         .filter(|field| {
             fields.iter().any(|name| name == field)
-                || field
-                    .strip_prefix('#')
-                    .and_then(|tag| tags.get(tag))
-                    .is_some_and(|count| *count > 0)
+                || tags.get(*field).is_some_and(|(count, _)| *count > 0)
         })
         .map(|field| {
             probe(
@@ -723,6 +744,7 @@ fn population_counts(
 pub(crate) fn check_measurement(probe: &Probe, rows: &[Value]) -> Result<(), Diagnostic> {
     match probe.kind.as_str() {
         "volume" | "tag-detect" => count_row(rows).map(|_| ()),
+        "tag-batch" => population_counts(probe, rows, &mut BTreeMap::new()),
         "dataset-facet" => kind_facet(rows, "#event.dataset", None).map(|_| ()),
         "fieldset" | "kind-fieldset" => fieldset_fields(rows).map(|_| ()),
         "record-kind-facet" => kind_facet(
@@ -752,7 +774,9 @@ struct SourceMeasurements {
     fieldset_seen: BTreeSet<String>,
     full_fieldset_seen: BTreeSet<String>,
     population: BTreeMap<String, (u64, u64)>,
-    tags: BTreeMap<String, u64>,
+    /// Tag batch counts by namespaced field, and the concrete window they cover.
+    tags: Counts,
+    tag_window: Option<Window>,
     record_kinds: Vec<Value>,
     full_fields: BTreeSet<String>,
     kind_fields: BTreeSet<String>,
@@ -781,10 +805,30 @@ fn capture_key(
 
 type FieldCaptures = BTreeMap<String, (usize, bool, Option<f64>)>;
 
+/// The capture that proves each field of `source`, its presence and, for a population count, its
+/// rate. Without a selection (inventory work proofs) a tag batch column carries no rate; the
+/// chosen captures do not depend on it.
 pub(crate) fn field_captures(
     captures: &[Capture],
     source: &Scope,
 ) -> Result<FieldCaptures, Diagnostic> {
+    field_captures_for(captures, source, None)
+}
+
+fn field_captures_for(
+    captures: &[Capture],
+    source: &Scope,
+    selected: Option<&BTreeSet<String>>,
+) -> Result<FieldCaptures, Diagnostic> {
+    // Captures of the current plan carry a tag batch; earlier-plan receipts keep their ordering.
+    let current_plan = captures
+        .iter()
+        .any(|capture| &capture.probe.source == source && capture.probe.kind == "tag-batch");
+    let counted: BTreeSet<&str> = captures
+        .iter()
+        .filter(|capture| &capture.probe.source == source && capture.probe.kind == "population")
+        .flat_map(|capture| capture.probe.fields.iter().map(String::as_str))
+        .collect();
     let mut result = FieldCaptures::new();
     for (index, capture) in captures
         .iter()
@@ -794,13 +838,18 @@ pub(crate) fn field_captures(
         let probe = &capture.probe;
         let rows = &capture.receipt.events;
         let values = match probe.kind.as_str() {
-            "population" => {
+            "population" | "tag-batch" => {
                 let mut counts = BTreeMap::new();
                 population_counts(probe, rows, &mut counts)?;
                 counts
                     .into_iter()
                     .map(|(field, (count, total))| {
-                        (field, count > 0, Some(count as f64 / total as f64))
+                        // A tag batch column is a population rate only for a selected field that
+                        // no residual population search counted over another window.
+                        let rate = probe.kind == "population"
+                            || selected.is_some_and(|selected| selected.contains(&field))
+                                && !counted.contains(field.as_str());
+                        (field, count > 0, rate.then(|| count as f64 / total as f64))
                     })
                     .collect::<Vec<_>>()
             }
@@ -837,19 +886,26 @@ pub(crate) fn field_captures(
         };
         let key = capture_key(capture)?;
         for (field, observed, rate) in values {
-            if let Some((previous, previous_observed, previous_rate)) = result.get(&field) {
-                let previous_key = capture_key(&captures[*previous])?;
+            if let Some(&(previous, previous_observed, previous_rate)) = result.get(&field) {
+                let previous_key = capture_key(&captures[previous])?;
                 if key == previous_key
-                    && (observed != *previous_observed
-                        || rate.zip(*previous_rate).is_some_and(|(a, b)| a != b))
+                    && (observed != previous_observed
+                        || rate.zip(previous_rate).is_some_and(|(a, b)| a != b))
                 {
                     return Err(fail(
                         "Tied field measurements contain contradictory presence or population rates.",
                     ));
                 }
-                if key < previous_key
-                    || key == previous_key && (rate.is_none() || previous_rate.is_some())
-                {
+                let keep = if current_plan {
+                    keeps_previous(
+                        (&captures[previous], previous_key, previous_observed),
+                        (capture, key, observed),
+                    )
+                } else {
+                    key < previous_key
+                        || key == previous_key && (rate.is_none() || previous_rate.is_some())
+                };
+                if keep {
                     continue;
                 }
             }
@@ -859,21 +915,126 @@ pub(crate) fn field_captures(
     Ok(result)
 }
 
+type Candidate<'a> = (
+    &'a Capture,
+    (
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+        time::OffsetDateTime,
+    ),
+    bool,
+);
+
+/// Current-plan precedence between two non-contradictory-at-tie measurements of one field.
+fn keeps_previous(previous: Candidate, new: Candidate) -> bool {
+    let (
+        (p, (p_end, p_start, p_retrieved), p_observed),
+        (n, (n_end, n_start, n_retrieved), n_observed),
+    ) = (previous, new);
+    let counts = |c: &Capture| matches!(c.probe.kind.as_str(), "population" | "tag-batch");
+    if (p_end, p_start) == (n_end, n_start) {
+        if p_retrieved == n_retrieved {
+            // Prefer a count over presence alone.
+            return counts(p) || !counts(n);
+        }
+        // Within one window a later count replaces the earlier measurement; a later presence-only
+        // facet does so only when it contradicts it, which also drops the earlier rate.
+        let new_later = n_retrieved > p_retrieved;
+        let later = if new_later { n } else { p };
+        let later_wins = counts(later) || p_observed != n_observed;
+        return later_wins != new_later;
+    }
+    let new_inside = p_start <= n_start && n_end <= p_end;
+    let previous_inside = n_start <= p_start && p_end <= n_end;
+    // A selected population count over its window outranks a tag batch column over a narrower one.
+    if p.probe.kind == "population" && n.probe.kind == "tag-batch" && new_inside {
+        return true;
+    }
+    if n.probe.kind == "population" && p.probe.kind == "tag-batch" && previous_inside {
+        return false;
+    }
+    // A zero in a narrower window never hides presence seen over the wider one.
+    if new_inside && p_observed && !n_observed {
+        return true;
+    }
+    if previous_inside && n_observed && !p_observed {
+        return false;
+    }
+    (n_end, n_start) < (p_end, p_start)
+}
+
+/// Each logically selected field with its concrete population window: the sample window for a
+/// field the sample listing named, the full window otherwise.
+fn selected_windows(
+    r: &DiscoverRequest,
+    measured: &SourceMeasurements,
+) -> Result<Vec<(String, Window, PopulationWindow)>, Diagnostic> {
+    let (sample, full) = (window(r, true)?, window(r, false)?);
+    Ok(measured
+        .fields
+        .iter()
+        .filter(|field| !measured.full_fields.contains(*field))
+        .map(|field| (field.clone(), sample.clone(), PopulationWindow::Sample))
+        .chain(
+            measured
+                .full_fields
+                .iter()
+                .map(|field| (field.clone(), full.clone(), PopulationWindow::Full)),
+        )
+        .collect())
+}
+
+/// The tag batch count of a selected field, when the batch counted that exact namespaced field
+/// over that exact window. The batch shares the source selector and view by construction.
+fn reused_count(
+    measured: &SourceMeasurements,
+    field: &str,
+    concrete: &Window,
+) -> Option<(u64, u64)> {
+    (measured.tag_window.as_ref() == Some(concrete))
+        .then(|| measured.tags.get(field).copied())
+        .flatten()
+}
+
+/// Residual population searches for the logically selected fields that the tag batch did not
+/// already count, grouped by concrete window before chunking, so equal sample and full windows
+/// share one search and an empty residual takes none.
 fn selected_population_probes(
     r: &DiscoverRequest,
     s: &Scope,
     measured: &SourceMeasurements,
 ) -> Result<Vec<Probe>, Diagnostic> {
-    let sampled = measured
-        .fields
-        .iter()
-        .filter(|field| !measured.full_fields.contains(*field))
-        .cloned()
-        .collect::<Vec<_>>();
-    let full = measured.full_fields.iter().cloned().collect::<Vec<_>>();
-    let mut probes = population_probes_in(r, s, &sampled, PopulationWindow::Sample)?;
-    probes.extend(population_probes_in(r, s, &full, PopulationWindow::Full)?);
+    let mut buckets: Vec<(Window, PopulationWindow, Vec<String>)> = Vec::new();
+    for (field, concrete, nominal) in selected_windows(r, measured)? {
+        if reused_count(measured, &field, &concrete).is_some() {
+            continue;
+        }
+        match buckets
+            .iter_mut()
+            .find(|(window, _, _)| *window == concrete)
+        {
+            Some((_, _, fields)) => fields.push(field),
+            None => buckets.push((concrete, nominal, vec![field])),
+        }
+    }
+    let mut probes = Vec::new();
+    for (_, nominal, fields) in buckets {
+        probes.extend(population_probes_in(r, s, "population", &fields, nominal)?);
+    }
     Ok(probes)
+}
+
+/// Add the selected fields' reused tag batch counts to their population measurements.
+fn reuse_tag_counts(
+    r: &DiscoverRequest,
+    measured: &mut SourceMeasurements,
+) -> Result<(), Diagnostic> {
+    for (field, concrete, _) in selected_windows(r, measured)? {
+        if let Some(count) = reused_count(measured, &field, &concrete) {
+            measured.population.insert(field, count);
+        }
+    }
+    Ok(())
 }
 
 fn sampled_measurements(
@@ -898,11 +1059,11 @@ fn sampled_measurements(
 }
 enum SourceProgress {
     Pending(Vec<Probe>),
-    Complete(SourceMeasurements),
+    Complete(Box<SourceMeasurements>),
 }
 
 // Both relay planning and execution follow this dependency graph:
-// base -> tags -> kind facets -> rare-kind fieldsets -> selected population -> values.
+// base -> tag batch -> kind facets -> rare-kind fieldsets -> selected population -> values.
 fn stratified_source(
     r: &DiscoverRequest,
     s: &Scope,
@@ -915,17 +1076,14 @@ fn stratified_source(
         .max_population_fields_per_source
         .expect("stratified discovery has a population cap");
     let tags = tag_probes(r, s, full_window)?;
-    let pending = unanswered(r, &tags, answered);
-    if !pending.is_empty() {
-        return Ok(SourceProgress::Pending(pending));
-    }
-    let mut measured = SourceMeasurements::default();
-    for p in tags {
-        measured.tags.insert(
-            p.field.clone().expect("tag probe has a name"),
-            count_row(&answered[&probe_id(&r.environment.view, &p)])?,
-        );
-    }
+    let Some(tag_counts) = tag_counts(r, &tags, answered)? else {
+        return Ok(SourceProgress::Pending(unanswered(r, &tags, answered)));
+    };
+    let mut measured = SourceMeasurements {
+        tags: tag_counts,
+        tag_window: Some(window(r, !full_window)?),
+        ..SourceMeasurements::default()
+    };
     let kinds = record_kind_probes(r, s, sampled, &measured.tags)?;
     let pending = unanswered(r, &kinds, answered);
     if !pending.is_empty() {
@@ -1008,8 +1166,8 @@ fn stratified_source(
         measured
             .tags
             .iter()
-            .filter(|(_, count)| **count > 0)
-            .map(|(field, _)| format!("#{field}")),
+            .filter(|(_, (count, _))| *count > 0)
+            .map(|(field, _)| field.clone()),
     );
     let mandatory = validate_mandatory_population(r, s, &observed)?;
     let newly_seen = rare_fields.difference(&sampled).cloned().collect();
@@ -1043,13 +1201,22 @@ fn stratified_source(
             &mut measured.population,
         )?;
     }
-    Ok(SourceProgress::Complete(measured))
+    reuse_tag_counts(r, &mut measured)?;
+    Ok(SourceProgress::Complete(Box::new(measured)))
 }
 /// Expected searches for a run whose sources hold events, counted with the builders the
 /// frontier uses: the fewest, and the most when that can be stated before the first answers.
 /// A census names its own sources, so it has no figure; an uncapped field run measures every
 /// field it finds, so it has no upper figure.
 pub fn expected_searches(r: &DiscoverRequest) -> Option<(u32, Option<u32>)> {
+    expected_searches_for_plan(r, false)
+}
+/// The same figures for a checkpoint of the earlier plan, which counted each tag candidate in its
+/// own search. Only the tag term differs; the earlier graph is not executed.
+pub(crate) fn expected_searches_for_plan(
+    r: &DiscoverRequest,
+    earlier_plan: bool,
+) -> Option<(u32, Option<u32>)> {
     if r.census {
         return None;
     }
@@ -1060,9 +1227,13 @@ pub fn expected_searches(r: &DiscoverRequest) -> Option<(u32, Option<u32>)> {
             high = high.map(|high| high + 1);
             continue;
         }
-        let fixed = base_probes(r, s).ok()?.len()
-            + tag_probes(r, s, false).ok()?.len()
-            + r.value_fields.len();
+        let tags = tag_probes(r, s, false).ok()?;
+        let tag_searches = if earlier_plan {
+            tags.iter().map(|p| p.fields.len()).sum()
+        } else {
+            tags.len()
+        };
+        let fixed = base_probes(r, s).ok()?.len() + tag_searches + r.value_fields.len();
         // Fields are measured in chunks, over the sample window, the whole window or both.
         let selected = field_selection(r, s).map(|fields| fields.len().max(1));
         low += fixed + selected.unwrap_or(1).div_ceil(POPULATION_CHUNK);
@@ -1227,26 +1398,19 @@ pub(crate) fn frontier_with_policy(
             }
             continue;
         }
-        let measured = sampled_measurements(r, s, fields.clone(), full_window);
-        let pop_probes = selected_population_probes(r, s, &measured)?;
-        let tag_probes = tag_probes(r, s, full_window)?;
-        let tags_ready = unanswered(r, &tag_probes, answered).is_empty();
-        let tags = if tags_ready {
-            let mut tags = BTreeMap::new();
-            for p in &tag_probes {
-                tags.insert(
-                    p.field.clone().expect("tag probe has a name"),
-                    count_row(&answered[&id(p)])?,
-                );
-            }
-            tags
-        } else {
-            BTreeMap::new()
+        // The tag batch answers before population, so no tag column is counted twice.
+        let tags = tag_probes(r, s, full_window)?;
+        let Some(tag_counts) = tag_counts(r, &tags, answered)? else {
+            pending.extend(unanswered(r, &tags, answered));
+            continue;
         };
+        let mut measured = sampled_measurements(r, s, fields.clone(), full_window);
+        measured.tags = tag_counts;
+        measured.tag_window = Some(window(r, !full_window)?);
+        let pop_probes = selected_population_probes(r, s, &measured)?;
         let mut dependent = pop_probes.clone();
-        dependent.extend(tag_probes);
-        dependent.extend(record_kind_probes(r, s, &fields, &tags)?);
-        if tags_ready && unanswered(r, &pop_probes, answered).is_empty() {
+        dependent.extend(record_kind_probes(r, s, &fields, &measured.tags)?);
+        if unanswered(r, &pop_probes, answered).is_empty() {
             dependent.extend(value_probes(r, s, full_window)?);
         }
         pending.extend(unanswered(r, &dependent, answered));
@@ -1405,7 +1569,7 @@ impl<B: SearchBackend> Run<'_, B> {
                     &dataset_rows,
                     &answered,
                 )? {
-                    SourceProgress::Complete(measured) => return Ok(measured),
+                    SourceProgress::Complete(measured) => return Ok(*measured),
                     SourceProgress::Pending(probes) => {
                         for p in probes {
                             let id = probe_id(&self.request.environment.view, &p);
@@ -1417,15 +1581,16 @@ impl<B: SearchBackend> Run<'_, B> {
             }
         }
         let mut measured = sampled_measurements(self.request, source, fields, full_window);
+        for p in tag_probes(self.request, source, full_window)? {
+            let rows = self.execute(p.clone())?;
+            population_counts(&p, &rows, &mut measured.tags)?;
+        }
+        measured.tag_window = Some(window(self.request, !full_window)?);
         for p in selected_population_probes(self.request, source, &measured)? {
             let rows = self.execute(p.clone())?;
             population_counts(&p, &rows, &mut measured.population)?;
         }
-        for p in tag_probes(self.request, source, full_window)? {
-            let name = p.field.clone().expect("tag probe has a name");
-            let rows = self.execute(p)?;
-            measured.tags.insert(name, count_row(&rows)?);
-        }
+        reuse_tag_counts(self.request, &mut measured)?;
         let sampled = measured.fieldset_seen.iter().cloned().collect::<Vec<_>>();
         for p in record_kind_probes(self.request, source, &sampled, &measured.tags)? {
             let field = p.field.clone().expect("kind probe has a field");
@@ -1538,7 +1703,8 @@ impl<B: SearchBackend> Run<'_, B> {
             };
             let sid = source_id(&s);
             let source_window = format!("{}/{}", self.request.start, self.request.end);
-            let measurements = field_captures(&self.report.captures, &s)?;
+            let selected = population.keys().cloned().collect();
+            let measurements = field_captures_for(&self.report.captures, &s, Some(&selected))?;
             let volume = self
                 .report
                 .captures
@@ -1847,6 +2013,78 @@ mod tests {
                 .unwrap()
                 .contains("\\Aliteral\\*repo\\z")
         );
+    }
+    fn capture(
+        kind: &str,
+        start: &str,
+        fields: &[&str],
+        field: Option<&str>,
+        row: Value,
+    ) -> Capture {
+        let probe = Probe {
+            kind: kind.into(),
+            source: Scope {
+                repo: Some("synthetic".into()),
+                ..Scope::default()
+            },
+            query: format!("{kind} {start}"),
+            start: start.into(),
+            end: "2026-01-01T01:00:00Z".into(),
+            fields: fields.iter().map(|field| field.to_string()).collect(),
+            field: field.map(str::to_string),
+        };
+        Capture {
+            receipt: JobReceipt {
+                query: probe.query.clone(),
+                start: probe.start.clone(),
+                end: probe.end.clone(),
+                job_id: Some("job".into()),
+                completion: "complete".into(),
+                cleanup: "confirmed".into(),
+                polls: 1,
+                events: vec![row],
+                metadata: None,
+                issues: BTreeMap::new(),
+                diagnostic: None,
+            },
+            probe,
+            retrieved_at: "2026-02-01T00:00:00Z".into(),
+        }
+    }
+    #[test]
+    fn earlier_plan_receipts_keep_their_ordering() {
+        let source = Scope {
+            repo: Some("synthetic".into()),
+            ..Scope::default()
+        };
+        let full = capture(
+            "population",
+            "2026-01-01T00:00:00Z",
+            &["#Vendor"],
+            None,
+            json!({"total":10,"c0":4}),
+        );
+        // An earlier-plan tag check over the recent window still decides presence.
+        let detect = capture(
+            "tag-detect",
+            "2026-01-01T00:45:00Z",
+            &[],
+            Some("Vendor"),
+            json!({"events":0}),
+        );
+        let earlier = field_captures(&[full.clone(), detect], &source).unwrap();
+        assert_eq!(earlier["#Vendor"], (1, false, None));
+        // The current plan's tag batch over the same recent window does not override the
+        // full-window population count.
+        let batch = capture(
+            "tag-batch",
+            "2026-01-01T00:45:00Z",
+            &["#Vendor"],
+            None,
+            json!({"total":3,"c0":0}),
+        );
+        let current = field_captures(&[full, batch], &source).unwrap();
+        assert_eq!(current["#Vendor"], (0, true, Some(0.4)));
     }
     #[test]
     fn missing_count_is_not_zero() {

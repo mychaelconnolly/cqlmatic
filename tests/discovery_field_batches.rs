@@ -53,9 +53,18 @@ impl Scenario {
                 .iter()
                 .map(|field| json!({"field":field}))
                 .collect(),
-            "tag-detect" => vec![
-                json!({"events":self.counts.get(&format!("tag:#{}", probe.field.as_deref().unwrap())).copied().unwrap_or(0)}),
-            ],
+            "tag-batch" => {
+                let mut row = json!({"total":1000});
+                for (i, field) in probe.fields.iter().enumerate() {
+                    row[format!("c{i}")] = json!(
+                        self.counts
+                            .get(&format!("tag:{field}"))
+                            .copied()
+                            .unwrap_or(0)
+                    );
+                }
+                vec![row]
+            }
             "population" => {
                 let mut row = json!({"total":1000});
                 for (i, field) in probe.fields.iter().enumerate() {
@@ -829,7 +838,7 @@ fn population_batches_near_the_limit_do_not_absorb_auxiliary_fields() {
 }
 
 #[test]
-fn a_narrower_auxiliary_zero_controls_presence_without_borrowing_the_population_rate() {
+fn a_narrower_tag_batch_zero_keeps_the_selected_full_window_population() {
     let mut r = request(&["#Vendor"]);
     r.contracts.clear();
     let scenario = Scenario {
@@ -838,11 +847,11 @@ fn a_narrower_auxiliary_zero_controls_presence_without_borrowing_the_population_
     };
     let (pack, _) = execute(&r, &scenario, 1, Origin::Api);
     let vendor = field(&pack, "Vendor", true);
-    assert_eq!(vendor["coverage"]["observed"], false);
-    assert!(vendor["coverage"]["rate"].is_null());
+    assert_eq!(vendor["coverage"]["observed"], true);
+    assert_eq!(vendor["coverage"]["rate"], 0.01);
     assert_eq!(
         vendor["observation_window"],
-        "2026-01-01T00:45:00Z/2026-01-01T01:00:00Z"
+        "2026-01-01T00:00:00Z/2026-01-01T01:00:00Z"
     );
     let proof = pack
         .data
@@ -851,12 +860,12 @@ fn a_narrower_auxiliary_zero_controls_presence_without_borrowing_the_population_
         .find(|proof| proof["id"] == vendor["provenance_ids"][0])
         .unwrap();
     assert_eq!(proof["observation_window"], vendor["observation_window"]);
-    assert!(proof["id"].as_str().unwrap().contains("tag-detect"));
+    assert!(proof["id"].as_str().unwrap().contains("population"));
     assert!(
         pack.data
             .provenance
             .iter()
-            .any(|proof| proof["id"].as_str().unwrap().contains("population"))
+            .any(|proof| proof["id"].as_str().unwrap().contains("tag-batch"))
     );
 }
 
@@ -904,7 +913,7 @@ fn current_proofs_keep_each_winning_captures_retrieval_date() {
         .map(|probe| {
             let date = match probe.kind.as_str() {
                 "population" => "2026-02-02T00:00:00Z",
-                "tag-detect" => "2026-02-03T00:00:00Z",
+                "tag-batch" => "2026-02-03T00:00:00Z",
                 "value-facet" => "2026-02-04T00:00:00Z",
                 _ => "2026-02-01T00:00:00Z",
             };
@@ -943,8 +952,10 @@ fn tied_native_capture_presence_conflicts_prevent_pack_construction() {
     let mut r = request(&["#Vendor"]);
     r.contracts.clear();
     r.start = "2026-01-01T00:45:00Z".into();
+    // The tag batch counts #type while its kind facet over the same window, retrieved at the
+    // same instant, lists no value.
     let scenario = Scenario {
-        counts: BTreeMap::from([("#Vendor".into(), 1)]),
+        counts: BTreeMap::from([("tag:#type".into(), 1)]),
         ..Scenario::default()
     };
     let (_, answers) = scenario.graph(&r);

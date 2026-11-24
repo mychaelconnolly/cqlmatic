@@ -78,10 +78,14 @@ impl World {
             }
             "fieldset" => listing(self.recent.get(&source).map_or(&[][..], Vec::as_slice)),
             "dataset-facet" | "record-kind-facet" | "kind-fieldset" | "value-facet" => vec![],
-            "tag-detect" => {
-                let tag = probe.field.clone().unwrap_or_default();
-                let events = self.tags.get(&(source, tag)).copied().unwrap_or(0);
-                vec![json!({"events":events})]
+            "tag-batch" => {
+                let mut row = json!({"total":10});
+                for (index, field) in probe.fields.iter().enumerate() {
+                    let tag = field.trim_start_matches('#').to_string();
+                    row[format!("c{index}")] =
+                        json!(self.tags.get(&(source.clone(), tag)).copied().unwrap_or(0));
+                }
+                vec![row]
             }
             "population" => {
                 let mut row = json!({"total":10});

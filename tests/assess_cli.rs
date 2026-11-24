@@ -605,7 +605,7 @@ fn synthetic_mcp_replay_generates_observed_query_and_assesses_saved_answer() {
         .arg(&receipt);
     let mut step = result(&run(command, b""), 3);
     let mut activated = false;
-    for _ in 0..4 {
+    for _ in 0..5 {
         assert_eq!(step["status"], "needs-probes");
         let probes = step["probes"].as_array().unwrap().clone();
         assert!(!probes.is_empty());
@@ -615,8 +615,7 @@ fn synthetic_mcp_replay_generates_observed_query_and_assesses_saved_answer() {
             let file = match probe["kind"].as_str().unwrap() {
                 "census" => "census.json",
                 "volume" => "count.json",
-                "tag-detect" if field == Some("event_simpleName") => "count.json",
-                "tag-detect" => "zero.json",
+                "tag-batch" => "tags.json",
                 "dataset-facet" => "dataset.json",
                 "fieldset" => "fieldset.json",
                 "population" => "population.json",
