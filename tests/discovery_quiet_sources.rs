@@ -1700,6 +1700,8 @@ fn many_quiet_sources_with_ceiling_scout_stay_fast() {
     );
     let source_ids: Vec<String> = state.sources.iter().map(|s| s.id.clone()).collect();
     state.discovery_runs.push(inventory::DiscoveryRun {
+        pruned_at: None,
+        cleanup_pending: false,
         state_path: dir.0.join("run.json").to_string_lossy().into_owned(),
         pack_path: dir.0.join("pack.json").to_string_lossy().into_owned(),
         receipt_path: dir.0.join("receipt.json").to_string_lossy().into_owned(),

@@ -31,11 +31,15 @@ fn host() -> Vec<u8> {
 }
 
 fn run(case: CaseId, max_queries: u32, max_seconds: u64) -> CapabilityRun {
+    run_of(vec![case], max_queries, max_seconds)
+}
+
+fn run_of(cases: Vec<CaseId>, max_queries: u32, max_seconds: u64) -> CapabilityRun {
     CapabilityRun::prepare(
         environment(),
         "synthetic-auth".into(),
         "synthetic-session".into(),
-        vec![case],
+        cases,
         &host(),
         max_queries,
         max_seconds,
@@ -177,7 +181,8 @@ fn numeric_oracles_accept_equivalent_wire_numbers_without_rounding_to_a_match() 
 
 #[test]
 fn positive_evidence_is_exact_context_case_environment_and_time_bound() {
-    let mut run = run(CaseId::ArrayUnion, 2, 10);
+    // An unverified second case keeps the run open for the later attempt below.
+    let mut run = run_of(vec![CaseId::ArrayUnion, CaseId::MathSqrt], 2, 10);
     dispatch(&mut run, CaseId::ArrayUnion, START);
     submit(
         &mut run,
@@ -359,7 +364,7 @@ fn errors_empty_extra_wrong_and_ambiguous_outputs_never_confirm_a_case() {
 
 #[test]
 fn pause_waits_for_safe_termination_and_never_renews_either_budget() {
-    let mut run = run(CaseId::ArrayUnion, 2, 4);
+    let mut run = run(CaseId::ArrayUnion, 2, 5);
     dispatch(&mut run, CaseId::ArrayUnion, START);
     submit(&mut run, RefreshTermination::Unresolved, None, ONE);
     run.pause(TWO).unwrap();
@@ -382,7 +387,7 @@ fn pause_waits_for_safe_termination_and_never_renews_either_budget() {
         "2026-01-01T00:00:03Z",
     );
     assert!(run.paused());
-    assert_eq!(run.remaining_seconds("2026-02-01T00:00:00Z").unwrap(), 1.0);
+    assert_eq!(run.remaining_seconds("2026-02-01T00:00:00Z").unwrap(), 2.0);
     run.resume("synthetic-auth", "2026-02-01T00:00:00Z")
         .unwrap();
     dispatch(&mut run, CaseId::ArrayUnion, "2026-02-01T00:00:00Z");
@@ -418,7 +423,8 @@ fn capability_poll_failure_settlement_keeps_the_capture_and_original_allowance()
     let expired = "2026-01-01T00:00:05Z";
     let resumed = "2026-01-01T00:00:07Z";
     for record_unresolved in [false, true] {
-        let mut run = run(case, 3, 6);
+        // An unverified second case keeps the run open after the first verification.
+        let mut run = run_of(vec![case, CaseId::ArrayUnion], 3, 7);
         dispatch(&mut run, case, START);
         submit(
             &mut run,
@@ -522,13 +528,13 @@ fn capability_poll_failure_settlement_keeps_the_capture_and_original_allowance()
         ));
 
         run.resume("synthetic-auth", resumed).unwrap();
-        assert_eq!(run.remaining_seconds(resumed).unwrap(), 1.0);
+        assert_eq!(run.remaining_seconds(resumed).unwrap(), 2.0);
         assert!(
             run.dispatch(
                 case,
                 "synthetic-auth",
                 "synthetic-session",
-                "2026-01-01T00:00:07.000000001Z"
+                "2026-01-01T00:00:08.000000001Z"
             )
             .is_err()
         );
@@ -1306,8 +1312,8 @@ fn optional_cli_phase_preserves_the_active_field_pack_and_blocks_other_dispatch(
     let old_run = serde_json::to_value(&after.capability_runs[0]).unwrap();
     inventory_call(
         directory,
-        json!({"kind":"prepare-capabilities","execution_context_id":"other-auth","session_id":"synthetic-session",
-        "case_ids":["array-union"],"host_evidence_file":host_file,"max_queries":2,"max_seconds":60}),
+        json!({"kind":"prepare-capabilities","execution_context_id":"other-auth","session_id":"other-session",
+        "case_ids":["array-union"],"host_evidence_file":other_host_file,"max_queries":2,"max_seconds":60}),
     );
     let next: InventoryState =
         serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
@@ -1375,11 +1381,22 @@ fn paused_capability_allowance_is_preserved_when_a_new_binding_is_explicitly_pre
             "next-host.json",
             &serde_json::to_vec(&new_host).unwrap(),
         );
-        let next = inventory_call(
-            directory,
-            json!({"kind":"prepare-capabilities","execution_context_id":new_context,"session_id":new_session,
-            "case_ids":["array-union"],"host_evidence_file":new_host_file,"max_queries":3,"max_seconds":120}),
-        );
+        let next_preparation = json!({"kind":"prepare-capabilities","execution_context_id":new_context,"session_id":new_session,
+            "case_ids":["array-union"],"host_evidence_file":new_host_file,"max_queries":3,"max_seconds":120});
+        if new_session == "synthetic-session" {
+            let before = std::fs::read(&state_file).unwrap();
+            let rejected = inventory_command(directory, next_preparation)
+                .output()
+                .unwrap();
+            assert!(
+                !rejected.status.success(),
+                "another context in the same host session must not renew a held allowance"
+            );
+            assert!(String::from_utf8_lossy(&rejected.stderr).contains("renew its allowance"));
+            assert_eq!(std::fs::read(&state_file).unwrap(), before);
+            continue;
+        }
+        let next = inventory_call(directory, next_preparation);
         assert_eq!(next["action"]["executes_searches"], false);
         let new_run_id = next["action"]["capability"]["run_id"].as_str().unwrap();
         let state: InventoryState =

@@ -14,6 +14,8 @@ struct SetupContract {
     request: crate::setup::SetupRequest,
     result: crate::setup::SetupResult,
     state: crate::setup::SetupState,
+    /// The saved host report that `import-discovery` reads from `file`.
+    host_tool_discovery: crate::setup::HostToolDiscovery,
 }
 
 #[derive(JsonSchema)]

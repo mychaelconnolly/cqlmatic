@@ -869,12 +869,13 @@ const EARLIER_DISCOVERY_ALGORITHM: &str = "bounded-discovery-v2";
 
 #[path = "discovery_session.rs"]
 mod session;
+pub use session::has_search_allowance;
 pub use session::{
     Transport, bind_inventory_owner, dispatch, dispatch_inventory, earlier_release_ended,
     has_in_flight, init_inventory_resumable, init_resumable, inspect_inventory_owner,
-    inventory_probe, is_resumable, outstanding_probe_id, outstanding_refusal, pause,
-    recover_native_cleanup, resumable_info, resumable_request, resume, resume_inventory,
-    run_native, settle_cancelled, step_resumable, time_limit_passed,
+    inspect_inventory_owner_path, inventory_probe, is_resumable, outstanding_probe_id,
+    outstanding_refusal, pause, recover_native_cleanup, resumable_info, resumable_request, resume,
+    resume_inventory, run_native, settle_cancelled, step_resumable, time_limit_passed,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -887,6 +888,14 @@ struct ActivationIntent {
     pack_sha256: String,
     receipt_bytes: String,
     receipt_sha256: String,
+}
+
+/// The frozen starting pack, including an explicitly absent predecessor.
+pub fn activation_predecessor(state: &State) -> Option<Option<&str>> {
+    state
+        .activation
+        .as_ref()
+        .map(|intent| intent.predecessor_pack_sha256.as_deref())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1382,6 +1391,24 @@ pub fn inspect_state(path: &Path) -> Result<State, Diagnostic> {
     inspect_state_for_producer(path, env!("CARGO_PKG_VERSION"))
 }
 fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diagnostic> {
+    inspect_checkpoint(path, producer, None)
+}
+
+/// Verify a marked run's surviving activation artifacts. The inventory cleaner
+/// supplies the verified live or detached paths, which may now be absent.
+pub fn inspect_prune_leftovers(
+    path: &Path,
+    pack: &Path,
+    receipt: &Path,
+) -> Result<State, Diagnostic> {
+    inspect_checkpoint(path, env!("CARGO_PKG_VERSION"), Some((pack, receipt)))
+}
+
+fn inspect_checkpoint(
+    path: &Path,
+    producer: &str,
+    leftovers: Option<(&Path, &Path)>,
+) -> Result<State, Diagnostic> {
     let bytes = storage::read_bytes(path, MAX_PACK_BYTES)?;
     let header: Value = serde_json::from_slice(&bytes)
         .map_err(|_| Diagnostic::error("MCP_STATE_TAMPERED", "Cannot decode MCP state."))?;
@@ -1471,11 +1498,16 @@ fn inspect_state_for_producer(path: &Path, producer: &str) -> Result<State, Diag
     if state.status == "activated" {
         let expected = state.pack_sha256.as_deref().ok_or_else(tampered)?;
         let intent = state.activation.as_ref().ok_or_else(tampered)?;
-        let committed = storage::read_bytes(&state.pack, MAX_PACK_BYTES).map_err(|_| tampered())?;
-        if expected != sha256_hex(&committed)
-            || expected != intent.pack_sha256
-            || storage::read_bytes(&state.receipt, MAX_PACK_BYTES)
-                .map_or(true, |bytes| bytes != intent.receipt_bytes.as_bytes())
+        let (pack, receipt) = match leftovers {
+            Some((pack, receipt)) => (optional_bytes(pack)?, optional_bytes(receipt)?),
+            None => (
+                Some(storage::read_bytes(&state.pack, MAX_PACK_BYTES).map_err(|_| tampered())?),
+                Some(storage::read_bytes(&state.receipt, MAX_PACK_BYTES).map_err(|_| tampered())?),
+            ),
+        };
+        if expected != intent.pack_sha256
+            || pack.is_some_and(|committed| expected != sha256_hex(&committed))
+            || receipt.is_some_and(|committed| committed != intent.receipt_bytes.as_bytes())
             || state.failure.is_some()
         {
             return Err(tampered());
@@ -1714,6 +1746,7 @@ pub fn init(
     receipt_path: &Path,
 ) -> Result<StepOutput, Diagnostic> {
     discovery::validate_request(&request)?;
+    let request = request.normalize_inputs()?;
     distinct_paths(&[state_path, pack_path, receipt_path])?;
     let state_path = path_identity(state_path)?;
     let pack_path = path_identity(pack_path)?;
@@ -1831,11 +1864,11 @@ fn activate(
         );
     }
     let merged = match old {
-        Some(old) => environment::merge(&old, &candidate),
-        None => Ok(candidate),
+        Some(old) => environment::merge_with_notices(&old, &candidate),
+        None => environment::validate_incoming_fields(&candidate).map(|()| (candidate, Vec::new())),
     };
-    let merged = match merged {
-        Ok(pack) => pack,
+    let (merged, notices) = match merged {
+        Ok(merged) => merged,
         Err(d) => return fail_state(writer, state, d),
     };
     let receipt_writer = match storage::Writer::acquire(&state.receipt) {
@@ -1859,6 +1892,7 @@ fn activate(
     }
     let predecessor = optional_bytes(&state.pack)?.map(|bytes| sha256_hex(&bytes));
     report.active_pack_updated = true;
+    report.diagnostics.extend(notices.iter().cloned());
     let mut receipt = serde_json::to_value(&report)
         .map_err(|_| Diagnostic::error("LOCAL_SERIALIZATION", "Cannot serialize MCP receipt."))?;
     receipt["mode"] = json!(if state
@@ -2007,6 +2041,30 @@ fn activation_artifacts(
     Ok((target_visible, receipt.is_some()))
 }
 
+/// Verify that the on-disk pack and receipt agree with the frozen activation, or that an
+/// activation-blocked run without frozen intent has no stale receipt blocking recovery.
+pub fn inspect_activation_artifacts(state: &State) -> Result<(), Diagnostic> {
+    if state.status == "activation-blocked" && state.activation.is_none() {
+        if optional_bytes(&state.receipt)?.is_some() {
+            return Err(Diagnostic::error(
+                "LOCAL_IO",
+                "MCP receipt path must remain absent before activation.",
+            ));
+        }
+        return Ok(());
+    }
+    let intent = state.activation.as_ref().ok_or_else(tampered)?;
+    if let Some(session) = &state.session
+        && intent.predecessor_pack_sha256 != session.predecessor_sha256
+    {
+        return Err(Diagnostic::error(
+            "MCP_ACTIVATION_CONFLICT",
+            "Frozen activation predecessor disagrees with the bound session predecessor.",
+        ));
+    }
+    activation_artifacts(state, intent).map(|_| ())
+}
+
 /// Report a current conflict with the frozen activation artifacts without attempting promotion.
 pub fn pending_activation_conflict(state: &State) -> Option<Diagnostic> {
     if state.status != "activating" {
@@ -2015,6 +2073,23 @@ pub fn pending_activation_conflict(state: &State) -> Option<Diagnostic> {
     activation_artifacts(state, state.activation.as_ref()?)
         .err()
         .filter(|error| error.code == "MCP_ACTIVATION_CONFLICT")
+}
+
+fn receipt_notices(state: &State) -> Vec<Diagnostic> {
+    let Some(intent) = state.activation.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(receipt) = serde_json::from_str::<Value>(&intent.receipt_bytes) else {
+        return Vec::new();
+    };
+    receipt
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| serde_json::from_value::<Diagnostic>(item.clone()).ok())
+        .filter(|diagnostic| diagnostic.code == "FIELD_MEASUREMENT_NOT_APPLIED")
+        .collect()
 }
 
 fn finish_activation(
@@ -2059,7 +2134,13 @@ fn finish_activation(
         return Ok(activation_blocked(state, d));
     }
     activation_checkpoint("after-activated")?;
-    Ok(progress(state, "complete", vec![], true, vec![]))
+    Ok(progress(
+        state,
+        "complete",
+        vec![],
+        true,
+        receipt_notices(state),
+    ))
 }
 
 #[cfg(test)]
@@ -2114,7 +2195,13 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
         if let Err(d) = writer.confirm_durable() {
             return Ok(activation_blocked(state, d));
         }
-        return Ok(progress(state, "complete", vec![], true, vec![]));
+        return Ok(progress(
+            state,
+            "complete",
+            vec![],
+            true,
+            receipt_notices(state),
+        ));
     }
     if state.status == "activating" {
         return recover_activation(writer, state);
@@ -2909,6 +2996,8 @@ mod recovery_tests {
             )
             .unwrap();
         inventory.discovery_runs.push(DiscoveryRun {
+            pruned_at: None,
+            cleanup_pending: false,
             state_path: run.state.to_str().unwrap().into(),
             pack_path: run.pack.to_str().unwrap().into(),
             receipt_path: run.receipt.to_str().unwrap().into(),

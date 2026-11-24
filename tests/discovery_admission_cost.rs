@@ -486,7 +486,17 @@ fn admission_refuses_a_pack_created_after_now() {
     );
     let ids = source_ids(&dir);
     let (_, sibling) = unowned_paused_run(&dir, &[&ids[0]], 1);
-    call(&dir, json!({"kind":"import-pack","pack_file":pack_file}));
+    // Seed a future-dated snapshot that an earlier build could import.
+    let reference = json!({
+        "path": pack_file,
+        "content_digest": future.content_digest,
+        "imported_at": END,
+        "discovery_run": null,
+    });
+    let mut saved = read(&dir.state());
+    saved["active_pack"] = reference.clone();
+    saved["packs"] = json!([reference]);
+    write(&dir.state(), &saved);
     status(&dir);
     assert_refused(
         &dir,
