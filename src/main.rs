@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
     io::{self, BufRead, Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::atomic::Ordering,
     time::{Duration, Instant},
@@ -1470,22 +1470,60 @@ fn add_inventory_source_id(row: &mut Value) {
     }
 }
 
+fn prospective_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let mut ancestor = absolute.as_path();
+    let mut suffix = Vec::new();
+    let mut resolved = loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(existing) => break existing,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(parent) = ancestor.parent() else {
+                    return Err(error);
+                };
+                suffix.extend(ancestor.components().next_back());
+                ancestor = parent;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    for component in suffix.into_iter().rev() {
+        if component == Component::ParentDir {
+            if !resolved.pop() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "path escapes its root",
+                ));
+            }
+        } else {
+            resolved.push(component.as_os_str());
+            // Traversing ".." can bring the suffix back to an existing directory.
+            match std::fs::canonicalize(&resolved) {
+                Ok(existing) => resolved = existing,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 fn protect_import_inputs(
     out: &Path,
     from: &Path,
     descriptor: Option<&Path>,
     legacy: bool,
 ) -> Result<(), Diagnostic> {
-    let destination = match std::fs::canonicalize(out) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(input_error(&format!(
-                "Cannot resolve output path {out:?}: {error}. Choose an accessible output path."
-            )));
-        }
-    };
-    let mut inputs: Vec<_> = descriptor.into_iter().map(Path::to_path_buf).collect();
+    let destination = prospective_path(out).map_err(|error| {
+        input_error(&format!(
+            "Cannot resolve output path {out:?}: {error}. Choose an accessible output path."
+        ))
+    })?;
+    let mut inputs: Vec<_> = descriptor
+        .filter(|path| *path != Path::new("-"))
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
     if legacy {
         // Match the directory and component names read by storage::legacy_data.
         let dir = if from.join("sources.jsonl").exists() {
@@ -1495,15 +1533,13 @@ fn protect_import_inputs(
         };
         inputs.extend(
             ["sources", "fields", "provenance", "values", "annotations"]
-                .map(|name| dir.join(format!("{name}.jsonl")))
-                .into_iter()
-                .filter(|path| path.exists()),
+                .map(|name| dir.join(format!("{name}.jsonl"))),
         );
     } else {
         inputs.push(from.to_path_buf());
     }
     for input in inputs {
-        let original = std::fs::canonicalize(&input).map_err(|error| {
+        let original = prospective_path(&input).map_err(|error| {
             input_error(&format!(
                 "Cannot resolve import input {input:?}: {error}. Check the input path and retry."
             ))

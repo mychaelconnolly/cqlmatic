@@ -867,7 +867,7 @@ fn oversized_default_inventory_cannot_be_ignored_for_an_explicit_pack() {
 }
 
 #[test]
-fn unconfirmed_preferences_are_benign_only_without_evidence() {
+fn unconfirmed_inventory_is_ignored_at_the_default_location() {
     let dir = Temp::new();
     let path = dir.default_state();
     for mode in [DiscoveryMode::Full, DiscoveryMode::Quick] {
@@ -884,6 +884,14 @@ fn unconfirmed_preferences_are_benign_only_without_evidence() {
     contradictory.refresh_reminder = None;
     save_state(&path, &contradictory);
     let (code, result) = dir.one(&["check", "count()", "--json"]);
+    assert_eq!(code, 0, "{result}");
+    let (code, result) = dir.one(&[
+        "check",
+        "count()",
+        "--json",
+        "--inventory-state",
+        path.to_str().unwrap(),
+    ]);
     assert_eq!(code, 1, "{result}");
     assert!(diagnostic(&result, "CQL_QUICK_INVENTORY", "error"));
 }
@@ -1264,6 +1272,7 @@ fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
     }
     let run_import = |from: &Path, out: &Path| {
         temp.binary()
+            .current_dir(&legacy)
             .args(["env", "import", "--from"])
             .arg(from)
             .args(["--out"])
@@ -1301,6 +1310,22 @@ fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
         assert_eq!(fs::read(&out).unwrap(), before);
     }
 
+    let fields = legacy.join("fields.jsonl");
+    let before = fs::read(&fields).unwrap();
+    let result = run_import(&legacy_root, Path::new("missing/../fields.jsonl"));
+    assert_eq!(result.status.code(), Some(2), "{result:?}");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("separate output path"));
+    assert_eq!(fs::read(&fields).unwrap(), before);
+    assert!(!legacy.join("missing").exists());
+    for name in ["values.jsonl", "annotations.jsonl"] {
+        let path = legacy.join(name);
+        fs::remove_file(&path).unwrap();
+        let result = run_import(&legacy_root, &path);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("separate output path"));
+        assert!(!path.exists());
+    }
+
     let output = temp.0.join("output.json");
     let (first, second) = (
         run_import(&legacy_root, &output),
@@ -1308,6 +1333,43 @@ fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
     );
     assert!(first.status.success(), "{first:?}");
     assert!(second.status.success(), "{second:?}");
+    assert_eq!(
+        cqlmatic::storage::read_pack(&output)
+            .unwrap()
+            .content_digest,
+        pack.content_digest
+    );
+}
+
+#[test]
+fn import_replace_accepts_an_environment_from_standard_input() {
+    let temp = Temp::new();
+    let native = temp.0.join("original.json");
+    let output = temp.0.join("output.json");
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    save_pack(&native, &pack);
+    fs::write(&output, b"previous output").unwrap();
+    let mut child = temp
+        .binary()
+        .current_dir(&temp.0)
+        .args(["env", "import", "--from"])
+        .arg(&native)
+        .args(["--out"])
+        .arg(&output)
+        .args(["--environment", "-", "--replace"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&environment()).unwrap())
+        .unwrap();
+    let result = child.wait_with_output().unwrap();
+    assert!(result.status.success(), "{result:?}");
     assert_eq!(
         cqlmatic::storage::read_pack(&output)
             .unwrap()
