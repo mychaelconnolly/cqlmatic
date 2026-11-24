@@ -571,18 +571,24 @@ impl CapabilityRun {
         self.case_revision(case_id) == Some(case_id.revision().as_str())
     }
 
-    /// Whether every case's latest attempt is verified; such a run dispatches no further attempts.
+    /// Whether every case held at its current revision has a verified latest attempt; such a run
+    /// dispatches no further attempts, and a later revision of another case does not reopen it.
     pub fn complete(&self) -> bool {
-        self.status()
+        let status = self.status();
+        let mut current = status
             .cases
             .iter()
-            .all(|case| case.last_outcome == Some(CapabilityOutcome::Verified))
+            .filter(|case| self.holds_current(case.case_id))
+            .peekable();
+        current.peek().is_some()
+            && current.all(|case| case.last_outcome == Some(CapabilityOutcome::Verified))
     }
 
     /// Whether this run could still reserve an attempt for a case it holds, after resuming if paused.
     pub fn can_dispatch_again(&self, now: &str) -> Result<bool, Diagnostic> {
         Ok(!self.complete()
             && self.attempts.len() < self.max_queries as usize
+            && !(self.paused() && self.periods.len() >= 4096)
             && self
                 .case_ids
                 .iter()
@@ -947,12 +953,17 @@ impl CapabilityRun {
             ));
         }
         if let Some(previous) = attempt.reservation.settlement.take() {
-            if attempt.reservation.settlement_history.len() >= 20 {
-                return Err(fail(
-                    "Capability reconciliation history reached its finite limit.",
-                ));
+            let history = &mut attempt.reservation.settlement_history;
+            if history.len() >= 20 {
+                if report.termination == RefreshTermination::Unresolved {
+                    return Err(fail(
+                        "Capability reconciliation history reached its finite limit. Submit the attempt's terminal settlement with submit-capability.",
+                    ));
+                }
+                // A terminal settlement is always recorded, in place of the oldest unresolved report.
+                history.remove(0);
             }
-            attempt.reservation.settlement_history.push(previous);
+            history.push(previous);
         }
         attempt.reservation.phase = if report.termination == RefreshTermination::Unresolved {
             RefreshPhase::Unresolved
@@ -1000,17 +1011,14 @@ impl CapabilityRun {
 
     pub fn resume(&mut self, execution_context_id: &str, now: &str) -> Result<(), Diagnostic> {
         self.validate(self.ordinal)?;
-        if self.blocked()
-            || execution_context_id != self.execution_context_id
-            || self.periods.len() >= 4096
-        {
+        if self.blocked() || execution_context_id != self.execution_context_id {
             return Err(fail(
                 "Resume requires safe termination, the same authorization context and remaining original allowance.",
             ));
         }
         if !self.can_dispatch_again(now)? {
             return Err(fail(
-                "This capability checkpoint cannot dispatch again: every case is verified, it holds no case at its current revision, its max_queries attempts are used, or its remaining active time does not exceed the host evidence's max_search_seconds. Use prepare-capabilities for a new run; the checkpoint keeps its history.",
+                "This capability checkpoint cannot dispatch again: every case it holds at its current revision is verified, it holds no case at its current revision, its max_queries attempts are used, its remaining active time does not exceed the host evidence's max_search_seconds, or it has been resumed its limit of 4,095 times. Use prepare-capabilities for a new run; the checkpoint keeps its history.",
             ));
         }
         if self.paused() {
@@ -1053,10 +1061,10 @@ impl DispatchRefusal {
                 "This case is not in the capability checkpoint. Pause the checkpoint with pause-capabilities, then use prepare-capabilities for the cases it does not hold."
             }
             Self::EarlierRevision => {
-                "The capability checkpoint holds an earlier revision of this case. Use prepare-capabilities to prepare the current revision."
+                "The capability checkpoint holds an earlier revision of this case. Pause the checkpoint with pause-capabilities if it is active, then use prepare-capabilities to prepare the current revision."
             }
             Self::Complete => {
-                "Every case in this capability checkpoint is verified, so it dispatches no further attempts. Use prepare-capabilities to check a case again; the checkpoint keeps its history."
+                "Every case this capability checkpoint holds at its current revision is verified, so it dispatches no further attempts. Use prepare-capabilities to check a case again; the checkpoint keeps its history."
             }
             Self::NoAttempts => {
                 "The capability checkpoint has used all of its max_queries attempts. Use prepare-capabilities for a new run; the checkpoint keeps its history."
@@ -1296,7 +1304,7 @@ mod tests {
             run.dispatch(CaseId::ArrayUnion, "auth", "host", settled)
                 .unwrap_err()
                 .message,
-            "The capability checkpoint holds an earlier revision of this case. Use prepare-capabilities to prepare the current revision."
+            "The capability checkpoint holds an earlier revision of this case. Pause the checkpoint with pause-capabilities if it is active, then use prepare-capabilities to prepare the current revision."
         );
     }
 }

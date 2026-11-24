@@ -3,6 +3,7 @@ use cqlmatic::{
     contracts::{Cloud, Diagnostic, EnvironmentId},
     discovery,
     environment::{Pack, PackData},
+    inventory::RawSnapshot,
     sha256_hex,
 };
 use serde_json::{Value, json};
@@ -21,19 +22,24 @@ const UNRESOLVED: &str = "An earlier attempt in this capability checkpoint is un
 const OTHER_CONTEXT: &str = "The execution_context_id differs from the one this capability checkpoint was prepared with. Dispatch with that context; its cases cannot be prepared again under another context while this checkpoint can still dispatch them.";
 const OTHER_SESSION: &str = "The session_id differs from the host session this capability checkpoint was prepared with. Dispatch with that session, or use prepare-capabilities with host evidence for the new session.";
 const NOT_IN_RUN: &str = "This case is not in the capability checkpoint. Pause the checkpoint with pause-capabilities, then use prepare-capabilities for the cases it does not hold.";
-const EARLIER_REVISION: &str = "The capability checkpoint holds an earlier revision of this case. Use prepare-capabilities to prepare the current revision.";
-const COMPLETE: &str = "Every case in this capability checkpoint is verified, so it dispatches no further attempts. Use prepare-capabilities to check a case again; the checkpoint keeps its history.";
+const EARLIER_REVISION: &str = "The capability checkpoint holds an earlier revision of this case. Pause the checkpoint with pause-capabilities if it is active, then use prepare-capabilities to prepare the current revision.";
+const COMPLETE: &str = "Every case this capability checkpoint holds at its current revision is verified, so it dispatches no further attempts. Use prepare-capabilities to check a case again; the checkpoint keeps its history.";
 const NO_ATTEMPTS: &str = "The capability checkpoint has used all of its max_queries attempts. Use prepare-capabilities for a new run; the checkpoint keeps its history.";
 const BELOW_LIFETIME: &str = "The capability checkpoint's remaining active time does not cover the host evidence's max_search_seconds for another dispatch; a paused checkpoint needs more than that, because it must resume first. Use prepare-capabilities for a new run; the checkpoint keeps its history.";
 const PAUSED: &str = "The capability checkpoint is paused. Resume it with resume-capabilities and its execution_context_id before dispatching.";
+const PAUSED_BEHIND_ACTIVE: &str = "The capability checkpoint is paused, and another checkpoint for its execution context and session is active. Pause that one with pause-capabilities, then resume this one with resume-capabilities and its execution_context_id before dispatching.";
 const RESUME_RETAINED: &str =
     "Resume the retained capability checkpoint with its original remaining allowance.";
+const RESUME_RETAINED_BEHIND_ACTIVE: &str = "Resume the retained capability checkpoint with its original remaining allowance. Another checkpoint for its execution context and session is active, so pause that one with pause-capabilities first.";
 const PAUSE_FIRST: &str = "A retained capability checkpoint for this execution context and session can still dispatch. Pause it with pause-capabilities before preparing cases it does not hold.";
 const RECONCILE_FIRST: &str = "A capability attempt is unresolved. Submit its terminal settlement with submit-capability before another inventory search; status marks its checkpoint termination_pending.";
 const HELD_ELSEWHERE: &str = "A retained capability checkpoint for this host session can still dispatch a requested case, so preparing it again would renew its allowance. Use that checkpoint's run_id and execution_context_id from status, resuming it first if it is paused.";
+const HELD_BEHIND_ACTIVE: &str = "A retained capability checkpoint for this host session can still dispatch a requested case, so preparing it again would renew its allowance. It is paused while another checkpoint for its execution context and session is active: pause that one with pause-capabilities, then resume the retained checkpoint with its run_id and execution_context_id from status.";
 const OTHER_ACTIVE_PREPARE: &str = "Another capability checkpoint for this execution context and session is active. Pause it with pause-capabilities, then use prepare-capabilities for this case.";
 const OTHER_ACTIVE_RESUME: &str = "Another capability checkpoint for this execution context and session is active. Pause it with pause-capabilities before resuming this one.";
-const CANNOT_RESUME: &str = "This capability checkpoint cannot dispatch again: every case is verified, it holds no case at its current revision, its max_queries attempts are used, or its remaining active time does not exceed the host evidence's max_search_seconds. Use prepare-capabilities for a new run; the checkpoint keeps its history.";
+const CANNOT_RESUME: &str = "This capability checkpoint cannot dispatch again: every case it holds at its current revision is verified, it holds no case at its current revision, its max_queries attempts are used, its remaining active time does not exceed the host evidence's max_search_seconds, or it has been resumed its limit of 4,095 times. Use prepare-capabilities for a new run; the checkpoint keeps its history.";
+const WRONG_CONTEXT_RESUME: &str = "Resume requires safe termination, the same authorization context and remaining original allowance.";
+const HISTORY_LIMIT: &str = "Capability reconciliation history reached its finite limit. Submit the attempt's terminal settlement with submit-capability.";
 const AT_CAPACITY: &str = "This inventory already retains 100 capability checkpoints, its limit, and keeps their history. Use a separately initialized inventory (another --state path) for further capability checks.";
 
 fn too_short(lifetime: u64) -> String {
@@ -411,7 +417,12 @@ fn resume(run_id: &Value) -> Value {
 
 fn verified(directory: &Path, run_id: &Value, reserved: &Value) -> Value {
     let now = discovery::timestamp();
-    let raw = serde_json::to_vec(&json!({"result":[{"out":3}]})).unwrap();
+    let raw = serde_json::to_vec(&if reserved["action"]["case_id"] == "array-union" {
+        json!({"result":[{"out[0]":1,"out[1]":2,"out[2]":3}]})
+    } else {
+        json!({"result":[{"out":3}]})
+    })
+    .unwrap();
     let result = protected_file(directory, "result.json", &raw);
     let settlement = protected_file(
         directory,
@@ -452,6 +463,54 @@ fn hold_earlier_revision(directory: &Path, index: usize, case: CaseId) -> Value 
             .unwrap()
         )
     );
+    for (position, attempt) in run.attempts.iter_mut().enumerate() {
+        if attempt.case_id == case {
+            attempt.case_revision = "f".repeat(64);
+        }
+        let reservation = &attempt.reservation;
+        let reservation_id = format!(
+            "refresh:{}",
+            sha256_hex(
+                &serde_json::to_vec(&(
+                    &reservation.environment,
+                    &reservation.session_id,
+                    &reservation.arguments,
+                    &reservation.host_evidence.sha256,
+                    &reservation.prepared_at,
+                    position,
+                ))
+                .unwrap()
+            )
+        );
+        let id = format!(
+            "capability-attempt:{}",
+            sha256_hex(
+                &serde_json::to_vec(&(
+                    &run.id,
+                    attempt.case_id,
+                    &attempt.case_revision,
+                    &attempt.resources,
+                    reservation_id,
+                ))
+                .unwrap()
+            )
+        );
+        let reservation = &mut attempt.reservation;
+        for snapshot in reservation
+            .settlement_history
+            .iter_mut()
+            .chain(reservation.settlement.iter_mut())
+        {
+            let mut report: Value = serde_json::from_slice(&snapshot.bytes().unwrap()).unwrap();
+            report["attempt_id"] = json!(id);
+            *snapshot = RawSnapshot::new(
+                &serde_json::to_vec(&report).unwrap(),
+                &snapshot.retrieved_at,
+            )
+            .unwrap();
+        }
+        reservation.id = id;
+    }
     state["capability_runs"][index] = serde_json::to_value(&run).unwrap();
     protected_file(
         directory,
@@ -599,8 +658,8 @@ fn a_paused_run_does_not_block_cases_it_does_not_hold() {
         for cases in [&["array-union"][..], &["array-union", "math-sqrt"][..]] {
             assert_eq!(
                 refused(directory, prepare(directory, cases, 30, 4, 300))["message"],
-                RESUME_RETAINED,
-                "the same cases reuse the retained allowance"
+                RESUME_RETAINED_BEHIND_ACTIVE,
+                "the same cases reuse the retained allowance once the new run is paused"
             );
         }
         assert_reserved(directory, &run_id(&second), "math-sqrt");
@@ -815,10 +874,21 @@ fn a_fully_verified_run_is_replaced_not_reused() {
         refused(directory, dispatch(&first, "math-sqrt"))["message"],
         COMPLETE
     );
+    call(directory, pause(&first));
     let second = run_id(&call(
         directory,
         prepare(directory, &["math-sqrt"], 30, 3, 300),
     ));
+    assert_eq!(
+        refused(directory, dispatch(&first, "math-sqrt"))["message"],
+        HELD_ELSEWHERE,
+        "the replacement already holds the case"
+    );
+    assert_eq!(
+        refused(directory, resume(&first))["message"],
+        CANNOT_RESUME,
+        "pausing the active replacement would not help"
+    );
     call(directory, pause(&second));
     assert_eq!(refused(directory, resume(&first))["message"], CANNOT_RESUME);
     call(directory, resume(&second));
@@ -883,21 +953,39 @@ fn several_retained_runs_lead_to_the_one_that_holds_the_case() {
     ));
     call(directory, pause(&second));
     call(directory, resume(&first));
-    // The paused run holds the case, so pausing the active one would not help.
+    // The paused run holds the case; it resumes once the active one is paused.
     for cases in [&["math-sqrt"][..], &["math-sqrt", "array-intersection"][..]] {
         assert_eq!(
             refused(directory, prepare(directory, cases, 30, 4, 300))["message"],
-            RESUME_RETAINED,
+            RESUME_RETAINED_BEHIND_ACTIVE,
             "{cases:?}"
         );
     }
     assert_eq!(
-        refused(directory, resume(&second))["message"],
-        OTHER_ACTIVE_RESUME
+        refused(
+            directory,
+            preparation(directory, "other-auth", SESSION, &["math-sqrt"], 30, 4, 300)
+        )["message"],
+        HELD_BEHIND_ACTIVE
     );
     assert_eq!(
         refused(directory, dispatch(&first, "math-sqrt"))["message"],
-        HELD_ELSEWHERE
+        HELD_BEHIND_ACTIVE
+    );
+    assert_eq!(
+        refused(directory, dispatch(&second, "math-sqrt"))["message"],
+        PAUSED_BEHIND_ACTIVE
+    );
+    assert_eq!(
+        refused(directory, resume(&second))["message"],
+        OTHER_ACTIVE_RESUME
+    );
+    let mut wrong_context = resume(&second);
+    wrong_context["execution_context_id"] = json!("wrong-auth");
+    assert_eq!(
+        refused(directory, wrong_context)["message"],
+        WRONG_CONTEXT_RESUME,
+        "a wrong context is named before the active sibling"
     );
     call(directory, pause(&first));
     call(directory, resume(&second));
@@ -984,4 +1072,276 @@ fn the_retained_checkpoint_limit_names_a_separate_inventory() {
     );
     assert_eq!(error["code"], "CAPABILITY_INPUT");
     assert_eq!(error["message"], AT_CAPACITY);
+}
+
+#[test]
+fn a_completed_run_stays_complete_when_one_case_is_revised() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    let first = run_id(&call(
+        directory,
+        prepare(directory, &["array-union", "math-sqrt"], 30, 3, 300),
+    ));
+    for case in ["array-union", "math-sqrt"] {
+        let reserved = call(directory, dispatch(&first, case));
+        call(directory, verified(directory, &first, &reserved));
+    }
+    let first = hold_earlier_revision(directory, 0, CaseId::MathSqrt);
+    let retained: CapabilityRun = serde_json::from_value(runs(directory)[0].clone()).unwrap();
+    assert!(retained.complete());
+    assert!(
+        !retained
+            .can_dispatch_again(&discovery::timestamp())
+            .unwrap()
+    );
+    assert_eq!(
+        refused(directory, dispatch(&first, "array-union"))["message"],
+        COMPLETE
+    );
+    assert_eq!(
+        refused(directory, dispatch(&first, "math-sqrt"))["message"],
+        EARLIER_REVISION
+    );
+    assert_eq!(refused(directory, resume(&first))["message"], CANNOT_RESUME);
+    let retained = runs(directory)[0].clone();
+    let revised = run_id(&call(
+        directory,
+        prepare(directory, &["math-sqrt"], 30, 3, 300),
+    ));
+    call(directory, pause(&revised));
+    let again = run_id(&call(
+        directory,
+        prepare(directory, &["array-union"], 30, 3, 300),
+    ));
+    assert_eq!(
+        runs(directory)[0],
+        retained,
+        "the completed run keeps its history"
+    );
+    assert_reserved(directory, &again, "array-union");
+}
+
+#[test]
+fn a_terminal_settlement_is_recorded_after_many_unresolved_reports() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    let first = run_id(&call(
+        directory,
+        prepare(directory, &["math-sqrt"], 30, 2, 300),
+    ));
+    let reserved = call(directory, dispatch(&first, "math-sqrt"));
+    let unresolved = |report: usize| {
+        let now = discovery::timestamp();
+        let settlement = protected_file(
+            directory,
+            "settlement.json",
+            &serde_json::to_vec(&json!({"schema_version":1,"attempt_id":reserved["action"]["attempt_id"],
+                "environment":environment(),"session_id":SESSION,"arguments":reserved["action"]["arguments"],
+                "termination":"unresolved","recorded_at":now,
+                "evidence":format!("Synthetic unresolved report {report}")}))
+            .unwrap(),
+        );
+        json!({"kind":"submit-capability","run_id":first,"attempt_id":reserved["action"]["attempt_id"],
+            "execution_context_id":CONTEXT,"settlement_file":settlement,"retrieved_at":now})
+    };
+    for report in 0..21 {
+        call(directory, unresolved(report));
+    }
+    let error = refused(directory, unresolved(21));
+    assert_eq!(error["code"], "CAPABILITY_INPUT");
+    assert_eq!(error["message"], HISTORY_LIMIT);
+    let settled = call(directory, cancel(directory, &first, &reserved));
+    assert_eq!(settled["status"]["capability_blocked"], false);
+    let history = &runs(directory)[0]["attempts"][0]["reservation"]["settlement_history"];
+    assert_eq!(history.as_array().unwrap().len(), 20);
+    assert_reserved(directory, &first, "math-sqrt");
+}
+
+#[test]
+fn a_run_at_its_resume_limit_does_not_block_preparing() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    let first = run_id(&call(
+        directory,
+        prepare(directory, &["math-sqrt"], 30, 4, 300),
+    ));
+    call(directory, pause(&first));
+    let path = directory.join("state.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let prepared_at = state["capability_runs"][0]["prepared_at"].clone();
+    state["capability_runs"][0]["periods"] =
+        json!(vec![json!({"start":prepared_at,"end":prepared_at}); 4096]);
+    protected_file(
+        directory,
+        "state.json",
+        &serde_json::to_vec_pretty(&state).unwrap(),
+    );
+    let retained: CapabilityRun = serde_json::from_value(runs(directory)[0].clone()).unwrap();
+    retained.validate(0).unwrap();
+    assert!(
+        !retained
+            .can_dispatch_again(&discovery::timestamp())
+            .unwrap()
+    );
+    assert_eq!(refused(directory, resume(&first))["message"], CANNOT_RESUME);
+    let second = run_id(&call(
+        directory,
+        prepare(directory, &["math-sqrt"], 30, 4, 300),
+    ));
+    assert_reserved(directory, &second, "math-sqrt");
+}
+
+#[test]
+fn an_earlier_revision_points_to_the_current_holder() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    call(directory, prepare(directory, &["array-union"], 30, 4, 300));
+    let first = hold_earlier_revision(directory, 0, CaseId::ArrayUnion);
+    let second = run_id(&call(
+        directory,
+        prepare(directory, &["array-union"], 30, 4, 300),
+    ));
+    assert_eq!(
+        refused(directory, dispatch(&first, "array-union"))["message"],
+        HELD_ELSEWHERE
+    );
+    assert_reserved(directory, &second, "array-union");
+}
+
+#[test]
+fn a_sibling_holding_an_earlier_revision_is_not_the_holder() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    call(
+        directory,
+        prepare(directory, &["array-union", "math-sqrt"], 30, 4, 300),
+    );
+    let first = hold_earlier_revision(directory, 0, CaseId::ArrayUnion);
+    call(directory, pause(&first));
+    let second = run_id(&call(
+        directory,
+        prepare(directory, &["array-intersection"], 30, 4, 300),
+    ));
+    assert_eq!(
+        refused(directory, dispatch(&second, "array-union"))["message"],
+        NOT_IN_RUN
+    );
+    call(directory, pause(&second));
+    let third = run_id(&call(
+        directory,
+        prepare(directory, &["array-union"], 30, 4, 300),
+    ));
+    assert_reserved(directory, &third, "array-union");
+}
+
+#[test]
+fn a_revised_case_can_be_prepared_under_another_context() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    call(
+        directory,
+        prepare(directory, &["array-union", "math-sqrt"], 30, 4, 300),
+    );
+    hold_earlier_revision(directory, 0, CaseId::MathSqrt);
+    let revised = call(
+        directory,
+        preparation(directory, "other-auth", SESSION, &["math-sqrt"], 30, 4, 300),
+    );
+    let mut reserve = dispatch(&run_id(&revised), "math-sqrt");
+    reserve["execution_context_id"] = json!("other-auth");
+    assert_eq!(call(directory, reserve)["action"]["phase"], "dispatched");
+}
+
+#[test]
+fn another_context_holder_is_named_before_pausing_an_active_run() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    call(
+        directory,
+        preparation(
+            directory,
+            "other-auth",
+            SESSION,
+            &["array-union"],
+            30,
+            4,
+            300,
+        ),
+    );
+    let first = run_id(&call(
+        directory,
+        prepare(directory, &["math-sqrt"], 30, 4, 300),
+    ));
+    assert_eq!(
+        refused(directory, prepare(directory, &["array-union"], 30, 4, 300))["message"],
+        HELD_ELSEWHERE
+    );
+    assert_eq!(
+        refused(directory, dispatch(&first, "array-union"))["message"],
+        HELD_ELSEWHERE
+    );
+}
+
+#[test]
+fn a_run_holding_only_earlier_revisions_cannot_resume() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    let first = run_id(&call(
+        directory,
+        prepare(directory, &["array-union"], 30, 4, 300),
+    ));
+    call(directory, pause(&first));
+    let first = hold_earlier_revision(directory, 0, CaseId::ArrayUnion);
+    assert_eq!(refused(directory, resume(&first))["message"], CANNOT_RESUME);
+}
+
+#[test]
+fn only_an_active_run_that_can_dispatch_holds_back_a_paused_one() {
+    let directory = active_inventory();
+    let directory = &directory.0;
+    let paused = run_id(&call(
+        directory,
+        prepare(directory, &["math-sqrt"], 30, 4, 300),
+    ));
+    call(directory, pause(&paused));
+    let spent = run_id(&call(
+        directory,
+        prepare(directory, &["array-union"], 30, 1, 300),
+    ));
+    let reserved = call(directory, dispatch(&spent, "array-union"));
+    call(directory, cancel(directory, &spent, &reserved));
+    call(
+        directory,
+        preparation(
+            directory,
+            "other-auth",
+            SESSION,
+            &["array-intersection"],
+            30,
+            4,
+            300,
+        ),
+    );
+    call(
+        directory,
+        preparation(
+            directory,
+            CONTEXT,
+            "other-session",
+            &["array-reduce-row"],
+            30,
+            4,
+            300,
+        ),
+    );
+    assert_eq!(
+        refused(directory, prepare(directory, &["math-sqrt"], 30, 4, 300))["message"],
+        RESUME_RETAINED
+    );
+    assert_eq!(
+        refused(directory, dispatch(&paused, "math-sqrt"))["message"],
+        PAUSED
+    );
+    call(directory, resume(&paused));
+    assert_reserved(directory, &paused, "math-sqrt");
 }

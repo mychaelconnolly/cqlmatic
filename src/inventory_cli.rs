@@ -1939,6 +1939,34 @@ fn preflight_foreign_run(
 }
 
 const CAPABILITY_HELD_ELSEWHERE: &str = "A retained capability checkpoint for this host session can still dispatch a requested case, so preparing it again would renew its allowance. Use that checkpoint's run_id and execution_context_id from status, resuming it first if it is paused.";
+const CAPABILITY_HELD_BEHIND_ACTIVE: &str = "A retained capability checkpoint for this host session can still dispatch a requested case, so preparing it again would renew its allowance. It is paused while another checkpoint for its execution context and session is active: pause that one with pause-capabilities, then resume the retained checkpoint with its run_id and execution_context_id from status.";
+const CAPABILITY_RESUME_RETAINED: &str =
+    "Resume the retained capability checkpoint with its original remaining allowance.";
+const CAPABILITY_RESUME_RETAINED_BEHIND_ACTIVE: &str = "Resume the retained capability checkpoint with its original remaining allowance. Another checkpoint for its execution context and session is active, so pause that one with pause-capabilities first.";
+
+/// Whether a paused capability run must wait for another run of its execution context and session,
+/// which is active and can still dispatch, to be paused before it resumes.
+fn capability_behind_active(
+    state: &InventoryState,
+    index: usize,
+    now: &str,
+) -> Result<bool, Diagnostic> {
+    let run = &state.capability_runs[index];
+    if !run.paused() {
+        return Ok(false);
+    }
+    for (other_index, other) in state.capability_runs.iter().enumerate() {
+        if other_index != index
+            && other.execution_context_id == run.execution_context_id
+            && other.session_id == run.session_id
+            && !other.paused()
+            && other.can_dispatch_again(now)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 /// Names the capability action that settles an outstanding attempt; inventory reconcile does not.
 fn check_capability_attempts_settled(state: &InventoryState) -> Result<(), Diagnostic> {
@@ -2075,25 +2103,34 @@ fn apply(
             // An allowance is never renewed: a case a retained run in this host session can still
             // dispatch is not prepared again under any execution context.
             let mut held_elsewhere = false;
+            let mut held_behind_active = false;
             let mut active = false;
-            for previous in &state.capability_runs {
+            for (previous_index, previous) in state.capability_runs.iter().enumerate() {
                 if previous.session_id != session_id || !previous.can_dispatch_again(now)? {
                     continue;
                 }
                 let holds = case_ids.iter().any(|case| previous.holds_current(*case));
+                let behind_active = holds && capability_behind_active(state, previous_index, now)?;
                 if previous.execution_context_id == execution_context_id {
                     if holds {
-                        return Err(fail(
-                            "Resume the retained capability checkpoint with its original remaining allowance.",
-                        ));
+                        return Err(fail(if behind_active {
+                            CAPABILITY_RESUME_RETAINED_BEHIND_ACTIVE
+                        } else {
+                            CAPABILITY_RESUME_RETAINED
+                        }));
                     }
                     active |= !previous.paused();
                 } else {
                     held_elsewhere |= holds;
+                    held_behind_active |= behind_active;
                 }
             }
             if held_elsewhere {
-                return Err(fail(CAPABILITY_HELD_ELSEWHERE));
+                return Err(fail(if held_behind_active {
+                    CAPABILITY_HELD_BEHIND_ACTIVE
+                } else {
+                    CAPABILITY_HELD_ELSEWHERE
+                }));
             }
             if active {
                 return Err(fail(
@@ -2151,10 +2188,20 @@ fn apply(
                 .iter()
                 .position(|run| run.id == run_id)
                 .ok_or_else(|| fail("Unknown capability checkpoint."))?;
-            if state.capability_runs[index]
-                .dispatch_refusal(case_id, &execution_context_id, &session_id, now)?
-                .is_some_and(|refusal| refusal.leads_to_preparation())
+            let refusal = state.capability_runs[index].dispatch_refusal(
+                case_id,
+                &execution_context_id,
+                &session_id,
+                now,
+            )?;
+            if refusal == Some(cqlmatic::capability::DispatchRefusal::Paused)
+                && capability_behind_active(state, index, now)?
             {
+                return Err(fail(
+                    "The capability checkpoint is paused, and another checkpoint for its execution context and session is active. Pause that one with pause-capabilities, then resume this one with resume-capabilities and its execution_context_id before dispatching.",
+                ));
+            }
+            if refusal.is_some_and(|refusal| refusal.leads_to_preparation()) {
                 // Point to the retained run that a new preparation would be refused for.
                 let mut active = false;
                 for (other_index, other) in state.capability_runs.iter().enumerate() {
@@ -2165,7 +2212,13 @@ fn apply(
                         continue;
                     }
                     if other.holds_current(case_id) {
-                        return Err(fail(CAPABILITY_HELD_ELSEWHERE));
+                        return Err(fail(
+                            if capability_behind_active(state, other_index, now)? {
+                                CAPABILITY_HELD_BEHIND_ACTIVE
+                            } else {
+                                CAPABILITY_HELD_ELSEWHERE
+                            },
+                        ));
                     }
                     active |= other.execution_context_id == execution_context_id && !other.paused();
                 }
@@ -2249,19 +2302,13 @@ fn apply(
                 .position(|run| run.id == run_id)
                 .ok_or_else(|| fail("Unknown capability checkpoint."))?;
             let target = &state.capability_runs[index];
-            if target.paused() && target.can_dispatch_again(now)? {
-                for (other_index, other) in state.capability_runs.iter().enumerate() {
-                    if other_index != index
-                        && other.execution_context_id == target.execution_context_id
-                        && other.session_id == target.session_id
-                        && !other.paused()
-                        && other.can_dispatch_again(now)?
-                    {
-                        return Err(fail(
-                            "Another capability checkpoint for this execution context and session is active. Pause it with pause-capabilities before resuming this one.",
-                        ));
-                    }
-                }
+            if target.execution_context_id == execution_context_id
+                && target.can_dispatch_again(now)?
+                && capability_behind_active(state, index, now)?
+            {
+                return Err(fail(
+                    "Another capability checkpoint for this execution context and session is active. Pause it with pause-capabilities before resuming this one.",
+                ));
             }
             let run = &mut state.capability_runs[index];
             run.resume(&execution_context_id, now)?;
