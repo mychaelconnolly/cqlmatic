@@ -188,6 +188,16 @@ impl Session {
     }
 }
 
+/// Check whether the run has time left to settle, complete, or reserve a search.
+pub fn has_search_allowance(state: &State, now: &str) -> Result<bool, Diagnostic> {
+    let session = state.session.as_ref().ok_or_else(tampered)?;
+    match session.remaining(state, now) {
+        Ok(_) => Ok(has_in_flight(state) || has_discovery_work_after_resume(state)),
+        Err(diagnostic) if diagnostic.code == "MCP_DEADLINE" => Ok(false),
+        Err(diagnostic) => Err(diagnostic),
+    }
+}
+
 /// Whether a resumable run has used its whole time limit, so it can never continue.
 pub fn time_limit_passed(state: &State, now: &str) -> bool {
     state.session.as_ref().is_some_and(|session| {

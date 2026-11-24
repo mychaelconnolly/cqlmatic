@@ -243,6 +243,8 @@ pub enum InventoryAction {
         pack_file: String,
         #[serde(default)]
         mode: ImportPackMode,
+        #[serde(default)]
+        supersede_runs: bool,
     },
     Reconcile {
         reviewed_at: String,
