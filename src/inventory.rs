@@ -1106,6 +1106,18 @@ pub struct CompletionDetail {
     pub scout_awaiting_capture: bool,
     /// The most recently imported census; null before any census is saved.
     pub latest_census: Option<CensusSize>,
+    /// The first step status and reconcile advise; null when no listed step is open.
+    #[serde(default)]
+    pub next_action: Option<String>,
+}
+
+/// A retained discovery run that must be handled before another search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedRun {
+    /// Its checkpoint is readable, so it can be continued or paused.
+    Settle(usize),
+    /// Its checkpoint is missing or cannot be read.
+    Unreadable(usize),
 }
 
 /// Expected sources whose work in each category is not done.
@@ -1668,7 +1680,8 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "readiness":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
         "completion_detail":status.completion_detail.as_ref().map(|detail| json!({
             "expected_sources_open":detail.expected_sources_open,"parser_catalog_captured":detail.parser_catalog_captured,
-            "scout_awaiting_capture":detail.scout_awaiting_capture,"latest_census":detail.latest_census})),
+            "scout_awaiting_capture":detail.scout_awaiting_capture,"latest_census":detail.latest_census,
+            "next_action":detail.next_action})),
         "settings_attention":status.settings_attention,"settings_label":if status.settings_attention { "Settings *" } else { "Settings" },
         "refresh":{"automatic":status.refresh_settings.automatic,"automatic_available":status.automatic_refresh_available,"lookback":status.refresh_settings.lookback,
             "recorded_phase":recorded.map(|attempt| attempt.phase),"known_termination":recorded.and_then(|attempt| attempt.termination),
@@ -4157,17 +4170,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     let scoped_complete = !expected_sources.is_empty()
         && expected_sources.iter().all(|s| s.status == Progress::Done)
         && reconciliation == Progress::Done;
-    let full_census: Vec<_> = state
-        .scouting
-        .iter()
-        .filter(|s| s.plan.arguments.repository == "search-all")
-        .collect();
-    // The refresh freshness check decides whether a census is a complete, uncapped capture.
-    let full_census_qualifies = full_census.iter().any(|s| {
-        s.snapshot
-            .bytes()
-            .is_ok_and(|raw| refresh_rows(&raw).is_ok())
-    });
+    let (_, full_census_qualifies) = full_census(state);
     let complete = state.discovery_mode == DiscoveryMode::Full
         && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
         && state.active_pack.is_some()
@@ -4186,79 +4189,12 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             .all(|w| w.resolution.is_some() || !w.new_source && w.source_types.is_empty())
         && scoped_complete
         && reconciliation == Progress::Done;
-    let mut next_actions = Vec::new();
-    if state.capability_blocked() {
-        next_actions.push("A capability search has unresolved termination. Submit exact settlement before dispatching any further inventory search.".into());
-    } else if state.active_pack.is_some() && state.capability_runs.is_empty() {
-        next_actions.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
-    }
-    if state
-        .refresh_attempts
-        .iter()
-        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved))
-    {
-        next_actions.push("Refresh search termination is unresolved. Reconcile the exact attempt with safe settlement before another search. Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
-    }
-    let prepared = state
-        .refresh_attempts
-        .iter()
-        .find(|a| a.phase == RefreshPhase::Prepared);
-    if prepared.is_some_and(|attempt| attempt.automatic) {
-        next_actions.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started before preparing explicit manual refresh.".into());
-    }
-    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
-        next_actions.push(format!("A manual refresh is prepared for recorded host session {:?}; dispatch only from that exact verified session.", attempt.session_id));
-    }
-    if target.is_none() {
-        next_actions.push("Confirm CID, cloud, searchable view, target scope and context.".into());
-    }
-    if scout != Progress::Done && state.discovery_mode == DiscoveryMode::Full {
-        next_actions.push("Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result.".into());
-    }
-    if state.discovery_mode == DiscoveryMode::Full
-        && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
-        && !full_census_qualifies
-        && let Some(latest) = full_census.last()
-    {
-        let reason = if latest.rows >= 10_000 {
-            "The latest saved search-all census reached the 10,000-row ceiling. Use prepare-scout over a shorter window and import its entire response with import-scout."
-        } else {
-            "The latest saved search-all census rows did not pass census validation. Use prepare-scout for a fresh capture and import its entire response with import-scout."
-        };
-        next_actions.push(format!(
-            "{reason} full_map_complete stays false until a census qualifies."
-        ));
-    }
-    if !catalog_complete && state.discovery_mode == DiscoveryMode::Full {
-        next_actions.push("Complete the native parser catalog and retrieve each exact parser ID; API credentials stay in the supplied protected file.".into());
-    }
-    if !unclassified.is_empty() {
-        next_actions.push("Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence.".into());
-    }
-    if target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
-        && sources.iter().any(|s| !s.expected)
-    {
-        next_actions.push("Confirm the known source selectors within the target scope before completing a full environment map.".into());
-    }
-    if target.is_some_and(|t| t.scope == TargetScope::SelectedSources) {
-        next_actions
-            .push("Selected-source coverage cannot establish a full environment map.".into());
-    }
-    if reconciliation != Progress::Done {
-        next_actions.push(
-            "Reconcile after completing the applicable source measurements and parser reviews."
-                .into(),
-        );
-    }
     let pending_inventory: Vec<_> = state
         .pending_inventory
         .iter()
         .filter(|w| w.resolution.is_none())
         .cloned()
         .collect();
-    if !pending_inventory.is_empty() {
-        next_actions.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
-    }
     let open =
         |is_open: fn(&SourceStatus) -> bool| expected_sources.iter().filter(|s| is_open(s)).count();
     let completion_detail = CompletionDetail {
@@ -4283,8 +4219,9 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             rows: s.rows,
             at_row_ceiling: s.rows >= 10_000,
         }),
+        next_action: None,
     };
-    Ok(InventoryStatus {
+    let mut status = InventoryStatus {
         schema_version: 1,
         blank_canvas: target.is_none()
             && state.scouting.is_empty()
@@ -4396,10 +4333,188 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         discovery_runs: state.discovery_runs.clone(),
         parser_runs: state.parser_runs.clone(),
         failures: state.failures.clone(),
-        next_actions,
+        next_actions: vec![],
         covered_queries_usable: true,
         active_pack: state.active_pack.clone(),
-    })
+    };
+    advise(state, &mut status, None);
+    Ok(status)
+}
+
+/// The saved search-all censuses, oldest first, and whether any of them qualifies.
+fn full_census(state: &InventoryState) -> (Vec<&ScoutEvidence>, bool) {
+    let census: Vec<_> = state
+        .scouting
+        .iter()
+        .filter(|s| s.plan.arguments.repository == "search-all")
+        .collect();
+    // The refresh freshness check decides whether a census is a complete, uncapped capture.
+    let qualifies = census.iter().any(|s| {
+        s.snapshot
+            .bytes()
+            .is_ok_and(|raw| refresh_rows(&raw).is_ok())
+    });
+    (census, qualifies)
+}
+
+/// Sets the next steps that status and reconcile share. Steps come in one order: the target,
+/// then blockers, then the work the confirmed mode and scope require. While a blocker is open
+/// only blockers are listed, so no step prepares or runs another search. Steps are fixed text;
+/// notes with recorded detail follow them.
+pub fn advise(state: &InventoryState, status: &mut InventoryStatus, retained: Option<RetainedRun>) {
+    let quick = state.discovery_mode == DiscoveryMode::Quick;
+    let scope = state.target.as_ref().map(|t| t.scope);
+    let selected_full = !quick && scope == Some(TargetScope::SelectedSources);
+    // Source review and parser work are Full discovery steps.
+    let full = if quick { "Full discovery: " } else { "" };
+    // A complete selected scope leaves only optional work towards a full-environment map.
+    let optional_map = selected_full && status.selected_scope_complete;
+    let map = if optional_map {
+        "Full-environment map: "
+    } else {
+        full
+    };
+    let (census, census_qualifies) = full_census(state);
+    let detail = status
+        .completion_detail
+        .as_ref()
+        .expect("assessed status carries its completion detail");
+    let open = &detail.expected_sources_open;
+    let prepared = state
+        .refresh_attempts
+        .iter()
+        .find(|a| a.phase == RefreshPhase::Prepared);
+    let unresolved = state
+        .refresh_attempts
+        .iter()
+        .any(|a| matches!(a.phase, RefreshPhase::Dispatched | RefreshPhase::Unresolved));
+
+    let mut steps: Vec<String> = Vec::new();
+    if state.target.is_none() {
+        steps.push("Use confirm-target to record the CID, cloud, searchable view, target scope and context before continuing inventory work.".into());
+    } else if quick && scope == Some(TargetScope::FullEnvironment) {
+        steps.push("Quick discovery covers selected sources only. Use confirm-target with scope selected-sources before Quick discovery, or set-discovery-mode full to keep the full-environment target.".into());
+    }
+    let target_step = !steps.is_empty();
+    if state.capability_blocked() {
+        steps.push("A capability search has unresolved termination. Use submit-capability with exact settlement for that attempt before another inventory search.".into());
+    }
+    if unresolved {
+        steps.push("Refresh search termination is unresolved. Use settle-refresh for the exact attempt with safe settlement before another search; full status says which termination to record.".into());
+    }
+    if prepared.is_some_and(|attempt| attempt.automatic) {
+        steps.push("Automatic inventory refresh is unavailable. Safely settle the reserved legacy attempt as not-started with settle-refresh before preparing explicit manual refresh.".into());
+    } else if prepared.is_some() {
+        steps.push("A manual refresh is prepared and reserved. Dispatch it only from that exact verified session, or use settle-refresh with not-started after confirming it never ran.".into());
+    }
+    match retained {
+        Some(RetainedRun::Settle(index)) => steps.push(format!("Discovery run_index {index} must be continued or paused before another search. Use discovery-step with run_index {index} for its saved answer, or pause-discovery with run_index {index} and settle any outstanding attempt.")),
+        Some(RetainedRun::Unreadable(index)) => steps.push(format!("The checkpoint of discovery run_index {index} is missing or cannot be read, so the run cannot be continued or paused. Restore that file at the state_path shown in full status, then reconcile again.")),
+        None => {}
+    }
+    if !target_step && detail.scout_awaiting_capture {
+        steps.push(if !state.scout_plan_matches_target_and_mode() {
+            format!("{map}Use prepare-scout for the confirmed target and current mode, with a finite host budget in Quick.")
+        } else if optional_map {
+            "Full-environment map: Import any saved response with import-scout. The selected scope is complete, so running this census is optional; run the exact plan once only with authorization and a finite host budget.".into()
+        } else {
+            "Import any saved response with import-scout first. Otherwise confirm whether the search already ran. If it did not, get authorization and run the exact plan once with a finite host budget.".into()
+        });
+    }
+    let blocked = !steps.is_empty();
+    if !blocked {
+        if open.measurements > 0 {
+            steps.push("Expected sources need measurements. Resume a paused run with resume-discovery or use prepare-discovery, then relay with next-probe.".into());
+        }
+        if open.interpretation_review > 0 {
+            steps.push(format!("{full}Expected sources still need interpretation review. Record each with review-source, then reconcile again."));
+        }
+        let parser = format!(
+            "{full}Use parser-not-applicable for a supported native source. For others, import any missing parser evidence and use bind-parser with the required line reviews."
+        );
+        // Selected-source parser work comes before the catalog, which only a full map needs.
+        let parser_first = selected_full && open.parser_review_or_binding > 0;
+        if parser_first {
+            steps.push(parser.clone());
+        }
+        if !quick && scope == Some(TargetScope::FullEnvironment) && !census_qualifies {
+            let reason = match census.last() {
+                None => {
+                    "A full-environment map needs a search-all census, and none is saved. Use prepare-scout, relay the emitted census through the existing CrowdStrike MCP and import its entire response with import-scout."
+                }
+                Some(latest) if latest.rows >= 10_000 => {
+                    "The latest saved search-all census reached the 10,000-row ceiling. Use prepare-scout over a shorter window and import its entire response with import-scout."
+                }
+                Some(_) => {
+                    "The latest saved search-all census rows did not pass census validation. Use prepare-scout for a fresh capture and import its entire response with import-scout."
+                }
+            };
+            steps.push(format!(
+                "{reason} full_map_complete stays false until a census qualifies."
+            ));
+        }
+        if !detail.parser_catalog_captured {
+            steps.push(format!("{map}Capture the native parser catalog: save its complete pages and exact parser details with import-parsers, or use fetch-parsers with API credentials in the supplied protected file."));
+        }
+        if !parser_first && open.parser_review_or_binding > 0 {
+            steps.push(parser);
+        }
+        if !status.unclassified_parser_ids.is_empty() {
+            steps.push(format!("{map}Bind or explicitly exclude every unclassified parser snapshot; parser-name similarity is not evidence."));
+        }
+        if scope == Some(TargetScope::FullEnvironment) && status.sources.iter().any(|s| !s.expected)
+        {
+            steps.push("Use confirm-target to confirm the known source selectors within the target scope before completing a full environment map.".into());
+        }
+        if status.reconciliation != Progress::Done {
+            steps.push(
+                "Reconcile after completing the applicable source measurements and parser reviews."
+                    .into(),
+            );
+        }
+    }
+
+    let mut notes: Vec<String> = Vec::new();
+    if unresolved {
+        notes.push("Lost responses, client waits without an answer, transport errors and unrecognized errors stay unresolved. Use timed-out for a hosted cutoff and not-started for a recognized start rejection. For a recognized poll failure from the hosted search tool, set search_started_at to the answer's arrival time and use lifetime-expired with recorded_at at least the retained provider lifetime later.".into());
+    }
+    if let Some(attempt) = prepared.filter(|a| !a.automatic) {
+        notes.push(format!(
+            "The prepared manual refresh belongs to recorded host session {:?}.",
+            attempt.session_id
+        ));
+    }
+    if !state.capability_blocked()
+        && state.active_pack.is_some()
+        && state.capability_runs.is_empty()
+    {
+        notes.push("Optional function checks are available after field-pack activation. Choose capabilities to review fixed synthetic cases and authorize a separate finite allowance; leaving this step unselected preserves the field map.".into());
+    }
+    if !blocked && selected_full && status.scouting != Progress::Done {
+        notes.push(format!("{map}Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result."));
+    }
+    if scope == Some(TargetScope::SelectedSources) {
+        notes.push("Selected-source coverage cannot establish a full environment map.".into());
+    }
+    if state
+        .pending_inventory
+        .iter()
+        .any(|w| w.resolution.is_none())
+    {
+        notes.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
+    }
+    if status
+        .refresh_reminder
+        .as_ref()
+        .is_some_and(|reminder| reminder.due)
+    {
+        notes.push("Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh.".into());
+    }
+    if let Some(detail) = status.completion_detail.as_mut() {
+        detail.next_action = steps.first().cloned();
+    }
+    steps.extend(notes);
+    status.next_actions = steps;
 }
 
 pub fn assess_at(
@@ -4415,7 +4530,7 @@ pub fn assess_at(
         .is_some_and(|reminder| reminder.due)
     {
         status.settings_attention = true;
-        status.next_actions.push("Inventory refresh is due. Run explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh.".into());
+        advise(state, &mut status, None);
     }
     Ok(status)
 }

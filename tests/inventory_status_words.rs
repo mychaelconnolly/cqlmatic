@@ -278,7 +278,16 @@ fn reconcile_leaves_open_work_visible_in_every_status_projection() {
     assert_eq!(summary["completion_detail"], *detail);
 
     let brief = status_json(&dir.0, &["--brief"]);
-    assert_eq!(brief["completion_detail"], counts);
+    let mut brief_detail = counts.clone();
+    brief_detail["next_action"] = detail["next_action"].clone();
+    assert_eq!(brief["completion_detail"], brief_detail);
+    assert!(
+        detail["next_action"]
+            .as_str()
+            .unwrap()
+            .contains("review-source"),
+        "{detail}"
+    );
 
     let text = status_text(&dir.0);
     assert!(
@@ -706,6 +715,59 @@ fn brief_with_every_notice_and_the_largest_counts_stays_within_the_bound() {
         // The CLI appends one newline.
         assert!(bytes.len() < 4096, "{} bytes", bytes.len());
     }
+
+    // Advice for a blocking run with the largest index is the longest step. A step of this
+    // bound fits the reconcile envelope, where it appears in the status and the action.
+    const STEP_BOUND: usize = 320;
+    for retained in [
+        RetainedRun::Settle(usize::MAX),
+        RetainedRun::Unreadable(usize::MAX),
+    ] {
+        let mut advised = assess_at(&state, &[], NOW).unwrap();
+        advise(&state, &mut advised, Some(retained));
+        let run = advised
+            .next_actions
+            .iter()
+            .find(|action| action.contains(&format!("run_index {}", usize::MAX)))
+            .unwrap();
+        assert!(run.len() <= STEP_BOUND && !run.contains('/'), "{run}");
+    }
+    let longest = "x".repeat(STEP_BOUND);
+    for capability_blocked in [false, true] {
+        status.capability_blocked = capability_blocked;
+        status.completion_detail.as_mut().unwrap().next_action = Some(longest.clone());
+        let mut projected = brief(&status, Some("synthetic-session"));
+        assert_eq!(projected["completion_detail"]["next_action"], longest);
+        // The reconcile envelope keeps the action's copy only.
+        projected["completion_detail"]
+            .as_object_mut()
+            .unwrap()
+            .remove("next_action");
+        let envelope = json!({
+            "schema_version":1,"brief":true,"status":projected,
+            "action":{"outcome":"already-current","notification_only":true,"executes_searches":false,
+                "next_action":longest}
+        });
+        // The CLI omits trailing references, and counts them, until the envelope fits.
+        let mut envelope = envelope;
+        let references = envelope["status"]["references"].as_array().unwrap().len();
+        let omitted = (0..=references)
+            .find(|_| {
+                if serde_json::to_vec(&envelope).unwrap().len() < 4096 {
+                    return true;
+                }
+                envelope["status"]["references"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+                false
+            })
+            .expect("the envelope fits once references are omitted");
+        println!(
+            "reconcile envelope fits with {omitted} of {references} references omitted: {} bytes",
+            serde_json::to_vec(&envelope).unwrap().len()
+        );
+    }
 }
 
 fn advice(dir: &Path, command: &str) -> String {
@@ -714,6 +776,13 @@ fn advice(dir: &Path, command: &str) -> String {
     assert!(next.contains(command), "expected {command}: {next}");
     let brief = brief_call(dir, reconcile());
     assert_eq!(brief["action"]["next_action"], next);
+    // The brief envelope carries the step once, in the action.
+    assert!(
+        brief["status"]["completion_detail"]
+            .get("next_action")
+            .is_none(),
+        "{brief}"
+    );
     next.into()
 }
 
@@ -839,8 +908,9 @@ fn reconcile_settles_a_dispatched_refresh_before_scouting() {
         } else {
             prepared.clone()
         };
-        let next = advice(&dir.0, "settle-refresh");
+        let next = agreed(&dir.0, "settle-refresh");
         assert_eq!(next.contains("reserved"), !dispatched, "{next}");
+        no_new_search(&dir.0);
         let attempt = &report["status"]["refresh_attempts"][0];
         let settlement = fixture(
             &dir.0,
@@ -896,7 +966,8 @@ fn reconcile_settles_a_capability_attempt_before_scouting() {
         json!({"kind":"dispatch-capability","run_id":run_id,"case_id":"array-union",
         "execution_context_id":"synthetic-auth","session_id":"synthetic-session"}),
     );
-    advice(&dir.0, "submit-capability");
+    agreed(&dir.0, "submit-capability");
+    no_new_search(&dir.0);
     let stored: InventoryState =
         serde_json::from_slice(&fs::read(state_path(&dir.0)).unwrap()).unwrap();
     let attempt = &stored.capability_runs[0].attempts[0].reservation;
@@ -1147,5 +1218,520 @@ fn newest_census_is_reported_but_any_qualifying_search_all_census_counts() {
             json!({"rows":second_rows,"at_row_ceiling":second_rows == ROW_CEILING})
         );
         assert_eq!(status["full_map_complete"], complete, "{status}");
+    }
+}
+
+/// Status names the same first step as reconcile, in every status projection.
+fn agreed(dir: &Path, command: &str) -> String {
+    let next = advice(dir, command);
+    let full = status_json(dir, &[]);
+    assert_eq!(full["next_actions"][0], next, "{full}");
+    assert_eq!(full["completion_detail"]["next_action"], next);
+    assert_eq!(
+        status_json(dir, &["--summary"])["next_actions"],
+        full["next_actions"]
+    );
+    assert_eq!(
+        status_json(dir, &["--brief"])["completion_detail"]["next_action"],
+        next
+    );
+    assert!(status_text(dir).contains(&format!("- {next}\n")));
+    next
+}
+
+fn actions(dir: &Path) -> Vec<String> {
+    status_json(dir, &[])["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| action.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// No listed action prepares or relays another search.
+fn no_new_search(dir: &Path) {
+    for action in actions(dir) {
+        for search in [
+            "Prepare scouting",
+            "prepare-scout",
+            "prepare-discovery",
+            "census qualifies",
+        ] {
+            assert!(!action.contains(search), "{search}: {action}");
+        }
+    }
+}
+
+#[test]
+fn status_imports_a_saved_scout_response_before_any_new_search() {
+    for scope in ["selected-sources", "full-environment"] {
+        let dir = Temp::new();
+        confirm(&dir.0, scope, json!([{"repo":"synthetic"}]));
+        let plan = call(
+            &dir.0,
+            scout_request(
+                environment(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                false,
+            ),
+        );
+        let next = agreed(&dir.0, "import-scout");
+        assert!(next.starts_with("Import any saved response"), "{next}");
+        no_new_search(&dir.0);
+        let imported = call(&dir.0, scout_import(&dir.0, &plan, census(1)));
+        assert_eq!(
+            imported["status"]["completion_detail"]["scout_awaiting_capture"],
+            false
+        );
+    }
+}
+
+fn discovery_window(start: &str, end: &str) -> Value {
+    let mut request = discovery_request(false);
+    request["start"] = json!(start);
+    request["end"] = json!(end);
+    request
+}
+
+#[test]
+fn status_and_reconcile_name_the_blocking_discovery_run() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let plan = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            false,
+        ),
+    );
+    let first = call(&dir.0, discovery_request(false));
+    assert_eq!(first["action"]["run_index"], 0, "{first}");
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    let second = call(
+        &dir.0,
+        discovery_window("2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z"),
+    );
+    assert_eq!(second["action"]["run_index"], 1, "{second}");
+    call(&dir.0, json!({"kind":"pause-discovery","run_index":1}));
+    call(&dir.0, json!({"kind":"resume-discovery","run_index":0}));
+    let polled = call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,"answers":[]}),
+    );
+    let probe = polled["action"]["relay"]["probes"][0]["probe_id"].clone();
+    assert!(probe.is_string(), "{polled}");
+    call(
+        &dir.0,
+        json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe}),
+    );
+
+    // The older run blocks; the advice names it, not the latest run.
+    let next = agreed(&dir.0, "discovery-step with run_index 0");
+    assert!(next.contains("pause-discovery with run_index 0"), "{next}");
+    no_new_search(&dir.0);
+    let result = fixture(&dir.0, "result.json", json!({"result":[{"events":10}]}));
+    let answered = call(
+        &dir.0,
+        json!({"kind":"discovery-step","run_index":0,"answers":[{"probe_id":probe,"result_file":result}]}),
+    );
+    assert_eq!(answered["action"]["relay"]["answered"], 1, "{answered}");
+    agreed(&dir.0, "pause-discovery with run_index 0");
+    let paused = call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    assert_eq!(paused["action"]["relay"]["status"], "paused");
+    agreed(&dir.0, "import-scout");
+    call(&dir.0, scout_import(&dir.0, &plan, census(1)));
+}
+
+#[test]
+fn a_missing_checkpoint_is_restored_before_it_can_be_settled() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, discovery_request(false));
+    let checkpoint = PathBuf::from(
+        status_json(&dir.0, &[])["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let held = dir.0.join("held-checkpoint.json");
+    fs::rename(&checkpoint, &held).unwrap();
+
+    let next = agreed(&dir.0, "run_index 0");
+    assert!(next.contains("missing or cannot be read"), "{next}");
+    for command in ["discovery-step", "pause-discovery"] {
+        assert!(!next.contains(command), "{next}");
+    }
+    let brief = String::from_utf8(status(&dir.0, &["--json", "--brief"])).unwrap();
+    assert!(!brief.contains(checkpoint.to_str().unwrap()), "{brief}");
+    let failed = inventory(&dir.0, json!({"kind":"pause-discovery","run_index":0}), &[]);
+    assert_eq!(failed.status.code(), Some(2));
+
+    fs::rename(&held, &checkpoint).unwrap();
+    agreed(&dir.0, "pause-discovery with run_index 0");
+    let paused = call(&dir.0, json!({"kind":"pause-discovery","run_index":0}));
+    assert_eq!(paused["action"]["relay"]["status"], "paused");
+}
+
+#[test]
+fn quick_discovery_first_confirms_a_selected_source_target() {
+    let dir = Temp::new();
+    confirm(&dir.0, "full-environment", json!([{"repo":"synthetic"}]));
+    call(&dir.0, json!({"kind":"set-discovery-mode","mode":"quick"}));
+    let next = agreed(&dir.0, "confirm-target");
+    assert!(next.contains("selected-sources"), "{next}");
+    no_new_search(&dir.0);
+    let refused = inventory(&dir.0, discovery_request(false), &[]);
+    assert_eq!(refused.status.code(), Some(2));
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let started = call(&dir.0, discovery_request(false));
+    assert_eq!(started["action"]["run_index"], 0);
+}
+
+/// Every action about the full-environment census or catalog is marked as optional.
+fn optional_full_environment_work(dir: &Path) {
+    for action in actions(dir) {
+        if action.contains("census") || action.contains("parser catalog") {
+            assert!(action.starts_with("Full-environment map: "), "{action}");
+        }
+    }
+}
+
+#[test]
+fn completed_selected_scope_marks_full_environment_work_optional_everywhere() {
+    let dir = Temp::new();
+    let confirmed = confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let source = &confirmed["status"]["sources"][0]["source_id"];
+    let progress = call(&dir.0, discovery_request(false));
+    complete_discovery(&dir.0, progress, None);
+    review(&dir.0, source);
+    native_parser(&dir.0, source);
+    let next = agreed(&dir.0, "import-parsers");
+    assert!(next.starts_with("Full-environment map: "), "{next}");
+    assert_eq!(status_json(&dir.0, &[])["selected_scope_complete"], true);
+    let all = actions(&dir.0);
+    assert!(
+        all.iter().any(|a| a.contains("Prepare scouting")),
+        "{all:?}"
+    );
+    optional_full_environment_work(&dir.0);
+
+    // A search-all scout prepared before the target was narrowed is optional too.
+    let dir = Temp::new();
+    let confirmed = confirm(&dir.0, "full-environment", json!([{"repo":"synthetic"}]));
+    let source = &confirmed["status"]["sources"][0]["source_id"];
+    let plan = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            false,
+        ),
+    );
+    assert_eq!(plan["action"]["arguments"]["repository"], "search-all");
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let progress = call(&dir.0, discovery_request(false));
+    complete_discovery(&dir.0, progress, None);
+    review(&dir.0, source);
+    native_parser(&dir.0, source);
+    let next = agreed(&dir.0, "import-scout");
+    assert!(next.starts_with("Full-environment map: "), "{next}");
+    assert!(next.contains("optional"), "{next}");
+    assert_eq!(status_json(&dir.0, &[])["selected_scope_complete"], true);
+    optional_full_environment_work(&dir.0);
+    call(&dir.0, scout_import(&dir.0, &plan, census(1)));
+}
+
+#[test]
+fn quick_status_qualifies_tenant_parser_work_as_full_discovery() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    call(&dir.0, json!({"kind":"set-discovery-mode","mode":"quick"}));
+    let page = fixture(
+        &dir.0,
+        "parser-page.json",
+        json!({"resources":["parser"],"meta":{"pagination":{"offset":0,"total":1}}}),
+    );
+    let detail = fixture(
+        &dir.0,
+        "parser.json",
+        json!({"resources":[{"id":"parser","name":"Synthetic parser","script":"user := \"synthetic\""}]}),
+    );
+    call(
+        &dir.0,
+        json!({"kind":"import-parsers","pages":[{"offset":0,"limit":100,"result_file":page}],
+        "details":[{"parser_id":"parser","result_file":detail}],"retrieved_at":"2026-01-02T00:00:00Z"}),
+    );
+    let all = actions(&dir.0);
+    let unclassified: Vec<_> = all
+        .iter()
+        .filter(|a| a.contains("unclassified parser snapshot"))
+        .collect();
+    assert_eq!(unclassified.len(), 1, "{all:?}");
+    assert!(unclassified[0].starts_with("Full discovery: "), "{all:?}");
+    let text = status_text(&dir.0);
+    assert!(
+        text.lines()
+            .filter(|line| line.contains("unclassified parser snapshot"))
+            .all(|line| line.starts_with("- Full discovery: ")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_named_view_census_still_leaves_the_search_all_census_to_do() {
+    let dir = Temp::new();
+    call(&dir.0, json!({"kind":"init"}));
+    call(&dir.0, json!({"kind":"set-discovery-mode","mode":"quick"}));
+    let confirmed = confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let source = confirmed["status"]["sources"][0]["source_id"].clone();
+    let plan = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-01T00:00:00Z",
+            "2026-01-02T00:00:00Z",
+            true,
+        ),
+    );
+    assert_eq!(plan["action"]["arguments"]["repository"], "synthetic-view");
+    call(&dir.0, scout_import(&dir.0, &plan, census(1)));
+    call(&dir.0, json!({"kind":"set-discovery-mode","mode":"full"}));
+    confirm(&dir.0, "full-environment", json!([{"repo":"synthetic"}]));
+    review(&dir.0, &source);
+    native_parser(&dir.0, &source);
+    empty_catalog(&dir.0);
+    let progress = call(&dir.0, discovery_request(false));
+    complete_discovery(&dir.0, progress, None);
+
+    let next = agreed(&dir.0, "search-all census");
+    assert!(next.contains("prepare-scout"), "{next}");
+    let status = status_json(&dir.0, &[]);
+    assert_eq!(status["full_map_complete"], false);
+    assert_eq!(
+        status["completion_detail"]["expected_sources_open"],
+        json!({"interpretation_review":0,"parser_review_or_binding":0,"measurements":0})
+    );
+    let plan = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-02T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            false,
+        ),
+    );
+    assert_eq!(plan["action"]["arguments"]["repository"], "search-all");
+    call(&dir.0, scout_import(&dir.0, &plan, census(0)));
+    assert_eq!(
+        call(&dir.0, reconcile())["status"]["full_map_complete"],
+        true
+    );
+}
+
+#[test]
+fn an_unresolved_refresh_is_still_settled_first() {
+    let dir = Temp::new();
+    confirm(&dir.0, "selected-sources", json!([{"repo":"synthetic"}]));
+    let host = host_evidence(&dir.0);
+    let prepared = call(
+        &dir.0,
+        json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":host}),
+    );
+    let id = &prepared["status"]["refresh_attempts"][0]["attempt_id"];
+    let dispatched = call(
+        &dir.0,
+        json!({"kind":"dispatch-refresh","attempt_id":id,"session_id":"synthetic-session"}),
+    );
+    let attempt = &dispatched["status"]["refresh_attempts"][0];
+    let settlement = fixture(
+        &dir.0,
+        "settlement.json",
+        json!({
+            "schema_version":1,"attempt_id":id,"environment":environment(),"session_id":"synthetic-session",
+            "arguments":attempt["arguments"],"termination":"unresolved","recorded_at":cqlmatic::discovery::timestamp(),
+            "search_started_at":attempt["dispatched_at"],"result_sha256":null,"evidence":"Synthetic host lost its reply"
+        }),
+    );
+    let settled = call(
+        &dir.0,
+        json!({"kind":"settle-refresh","attempt_id":id,"evidence_file":settlement}),
+    );
+    assert_eq!(
+        settled["status"]["refresh_attempts"][0]["phase"],
+        "unresolved"
+    );
+    assert_eq!(settled["status"]["refresh_blocked"], true);
+    agreed(&dir.0, "settle-refresh");
+    no_new_search(&dir.0);
+    let refused = inventory(&dir.0, discovery_request(false), &[]);
+    assert_eq!(refused.status.code(), Some(2));
+}
+
+fn invalid_census(valid: usize) -> Value {
+    let mut census = census(valid);
+    census["result"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"#repo":"synthetic","#type":123,"events":1}));
+    census
+}
+
+fn census_warnings(status: &Value) -> Vec<String> {
+    status["next_actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|action| action.as_str().unwrap().to_owned())
+        .filter(|action| action.contains("census qualifies"))
+        .collect()
+}
+
+#[test]
+fn the_newest_failed_search_all_census_explains_why_in_either_order() {
+    let ceiling = "10,000-row ceiling";
+    let invalid = "did not pass census validation";
+    for (first, second, reason) in [
+        (census(ROW_CEILING), invalid_census(0), invalid),
+        (invalid_census(0), census(ROW_CEILING), ceiling),
+    ] {
+        let dir = Temp::new();
+        full_inventory(&dir.0, first, true, None);
+        let plan = call(
+            &dir.0,
+            scout_request(
+                environment(),
+                "2026-01-02T00:00:00Z",
+                "2026-01-03T00:00:00Z",
+                false,
+            ),
+        );
+        call(&dir.0, scout_import(&dir.0, &plan, second));
+        let status = &call(&dir.0, reconcile())["status"];
+        assert_eq!(status["full_map_complete"], false);
+        let warnings = census_warnings(status);
+        assert_eq!(warnings.len(), 1, "{status}");
+        assert!(warnings[0].contains(reason), "{warnings:?}");
+        let other = if reason == ceiling { invalid } else { ceiling };
+        assert!(!warnings[0].contains(other), "{warnings:?}");
+    }
+}
+
+#[test]
+fn an_earlier_qualifying_census_leaves_no_census_warning() {
+    let dir = Temp::new();
+    full_inventory(&dir.0, census(0), true, None);
+    let plan = call(
+        &dir.0,
+        scout_request(
+            environment(),
+            "2026-01-02T00:00:00Z",
+            "2026-01-03T00:00:00Z",
+            false,
+        ),
+    );
+    call(&dir.0, scout_import(&dir.0, &plan, invalid_census(0)));
+    let status = &call(&dir.0, reconcile())["status"];
+    assert_eq!(status["full_map_complete"], true, "{status}");
+    assert!(census_warnings(status).is_empty(), "{status}");
+    assert!(census_warnings(&status_json(&dir.0, &[])).is_empty());
+}
+
+#[test]
+fn a_census_below_the_ceiling_with_an_invalid_row_is_a_validation_failure() {
+    let dir = Temp::new();
+    full_inventory(&dir.0, invalid_census(ROW_CEILING - 2), true, None);
+    let status = &call(&dir.0, reconcile())["status"];
+    assert_eq!(
+        status["completion_detail"]["latest_census"],
+        json!({"rows":ROW_CEILING - 1,"at_row_ceiling":false})
+    );
+    assert_eq!(status["full_map_complete"], false);
+    let warnings = census_warnings(status);
+    assert_eq!(warnings.len(), 1, "{status}");
+    assert!(warnings[0].contains("did not pass census validation"));
+    assert!(!warnings[0].contains("10,000-row ceiling") && !warnings[0].contains("shorter window"));
+}
+
+#[test]
+fn a_bound_parser_awaiting_line_review_stays_open() {
+    let dir = Temp::new();
+    let source = full_inventory(&dir.0, census(1), false, None);
+    review(&dir.0, &source);
+    let page = fixture(
+        &dir.0,
+        "parser-page.json",
+        json!({"resources":["dynamic"],"meta":{"pagination":{"offset":0,"total":1}}}),
+    );
+    let detail = fixture(
+        &dir.0,
+        "parser.json",
+        json!({"resources":[{"id":"dynamic","name":"Synthetic dynamic parser","script":"case { actor := other }","fields_to_tag":[]}]}),
+    );
+    let imported = call(
+        &dir.0,
+        json!({"kind":"import-parsers","pages":[{"offset":0,"limit":100,"result_file":page}],
+        "details":[{"parser_id":"dynamic","result_file":detail}],"retrieved_at":"2026-01-02T00:00:00Z"}),
+    );
+    let parser = &imported["status"]["parsers"][0];
+    let lines = parser["review_lines"].as_array().unwrap().clone();
+    assert!(!lines.is_empty(), "{parser}");
+    let bind = |semantics: Value| {
+        call(
+            &dir.0,
+            json!({"kind":"bind-parser","source_id":source,"parser_id":"dynamic",
+            "parser_sha256":parser["sha256"],"reviewed_at":"2026-01-02T00:00:00Z",
+            "evidence":"Synthetic exact parser binding","semantics":semantics}),
+        )
+    };
+    let bound = bind(json!([]));
+    assert_eq!(bound["status"]["sources"][0]["parser"], "review");
+    assert_eq!(
+        bound["status"]["completion_detail"]["expected_sources_open"]["parser_review_or_binding"],
+        1
+    );
+    let semantics: Vec<_> = lines
+        .iter()
+        .map(|line| json!({"line":line,"interpretation":"Synthetic reviewed branch","evidence":"Synthetic line review"}))
+        .collect();
+    let reviewed = bind(json!(semantics));
+    assert_eq!(reviewed["status"]["sources"][0]["parser"], "done");
+    assert_eq!(
+        reviewed["status"]["completion_detail"]["expected_sources_open"]["parser_review_or_binding"],
+        0
+    );
+}
+
+#[test]
+fn a_compatible_scout_stays_importable_across_a_mode_switch() {
+    for (first, second) in [("quick", "full"), ("full", "quick")] {
+        let dir = Temp::new();
+        let mut env = environment();
+        env["view"] = json!("search-all");
+        call(
+            &dir.0,
+            json!({"kind":"confirm-target","environment":env,"scope":"selected-sources",
+            "context":"Synthetic compatible mode change","expected_sources":[{"repo":"synthetic"}]}),
+        );
+        call(&dir.0, json!({"kind":"set-discovery-mode","mode":first}));
+        let plan = call(
+            &dir.0,
+            scout_request(
+                env.clone(),
+                "2026-01-01T00:00:00Z",
+                "2026-01-02T00:00:00Z",
+                true,
+            ),
+        );
+        call(&dir.0, json!({"kind":"set-discovery-mode","mode":second}));
+        let next = agreed(&dir.0, "import-scout");
+        assert!(!next.contains("prepare-scout"), "{next}");
+        let imported = call(&dir.0, scout_import(&dir.0, &plan, census(0)));
+        assert_eq!(
+            imported["status"]["completion_detail"]["scout_awaiting_capture"],
+            false
+        );
     }
 }

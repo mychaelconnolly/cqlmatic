@@ -180,6 +180,14 @@
             }
           ]
         },
+        "next_action": {
+          "description": "The first step status and reconcile advise; null when no listed step is open.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "parser_catalog_captured": {
           "type": "boolean"
         },

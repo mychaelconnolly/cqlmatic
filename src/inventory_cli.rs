@@ -589,7 +589,7 @@ pub fn status(args: StatusArgs) -> Result<i32, Diagnostic> {
             .or_else(|| request.and_then(|r| r.state.map(PathBuf::from))),
     )?;
     let state = load(&path)?;
-    let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+    let report = live_status(&state, &packs(&state)?, &discovery::timestamp())?;
     if args.json {
         if args.brief {
             output_brief(inventory::brief(&report, session_id.as_deref()))?;
@@ -608,7 +608,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     let path = state_path(args.state)?;
     if args.request.is_none() && !args.next_probe {
         let state = load(&path)?;
-        let report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+        let report = live_status(&state, &packs(&state)?, &discovery::timestamp())?;
         if args.json || !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             if args.json {
                 if args.brief {
@@ -657,10 +657,16 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
     let (report, extra) = apply_and_store(&path, request.action)?;
     if args.json {
         if args.brief {
+            let action = action_brief(&extra);
+            let mut status = inventory::brief(&report, session_id.as_deref());
+            // A reconcile action carries the same next step, so the brief keeps one copy.
+            if action.get("next_action").is_some()
+                && let Some(detail) = status["completion_detail"].as_object_mut()
+            {
+                detail.remove("next_action");
+            }
             output_brief(json!({
-                "schema_version":1,"brief":true,
-                "status":inventory::brief(&report, session_id.as_deref()),
-                "action":action_brief(&extra)
+                "schema_version":1,"brief":true,"status":status,"action":action
             }))?;
         } else if args.summary {
             output(
@@ -1217,9 +1223,9 @@ fn apply_locked(
         } else {
             (vec![], vec![], false)
         };
+        let mut recorded = None;
         if resolve_work {
             state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
-            let mut recorded = None;
             if let Some(reviewed_at) = reconcile_at {
                 let digest = state.evidence_digest()?;
                 recorded = Some(state.reconciled_evidence_sha256.as_ref() != Some(&digest));
@@ -1227,12 +1233,18 @@ fn apply_locked(
                 state.reconciled_at = Some(reviewed_at);
             }
             report = inventory::assess_at(&state, &loaded, &now)?;
-            if let Some(recorded) = recorded {
-                extra = json!({"kind":"reconcile",
-                    "status":if recorded { "recorded" } else { "already-current" },
-                    "evidence_sha256":state.reconciled_evidence_sha256,"reviewed_at":state.reconciled_at,
-                    "completion_detail":report.completion_detail,"next_action":reconcile_next_action(&state, &report, &now)});
-            }
+        }
+        inventory::advise(&state, &mut report, retained_blocker(&state, &now));
+        if let Some(recorded) = recorded {
+            let next_action = report
+                .completion_detail
+                .as_ref()
+                .and_then(|detail| detail.next_action.clone())
+                .unwrap_or_else(|| "No listed step is open. Read full_map_complete, selected_scope_complete or quick_scope_complete, and the status next_actions, for any other remaining work.".into());
+            extra = json!({"kind":"reconcile",
+                "status":if recorded { "recorded" } else { "already-current" },
+                "evidence_sha256":state.reconciled_evidence_sha256,"reviewed_at":state.reconciled_at,
+                "completion_detail":report.completion_detail,"next_action":next_action});
         }
         if evidence_limited {
             extra["inventory_work_evidence_limited"] = json!(true);
@@ -1256,69 +1268,40 @@ fn apply_locked(
     })()
 }
 
-/// Fixed guidance naming the first open category after a reconcile.
-fn reconcile_next_action(state: &InventoryState, report: &InventoryStatus, now: &str) -> String {
-    if report.target != Progress::Done {
-        return "Use confirm-target to record the target and scope before continuing inventory work.".into();
-    }
-    if report.capability_blocked {
-        return "A capability search needs settlement. Use submit-capability for the exact attempt before another search.".into();
-    }
-    if report.refresh_blocked {
-        return if report
-            .refresh_attempts
-            .iter()
-            .any(|attempt| attempt.phase == inventory::RefreshPhase::Prepared)
-        {
-            "A refresh is reserved. Settle it with settle-refresh before another search. Use not-started only after confirming it never ran.".into()
-        } else {
-            "A refresh needs settlement. Use settle-refresh for the exact attempt with verified termination evidence before another search.".into()
-        };
-    }
-    if check_retained_searches(state, None, None, now).is_err() {
-        return "Inspect the retained discovery run before another search. Use discovery-step for its saved answer, or pause-discovery and settle any outstanding attempt.".into();
-    }
+/// Status whose next steps account for the retained discovery runs.
+fn live_status(
+    state: &InventoryState,
+    packs: &[Pack],
+    now: &str,
+) -> Result<InventoryStatus, Diagnostic> {
+    let mut report = inventory::assess_at(state, packs, now)?;
+    inventory::advise(state, &mut report, retained_blocker(state, now));
+    Ok(report)
+}
 
-    let detail = report
-        .completion_detail
-        .as_ref()
-        .expect("assessed status carries its completion detail");
-    let open = &detail.expected_sources_open;
-    let quick = report.discovery_mode == DiscoveryMode::Quick;
-    let selected_full =
-        !quick && report.target_scope == Some(inventory::TargetScope::SelectedSources);
-    // Source review and parser work are Full discovery steps.
-    let full = if quick { "Full discovery: " } else { "" };
-    if detail.scout_awaiting_capture {
-        if state.scout_plan_matches_target_and_mode() {
-            "Import any saved response with import-scout first. Otherwise confirm whether the search already ran. If it did not, get authorization and run the exact plan once with a finite host budget.".into()
-        } else {
-            "Use prepare-scout for the confirmed target and current mode, with a finite host budget in Quick.".into()
-        }
-    } else if open.measurements > 0 {
-        "Expected sources need measurements. Resume a paused run with resume-discovery or use prepare-discovery, then relay with next-probe.".into()
-    } else if open.interpretation_review > 0 {
-        format!(
-            "{full}Expected sources still need interpretation review. Record each with review-source, then reconcile again."
-        )
-    } else if !detail.parser_catalog_captured
-        && !(selected_full && open.parser_review_or_binding > 0)
-    {
-        let prefix = if selected_full && report.selected_scope_complete {
-            "Full-environment map: "
-        } else {
-            full
-        };
-        format!(
-            "{prefix}To capture the parser catalog, save its complete pages and details with import-parsers."
-        )
-    } else if open.parser_review_or_binding > 0 {
-        format!(
-            "{full}Use parser-not-applicable for a supported native source. For others, import any missing parser evidence and use bind-parser with the required line reviews."
-        )
-    } else {
-        "No counted work is open. Read full_map_complete, selected_scope_complete or quick_scope_complete, and the status next_actions, for any other remaining work.".into()
+/// The retained discovery run that the search guard would refuse another search for.
+fn retained_blocker(state: &InventoryState, now: &str) -> Option<inventory::RetainedRun> {
+    // The guard refuses a blocked capability first, without naming a run; it is advised first.
+    if state.capability_blocked() {
+        return None;
     }
+    let refused = check_retained_searches(state, None, None, now).err()?;
+    let index: usize = refused
+        .pointer
+        .as_deref()?
+        .strip_prefix("/discovery_runs/")?
+        .parse()
+        .ok()?;
+    let run = state.discovery_runs.get(index)?;
+    let path = Path::new(&run.state_path);
+    let readable = crate::setup_cli::private_input_exists(path).unwrap_or(false)
+        && mcp::inspect_state(path)
+            .is_ok_and(|relay| verify_run_reference(state, run, &relay).is_ok());
+    Some(if readable {
+        inventory::RetainedRun::Settle(index)
+    } else {
+        inventory::RetainedRun::Unreadable(index)
+    })
 }
 
 fn action_summary(action: &Value) -> Value {
@@ -3626,7 +3609,7 @@ fn interactive(
             Err(error) => return Err(error),
         }
         state = load(path)?;
-        report = inventory::assess_at(&state, &packs(&state)?, &discovery::timestamp())?;
+        report = live_status(&state, &packs(&state)?, &discovery::timestamp())?;
     }
     let notifications = state.inventory_notifications();
     if !notifications.is_empty() {
