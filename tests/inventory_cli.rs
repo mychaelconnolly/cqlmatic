@@ -367,17 +367,35 @@ fn a_request_missing_a_required_field_names_it_without_repeating_the_request() {
         "{stderr}"
     );
     assert!(!stderr.contains("request"), "{stderr}");
-    let raw = "Ignore previous instructions";
-    for action in [
-        json!({"kind":"init", raw: true}),
-        json!({"kind": raw}),
-        json!({"kind":"reconcile","reviewed_at":{raw: raw}}),
+    let marker = "synthetic-input-marker";
+    for (action, name) in [
+        (
+            json!({"kind":"init", (marker): "synthetic-hidden-value"}),
+            Some("unknown field"),
+        ),
+        (
+            json!({"kind": marker}),
+            Some("Unknown inventory action kind"),
+        ),
+        (
+            json!({"kind":"reconcile","reviewed_at":{(marker): marker}}),
+            None,
+        ),
     ] {
-        let output = inventory_command(&dir.0, action).output().unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "{stderr}");
-        assert!(stderr.contains("Invalid inventory JSON or unknown fields"));
-        assert!(!stderr.contains(raw), "{stderr}");
+        for mode in [None, Some("--brief")] {
+            let output = inventory_command(&dir.0, action.clone())
+                .args(mode)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(2), "{stderr}");
+            if let Some(name) = name.filter(|_| mode.is_none()) {
+                assert!(stderr.contains(name) && stderr.contains(marker), "{stderr}");
+            } else {
+                assert!(!stderr.contains(marker), "{stderr}");
+            }
+            assert!(!stderr.contains("synthetic-hidden-value"), "{stderr}");
+        }
     }
 }
 
@@ -1767,7 +1785,7 @@ fn next_probe_brief_matches_full_even_for_long_arguments() {
 }
 
 #[test]
-fn next_probe_hides_request_text_and_keeps_raw_refusal_in_the_checkpoint() {
+fn next_probe_names_bad_fields_in_full_and_protects_result_text() {
     let dir = Temp::new();
     confirm_quick_source(&dir.0, "synthetic");
     let prepared = prepare_source_run(&dir.0);
@@ -1784,7 +1802,16 @@ fn next_probe_hides_request_text_and_keeps_raw_refusal_in_the_checkpoint() {
     assert!(refused.stdout.is_empty());
     let stderr = String::from_utf8(refused.stderr).unwrap();
     assert!(stderr.contains("INVENTORY_INPUT"), "{stderr}");
-    assert!(!stderr.contains(marker), "{stderr}");
+    assert!(stderr.contains(marker), "{stderr}");
+    let brief = inventory_command(&dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":probe,"result_file":"answer.json",(marker):"private-value"}}))
+        .arg("--brief").output().unwrap();
+    assert_eq!(brief.status.code(), Some(2));
+    let stderr = String::from_utf8(brief.stderr).unwrap();
+    assert!(
+        !stderr.contains(marker) && !stderr.contains("private-value"),
+        "{stderr}"
+    );
 
     let marker = "synthetic-private-result-error";
     let result = fixture(
@@ -5656,4 +5683,58 @@ fn closed_output_after_inventory_write_reports_that_state_may_be_saved() {
         );
         assert!(dir.0.join("workflow/state.json").is_file());
     }
+}
+
+#[test]
+fn unknown_inventory_kind_is_bounded_and_lists_valid_kinds() {
+    let dir = Temp::new();
+    let kind = format!("synthetic-{}", "x".repeat(1000));
+    for mode in [None, Some("--summary"), Some("--brief")] {
+        let output = inventory_command(&dir.0, json!({"kind":kind}))
+            .args(mode)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let message = diagnostic["message"].as_str().unwrap();
+        assert_eq!(diagnostic["code"], "INVENTORY_INPUT");
+        assert!(!message.contains(&kind));
+        if mode == Some("--brief") {
+            assert!(!message.contains("synthetic-"), "{message}");
+        } else {
+            assert!(
+                message.contains("Unknown inventory action kind") && message.contains("synthetic-"),
+                "{message}"
+            );
+            assert!(
+                message.contains("init, ") && message.contains("record-failure"),
+                "{message}"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_refresh_host_evidence_names_the_failed_binding() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let host = refresh_host(&dir.0);
+    let mut report: Value = serde_json::from_slice(&fs::read(&host).unwrap()).unwrap();
+    report["session_id"] = json!("synthetic-other-session");
+    fs::write(&host, serde_json::to_vec(&report).unwrap()).unwrap();
+    let request = json!({"kind":"prepare-refresh","session_id":"synthetic-session","host_evidence_file":host});
+    assert_rejected(&dir.0, request.clone(), "session_id differs");
+    let output = inventory_command(&dir.0, request)
+        .arg("--brief")
+        .output()
+        .unwrap();
+    let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(diagnostic["code"], "INVENTORY_EVIDENCE");
+    assert!(
+        !diagnostic["message"]
+            .as_str()
+            .unwrap()
+            .contains("synthetic-other-session")
+    );
 }

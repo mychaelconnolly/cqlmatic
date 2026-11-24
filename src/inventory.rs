@@ -3642,19 +3642,36 @@ pub(crate) fn validate_refresh_host(
     text(session_id)?;
     text(&host.capability_reference)?;
     text(&host.verification_evidence)?;
-    if host.schema_version != 1
-        || &host.environment != environment
-        || host.session_id != session_id
-        || !(1..=if automatic {
-            REFRESH_SECONDS
-        } else {
-            MANUAL_REFRESH_SECONDS
-        })
-            .contains(&host.max_search_seconds)
-        || environment::parse_time(&host.verified_at)? > environment::parse_time(now)?
-    {
+    let max_seconds = if automatic {
+        REFRESH_SECONDS
+    } else {
+        MANUAL_REFRESH_SECONDS
+    };
+    for (valid, message) in [
+        (
+            host.schema_version == 1,
+            "Refresh host evidence requires schema_version 1. Export a compatible report.",
+        ),
+        (
+            &host.environment == environment,
+            "Refresh host evidence environment differs from the confirmed target. Use evidence for the selected target.",
+        ),
+        (
+            host.session_id == session_id,
+            "Refresh host evidence session_id differs from the selected session. Use evidence for the selected session.",
+        ),
+        (
+            (1..=max_seconds).contains(&host.max_search_seconds),
+            "Refresh host evidence max_search_seconds is outside the allowed provider lifetime. Supply a verified lifetime within the refresh budget.",
+        ),
+    ] {
+        if !valid {
+            return Err(fail(message));
+        }
+    }
+    if environment::parse_time(&host.verified_at)? > environment::parse_time(now)? {
         return Err(fail(
-            "Host evidence must bind this exact target/session to a verified provider-enforced search lifetime of 1..300 seconds for automatic refresh or 1..600 seconds for explicit manual refresh. Client wait timeouts do not qualify.",
+            "Refresh host evidence verified_at is in the future. Supply the actual verification time.",
         ));
     }
     Ok(())
@@ -3667,31 +3684,62 @@ pub(crate) fn validate_refresh_settlement(
 ) -> Result<(), Diagnostic> {
     text(&report.evidence)?;
     let recorded = environment::parse_time(&report.recorded_at)?;
-    if (report.termination == RefreshTermination::Completed) != report.result_sha256.is_some()
-        || report
-            .result_sha256
-            .as_ref()
-            .is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    for (valid, message) in [
+        (
+            (report.termination == RefreshTermination::Completed) == report.result_sha256.is_some(),
+            "Refresh settlement requires result_sha256 for completed searches and forbids it for other outcomes. Supply the settlement for the actual outcome.",
+        ),
+        (
+            report
+                .result_sha256
+                .as_ref()
+                .is_none_or(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+            "Refresh settlement result_sha256 is invalid. Use the SHA-256 of the exact saved result.",
+        ),
+        (
+            report.schema_version == 1,
+            "Refresh settlement requires schema_version 1. Export a compatible report.",
+        ),
+        (
+            report.attempt_id == attempt.id,
+            "Refresh settlement attempt_id differs from the reserved attempt. Use evidence for the exact attempt.",
+        ),
+        (
+            report.environment == attempt.environment,
+            "Refresh settlement environment differs from the reserved target. Use evidence for the exact target.",
+        ),
+        (
+            report.session_id == attempt.session_id,
+            "Refresh settlement session_id differs from the reserved session. Use evidence for the exact session.",
+        ),
+        (
+            report.arguments == attempt.arguments,
+            "Refresh settlement arguments differ from the reservation. Use the exact reserved arguments.",
+        ),
+    ] {
+        if !valid {
+            return Err(fail(message));
+        }
+    }
+    if recorded > environment::parse_time(now)?
+        || recorded < environment::parse_time(&attempt.prepared_at)?
     {
         return Err(fail(
-            "Completed refresh settlement requires the exact full result SHA-256; other outcomes cannot attest a result.",
+            "Refresh settlement recorded_at falls outside the prepared-to-current interval. Supply the actual settlement time.",
         ));
     }
-    if report.schema_version != 1
-        || report.attempt_id != attempt.id
-        || report.environment != attempt.environment
-        || report.session_id != attempt.session_id
-        || report.arguments != attempt.arguments
-        || recorded > environment::parse_time(now)?
-        || recorded < environment::parse_time(&attempt.prepared_at)?
-        || (attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted)
-        || attempt
-            .dispatched_at
-            .as_ref()
-            .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
+    if attempt.dispatched_at.is_none() && report.termination != RefreshTermination::NotStarted {
+        return Err(fail(
+            "Refresh settlement for a reservation without dispatch requires not-started. Check the recorded dispatch before settling.",
+        ));
+    }
+    if attempt
+        .dispatched_at
+        .as_ref()
+        .is_some_and(|at| environment::parse_time(at).is_ok_and(|at| recorded < at))
     {
         return Err(fail(
-            "Settlement must identify the exact target, session, attempt and arguments after dispatch; a lost response is unresolved.",
+            "Refresh settlement recorded_at precedes dispatch. Supply the actual settlement time.",
         ));
     }
     if report.termination == RefreshTermination::LifetimeExpired {

@@ -1312,23 +1312,46 @@ fn validate_cancellation(
             "Invalid delegated cancellation report.",
         )
     })?;
-    if evidence.schema_version != 1
-        || evidence.request_sha256 != state.request_sha256
-        || evidence.probe_id != probe_id
-        || discovery::probe_id(&state.request.environment.view, &attempt.probe) != probe_id
-        || evidence.repository != state.request.environment.view
-        || evidence.query_sha256 != sha256_hex(attempt.probe.query.as_bytes())
-        || evidence.start != attempt.probe.start
-        || evidence.end != attempt.probe.end
-        || evidence.dispatched_at != attempt.dispatched_at
-        || evidence.outcome != "cancelled"
-        || evidence.cleanup != "confirmed"
-        || evidence.caller_assertion != "exact-host-attempt-terminal-cleanup"
-    {
-        return Err(error(
-            "MCP_CLEANUP_EVIDENCE",
-            "Cancellation evidence must attest terminal cleanup of this exact host attempt, query, target and window.",
-        ));
+    for (valid, field) in [
+        (evidence.schema_version == 1, "schema_version"),
+        (
+            evidence.request_sha256 == state.request_sha256,
+            "request_sha256",
+        ),
+        (
+            evidence.probe_id == probe_id
+                && discovery::probe_id(&state.request.environment.view, &attempt.probe) == probe_id,
+            "probe_id",
+        ),
+        (
+            evidence.repository == state.request.environment.view,
+            "repository",
+        ),
+        (
+            evidence.query_sha256 == sha256_hex(attempt.probe.query.as_bytes()),
+            "query_sha256",
+        ),
+        (evidence.start == attempt.probe.start, "start"),
+        (evidence.end == attempt.probe.end, "end"),
+        (
+            evidence.dispatched_at == attempt.dispatched_at,
+            "dispatched_at",
+        ),
+        (evidence.outcome == "cancelled", "outcome"),
+        (evidence.cleanup == "confirmed", "cleanup"),
+        (
+            evidence.caller_assertion == "exact-host-attempt-terminal-cleanup",
+            "caller_assertion",
+        ),
+    ] {
+        if !valid {
+            return Err(error(
+                "MCP_CLEANUP_EVIDENCE",
+                &format!(
+                    "Cancellation report {field} does not match the required terminal evidence. Supply the report for the exact host attempt."
+                ),
+            ));
+        }
     }
     Ok(())
 }

@@ -162,6 +162,12 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ("MCP_STATE_PRODUCER", _) => {
             "Discovery checkpoint requires its producing version. Preserve the files. Settle all outstanding inventory searches before any new search dispatch, and prevent concurrent inventory execution throughout standalone recovery. For unowned runs, use standalone recovery with that release and the checkpoint. Runs bound to inventory require compatible inventory or a tested recovery build. Inspect protected full-mode output locally."
         }
+        ("INVENTORY_INPUT", message)
+            if message.starts_with("Unknown inventory action kind ")
+                || message.starts_with("Inventory input has an unknown field ") =>
+        {
+            "Inventory input did not match the required JSON shape. Inspect the inventory schema and correct the request."
+        }
         ("INVENTORY_INPUT", INVALID_INVENTORY_JSON) => {
             "Inventory input did not match the required JSON shape. Inspect the inventory schema and correct the request."
         }
@@ -259,6 +265,12 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ) => {
             "The host evidence is invalid. Supply the saved proof of a provider-enforced search lifetime."
         }
+        ("INVENTORY_EVIDENCE", message) if message.starts_with("Refresh host evidence ") => {
+            "The host evidence did not pass refresh validation. Check the selected target, session and provider lifetime."
+        }
+        ("INVENTORY_EVIDENCE", message) if message.starts_with("Refresh settlement ") => {
+            "The settlement did not match the reserved refresh. Submit evidence for the exact attempt."
+        }
         ("INVENTORY_REFRESH_UNAVAILABLE", _) => {
             "Automatic inventory refresh is unavailable. Use an explicit manual refresh."
         }
@@ -349,33 +361,77 @@ fn output_brief(value: Value) -> Result<(), Diagnostic> {
         .and_then(|_| out.flush())
         .map_err(|_| brief_output_failure())
 }
+fn read_json_bytes(path: &Path) -> Result<Vec<u8>, Diagnostic> {
+    if path != Path::new("-") {
+        return storage::read_bytes(path, MAX_STATE_BYTES);
+    }
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(MAX_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| fail("Cannot read inventory request from stdin."))?;
+    if bytes.len() as u64 > MAX_STATE_BYTES {
+        return Err(fail("Inventory input exceeds 64 MiB."));
+    }
+    Ok(bytes)
+}
+
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, Diagnostic> {
-    let raw = if path == Path::new("-") {
-        let mut bytes = Vec::new();
-        io::stdin()
-            .take(MAX_STATE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| fail("Cannot read inventory request from stdin."))?;
-        if bytes.len() as u64 > MAX_STATE_BYTES {
-            return Err(fail("Inventory input exceeds 64 MiB."));
-        }
-        bytes
-    } else {
-        storage::read_bytes(path, MAX_STATE_BYTES)?
-    };
-    serde_json::from_slice(&raw).map_err(|error| {
-        // A missing field's name comes from the schema. Nothing from the file is repeated.
-        // The file may be a request or a saved state, so the message names neither.
-        let error = error.to_string();
-        match error
-            .strip_prefix("missing field `")
-            .and_then(|rest| rest.split_once('`'))
-        {
-            Some((field, _)) => fail(&format!(
+    serde_json::from_slice(&read_json_bytes(path)?)
+        .map_err(|error| inventory_decode_error(&error.to_string()))
+}
+
+fn inventory_decode_error(message: &str) -> Diagnostic {
+    message
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split_once('`'))
+        .map_or_else(
+            || fail(INVALID_INVENTORY_JSON),
+            |(field, _)| fail(&format!(
                 "Inventory input is missing the required field {field}; inspect the inventory schema."
             )),
-            None => fail(INVALID_INVENTORY_JSON),
+        )
+}
+
+fn request_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let mut bounded: String = chars.by_ref().take(64).collect();
+    if chars.next().is_some() {
+        bounded.push_str("...");
+    }
+    format!("{bounded:?}")
+}
+
+fn read_inventory_request(path: &Path) -> Result<InventoryRequest, Diagnostic> {
+    let raw = read_json_bytes(path)?;
+    serde_json::from_slice(&raw).map_err(|error| {
+        let message = error.to_string();
+        if let Some((field, _)) = message.strip_prefix("unknown field `")
+            .and_then(|rest| rest.rsplit_once("`, "))
+        {
+            return fail(&format!(
+                "Inventory input has an unknown field {}. Remove it or use a field from the inventory schema.",
+                request_label(field)
+            ));
         }
+        if message.starts_with("unknown variant `")
+            && let Ok(request) = serde_json::from_slice::<Value>(&raw)
+            && let Some(kind) = request.pointer("/action/kind").and_then(Value::as_str)
+        {
+            let schema: Value = serde_json::from_str(include_str!("../schemas/inventory.json"))
+                .expect("Bundled inventory schema is JSON");
+            let kinds: Vec<_> = schema["$defs"]["InventoryAction"]["oneOf"]
+                .as_array().expect("Bundled inventory schema lists the actions")
+                .iter().filter_map(|action| action["properties"]["kind"]["const"].as_str())
+                .collect();
+            if !kinds.contains(&kind) {
+                return fail(&format!(
+                    "Unknown inventory action kind {}. Choose one of {}.",
+                    request_label(kind), kinds.join(", ")
+                ));
+            }
+        }
+        inventory_decode_error(&message)
     })
 }
 
@@ -795,7 +851,7 @@ pub fn run(args: InventoryArgs) -> Result<i32, Diagnostic> {
             },
         }
     } else {
-        read_json(args.request.as_deref().expect("request checked"))?
+        read_inventory_request(args.request.as_deref().expect("request checked"))?
     };
     if request.schema_version != 1 {
         return Err(fail("Unsupported inventory request version."));
@@ -4081,7 +4137,7 @@ fn interactive(
         },
         "request" => {
             let request: InventoryRequest =
-                read_json(Path::new(&prompt("Inventory request file")?))?;
+                read_inventory_request(Path::new(&prompt("Inventory request file")?))?;
             if request.schema_version != 1 {
                 return Err(fail("Unsupported inventory request version."));
             }
