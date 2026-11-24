@@ -682,3 +682,100 @@ fn discovery_collision_ids_are_stable_across_runs() {
         assert_eq!(completed.data.values[1]["id"], final_value);
     }
 }
+
+#[test]
+fn null_retained_parent_does_not_erase_a_mapped_incoming_parent() {
+    let parent_scope = scope("parent");
+    let child_scope = scope("child");
+    let mut prior_child = record("env:repo:child_old", child_scope.clone());
+    prior_child["relationship"] = json!({"parent_repo_id": null, "datasets": ["synthetic"]});
+    let old = pack(
+        CREATED,
+        vec![
+            record("env:repo:parent_old", parent_scope.clone()),
+            prior_child,
+        ],
+    );
+    let mut fresh_child = record("env:repo:child_new", child_scope);
+    fresh_child["relationship"] = json!({"parent_repo_id": "env:repo:parent_new"});
+    let fresh = pack(
+        LATER,
+        vec![record("env:repo:parent_new", parent_scope), fresh_child],
+    );
+    let merged = environment::merge(&old, &fresh).unwrap();
+    let child = merged
+        .data
+        .sources
+        .iter()
+        .find(|s| s["id"] == "env:repo:child_old")
+        .unwrap();
+    assert_eq!(
+        child["relationship"]["parent_repo_id"],
+        "env:repo:parent_old"
+    );
+    assert_eq!(child["relationship"]["datasets"], json!(["synthetic"]));
+}
+
+#[test]
+fn legacy_history_status_keeps_retained_equal_sourcetype_label() {
+    let inventory = Inventory::new();
+    inventory.mode("quick", "sources-only");
+    inventory.confirm(vec![scope("alpha")]);
+    let mut labeled = record("env:repo:alpha_labeled", scope("alpha"));
+    labeled["selectors"]["sourcetype"] = json!("example");
+    let first = pack(CREATED, vec![labeled]);
+    let second = pack(LATER, vec![record("env:repo:alpha_plain", scope("alpha"))]);
+    let state = inventory.state();
+    let parent = state.parent().unwrap();
+    let first_path = parent.join("legacy-first.json");
+    let second_path = parent.join("legacy-second.json");
+    fs::write(&first_path, serde_json::to_vec_pretty(&first).unwrap()).unwrap();
+    fs::write(&second_path, serde_json::to_vec_pretty(&second).unwrap()).unwrap();
+    let mut saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    saved["active_pack"] = Value::Null;
+    saved["packs"] = json!([
+        {"path": first_path, "content_digest": first.content_digest, "imported_at": CREATED},
+        {"path": second_path, "content_digest": second.content_digest, "imported_at": LATER},
+    ]);
+    fs::write(&state, serde_json::to_vec_pretty(&saved).unwrap()).unwrap();
+
+    for flags in [&["--json"][..], &["--json", "--summary"][..]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .arg("status")
+            .args(flags)
+            .arg("--state")
+            .arg(&state)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["sources"][0]["retained_restrictions"],
+            json!({"sourcetype": "example", "discovery_compatible": true}),
+            "{flags:?}: {report}"
+        );
+    }
+    let text = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--state"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(text.status.success(), "{text:?}");
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        stdout.contains("retained sourcetype=\"example\" (discovery-compatible)"),
+        "{stdout}"
+    );
+    let brief = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+        .args(["status", "--json", "--brief", "--state"])
+        .arg(&state)
+        .output()
+        .unwrap();
+    assert!(brief.status.success(), "{brief:?}");
+    let brief_text = String::from_utf8(brief.stdout).unwrap();
+    assert!(
+        !brief_text.contains("retained_restrictions"),
+        "{brief_text}"
+    );
+    assert!(!brief_text.contains("example"), "{brief_text}");
+}

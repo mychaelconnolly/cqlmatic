@@ -4518,15 +4518,27 @@ fn assess_source(
         else {
             continue;
         };
-        retained_restrictions = pack_source
-            .selectors
-            .as_ref()
-            .filter(|s| s.sourcetype.is_some() || s.event_family.is_some())
-            .map(|s| SourceRestrictions {
-                sourcetype: s.sourcetype.clone(),
-                event_family: s.event_family.clone(),
-                discovery_compatible: environment::discovery_compatible_restrictions(s),
-            });
+        if let Some(selectors) = pack_source.selectors.as_ref() {
+            let mut merged = environment::Selectors {
+                repo: source.selectors.repo.clone(),
+                type_: source.selectors.type_.clone(),
+                sourcetype: retained_restrictions
+                    .as_ref()
+                    .and_then(|r: &SourceRestrictions| r.sourcetype.clone())
+                    .or_else(|| selectors.sourcetype.clone()),
+                event_family: retained_restrictions
+                    .as_ref()
+                    .and_then(|r: &SourceRestrictions| r.event_family.clone())
+                    .or_else(|| selectors.event_family.clone()),
+            };
+            if merged.sourcetype.is_some() || merged.event_family.is_some() {
+                retained_restrictions = Some(SourceRestrictions {
+                    discovery_compatible: environment::discovery_compatible_restrictions(&merged),
+                    sourcetype: merged.sourcetype.take(),
+                    event_family: merged.event_family.take(),
+                });
+            }
+        }
         observed_source = pack_source
             .evidence
             .as_ref()

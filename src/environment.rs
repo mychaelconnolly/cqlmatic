@@ -1069,7 +1069,10 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
                 merged["evidence"]["declared"] = declared.clone();
             }
             if let Some(relationship) = prior.get("relationship").and_then(Value::as_object) {
-                if let Some(parent) = relationship.get("parent_repo_id") {
+                if let Some(parent) = relationship
+                    .get("parent_repo_id")
+                    .filter(|value| !value.is_null())
+                {
                     merged["relationship"]["parent_repo_id"] = parent.clone();
                 }
                 for key in ["datasets", "parsers"] {
@@ -1137,7 +1140,7 @@ pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
             merged["provenance_ids"] = Value::Array(evidence);
             if let Some(selectors) = prior.get("selectors").and_then(Value::as_object) {
                 for key in ["event_family", "sourcetype"] {
-                    if let Some(v) = selectors.get(key) {
+                    if let Some(v) = selectors.get(key).filter(|value| !value.is_null()) {
                         merged["selectors"][key] = v.clone();
                     }
                 }
