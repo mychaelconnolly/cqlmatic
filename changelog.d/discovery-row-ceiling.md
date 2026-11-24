@@ -1,0 +1,1 @@
+- Keep the search row-limit reason on discovery replies and polls. Suggest a narrower window or omitting an optional listing field before starting another run.

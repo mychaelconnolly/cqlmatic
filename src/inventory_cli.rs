@@ -936,6 +936,9 @@ fn inspect_next_probe_run(
     })
 }
 
+const ROW_LIMIT_REASON: &str = "The answer reached the 10,000-row ceiling. With the same data, repeating this search will reach the ceiling again.";
+const ROW_LIMIT_ACTION: &str = "Prepare a new discovery run over a narrower window. If a field requested through kind_fields or value_fields produced the listing, you can omit that field from the new run.";
+
 fn next_probe(
     path: &Path,
     run_index: Option<usize>,
@@ -1018,6 +1021,8 @@ fn next_probe(
     let mut cost = json!(mcp::cost(&run.relay, 0));
     let mut phase = run.phase.clone();
     let mut terminal_failure = run.relay.failure.as_ref().map(relay_failure);
+    let row_limited = diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT")
+        || (diagnostics.is_empty() && mcp::paused_at_row_limit(&run.relay));
     if phase == "cleanup-pending" {
         for diagnostic in cleanup_diagnostics(&run.relay, diagnostics.is_empty()) {
             if !diagnostics.contains(&diagnostic) {
@@ -1094,6 +1099,11 @@ fn next_probe(
     {
         diagnostics = vec![diagnostic];
         guidance.to_owned()
+    } else if row_limited {
+        if !diagnostics.iter().any(|d| d["code"] == "SEARCH_ROW_LIMIT") {
+            diagnostics.push(safe_answer_diagnostic("SEARCH_ROW_LIMIT", Severity::Error));
+        }
+        ROW_LIMIT_ACTION.to_owned()
     } else if stale_predecessor {
         "Pause this run, then prepare discovery again from the current inventory. Previously accepted answers are retained.".to_owned()
     } else {
@@ -1287,6 +1297,7 @@ fn relay_failure(error: &Diagnostic) -> (Value, &'static str) {
             "The inventory pack used to prepare discovery changed.",
             "Prepare discovery again from the current inventory.",
         ),
+        ("SEARCH_ROW_LIMIT", _) => ("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON, ROW_LIMIT_ACTION),
         ("DISCOVERY_EVIDENCE", _) => (
             "DISCOVERY_EVIDENCE",
             "Discovery could not qualify the returned evidence.",
@@ -1372,6 +1383,7 @@ fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
             "DISCOVERY_EVIDENCE",
             "The result did not provide the evidence required by this probe. Review the saved response before resuming.",
         ),
+        "SEARCH_ROW_LIMIT" => ("SEARCH_ROW_LIMIT", ROW_LIMIT_REASON),
         "MCP_TOO_LARGE" => (
             "MCP_TOO_LARGE",
             "The search response exceeds the size limit. Check the saved response before settling the attempt.",
@@ -1382,7 +1394,7 @@ fn safe_answer_diagnostic(code: &str, severity: Severity) -> Value {
         ),
         "DISCOVERY_ATTEMPT_ENDED" => (
             "DISCOVERY_ATTEMPT_ENDED",
-            "The attempt ended and its allowance remains charged. Resume the run to continue.",
+            "The attempt ended and its allowance remains charged.",
         ),
         "DISCOVERY_SUPERSEDED" => (
             "DISCOVERY_SUPERSEDED",

@@ -1193,6 +1193,34 @@ fn next_probe_refuses_wrong_ids_and_unusable_files_without_dispatching() {
 }
 
 #[test]
+fn next_probe_keeps_the_row_limit_reason_and_changes_the_retry_advice() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let result = fixture(
+        &dir.0,
+        "capped.json",
+        json!({"result": vec![json!({"events":1}); 10_000]}),
+    );
+    let answer = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":first["action"]["probe"]["probe_id"],"result_file":result}}),
+    );
+    let poll = call(&dir.0, json!({"kind":"next-probe"}));
+    for reply in [answer, poll] {
+        assert_eq!(reply["action"]["state"], "paused");
+        assert_eq!(
+            reply["action"]["diagnostics"][0]["code"],
+            "SEARCH_ROW_LIMIT"
+        );
+        let next = reply["action"]["next_action"].as_str().unwrap();
+        assert!(next.contains("narrower window"));
+        assert!(!next.contains("resume-discovery"));
+    }
+}
+
+#[test]
 fn next_probe_checks_ownership_before_writing_the_answer() {
     let owner = Temp::new();
     let copy = Temp::new();

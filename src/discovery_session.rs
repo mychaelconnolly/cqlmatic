@@ -1079,6 +1079,25 @@ fn resume_locked(writer: &storage::Writer, state: &mut State) -> Result<StepOutp
     }
 }
 
+/// Read the cause of a retained row-capped answer while the run is paused.
+pub fn paused_at_row_limit(state: &State) -> bool {
+    if state.status != "paused" {
+        return false;
+    }
+    state
+        .session
+        .as_ref()
+        .and_then(|session| session.attempts.last())
+        .filter(|attempt| attempt.outcome == "completed-unusable")
+        .and_then(|attempt| attempt.terminal.as_ref())
+        .and_then(|evidence| {
+            capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)
+                .ok()
+                .and_then(|raw| normalize_framed(&raw, evidence.extended_result_framing).ok())
+        })
+        .is_some_and(|result| result.rows.len() >= 10_000)
+}
+
 fn complete_result(raw: &[u8], probe: &Probe, extended: bool) -> Result<Normalized, Diagnostic> {
     let normalized = normalize_framed(raw, extended)?;
     if normalized.rows.len() >= 10000 {
