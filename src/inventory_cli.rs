@@ -479,16 +479,41 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
         )
         .map_err(|_| fail("Cannot emit inventory status."))?;
     }
+    // A bare DONE here reads as a finished map, so say which milestone each word records.
+    let done = |progress: Progress, label: &str| {
+        if progress == Progress::Done {
+            label.to_owned()
+        } else {
+            progress.to_string()
+        }
+    };
     writeln!(
         out,
         "Target: {}; scouting: {}; parser catalog: {} ({}); reconciliation: {}",
         status.target,
-        status.scouting,
-        status.parser_catalog,
+        done(status.scouting, "census saved"),
+        done(status.parser_catalog, "captured"),
         status.parser_count,
-        status.reconciliation
+        done(status.reconciliation, "evidence review current")
     )
     .map_err(|_| fail("Cannot emit inventory status."))?;
+    if let Some(detail) = &status.completion_detail {
+        let open = &detail.expected_sources_open;
+        writeln!(
+            out,
+            "Expected sources still open: interpretation review {}, parser review or binding {}, measurements {}; prepared census awaiting capture: {}; latest census rows: {}",
+            open.interpretation_review,
+            open.parser_review_or_binding,
+            open.measurements,
+            if detail.scout_awaiting_capture { "yes" } else { "no" },
+            detail.latest_census.as_ref().map_or("none".into(), |census| format!(
+                "{}{}",
+                census.rows,
+                if census.at_row_ceiling { " (row ceiling reached)" } else { "" }
+            ))
+        )
+        .map_err(|_| fail("Cannot emit inventory status."))?;
+    }
     for source in &status.sources {
         let selectors = [
             source
@@ -526,7 +551,10 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             out,
             "Discovery {:?}: {}; queries {}/{}; elapsed {:.1}/{} seconds; sources {}",
             run.state_path,
-            run.status,
+            match run.status.as_str() {
+                "complete" => "run complete, pack activated",
+                other => other,
+            },
             run.answered,
             run.max_queries,
             run.elapsed_seconds,
@@ -1191,11 +1219,20 @@ fn apply_locked(
         };
         if resolve_work {
             state.resolve_inventoried_work_with_evidence(&report, &evidence)?;
+            let mut recorded = None;
             if let Some(reviewed_at) = reconcile_at {
-                state.reconciled_evidence_sha256 = Some(state.evidence_digest()?);
+                let digest = state.evidence_digest()?;
+                recorded = Some(state.reconciled_evidence_sha256.as_ref() != Some(&digest));
+                state.reconciled_evidence_sha256 = Some(digest);
                 state.reconciled_at = Some(reviewed_at);
             }
             report = inventory::assess_at(&state, &loaded, &now)?;
+            if let Some(recorded) = recorded {
+                extra = json!({"kind":"reconcile",
+                    "status":if recorded { "recorded" } else { "already-current" },
+                    "evidence_sha256":state.reconciled_evidence_sha256,"reviewed_at":state.reconciled_at,
+                    "completion_detail":report.completion_detail,"next_action":reconcile_next_action(&report)});
+            }
         }
         if evidence_limited {
             extra["inventory_work_evidence_limited"] = json!(true);
@@ -1217,6 +1254,40 @@ fn apply_locked(
         }
         Ok((report, extra))
     })()
+}
+
+/// Fixed guidance naming the first open category after a reconcile.
+fn reconcile_next_action(report: &InventoryStatus) -> String {
+    let detail = report
+        .completion_detail
+        .as_ref()
+        .expect("assessed status carries its completion detail");
+    let open = &detail.expected_sources_open;
+    // Source review and parser work are Full discovery steps; Quick completion does not need them.
+    let full = if report.discovery_mode == DiscoveryMode::Quick {
+        "Full discovery: "
+    } else {
+        ""
+    };
+    if detail.scout_awaiting_capture {
+        "A prepared census is awaiting its capture. Run it once with its exact arguments, save the entire result, import it with import-scout, then reconcile again.".into()
+    } else if open.measurements > 0 {
+        "Expected sources still need completed measurements. Complete a discovery run that covers them, relaying each probe with next-probe, then reconcile again.".into()
+    } else if open.interpretation_review > 0 {
+        format!(
+            "{full}Expected sources still need interpretation review. Record each with review-source, then reconcile again."
+        )
+    } else if !detail.parser_catalog_captured {
+        format!(
+            "{full}The parser catalog is not captured. Save the complete catalog with import-parsers or fetch-parsers, then reconcile again."
+        )
+    } else if open.parser_review_or_binding > 0 {
+        format!(
+            "{full}Expected sources still need a parser binding or review. Use bind-parser with a review of every listed line, or parser-not-applicable for a supported native source, then reconcile again."
+        )
+    } else {
+        "No counted work is open. Read full_map_complete, selected_scope_complete or quick_scope_complete, and the status next_actions, for any other remaining work.".into()
+    }
 }
 
 fn action_summary(action: &Value) -> Value {
@@ -1266,10 +1337,17 @@ fn action_brief(action: &Value) -> Value {
                     | "paused"
                     | "cancel-requested"
                     | "cleanup-pending"
+                    | "recorded"
+                    | "already-current"
             )
         })
     {
         compact["outcome"] = json!(status);
+    }
+    if action["kind"] == "reconcile"
+        && let Some(next) = action["next_action"].as_str()
+    {
+        compact["next_action"] = json!(next);
     }
     for key in [
         "initialized",

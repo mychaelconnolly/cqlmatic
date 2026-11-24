@@ -129,12 +129,74 @@
         "case_revision"
       ]
     },
+    "CensusSize": {
+      "type": "object",
+      "properties": {
+        "at_row_ceiling": {
+          "type": "boolean"
+        },
+        "rows": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "at_row_ceiling"
+      ]
+    },
     "Cloud": {
       "type": "string",
       "enum": [
         "us1",
         "us2",
         "eu1"
+      ]
+    },
+    "CompletionDetail": {
+      "description": "What the progress words cover and what is still open, derived from the rest of the status.",
+      "type": "object",
+      "properties": {
+        "evidence_reviewed_at": {
+          "description": "Review time of the current evidence fingerprint; null unless reconciliation is done.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_sources_open": {
+          "$ref": "#/$defs/OpenSourceCounts"
+        },
+        "latest_census": {
+          "description": "The most recently imported census; null before any census is saved.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CensusSize"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parser_catalog_captured": {
+          "type": "boolean"
+        },
+        "reconciliation_meaning": {
+          "type": "string"
+        },
+        "scout_awaiting_capture": {
+          "description": "A prepared census has no saved capture yet.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reconciliation_meaning",
+        "expected_sources_open",
+        "parser_catalog_captured",
+        "scout_awaiting_capture"
       ]
     },
     "Diagnostic": {
@@ -332,6 +394,11 @@
         },
         "values_requested": {
           "type": "boolean"
+        },
+        "values_saved": {
+          "description": "The map holds at least one observed value for this field. `values: done` without it\nmeans a completed run sampled the field and the map holds no value for it.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -434,6 +501,16 @@
           "items": {
             "$ref": "#/$defs/QueryObservation"
           }
+        },
+        "completion_detail": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CompletionDetail"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "context": {
           "type": [
@@ -692,6 +769,33 @@
       "enum": [
         "falcon-sensor-native",
         "platform-internal"
+      ]
+    },
+    "OpenSourceCounts": {
+      "description": "Expected sources whose work in each category is not done.",
+      "type": "object",
+      "properties": {
+        "interpretation_review": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "measurements": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "parser_review_or_binding": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "interpretation_review",
+        "parser_review_or_binding",
+        "measurements"
       ]
     },
     "PackReference": {

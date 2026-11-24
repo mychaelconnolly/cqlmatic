@@ -987,6 +987,10 @@ pub struct FieldStatus {
     pub status: Progress,
     pub values: Progress,
     pub values_requested: bool,
+    /// The map holds at least one observed value for this field. `values: done` without it
+    /// means a completed run sampled the field and the map holds no value for it.
+    #[serde(default)]
+    pub values_saved: bool,
     pub evidence_dates: Vec<String>,
     pub not_reobserved: bool,
 }
@@ -1072,6 +1076,8 @@ pub struct InventoryStatus {
     pub scouting: Progress,
     pub parser_catalog: Progress,
     pub reconciliation: Progress,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_detail: Option<CompletionDetail>,
     pub parser_count: usize,
     pub parser_page_count: usize,
     pub parsers: Vec<ParserSummary>,
@@ -1084,6 +1090,40 @@ pub struct InventoryStatus {
     pub next_actions: Vec<String>,
     pub covered_queries_usable: bool,
     pub active_pack: Option<PackReference>,
+}
+
+/// What the progress words cover and what is still open, derived from the rest of the status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CompletionDetail {
+    /// Review time of the current evidence fingerprint; null unless reconciliation is done.
+    pub evidence_reviewed_at: Option<String>,
+    pub reconciliation_meaning: String,
+    pub expected_sources_open: OpenSourceCounts,
+    pub parser_catalog_captured: bool,
+    /// A prepared census has no saved capture yet.
+    pub scout_awaiting_capture: bool,
+    /// The most recently imported census; null before any census is saved.
+    pub latest_census: Option<CensusSize>,
+}
+
+/// Expected sources whose work in each category is not done.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct OpenSourceCounts {
+    pub interpretation_review: usize,
+    pub parser_review_or_binding: usize,
+    pub measurements: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CensusSize {
+    pub rows: usize,
+    pub at_row_ceiling: bool,
 }
 
 impl QueryObservation {
@@ -1437,6 +1477,7 @@ pub fn summary(status: &InventoryStatus) -> Value {
         "quick_scope_complete":status.quick_scope_complete,"discovery_mode":status.discovery_mode,"quick_depth":status.quick_depth,
         "message":status.message,"environment":status.environment,"target_scope":status.target_scope,
         "progress":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "completion_detail":status.completion_detail,
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|s|s.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
@@ -1625,6 +1666,9 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "refresh_blocked":status.refresh_blocked,
         "capability_blocked":status.capability_blocked,"capability_run_count":status.capabilities.len(),
         "readiness":{"target":status.target,"scouting":status.scouting,"parser_catalog":status.parser_catalog,"reconciliation":status.reconciliation},
+        "completion_detail":status.completion_detail.as_ref().map(|detail| json!({
+            "expected_sources_open":detail.expected_sources_open,"parser_catalog_captured":detail.parser_catalog_captured,
+            "scout_awaiting_capture":detail.scout_awaiting_capture,"latest_census":detail.latest_census})),
         "settings_attention":status.settings_attention,"settings_label":if status.settings_attention { "Settings *" } else { "Settings" },
         "refresh":{"automatic":status.refresh_settings.automatic,"automatic_available":status.automatic_refresh_available,"lookback":status.refresh_settings.lookback,
             "recorded_phase":recorded.map(|attempt| attempt.phase),"known_termination":recorded.and_then(|attempt| attempt.termination),
@@ -4101,6 +4145,17 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     let scoped_complete = !expected_sources.is_empty()
         && expected_sources.iter().all(|s| s.status == Progress::Done)
         && reconciliation == Progress::Done;
+    let full_census: Vec<_> = state
+        .scouting
+        .iter()
+        .filter(|s| s.plan.arguments.repository == "search-all")
+        .collect();
+    // The refresh freshness check decides whether a census is a complete, uncapped capture.
+    let full_census_qualifies = full_census.iter().any(|s| {
+        s.snapshot
+            .bytes()
+            .is_ok_and(|raw| refresh_rows(&raw).is_ok())
+    });
     let complete = state.discovery_mode == DiscoveryMode::Full
         && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
         && state.active_pack.is_some()
@@ -4109,6 +4164,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
             .scouting
             .iter()
             .any(|s| s.plan.arguments.repository == "search-all")
+        && full_census_qualifies
         && catalog_complete
         && unclassified.is_empty()
         && sources.iter().all(|s| s.expected)
@@ -4147,6 +4203,13 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     if scout != Progress::Done && state.discovery_mode == DiscoveryMode::Full {
         next_actions.push("Prepare scouting and relay the emitted census through the existing CrowdStrike MCP; save the entire result.".into());
     }
+    if state.discovery_mode == DiscoveryMode::Full
+        && target.is_some_and(|t| t.scope == TargetScope::FullEnvironment)
+        && !full_census.is_empty()
+        && !full_census_qualifies
+    {
+        next_actions.push("No saved search-all census is complete and uncapped. A census that reaches the 10,000-row ceiling cannot show that every source was listed. Prepare scouting over a shorter window and import its entire result; full_map_complete stays false until a census qualifies.".into());
+    }
     if !catalog_complete && state.discovery_mode == DiscoveryMode::Full {
         next_actions.push("Complete the native parser catalog and retrieve each exact parser ID; API credentials stay in the supplied protected file.".into());
     }
@@ -4177,6 +4240,31 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     if !pending_inventory.is_empty() {
         next_actions.push("Settings *: review new source, source-type metadata or field work. Deferral preserves it; inventory or explicitly exclude the exact revision.".into());
     }
+    let open =
+        |is_open: fn(&SourceStatus) -> bool| expected_sources.iter().filter(|s| is_open(s)).count();
+    let completion_detail = CompletionDetail {
+        evidence_reviewed_at: state
+            .reconciled_at
+            .clone()
+            .filter(|_| reconciliation == Progress::Done),
+        reconciliation_meaning: "reconciliation done means a review of the current evidence fingerprint is recorded. It is not a completion claim; read full_map_complete, selected_scope_complete or quick_scope_complete for completion.".into(),
+        expected_sources_open: OpenSourceCounts {
+            interpretation_review: open(|s| s.interpretation != Progress::Done),
+            parser_review_or_binding: open(|s| {
+                !matches!(s.parser, Progress::Done | Progress::NotApplicable)
+            }),
+            measurements: open(|s| s.measurements != Progress::Done),
+        },
+        parser_catalog_captured: catalog_complete,
+        scout_awaiting_capture: state
+            .scout_plan
+            .as_ref()
+            .is_some_and(|p| !state.scouting.iter().any(|s| &s.plan == p)),
+        latest_census: state.scouting.last().map(|s| CensusSize {
+            rows: s.rows,
+            at_row_ceiling: s.rows >= 10_000,
+        }),
+    };
     Ok(InventoryStatus {
         schema_version: 1,
         blank_canvas: target.is_none()
@@ -4257,6 +4345,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
         scouting: scout,
         parser_catalog,
         reconciliation,
+        completion_detail: Some(completion_detail),
         parser_count: state.parsers.len(),
         parser_page_count: state.parser_pages.len(),
         parsers: state
@@ -4438,6 +4527,7 @@ fn assess_source(
                 .any(|v| v["field_id"] == field.id && v["evidence_kind"] == "observed")
             {
                 entry.values = Progress::Done;
+                entry.values_saved = true;
             }
         }
     }
@@ -4592,6 +4682,7 @@ fn field_entry<'a>(
         status: Progress::Unknown,
         values: Progress::NotApplicable,
         values_requested: false,
+        values_saved: false,
         evidence_dates: vec![],
         not_reobserved: false,
     })
