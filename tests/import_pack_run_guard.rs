@@ -521,7 +521,11 @@ fn changed_import_classifies_each_relay_phase_for_current_and_earlier_producers(
             let run = inv.prepare(4);
             let probe = stage(&inv, &run, phase);
             if earlier {
-                run.edit(|state| state["producer_version"] = json!(EARLIER));
+                run.edit(|state| {
+                    state["producer_version"] = json!(EARLIER);
+                    state["discovery_algorithm"] = json!("bounded-discovery-v2");
+                    rebind_checkpoint(state);
+                });
             }
             let relay_status = if phase == "reserved" {
                 "needs-probes"
@@ -704,29 +708,39 @@ fn owner_format_plan_and_allowance_blockers_only_offer_override() {
                     // and consume the active-time limit without a clock-dependent wait.
                     state["created_at"] = json!(START);
                     state["session"]["periods"] = json!([{"start":START,"end":END}]);
-                    let mut binding = serde_json::to_vec(&(
-                        &state["request_sha256"],
-                        &state["created_at"],
-                        &state["pack"],
-                        &state["receipt"],
-                        &state["session"]["transport"],
-                        &state["session"]["predecessor_sha256"],
-                    ))
-                    .unwrap();
-                    if state["session"]["sparse_fieldset_fallback"] == true {
-                        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
-                    }
-                    binding.extend_from_slice(b"\0inventory-owner-v1\0");
-                    binding.extend_from_slice(
-                        &serde_json::to_vec(&state["session"]["inventory_owner"]).unwrap(),
-                    );
-                    state["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
+                    rebind_checkpoint(state);
                 });
             }
             _ => unreachable!(),
         }
         check_noncontinuable(&inv, &run, expected);
     }
+}
+
+fn rebind_checkpoint(state: &mut Value) {
+    if !state["session"].is_object() {
+        return;
+    }
+    let mut binding = serde_json::to_vec(&(
+        &state["request_sha256"],
+        &state["created_at"],
+        &state["pack"],
+        &state["receipt"],
+        &state["session"]["transport"],
+        &state["session"]["predecessor_sha256"],
+    ))
+    .unwrap();
+    if state["session"]["sparse_fieldset_fallback"] == true {
+        binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
+    }
+    if let Some(owner) = state["session"].get("inventory_owner") {
+        binding.extend_from_slice(b"\0inventory-owner-v1\0");
+        binding.extend_from_slice(&serde_json::to_vec(owner).unwrap());
+    }
+    if state["discovery_algorithm"] == "bounded-discovery-v3" {
+        binding.extend_from_slice(b"\0bounded-discovery-v3");
+    }
+    state["session"]["binding_sha256"] = json!(cqlmatic::sha256_hex(&binding));
 }
 
 fn check_noncontinuable(inv: &Inventory, run: &Run, expected: &str) {
@@ -1052,6 +1066,8 @@ fn paused_run_withholds_resume_advice_when_sibling_blocks_continuing() {
     let _p1 = inv_earlier.next(&r1);
     r1.edit(|state| {
         state["producer_version"] = json!(EARLIER);
+        state["discovery_algorithm"] = json!("bounded-discovery-v2");
+        rebind_checkpoint(state);
     });
     let req_earlier = inv_earlier.import("imported", "Extra", false);
     let denied_earlier = inv_earlier.blocked(&req_earlier, 0);
