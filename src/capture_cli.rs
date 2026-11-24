@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -555,8 +555,10 @@ fn tidy(path: &Path, directory: &Path) {
             let Some(file) = record[name].as_str() else {
                 continue;
             };
-            let Ok(file) = fs::canonicalize(file) else {
-                return;
+            let file = match fs::canonicalize(file) {
+                Ok(file) => file,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return,
             };
             retained_copies.insert(file);
         }

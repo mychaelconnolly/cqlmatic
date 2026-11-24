@@ -1994,6 +1994,98 @@ fn capture_keeps_the_original_audit_and_replays_it_through_a_state_alias() {
 }
 
 #[test]
+fn capture_still_tidies_after_an_imported_observations_source_files_are_deleted() {
+    let dir = Temp::new();
+    dir.confirm();
+    let scratch = dir.0.join("scratch");
+    fs::create_dir(&scratch).unwrap();
+    let query = scratch.join("imported.cql");
+    let result = scratch.join("imported.json");
+    fs::write(&query, "#type=synthetic | head(5)").unwrap();
+    fs::write(&result, body(json!([{"z": "1"}]))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [&query, &result] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+    dir.act_on(
+        &dir.state(),
+        json!({
+            "kind": "import-query-observations",
+            "query_file": query,
+            "result_file": result,
+            "environment": environment(),
+            "source": {"type": "synthetic"},
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-02T00:00:00Z",
+            "retrieved_at": "2026-01-03T00:00:00Z",
+            "caller_assertion": "exact-query-result-target-window"
+        }),
+    );
+
+    let now = cqlmatic::environment::parse_time(&cqlmatic::discovery::timestamp()).unwrap();
+    let iso = |hours: i64| {
+        let time = now - time::Duration::hours(hours);
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            time.year(),
+            time.month() as u8,
+            time.day(),
+            time.hour(),
+            time.minute(),
+            time.second()
+        )
+    };
+    let window = |start: i64, end: i64, rows: Value| {
+        let mut payload = search("#type=synthetic | head(5)", json!(body(rows)));
+        payload["tool_input"]["start"] = json!(iso(start));
+        payload["tool_input"]["end"] = json!(iso(end));
+        payload
+    };
+
+    let captures = dir.0.join("workflow").join("state.json.captures");
+    let audits = dir.0.join("workflow").join("query-observations");
+    let imported_audits = names(&audits);
+    assert_eq!(imported_audits.len(), 1);
+
+    dir.capture(window(24 * 30, 3, json!([{"a": "1", "b": "1"}])));
+    let mut replaced: Vec<_> = names(&captures)
+        .into_iter()
+        .filter(|name| name != "tally.json")
+        .collect();
+    replaced.sort();
+    assert_eq!(replaced.len(), 2, "{replaced:?}");
+    let replaced_audit: Vec<_> = names(&audits)
+        .into_iter()
+        .filter(|name| !imported_audits.contains(name))
+        .collect();
+    assert_eq!(replaced_audit.len(), 1, "{replaced_audit:?}");
+
+    dir.capture(window(2, 1, json!([{"a": "1", "b": "1", "c": "1"}])));
+    for directory in [&captures, &audits] {
+        for name in names(directory) {
+            age(&directory.join(name));
+        }
+    }
+    fs::remove_dir_all(&scratch).unwrap();
+
+    dir.capture(window(6, 5, json!([{"d": "1"}])));
+    let kept_captures = names(&captures);
+    for stale in &replaced {
+        assert!(!kept_captures.contains(stale), "{stale}: {kept_captures:?}");
+    }
+    let kept_audits = names(&audits);
+    assert!(
+        !kept_audits.contains(&replaced_audit[0]),
+        "{replaced_audit:?}: {kept_audits:?}"
+    );
+    assert!(kept_audits.contains(&imported_audits[0]), "{kept_audits:?}");
+    assert!(!audits.join(format!(".{}.lock", replaced_audit[0])).exists());
+}
+
+#[test]
 fn capture_never_tidies_the_files_of_another_state_in_its_directory() {
     let dir = Temp::new();
     dir.confirm();
