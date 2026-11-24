@@ -1228,3 +1228,83 @@ fn inspect_distinguishes_filtered_views_misses_and_truncation() {
         }
     }
 }
+
+#[test]
+fn import_replace_rejects_input_aliases_and_keeps_real_output_replacement() {
+    let temp = Temp::new();
+    let descriptor = temp.0.join("environment.json");
+    fs::write(&descriptor, serde_json::to_vec(&environment()).unwrap()).unwrap();
+    let descriptor = descriptor.to_str().unwrap();
+    let native = temp.0.join("original.json");
+    let pack = pack(true, "2026-01-02T00:00:00Z");
+    save_pack(&native, &pack);
+    let legacy_root = temp.0.join("legacy");
+    let legacy = legacy_root.join("environment");
+    private_directory(&legacy);
+    for (name, rows) in [
+        ("sources", &pack.data.sources),
+        ("fields", &pack.data.fields),
+        ("provenance", &pack.data.provenance),
+        ("values", &pack.data.values),
+        ("annotations", &pack.data.annotations),
+    ] {
+        let content = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(legacy.join(format!("{name}.jsonl")), content).unwrap();
+    }
+    let run_import = |from: &Path, out: &Path| {
+        temp.binary()
+            .args(["env", "import", "--from"])
+            .arg(from)
+            .args(["--out"])
+            .arg(out)
+            .args(["--environment", descriptor, "--replace"])
+            .output()
+            .unwrap()
+    };
+    for (from, out) in [
+        (&legacy_root, legacy.join("sources.jsonl")),
+        (&legacy_root, legacy.join("fields.jsonl")),
+        (&legacy_root, legacy.join("provenance.jsonl")),
+        (&legacy_root, legacy.join("values.jsonl")),
+        (&legacy_root, legacy.join("annotations.jsonl")),
+        (&native, legacy_root.join("../original.json")),
+        (&native, legacy_root.join("../environment.json")),
+    ] {
+        let before = fs::read(&out).unwrap();
+        let result = run_import(from, &out);
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{}: {}",
+            out.display(),
+            String::from_utf8_lossy(&result.stdout)
+        );
+        let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains(out.file_name().unwrap().to_str().unwrap()),
+            "{error}"
+        );
+        assert!(message.contains("separate output path"), "{error}");
+        assert!(result.stdout.is_empty());
+        assert_eq!(fs::read(&out).unwrap(), before);
+    }
+
+    let output = temp.0.join("output.json");
+    let (first, second) = (
+        run_import(&legacy_root, &output),
+        run_import(&native, &output),
+    );
+    assert!(first.status.success(), "{first:?}");
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(
+        cqlmatic::storage::read_pack(&output)
+            .unwrap()
+            .content_digest,
+        pack.content_digest
+    );
+}

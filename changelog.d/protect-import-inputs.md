@@ -1,0 +1,1 @@
+- Refuse pack import destinations that resolve to an input snapshot, legacy component, or environment descriptor.

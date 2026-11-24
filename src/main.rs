@@ -1458,6 +1458,53 @@ fn add_inventory_source_id(row: &mut Value) {
     }
 }
 
+fn protect_import_inputs(
+    out: &Path,
+    from: &Path,
+    descriptor: Option<&Path>,
+    legacy: bool,
+) -> Result<(), Diagnostic> {
+    let destination = match std::fs::canonicalize(out) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(input_error(&format!(
+                "Cannot resolve output path {out:?}: {error}. Choose an accessible output path."
+            )));
+        }
+    };
+    let mut inputs: Vec<_> = descriptor.into_iter().map(Path::to_path_buf).collect();
+    if legacy {
+        // Match the directory and component names read by storage::legacy_data.
+        let dir = if from.join("sources.jsonl").exists() {
+            from.to_path_buf()
+        } else {
+            from.join("environment")
+        };
+        inputs.extend(
+            ["sources", "fields", "provenance", "values", "annotations"]
+                .map(|name| dir.join(format!("{name}.jsonl")))
+                .into_iter()
+                .filter(|path| path.exists()),
+        );
+    } else {
+        inputs.push(from.to_path_buf());
+    }
+    for input in inputs {
+        let original = std::fs::canonicalize(&input).map_err(|error| {
+            input_error(&format!(
+                "Cannot resolve import input {input:?}: {error}. Check the input path and retry."
+            ))
+        })?;
+        if destination == original {
+            return Err(input_error(&format!(
+                "Output resolves to import input {input:?}. Choose a separate output path."
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
     match command {
         EnvCommand::Inventory(args) => inventory_cli::run(args),
@@ -1670,7 +1717,8 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
         } => {
             let explicit: Option<EnvironmentId> =
                 environment.as_deref().map(json_file).transpose()?;
-            let p = if from.is_dir() {
+            let legacy = from.is_dir();
+            let p = if legacy {
                 let e=explicit.clone().ok_or_else(||input_error("Legacy import requires --environment FILE with explicit cloud/account/view."))?;
                 Pack::new(e, discovery::timestamp(), storage::legacy_data(&from)?)?
             } else {
@@ -1682,6 +1730,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 }
                 p
             };
+            protect_import_inputs(&out, &from, environment.as_deref(), legacy)?;
             let writer = storage::Writer::acquire(&out)?;
             if out.exists() && !replace {
                 return Err(input_error(
