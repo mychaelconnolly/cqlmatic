@@ -1911,7 +1911,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     }
     if discovery_recovery > 0 {
         notices.push(json!({"code":"DISCOVERY_RECOVERY_RECORDED","severity":"warning",
-            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the saved attempt before another search; recorded state does not prove live execution. 0.1.6/0.1.7 checkpoints recheck on the next search."}));
+            "message":"Discovery has recorded unresolved termination or cleanup. Reconcile the saved attempt before another search; recorded state does not prove live execution. 0.1.6/0.1.7 runs are rechecked from their saved checkpoints on the next search."}));
     } else if !discovery_work.is_empty() {
         notices.push(json!({"code":"DISCOVERY_UNFINISHED_RECORDED","severity":"info",
             "message":"Discovery has recorded unfinished work. Inspect its exact saved checkpoint before preparing refresh; recorded state does not establish current execution readiness."}));
