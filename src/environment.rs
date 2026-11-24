@@ -114,9 +114,27 @@ pub fn parse_time(s: &str) -> Result<time::OffsetDateTime, Diagnostic> {
         )
     })
 }
-pub fn normalize_request_time(s: &str) -> Result<String, Diagnostic> {
+/// Sort RFC 3339 timestamps by UTC instant without truncating fractional seconds.
+pub fn exact_time_key(s: &str) -> Result<(i64, bool, &str), Diagnostic> {
     let time = parse_time(s)?;
-    if s.ends_with('Z') {
+    let offset_len = if s.ends_with(['Z', 'z']) { 1 } else { 6 };
+    let fraction = s[19..s.len() - offset_len]
+        .trim_start_matches('.')
+        .trim_end_matches('0');
+    // The parser represents a leap second at the end of the previous Unix second.
+    Ok((time.unix_timestamp(), &s[17..19] == "60", fraction))
+}
+
+pub fn normalize_request_time(s: &str) -> Result<String, Diagnostic> {
+    let separator = s.as_bytes().get(10);
+    if !matches!(separator, Some(b'T' | b't' | b' ')) {
+        return Err(Diagnostic::error(
+            "PACK_TIME",
+            "Use T, t or a space between the date and time in an RFC 3339 timestamp with an explicit offset.",
+        ));
+    }
+    let time = parse_time(s)?;
+    if separator == Some(&b'T') && s.ends_with('Z') {
         return Ok(s.into());
     }
     let utc = time
@@ -130,7 +148,7 @@ pub fn normalize_request_time(s: &str) -> Result<String, Diagnostic> {
         })?;
     // An RFC 3339 offset changes the date, hour and minute. Keep the original seconds and
     // fractional digits, including any trailing zeros that the formatter would remove.
-    let offset_len = if s.ends_with('z') { 1 } else { 6 };
+    let offset_len = if s.ends_with(['Z', 'z']) { 1 } else { 6 };
     Ok(format!("{}{}Z", &utc[..17], &s[17..s.len() - offset_len]))
 }
 

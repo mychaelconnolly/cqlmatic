@@ -1269,6 +1269,11 @@ fn analyze_assess(
     args: &AssessArgs,
     pack: Option<&Pack>,
 ) -> AssessResult {
+    if let Some(identity) = &request.context.environment
+        && let Err(diagnostic) = environment::validate_identity(identity)
+    {
+        return failed_assessment(request.id, &request.query, diagnostic);
+    }
     let (quick, target_applied, notice) =
         match select_inventory(args.inventory_state.as_deref(), &mut request.context, pack) {
             Ok((quick, applied)) => (quick, applied, None),

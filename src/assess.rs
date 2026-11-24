@@ -262,6 +262,12 @@ pub fn assess(request: AssessRequest, pack: Option<&Pack>) -> AssessResult {
         );
         return result;
     }
+    if let Some(identity) = &request.context.environment
+        && let Err(diagnostic) = environment::validate_identity(identity)
+    {
+        result.add(AssessOutcome::Error, diagnostic);
+        return result;
+    }
     let pipeline = match parser::parse(&request.query) {
         Ok(pipeline) => pipeline,
         Err(failure) => {

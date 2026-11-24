@@ -2920,10 +2920,9 @@ fn ground(
         ..Grounding::default()
     };
     if let Some(e) = &context.environment
-        && environment::validate_identity(e).is_err()
+        && let Err(diagnostic) = environment::validate_identity(e)
     {
-        g.conflicting
-            .push("Invalid explicit environment identity.".into());
+        g.conflicting.push(diagnostic.message);
     }
     if let Some(p) = pack {
         g.pack_id = Some(p.content_digest.clone());

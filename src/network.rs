@@ -717,6 +717,18 @@ pub fn run_job(
     end: &str,
     policy: &JobPolicy,
 ) -> JobReceipt {
+    run_job_with_bounds(backend, view, query, start, end, policy, true)
+}
+
+pub(crate) fn run_job_with_bounds(
+    backend: &mut impl SearchBackend,
+    view: &str,
+    query: &str,
+    start: &str,
+    end: &str,
+    policy: &JobPolicy,
+    normalize: bool,
+) -> JobReceipt {
     let mut receipt = JobReceipt {
         query: query.into(),
         start: start.into(),
@@ -731,8 +743,11 @@ pub fn run_job(
         diagnostic: None,
     };
     let action = (|| {
-        receipt.start = normalize_request_time(start)?;
-        receipt.end = normalize_request_time(end)?;
+        // Discovery has already validated the bounds, and replay uses their exact bytes.
+        if normalize {
+            receipt.start = normalize_request_time(start)?;
+            receipt.end = normalize_request_time(end)?;
+        }
         let from = parse_time(start)?;
         let to = parse_time(end)?;
         if from >= to {

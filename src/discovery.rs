@@ -3,7 +3,7 @@ use crate::{
     contracts::*,
     environment::{self, Pack, PackData, ParserContract, Selectors},
     language::{ast::quote, plan},
-    network::{CANCELLED, JobPolicy, JobReceipt, SearchBackend, run_job},
+    network::{CANCELLED, JobPolicy, JobReceipt, SearchBackend, run_job_with_bounds},
     sha256_hex,
 };
 use serde::{Deserialize, Serialize};
@@ -199,9 +199,14 @@ pub fn validate_request(r: &DiscoverRequest) -> Result<(), Diagnostic> {
         return Err(fail("Unsupported discovery request version."));
     }
     environment::validate_identity(&r.environment)?;
-    let start = environment::parse_time(&r.start)?;
-    let end = environment::parse_time(&r.end)?;
-    if start >= end || end - start > time::Duration::days(7) {
+    let start = environment::exact_time_key(&r.start)?;
+    let end = environment::exact_time_key(&r.end)?;
+    let limit = (
+        start.0 + time::Duration::days(7).whole_seconds(),
+        start.1,
+        start.2,
+    );
+    if start >= end || end > limit {
         return Err(fail(
             "Use increasing absolute UTC windows of at most seven days.",
         ));
@@ -319,9 +324,8 @@ fn probe(
     fields: Vec<String>,
     field: Option<String>,
 ) -> Result<Probe, Diagnostic> {
-    let start = environment::parse_time(&environment::normalize_request_time(&r.start)?)?;
-    let end_text = environment::normalize_request_time(&r.end)?;
-    let end = environment::parse_time(&end_text)?;
+    let start = environment::parse_time(&r.start)?;
+    let end = environment::parse_time(&r.end)?;
     let query = if kind == "census" {
         suffix.to_string()
     } else {
@@ -343,13 +347,16 @@ fn probe(
         } else {
             start
         }),
-        end: end_text,
+        // New requests have UTC bounds. Retained checkpoints may use an older UTC spelling.
+        end: r.end.clone(),
         fields,
         field,
     })
 }
 pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     validate_request(r)?;
+    let normalized = r.clone().normalize_inputs()?;
+    let r = &normalized;
     let mut probes = Vec::new();
     if r.census {
         probes.push(census_probe(r)?);
@@ -357,8 +364,7 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     for s in &r.sources {
         probes.extend(base_probes(r, s)?);
     }
-    let identity = environment::normalize_identity(r.environment.clone())?;
-    let mut result = json!({"schema_version":1,"environment":identity,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census","population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
+    let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census","population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
     if r.depth == DiscoveryDepth::SourcesOnly {
         result["depth"] = json!(r.depth);
         result["deferred_stages"] =
@@ -1081,7 +1087,7 @@ pub fn frontier(
     r: &DiscoverRequest,
     answered: &BTreeMap<String, Vec<Value>>,
 ) -> Result<Vec<Probe>, Diagnostic> {
-    frontier_with_policy(r, answered, true)
+    frontier_with_policy(&r.clone().normalize_inputs()?, answered, true)
 }
 
 pub(crate) fn frontier_with_policy(
@@ -1295,7 +1301,7 @@ impl<B: SearchBackend> Run<'_, B> {
             .deadline
             .saturating_duration_since(Instant::now())
             .min(Duration::from_secs(180));
-        let receipt = run_job(
+        let receipt = run_job_with_bounds(
             self.backend,
             &self.request.environment.view,
             &probe.query,
@@ -1305,6 +1311,7 @@ impl<B: SearchBackend> Run<'_, B> {
                 timeout,
                 ..JobPolicy::default()
             },
+            false,
         );
         let capture = self.report.captures.push_mut(Capture {
             probe,
@@ -1661,7 +1668,20 @@ pub fn execute_with_origin(
     origin: Origin,
     remaining: Duration,
 ) -> (Option<Pack>, DiscoverReport) {
-    execute_with_policy(request, backend, origin, remaining, true)
+    match request.clone().normalize_inputs() {
+        Ok(request) => execute_with_policy(&request, backend, origin, remaining, true),
+        Err(diagnostic) => (
+            None,
+            DiscoverReport {
+                schema_version: 1,
+                environment: request.environment.clone(),
+                status: "error".into(),
+                active_pack_updated: false,
+                captures: vec![],
+                diagnostics: vec![diagnostic],
+            },
+        ),
+    }
 }
 
 pub(crate) fn execute_with_policy(
