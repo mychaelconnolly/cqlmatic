@@ -256,6 +256,9 @@ fn make_unowned(result: &Value) -> PathBuf {
     if state["session"]["sparse_fieldset_fallback"] == true {
         binding.extend_from_slice(b"\0sparse-fieldset-fallback-v1");
     }
+    if state["discovery_algorithm"] == "bounded-discovery-v3" {
+        binding.extend_from_slice(b"\0bounded-discovery-v3");
+    }
     state["session"]["binding_sha256"] = json!(sha256_hex(&binding));
     write_json(&checkpoint, &state);
     cqlmatic::mcp::inspect_state(&checkpoint).unwrap();
