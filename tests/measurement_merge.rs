@@ -543,6 +543,7 @@ fn a_zero_facet_is_measured_without_a_population_rate_or_full_inventory_completi
     let reference = PackReference {
         path: "/synthetic/pack.json".into(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: "2026-01-03T00:00:00Z".into(),
         discovery_run: None,
     };

@@ -329,6 +329,7 @@ fn source_only_pack_and_reconciliation_cannot_claim_full_map() {
     state.packs.push(PackReference {
         path: "synthetic-pack.json".into(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: NOW.into(),
         discovery_run: None,
     });
@@ -369,6 +370,7 @@ fn declared_parser_fields_are_not_observed_and_mismatched_pack_digest_fails() {
     state.packs.push(PackReference {
         path: "changed.json".into(),
         content_digest: "f".repeat(64),
+        input_content_digest: None,
         imported_at: NOW.into(),
         discovery_run: None,
     });
@@ -435,6 +437,7 @@ fn retain(state: &mut InventoryState, pack: &Pack, path: &str) -> PackReference 
     let reference = PackReference {
         path: path.into(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: pack.created_at.clone(),
         discovery_run: None,
     };
@@ -881,6 +884,7 @@ fn full_environment_completion_requires_newly_imported_selectors_to_be_confirmed
     let reference = PackReference {
         path: "synthetic-pack.json".into(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: NOW.into(),
         discovery_run: Some("synthetic-run.json".into()),
     };

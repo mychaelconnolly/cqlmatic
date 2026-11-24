@@ -498,7 +498,20 @@ fn future_predecessor_is_refused_before_allocation() {
     let inventory = Inventory::new();
     inventory.confirm(vec![scope("alpha")]);
     let future = "2099-01-02T00:00:00Z";
-    inventory.import(&pack(future, vec![record(RECORD, scope("alpha"))]));
+    // Seed a snapshot that an earlier build could import.
+    let retained = pack(future, vec![record(RECORD, scope("alpha"))]);
+    let state = inventory.state();
+    let path = state.parent().unwrap().join("retained-future.json");
+    write_json(&path, &json!(retained));
+    let reference =
+        json!({"path":path,"content_digest":retained.content_digest,"imported_at":CREATED});
+    let mut saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
+    saved["active_pack"] = reference.clone();
+    saved["packs"] = json!([reference]);
+    write_json(&state, &saved);
+    let before = fs::read(&state).unwrap();
+    inventory.import(&retained);
+    assert_eq!(fs::read(&state).unwrap(), before);
     let error = inventory.reject(&prepare(LATER), false);
     assert_eq!(error["code"], "INVENTORY_INPUT");
     assert!(message(&error).contains(future), "{error}");

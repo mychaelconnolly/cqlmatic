@@ -404,6 +404,13 @@
         "fields"
       ]
     },
+    "ImportPackMode": {
+      "type": "string",
+      "enum": [
+        "append",
+        "update"
+      ]
+    },
     "InventoryAction": {
       "oneOf": [
         {
@@ -1342,6 +1349,10 @@
               "type": "string",
               "const": "import-pack"
             },
+            "mode": {
+              "$ref": "#/$defs/ImportPackMode",
+              "default": "append"
+            },
             "pack_file": {
               "type": "string"
             }
@@ -1799,6 +1810,12 @@
         },
         "imported_at": {
           "type": "string"
+        },
+        "input_content_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "path": {
           "type": "string"

@@ -2883,6 +2883,7 @@ fn map_at(state: &Path) {
     let active = PackReference {
         path: path.to_string_lossy().into_owned(),
         content_digest: pack.content_digest.clone(),
+        input_content_digest: None,
         imported_at: "2026-01-02T00:00:00Z".into(),
         discovery_run: None,
     };

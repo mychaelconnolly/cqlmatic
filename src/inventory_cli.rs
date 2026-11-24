@@ -689,6 +689,7 @@ fn promote_discovery(
     let reference = PackReference {
         path: run.pack_path.clone(),
         content_digest: pack.content_digest,
+        input_content_digest: None,
         imported_at: now.into(),
         discovery_run: Some(run.state_path.clone()),
     };
@@ -1826,6 +1827,13 @@ fn reservation_diagnostic(error: Diagnostic, outstanding: bool) -> Value {
 
 const DISCOVERY_ALLOWANCE_EXPIRED: &str = "DISCOVERY_ALLOWANCE_EXPIRED";
 
+fn upgrade_state(state: &mut InventoryState) {
+    if state.schema_version < STATE_VERSION {
+        state.field_evidence_schema_version = Some(state.schema_version);
+        state.schema_version = STATE_VERSION;
+    }
+}
+
 fn state_fingerprint(state: &InventoryState) -> Result<String, Diagnostic> {
     serde_json::to_vec(state)
         .map(|bytes| cqlmatic::sha256_hex(&bytes))
@@ -2013,10 +2021,10 @@ fn apply_locked(
             mcp::bind_inventory_owner(relay, writer)
                 .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?;
         }
-        if state.schema_version < STATE_VERSION {
-            state.field_evidence_schema_version = Some(state.schema_version);
+        let importing_pack = matches!(&action, InventoryAction::ImportPack { .. });
+        if !importing_pack {
+            upgrade_state(&mut state);
         }
-        state.schema_version = STATE_VERSION;
         let resolve_work = matches!(
             &action,
             InventoryAction::ConfirmTarget { .. }
@@ -2062,6 +2070,10 @@ fn apply_locked(
                 &relay_guards,
             )?
         };
+        let resolve_work = resolve_work && (!importing_pack || extra["pack_updated"] == true);
+        if importing_pack && extra["pack_updated"] == true {
+            upgrade_state(&mut state);
+        }
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
         }
@@ -2170,6 +2182,11 @@ fn action_summary(action: &Value) -> Value {
         return Value::Null;
     }
     let mut compact = action.clone();
+    if let Some(entries) = compact.get_mut("not_applied").and_then(Value::as_array_mut) {
+        let count = entries.len();
+        entries.truncate(20);
+        compact["not_applied_count"] = json!(count);
+    }
     if let Some(relay) = compact.get_mut("relay").and_then(Value::as_object_mut) {
         if let Some(probes) = relay.remove("probes") {
             relay.insert(
@@ -2190,6 +2207,9 @@ fn action_summary(action: &Value) -> Value {
 }
 
 fn action_brief(action: &Value) -> Value {
+    if let Some(entries) = action["not_applied"].as_array() {
+        return json!({"counts":action["counts"], "not_applied_count":entries.len()});
+    }
     let mut compact =
         json!({"outcome":"applied","notification_only":true,"executes_searches":false});
     if let Some(status) = action
@@ -2992,9 +3012,8 @@ fn incompatible_selector_message(
             compatible_expected_ids.join(", ")
         )
     };
-    // Selector remediation advice can be appended here when supported.
     format!(
-        "{INCOMPATIBLE_SELECTOR_PREFIX} {}. {advice}",
+        "{INCOMPATIBLE_SELECTOR_PREFIX} {}. {advice} To remove or update an imported restriction on a source without discovery measurements, build a valid updated pack with `cqlmatic env import --from JSONL_DIR --environment ENV_JSON --out PACK_JSON` (keep the source's current name, omit the restriction from selectors; fields.jsonl may be empty) and submit import-pack with mode \"update\".",
         incompatible.join("; ")
     )
 }
@@ -4060,48 +4079,8 @@ fn apply(
                 }
             })
         }
-        InventoryAction::ImportPack { pack_file } => {
-            distinct_from_state(path, Path::new(&pack_file))?;
-            let pack = storage::read_pack(Path::new(&pack_file))?;
-            if state
-                .target
-                .as_ref()
-                .is_none_or(|t| t.environment != pack.environment)
-            {
-                return Err(fail(
-                    "Confirm the exact matching environment before importing a pack.",
-                ));
-            }
-            let cumulative = match cumulative_pack(state)? {
-                Some(previous) => cqlmatic::environment::import_history(&previous, &pack)?,
-                None => pack.clone(),
-            };
-            state.register_pack_sources(&pack)?;
-            if state
-                .active_pack
-                .as_ref()
-                .is_some_and(|active| active.content_digest == cumulative.content_digest)
-            {
-                return Ok(
-                    json!({"history":"unknown","already_imported":true,"sources_registered":state.sources.len()}),
-                );
-            }
-            let directory = snapshot_directory(path, "import", state.packs.len() + 1)?;
-            let destination = directory.join("pack.json");
-            let bytes = serde_json::to_vec_pretty(&cumulative)
-                .map_err(|_| fail("Cannot serialize the cumulative environment pack."))?;
-            storage::Writer::acquire(&destination)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
-            let reference = PackReference {
-                path: absolute_path(&destination)?,
-                content_digest: cumulative.content_digest,
-                imported_at: now.into(),
-                discovery_run: None,
-            };
-            state.active_pack = Some(reference.clone());
-            state.packs.push(reference);
-            Ok(
-                json!({"history":"unknown","note":"Imported packs remain usable; their missing workflow history cannot establish full-map completion."}),
-            )
+        InventoryAction::ImportPack { pack_file, mode } => {
+            import_pack(path, state, Path::new(&pack_file), mode, now)
         }
         InventoryAction::Reconcile { reviewed_at } => {
             cqlmatic::environment::parse_time(&reviewed_at)?;
@@ -4129,6 +4108,121 @@ fn apply(
             Ok(Value::Null)
         }
     }
+}
+
+fn import_pack(
+    path: &Path,
+    state: &mut InventoryState,
+    pack_file: &Path,
+    mode: ImportPackMode,
+    now: &str,
+) -> Result<Value, Diagnostic> {
+    use environment::{ImportCounts, ImportUpdateResult};
+
+    distinct_from_state(path, pack_file)?;
+    let pack = storage::read_pack(pack_file)?;
+    if state
+        .target
+        .as_ref()
+        .is_none_or(|t| t.environment != pack.environment)
+    {
+        return Err(Diagnostic::error(
+            "PACK_ENVIRONMENT_MISMATCH",
+            "Confirm the exact matching environment before importing a pack.",
+        ));
+    }
+    let append = mode == ImportPackMode::Append;
+    if append
+        && state.packs.iter().any(|entry| {
+            entry.discovery_run.is_none()
+                && entry
+                    .input_content_digest
+                    .as_deref()
+                    .unwrap_or(&entry.content_digest)
+                    == pack.content_digest
+        })
+    {
+        state.register_pack_sources(&pack)?;
+        let counts = ImportCounts {
+            sources_unchanged: pack.data.sources.len(),
+            fields_unchanged: pack.data.fields.len(),
+            ..ImportCounts::default()
+        };
+        return Ok(
+            json!({"history":"unknown","mode":mode,"already_imported":true,
+            "pack_updated":false,"counts":counts,"not_applied":[],"sources_registered":state.sources.len()}),
+        );
+    }
+    if environment::parse_time(&pack.created_at)? > environment::parse_time(now)? {
+        return Err(fail(&format!(
+            "Pack created_at {} is in the future.",
+            pack.created_at
+        )));
+    }
+    let previous = cumulative_pack(state)?;
+    let result = match (&previous, mode) {
+        (Some(previous), ImportPackMode::Update) => {
+            let promoted: BTreeSet<_> = state
+                .packs
+                .iter()
+                .filter_map(|p| p.discovery_run.as_deref())
+                .collect();
+            let measured = state
+                .discovery_runs
+                .iter()
+                .filter(|run| {
+                    run.status == "complete" && promoted.contains(run.state_path.as_str())
+                })
+                .flat_map(|run| run.source_ids.iter().cloned())
+                .collect();
+            environment::import_update(previous, &pack, &measured)?
+        }
+        (previous, _) => {
+            if !append {
+                environment::validate_update_input(&pack)?;
+            }
+            let cumulative = match previous {
+                Some(previous) => environment::import_history(previous, &pack)?,
+                None => pack.clone(),
+            };
+            ImportUpdateResult {
+                counts: ImportCounts::appended(previous.as_ref(), &cumulative, &pack),
+                pack: cumulative,
+                not_applied: vec![],
+            }
+        }
+    };
+    let cumulative = result.pack;
+    state.register_pack_sources(&pack)?;
+    let changed = previous.as_ref().is_none_or(|p| cumulative.data != p.data);
+    let mut reply = json!({"history":"unknown","mode":mode,"pack_updated":changed,
+        "counts":result.counts,"not_applied":result.not_applied,"sources_registered":state.sources.len()});
+    if !changed {
+        if append {
+            reply["already_imported"] = json!(true);
+        }
+        return Ok(reply);
+    }
+
+    let directory = snapshot_directory(path, "import", state.packs.len() + 1)?;
+    let destination = directory.join("pack.json");
+    let bytes = cumulative_pack_bytes(&cumulative)?;
+    storage::Writer::acquire(&destination)?.create_new_bytes(&bytes, MAX_STATE_BYTES)?;
+    let input_content_digest =
+        (cumulative.content_digest != pack.content_digest).then_some(pack.content_digest);
+    let reference = PackReference {
+        path: absolute_path(&destination)?,
+        content_digest: cumulative.content_digest,
+        input_content_digest,
+        imported_at: now.into(),
+        discovery_run: None,
+    };
+    state.active_pack = Some(reference.clone());
+    state.packs.push(reference);
+    reply["note"] = json!(
+        "Imported packs remain usable; their missing workflow history cannot establish full-map completion."
+    );
+    Ok(reply)
 }
 
 fn absolute_path(path: &Path) -> Result<String, Diagnostic> {

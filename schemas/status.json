@@ -709,6 +709,12 @@
         "imported_at": {
           "type": "string"
         },
+        "input_content_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "path": {
           "type": "string"
         }

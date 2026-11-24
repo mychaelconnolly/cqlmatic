@@ -241,6 +241,8 @@ pub enum InventoryAction {
     },
     ImportPack {
         pack_file: String,
+        #[serde(default)]
+        mode: ImportPackMode,
     },
     Reconcile {
         reviewed_at: String,
@@ -251,6 +253,15 @@ pub enum InventoryAction {
         message: String,
         recorded_at: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportPackMode {
+    #[default]
+    Append,
+    Update,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -896,6 +907,8 @@ pub struct ParserExclusion {
 pub struct PackReference {
     pub path: String,
     pub content_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_content_digest: Option<String>,
     pub imported_at: String,
     pub discovery_run: Option<String>,
 }
@@ -2971,6 +2984,9 @@ impl InventoryState {
                 });
         copy.field_evidence_schema_version = None;
         copy.refresh_reminder = None;
+        for reference in copy.packs.iter_mut().chain(copy.active_pack.iter_mut()) {
+            reference.input_content_digest = None;
+        }
         for work in &mut copy.pending_inventory {
             work.notified_revision = 0;
             work.deferred = false;
@@ -3022,6 +3038,17 @@ impl InventoryState {
             > 1
         {
             return Err(fail("Only one capability search may await termination."));
+        }
+        for reference in self.packs.iter().chain(self.active_pack.iter()) {
+            if let Some(digest) = &reference.input_content_digest
+                && (reference.discovery_run.is_some()
+                    || digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+            {
+                return Err(fail("Invalid imported pack input_content_digest."));
+            }
         }
         if let Some(active) = &self.active_pack
             && !self
