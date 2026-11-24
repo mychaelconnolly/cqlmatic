@@ -7922,16 +7922,35 @@ mod tests {
             json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
             "context":"Synthetic notice fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
         );
-        // One query is not enough for a Full measurement, so this run is recorded as failed.
-        let prepared = action(
+        // Four queries pass admission for one Full source but cannot also count an observed field.
+        let mut step = action(
             json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":at,
-            "source_ids":[source("first")],"max_queries":1,"max_seconds":3600}),
+            "source_ids":[source("first")],"max_queries":4,"max_seconds":3600}),
         );
-        let probe = prepared["relay"]["probes"][0]["probe_id"].clone();
-        action(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe}));
-        let answer = file("volume.json", json!({"result":[{"events":10}]}));
-        action(json!({"kind":"discovery-step","run_index":0,
-            "answers":[{"probe_id":probe,"result_file":answer}]}));
+        let mut answers = 0;
+        while step["relay"]["status"] == "needs-probes" {
+            let probe = step["relay"]["probes"][0].clone();
+            let rows = match probe["kind"].as_str().unwrap() {
+                "volume" => json!([{"events":10}]),
+                "dataset-facet" => json!([]),
+                "fieldset" => json!([{"field":"user"}]),
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for i in 0..probe["fields"].as_array().unwrap().len() {
+                        row[format!("c{i}")] = json!(0);
+                    }
+                    json!([row])
+                }
+                kind => panic!("unexpected probe {kind}"),
+            };
+            answers += 1;
+            assert!(answers <= 4);
+            let answer = file(&format!("answer-{answers}.json"), json!({"result":rows}));
+            action(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe["probe_id"]}));
+            step = action(json!({"kind":"discovery-step","run_index":0,
+                "answers":[{"probe_id":probe["probe_id"],"result_file":answer}]}));
+        }
+        assert_eq!(step["relay"]["status"], "failed");
         // A completed run whose pending work no evidence allowance has reached.
         action(json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}));
         source_work_run(&path, "second", 0, 0);

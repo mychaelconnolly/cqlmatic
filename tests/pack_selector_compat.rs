@@ -523,7 +523,7 @@ fn future_predecessor_is_refused_before_allocation() {
     inventory.import(&retained);
     assert_eq!(fs::read(&state).unwrap(), before);
     let error = inventory.reject(&prepare(LATER), false);
-    assert_eq!(error["code"], "DISCOVERY_INPUT");
+    assert_eq!(error["code"], "DISCOVERY_EVIDENCE");
     assert!(message(&error).contains(future), "{error}");
 }
 
