@@ -10,7 +10,7 @@ mod install;
 use crate::{inventory_cli, setup_cli};
 use clap::{Args, ValueEnum};
 use cqlmatic::{
-    app,
+    app, catalog,
     contracts::{Analysis, Diagnostic, EnvironmentId, Outcome, Severity},
     discovery,
     inventory::{InventoryAction, InventoryState, QueryObservation, QueryResultAssertion},
@@ -580,14 +580,37 @@ fn patiently<T>(mut attempt: impl FnMut() -> Result<T, Diagnostic>) -> Result<T,
     }
 }
 
+fn is_non_repo_source_field(name: &str) -> bool {
+    matches!(name, "#type" | "#sourcetype" | "#event_simpleName")
+}
+
+fn value_mentions_non_repo_source_field(value: &ast::Value) -> bool {
+    match value {
+        ast::Value::Word(name) => is_non_repo_source_field(name),
+        ast::Value::Array(items) => items.iter().any(value_mentions_non_repo_source_field),
+        ast::Value::Call(call) => {
+            call_has_non_repo_source_filter(call)
+                || call
+                    .args
+                    .iter()
+                    .any(|arg| value_mentions_non_repo_source_field(&arg.value))
+        }
+        ast::Value::Binary { left, right, .. } => {
+            value_mentions_non_repo_source_field(left)
+                || value_mentions_non_repo_source_field(right)
+        }
+        ast::Value::Unary { value, .. } => value_mentions_non_repo_source_field(value),
+        ast::Value::Query { pipeline, .. } => has_non_repo_source_filter(pipeline),
+        ast::Value::String(_)
+        | ast::Value::Number(_)
+        | ast::Value::Bool(_)
+        | ast::Value::Parameter(_) => false,
+    }
+}
+
 fn filter_has_non_repo_source(filter: &ast::Filter) -> bool {
     match filter {
-        ast::Filter::Compare { field, .. } => {
-            matches!(
-                field.as_str(),
-                "#type" | "#sourcetype" | "#event_simpleName"
-            )
-        }
+        ast::Filter::Compare { field, .. } => is_non_repo_source_field(field),
         ast::Filter::And(items) | ast::Filter::Or(items) => {
             items.iter().any(filter_has_non_repo_source)
         }
@@ -598,43 +621,48 @@ fn filter_has_non_repo_source(filter: &ast::Filter) -> bool {
 }
 
 fn call_has_non_repo_source_filter(call: &ast::Call) -> bool {
-    if call.name.eq_ignore_ascii_case("in") {
-        let mut positional = 0usize;
-        for arg in &call.args {
-            let is_field =
-                arg.name.as_deref() == Some("field") || (arg.name.is_none() && positional == 0);
-            if arg.name.is_none() {
-                positional += 1;
-            }
-            if is_field
-                && matches!(
-                    &arg.value,
-                    ast::Value::Word(name) | ast::Value::String(name)
-                        if matches!(name.as_str(), "#type" | "#sourcetype" | "#event_simpleName")
-                )
-            {
-                return true;
-            }
-        }
+    let Some(resolved) = catalog::resolve(call) else {
+        return false;
+    };
+    if resolved.function.resolved_effect(&resolved.arguments) != catalog::Effect::Filter {
+        return false;
     }
-    false
+    match resolved.function.name {
+        "in" | "regex" | "wildcard" | "match" => {
+            resolved.arguments.get("field").is_some_and(|value| {
+                catalog::fields(value)
+                    .iter()
+                    .any(|name| is_non_repo_source_field(name))
+            })
+        }
+        "text:contains" | "text:startsWith" | "text:endsWith" => resolved
+            .arguments
+            .get("string")
+            .is_some_and(|value| value_mentions_non_repo_source_field(value)),
+        "test" => resolved
+            .arguments
+            .get("expression")
+            .is_some_and(|value| value_mentions_non_repo_source_field(value)),
+        _ => false,
+    }
 }
 
 fn has_non_repo_source_filter(pipeline: &ast::Pipeline) -> bool {
-    pipeline.steps.iter().any(|step| match step {
-        ast::Step::Filter(filter) => filter_has_non_repo_source(filter),
-        ast::Step::Call(call) => call_has_non_repo_source_filter(call),
-        ast::Step::Case(branches) => branches.iter().any(has_non_repo_source_filter),
-        ast::Step::Match { field, arms } => {
-            matches!(
-                field.as_str(),
-                "#type" | "#sourcetype" | "#event_simpleName"
-            ) || arms
-                .iter()
-                .any(|(_, branch)| has_non_repo_source_filter(branch))
-        }
-        ast::Step::Assign { .. } | ast::Step::Link { .. } => false,
-    })
+    pipeline
+        .steps
+        .iter()
+        .any(|step| match step.semantic().as_ref() {
+            ast::Step::Filter(filter) => filter_has_non_repo_source(filter),
+            ast::Step::Call(call) => call_has_non_repo_source_filter(call),
+            ast::Step::Case(branches) => branches.iter().any(has_non_repo_source_filter),
+            ast::Step::Match { field, arms } => {
+                is_non_repo_source_field(field)
+                    || arms
+                        .iter()
+                        .any(|(_, branch)| has_non_repo_source_filter(branch))
+            }
+            ast::Step::Assign { .. } | ast::Step::Link { .. } => false,
+        })
 }
 
 fn apply(path: &Path, action: InventoryAction) -> Result<Value, Diagnostic> {

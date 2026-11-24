@@ -1486,6 +1486,85 @@ fn capture_hook_keeps_disjunctive_type_leads_and_exempts_escaped_census_queries(
         before_pending + 1
     );
 
+    // Filter functions that narrow #type/#sourcetype/#event_simpleName (regex, wildcard,
+    // in, test, text:*) keep their pending inventory lead instead of tallying not-creditable.
+    for query in [
+        r##"#repo=alpha_repo | regex("novel.*", field="#type") | select(user)"##,
+        r##"#repo=alpha_repo | wildcard("novel*", field="#type") | select(user)"##,
+        r##"#repo=alpha_repo | in(field="#type", values=["novel_one", "novel_two"]) | select(user)"##,
+        r##"#repo=alpha_repo | test(#type == "novel_one") | select(user)"##,
+        r##"#repo=alpha_repo | text:startsWith(#type, substring="novel") | select(user)"##,
+    ] {
+        let filtered_dir = Temp::new();
+        confirm(&filtered_dir, Depth::SourcesOnly, &["alpha"]);
+        call(&filtered_dir, json!({"kind":"reconcile","reviewed_at":END}));
+        let before = status(&filtered_dir)["pending_inventory"]
+            .as_array()
+            .unwrap()
+            .len();
+        capture(
+            &filtered_dir,
+            &json!({
+                "tool_name": format!("mcp__{SERVER}__falcon_search_ngsiem"),
+                "tool_input": {
+                    "repository": VIEW,
+                    "query_string": query,
+                    "start": START,
+                    "end": END
+                },
+                "tool_response": json!({"result":[{"user":"alice"}]}).to_string(),
+            }),
+        );
+        let filtered_tally = read(
+            &filtered_dir
+                .0
+                .join("workflow")
+                .join("state.json.captures")
+                .join("tally.json"),
+        );
+        assert_eq!(
+            filtered_tally["new-source-lead"], 1,
+            "query={query} tally={filtered_tally}"
+        );
+        assert_eq!(
+            status(&filtered_dir)["pending_inventory"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before + 1,
+            "query={query}"
+        );
+    }
+
+    // A non-filtering regex(strict=false) on #type does not narrow the repository scope.
+    let non_filter_dir = Temp::new();
+    confirm(&non_filter_dir, Depth::SourcesOnly, &["alpha"]);
+    call(
+        &non_filter_dir,
+        json!({"kind":"reconcile","reviewed_at":END}),
+    );
+    capture(
+        &non_filter_dir,
+        &json!({
+            "tool_name": format!("mcp__{SERVER}__falcon_search_ngsiem"),
+            "tool_input": {
+                "repository": VIEW,
+                "query_string": r##"#repo=alpha_repo | regex("(?<t>.*)", field="#type", strict=false) | select(user)"##,
+                "start": START,
+                "end": END
+            },
+            "tool_response": json!({"result":[{"user":"alice"}]}).to_string(),
+        }),
+    );
+    let non_filter_tally = read(
+        &non_filter_dir
+            .0
+            .join("workflow")
+            .join("state.json.captures")
+            .join("tally.json"),
+    );
+    assert_eq!(non_filter_tally, json!({"not-creditable":1}));
+
     // An expected typed source whose repository contains a literal `*` still tallies not-creditable.
     let star_dir = Temp::new();
     call(&star_dir, Depth::SourcesOnly.mode());
