@@ -920,6 +920,10 @@ pub struct DiscoveryRun {
     pub mode: DiscoveryMode,
     #[serde(default)]
     pub quick_depth: QuickDepth,
+    /// Selected sources whose accepted volume answer in this run's window was zero, in request
+    /// order. Written only for runs of the current discovery plan.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub quiet_source_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1032,7 +1036,56 @@ pub struct SourceStatus {
     pub record_kinds: Vec<RecordKind>,
     pub unobserved_declared_fields: Vec<String>,
     pub next_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet: Option<QuietSource>,
 }
+
+/// A source whose latest discovery run measured zero events in its window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct QuietSource {
+    pub run_index: usize,
+    pub events: u64,
+    pub start: String,
+    pub end: String,
+    pub view: String,
+    /// What saved census captures show for this source's repository.
+    pub census: String,
+    /// Other types with events in this repository, from saved scout and refresh captures,
+    /// latest positive capture per type, at most 25 by count.
+    pub other_types: Vec<CensusType>,
+    pub omitted_types: usize,
+    /// A matching capture reached the row ceiling, so it may not list every type.
+    pub ceiling_capture: bool,
+    /// An optional query the agent may run itself over the same window and view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CensusType {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub events: u64,
+    pub view: String,
+    pub start: String,
+    pub end: String,
+    pub retrieved_at: String,
+}
+
+pub const NO_REPOSITORY_CENSUS: &str =
+    "No repository-keyed census lookup is possible without a repository; no query is suggested.";
+pub const NO_CENSUS_CAPTURE: &str = "no census capture for this repository";
+pub const NO_OTHER_CENSUS_TYPE: &str =
+    "Saved census captures for this repository show no other type with events.";
+pub const OTHER_CENSUS_TYPES: &str =
+    "Other types with events in this repository, as seen in saved census captures:";
+pub const QUIET_NOTE: &str = "Zero events in this window does not show that the source is gone. Discovery reserves nothing for the query and never reads its answer.";
+pub const QUIET_BRIEF_POINTER: &str = "Some selected sources had zero events in their latest discovery window. Read status --json for each zero, its window, other types seen in that repository and an optional query.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -1475,7 +1528,12 @@ pub fn summary(status: &InventoryStatus) -> Value {
             "measurements":source.measurements,"observation":source.observation,"scouted_events":source.scouted_events,
             "fields":{"total":source.fields.len(),"declared":source.fields.iter().filter(|f|f.declared).count(),
                 "observed":source.fields.iter().filter(|f|f.observed).count(),"measured":source.fields.iter().filter(|f|f.measured).count(),
-                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).collect::<Vec<_>>(),
+                "unobserved_declared":source.unobserved_declared_fields.len()},"next_actions":source.next_actions})).zip(&status.sources).map(|(mut entry, source)| {
+            if let Some(quiet) = &source.quiet {
+                entry["quiet"] = json!(quiet);
+            }
+            entry
+        }).collect::<Vec<_>>(),
         "active_pack":status.active_pack,"covered_queries_usable":status.covered_queries_usable,"next_actions":status.next_actions
     })
 }
@@ -1582,6 +1640,10 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         notices.push(json!({"code":"INVENTORY_REFRESH_DUE","severity":"info",
             "message":"Inventory refresh is due. Run an explicit manual refresh or choose Remind me in 30 days; acknowledgement does not complete refresh."}));
     }
+    let quiet_sources = status.sources.iter().filter(|s| s.quiet.is_some()).count();
+    if quiet_sources > 0 {
+        notices.push(json!({"code":"DISCOVERY_QUIET_SOURCES","severity":"info","message":QUIET_BRIEF_POINTER}));
+    }
     if !status.pending_inventory.is_empty() {
         notices.push(json!({"code":"INVENTORY_WORK_PENDING","severity":"warning",
             "message":"Settings *: inventory work remains pending. Acknowledgement or deferral updates its notice; applicable inventory or explicit exclusion resolves the work."}));
@@ -1658,7 +1720,7 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
         "counts":{"sources":status.sources.len(),"expected_sources":status.sources.iter().filter(|source| source.expected).count(),
             "parsers":status.parser_count,"parser_pages":status.parser_page_count,"unclassified_parsers":status.unclassified_parser_ids.len(),
             "discovery_runs":status.discovery_runs.len(),"parser_runs":status.parser_runs.len(),"failures":status.failures.len(),
-            "discovery_recovery":discovery_recovery,"discovery_unfinished":discovery_work.len(),
+            "discovery_recovery":discovery_recovery,"discovery_unfinished":discovery_work.len(),"quiet_sources":quiet_sources,
             "unverified_leads":status.unverified_lead_count,"query_observations":status.query_observation_count,"captured_observations":status.captured_observation_count,
             "pending_inventory":status.pending_inventory.iter().filter(|work| work.resolution.is_none()).count(),
             "inventory_notifications":status.inventory_notification_count,
@@ -1736,6 +1798,7 @@ fn inventory_work_run_eligible(
 ) -> bool {
     run.status == "complete"
         && run.source_ids.contains(&work.id)
+        && !run.quiet_source_ids.contains(&work.id)
         && (index >= work.after_run
             || index + 1 == work.after_run
                 && work.capture_boundary.as_ref().is_some_and(|boundary| {
@@ -3033,6 +3096,21 @@ impl InventoryState {
             }
             if let Some(binding) = &source.binding {
                 self.validate_binding(binding)?;
+            }
+        }
+        for run in &self.discovery_runs {
+            let mut remaining = run.source_ids.iter();
+            if !run
+                .quiet_source_ids
+                .iter()
+                .all(|id| remaining.any(|source| source == id))
+                || run.status == "complete"
+                    && !run.quiet_source_ids.is_empty()
+                    && run.quiet_source_ids.len() == run.source_ids.len()
+            {
+                return Err(fail(
+                    "Quiet discovery sources must be distinct selected sources in request order, and a completed run needs a source with events.",
+                ));
             }
         }
         if let Some(plan) = &self.scout_plan {
@@ -4550,11 +4628,18 @@ fn assess_source(
             }
         }
     }
-    let runs: Vec<_> = state
+    let indexed: Vec<_> = state
         .discovery_runs
         .iter()
-        .filter(|r| r.source_ids.contains(&source.id))
+        .enumerate()
+        .filter(|(_, r)| r.source_ids.contains(&source.id))
         .collect();
+    let runs: Vec<_> = indexed.iter().map(|(_, r)| *r).collect();
+    // The latest run decides: a zero there leaves the source pending whatever came before.
+    let quiet = indexed
+        .last()
+        .filter(|(_, r)| r.quiet_source_ids.contains(&source.id))
+        .map(|(index, run)| quiet_detail(state, source, *index, run));
     let quick_run = state.discovery_mode == DiscoveryMode::Quick
         && runs.last().is_some_and(|r| {
             r.mode == DiscoveryMode::Quick
@@ -4563,6 +4648,7 @@ fn assess_source(
         });
     let measured = runs.last().is_some_and(|r| {
         r.status == "complete"
+            && !r.quiet_source_ids.contains(&source.id)
             && (r.mode == DiscoveryMode::Full || quick_run)
             && state
                 .packs
@@ -4570,11 +4656,12 @@ fn assess_source(
                 .any(|p| p.discovery_run.as_ref() == Some(&r.state_path))
     });
     for run in &runs {
+        let quiet_run = run.quiet_source_ids.contains(&source.id);
         for name in &run.value_fields {
             let field = field_entry(&mut fields, name);
             field.values_requested = true;
             if field.values != Progress::Done {
-                field.values = if run.status == "complete" {
+                field.values = if run.status == "complete" && !quiet_run {
                     Progress::Done
                 } else {
                     Progress::Pending
@@ -4659,7 +4746,9 @@ fn assess_source(
         interpretation,
         parser: parser_status,
         measurements,
-        observation: if observed_source {
+        observation: if quiet.is_some() {
+            Progress::Pending
+        } else if observed_source {
             Progress::Done
         } else {
             Progress::Unknown
@@ -4668,7 +4757,147 @@ fn assess_source(
         record_kinds,
         unobserved_declared_fields: missing,
         next_actions,
+        quiet,
     }
+}
+
+/// The quiet sources of one run, each with its saved census detail.
+pub fn run_quiet_sources(state: &InventoryState, run_index: usize) -> Vec<Value> {
+    let Some(run) = state.discovery_runs.get(run_index) else {
+        return vec![];
+    };
+    run.quiet_source_ids
+        .iter()
+        .filter_map(|id| state.sources.iter().find(|source| &source.id == id))
+        .map(|source| {
+            let mut entry = json!(quiet_detail(state, source, run_index, run));
+            entry["source_id"] = json!(source.id);
+            entry["selectors"] = json!(source.selectors);
+            entry
+        })
+        .collect()
+}
+
+fn quiet_detail(
+    state: &InventoryState,
+    source: &InventorySource,
+    run_index: usize,
+    run: &DiscoveryRun,
+) -> QuietSource {
+    let (census, other_types, omitted_types, ceiling_capture) = quiet_census(state, source);
+    QuietSource {
+        run_index,
+        events: 0,
+        start: run.start.clone(),
+        end: run.end.clone(),
+        view: state
+            .target
+            .as_ref()
+            .map(|target| target.environment.view.clone())
+            .unwrap_or_default(),
+        census,
+        other_types,
+        omitted_types,
+        ceiling_capture,
+        query: discovery::quiet_census_query(&source.selectors)
+            .ok()
+            .flatten(),
+        note: QUIET_NOTE.into(),
+    }
+}
+
+/// Other types with events in a quiet source's repository, from verified scout and imported
+/// refresh captures: rows split within one capture are summed, and each type keeps its latest
+/// positive capture by window end, window start and digest.
+fn quiet_census(
+    state: &InventoryState,
+    source: &InventorySource,
+) -> (String, Vec<CensusType>, usize, bool) {
+    let Some(repo) = source.selectors.repo.as_deref() else {
+        return (NO_REPOSITORY_CENSUS.into(), vec![], 0, false);
+    };
+    let captures = state
+        .scouting
+        .iter()
+        .map(|scout| (&scout.plan.arguments, &scout.snapshot))
+        .chain(state.refresh_attempts.iter().filter_map(|attempt| {
+            (attempt.phase == RefreshPhase::Imported)
+                .then_some(())
+                .and(attempt.result.as_ref())
+                .map(|result| (&attempt.arguments, result))
+        }));
+    let (mut matching, mut ceiling) = (false, false);
+    let mut latest = BTreeMap::<String, (_, CensusType)>::new();
+    for (arguments, snapshot) in captures {
+        let Ok(result) = snapshot.normalized_result() else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (
+            environment::parse_time(&arguments.start),
+            environment::parse_time(&arguments.end),
+        ) else {
+            continue;
+        };
+        let mut counts = BTreeMap::<&str, u64>::new();
+        let mut matched = false;
+        for row in &result.rows {
+            if row.get("#repo").and_then(Value::as_str) != Some(repo) {
+                continue;
+            }
+            matched = true;
+            let Some(type_) = row.get("#type").and_then(Value::as_str).filter(|type_| {
+                !type_.is_empty() && Some(*type_) != source.selectors.type_.as_deref()
+            }) else {
+                continue;
+            };
+            let events = row
+                .get("events")
+                .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()))
+                .unwrap_or(0);
+            let count = counts.entry(type_).or_default();
+            *count = count.saturating_add(events);
+        }
+        if !matched {
+            continue;
+        }
+        matching = true;
+        ceiling |= result.rows.len() >= 10_000;
+        let key = (end, start, snapshot.sha256.clone());
+        for (type_, events) in counts.into_iter().filter(|(_, events)| *events > 0) {
+            if latest
+                .get(type_)
+                .is_some_and(|(previous, _)| *previous >= key)
+            {
+                continue;
+            }
+            latest.insert(
+                type_.into(),
+                (
+                    key.clone(),
+                    CensusType {
+                        type_: type_.into(),
+                        events,
+                        view: arguments.repository.clone(),
+                        start: arguments.start.clone(),
+                        end: arguments.end.clone(),
+                        retrieved_at: snapshot.retrieved_at.clone(),
+                    },
+                ),
+            );
+        }
+    }
+    let mut types: Vec<_> = latest.into_values().map(|(_, entry)| entry).collect();
+    types.sort_by(|a, b| b.events.cmp(&a.events).then_with(|| a.type_.cmp(&b.type_)));
+    let omitted = types.len().saturating_sub(25);
+    types.truncate(25);
+    let census = if !matching {
+        NO_CENSUS_CAPTURE
+    } else if types.is_empty() {
+        NO_OTHER_CENSUS_TYPE
+    } else {
+        OTHER_CENSUS_TYPES
+    };
+    (census.into(), types, omitted, ceiling)
 }
 
 fn source_evidence_dates(pack: &Pack, ids: &[String]) -> Vec<String> {

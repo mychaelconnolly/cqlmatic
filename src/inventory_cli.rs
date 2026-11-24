@@ -797,6 +797,42 @@ fn render(status: &InventoryStatus) -> Result<(), Diagnostic> {
             source.fields.len()
         )
         .map_err(|_| fail(OUTPUT_FAILED))?;
+        if let Some(quiet) = &source.quiet {
+            writeln!(
+                out,
+                "  Zero events for [{selectors}] in {}/{} on view {:?} (discovery run {}). {}",
+                quiet.start, quiet.end, quiet.view, quiet.run_index, quiet.note
+            )
+            .map_err(|_| fail(OUTPUT_FAILED))?;
+            writeln!(out, "  {}", quiet.census).map_err(|_| fail(OUTPUT_FAILED))?;
+            for seen in &quiet.other_types {
+                writeln!(
+                    out,
+                    "    #type={:?}: {} events in {}/{} on view {:?}, retrieved {}",
+                    seen.type_, seen.events, seen.start, seen.end, seen.view, seen.retrieved_at
+                )
+                .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+            if quiet.omitted_types > 0 {
+                writeln!(out, "    {} more types omitted.", quiet.omitted_types)
+                    .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+            if quiet.ceiling_capture {
+                writeln!(
+                    out,
+                    "    A census capture reached 10,000 rows and may not list every type."
+                )
+                .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+            if let Some(query) = &quiet.query {
+                writeln!(
+                    out,
+                    "  Optional query over {}/{} on view {:?}: {query}",
+                    quiet.start, quiet.end, quiet.view
+                )
+                .map_err(|_| fail(OUTPUT_FAILED))?;
+            }
+        }
         for action in &source.next_actions {
             writeln!(out, "  - {action}").map_err(|_| fail(OUTPUT_FAILED))?;
         }
@@ -1404,6 +1440,9 @@ fn next_probe(
     if !diagnostics.is_empty() {
         action["diagnostics"] = json!(diagnostics);
     }
+    if let Some(state) = load_existing(path)? {
+        attach_quiet_sources(&state, index, &mut action);
+    }
     Ok(action)
 }
 
@@ -1561,6 +1600,16 @@ fn relay_failure(error: &Diagnostic, legacy: bool, query_limit: u32) -> (Value, 
         ("PACK_INTEGRITY", _) if selector_conflict(error).is_some() => (
             "PACK_INTEGRITY",
             "The measured scope conflicts with imported restrictions.",
+            FULL_STEP,
+        ),
+        ("DISCOVERY_EVIDENCE", discovery::ALL_QUIET_SOURCES) => (
+            "DISCOVERY_EVIDENCE",
+            "Every selected source had zero events in the window.",
+            FULL_STEP,
+        ),
+        ("DISCOVERY_EVIDENCE", discovery::EMPTY_FIELD_LISTING) => (
+            "DISCOVERY_EVIDENCE",
+            "A source with events listed no fields in the window.",
             FULL_STEP,
         ),
         (
@@ -2029,6 +2078,7 @@ fn apply_locked(
         )?;
         if let Some(index) = selected_run {
             extra["run_index"] = json!(index);
+            attach_quiet_sources(&state, index, &mut extra);
         }
         state.validate()?;
         let loaded = packs(&state)?;
@@ -2275,6 +2325,7 @@ fn action_brief(action: &Value) -> Value {
         "automatic_refresh_available",
         "inventory_work_evidence_limited",
         "run_index",
+        "quiet_source_count",
     ] {
         if let Some(value) = action.get(key).filter(|v| v.is_boolean() || v.is_u64()) {
             compact[key] = value.clone();
@@ -2351,6 +2402,12 @@ fn action_brief(action: &Value) -> Value {
     let mut notices = Vec::new();
     if action["inventory_work_evidence_limited"] == true {
         notices.push(json!({"code":"INVENTORY_WORK_EVIDENCE_LIMITED","severity":"info"}));
+    }
+    if action["quiet_source_count"]
+        .as_u64()
+        .is_some_and(|count| count > 0)
+    {
+        notices.push(json!({"code":"DISCOVERY_QUIET_SOURCES","severity":"info","message":inventory::QUIET_BRIEF_POINTER}));
     }
     if let Some(index) = action["notices"].as_array().and_then(|notices| {
         notices
@@ -2675,6 +2732,21 @@ fn verify_run_reference(
             "Retained discovery checkpoint differs from its inventory reference.",
         ));
     }
+    // Earlier-plan runs never record quiet sources and are not checked for them.
+    if let Some(quiet) = mcp::quiet_source_ids(relay)? {
+        let finalized = matches!(run.status.as_str(), "complete" | "failed" | "superseded");
+        let mut remaining = quiet.iter();
+        if finalized && run.quiet_source_ids != quiet
+            || !run
+                .quiet_source_ids
+                .iter()
+                .all(|id| remaining.any(|answered| answered == id))
+        {
+            return Err(fail(
+                "Recorded quiet discovery sources differ from the checkpoint's accepted volume answers.",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2737,6 +2809,7 @@ fn inventory_run_evidence(
             || !state.pending_inventory.iter().any(|work| {
                 work.resolution.is_none()
                     && run.source_ids.contains(&work.id)
+                    && !run.quiet_source_ids.contains(&work.id)
                     && (index >= work.after_run
                         || work
                             .capture_boundary
@@ -2837,7 +2910,23 @@ fn finish_discovery(
     }
     .into();
     run.answered = output.answered;
+    sync_quiet_sources(run, output);
     Ok(diagnostic)
+}
+
+fn sync_quiet_sources(run: &mut DiscoveryRun, output: &mcp::StepOutput) {
+    if let Some(quiet) = &output.quiet_source_ids {
+        run.quiet_source_ids.clone_from(quiet);
+    }
+}
+
+/// Name each zero of the selected run in its reply, with the saved census detail.
+fn attach_quiet_sources(state: &InventoryState, index: usize, reply: &mut Value) {
+    let quiet = inventory::run_quiet_sources(state, index);
+    if !quiet.is_empty() && reply.is_object() {
+        reply["quiet_source_count"] = json!(quiet.len());
+        reply["quiet_sources"] = json!(quiet);
+    }
 }
 
 const STALE_DISCOVERY_PREDECESSOR: &str = "Discovery started from an earlier inventory.";
@@ -3610,6 +3699,7 @@ fn apply(
                 status: output.status.into(),
                 mode: state.discovery_mode,
                 quick_depth: state.quick_depth,
+                quiet_source_ids: output.quiet_source_ids.clone().unwrap_or_default(),
             });
             let index = state.discovery_runs.len() - 1;
             let advice = discovery_step_advice(index, false, false, &output);
@@ -3654,6 +3744,11 @@ fn apply(
                 .discovery_runs
                 .get_mut(run_index)
                 .expect("Selected run exists");
+            if let Some(quiet) = mcp::quiet_source_ids(&relay)
+                .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?
+            {
+                run.quiet_source_ids = quiet;
+            }
             let stored_failure = if run.status == "failed"
                 && let Ok(output) = &result
                 && output.terminal_failure
@@ -3855,6 +3950,7 @@ fn apply(
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             run.status = output.status.into();
             run.answered = output.answered;
+            sync_quiet_sources(run, &output);
             run.elapsed_seconds = resumable_elapsed(&run.state_path)
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             let advice = discovery_step_advice(run_index, false, true, &output);
@@ -3870,6 +3966,7 @@ fn apply(
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             run.status = output.status.into();
             run.answered = output.answered;
+            sync_quiet_sources(run, &output);
             run.elapsed_seconds = resumable_elapsed(&run.state_path)
                 .map_err(|diagnostic| discovery_run_diagnostic(run_index, diagnostic))?;
             Ok(json!({"relay":output,"executes_searches":false}))

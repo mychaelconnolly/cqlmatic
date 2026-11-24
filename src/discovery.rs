@@ -34,6 +34,11 @@ const POPULATION_CHUNK: usize = 20;
 const KIND_FACET_LIMIT: usize = 50;
 const RARE_KIND_EVENTS: u64 = 50_000;
 const RARE_KIND_LIMIT: usize = 10;
+/// Every selected source answered its volume search with zero events.
+pub const ALL_QUIET_SOURCES: &str =
+    "Every selected source had zero events in the measurement window; no pack was activated.";
+/// A source with events listed no fields, even over the full window when that was eligible.
+pub const EMPTY_FIELD_LISTING: &str = "A source with events in the measurement window returned an empty field listing; no pack was activated.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -318,17 +323,10 @@ fn probe(
     let start = environment::parse_time(&r.start)?;
     let end = environment::parse_time(&r.end)?;
     let query = if kind == "census" {
-        suffix.to_string()
+        checked_query(suffix.to_string())?
     } else {
-        format!("{} | {suffix}", scope(s)?)
+        scoped_query(s, suffix)?
     };
-    let parsed = crate::language::parser::parse(&query).map_err(|e| e.diagnostic)?;
-    let checked = crate::language::validate::validate(&parsed, &query);
-    if checked.status != Acceptance::Accepted {
-        return Err(fail(
-            "An internal discovery query did not pass the bundled language profile.",
-        ));
-    }
     Ok(Probe {
         kind: kind.into(),
         source: s.clone(),
@@ -342,6 +340,40 @@ fn probe(
         fields,
         field,
     })
+}
+fn checked_query(query: String) -> Result<String, Diagnostic> {
+    let parsed = crate::language::parser::parse(&query).map_err(|e| e.diagnostic)?;
+    let checked = crate::language::validate::validate(&parsed, &query);
+    if checked.status != Acceptance::Accepted {
+        return Err(fail(
+            "An internal discovery query did not pass the bundled language profile.",
+        ));
+    }
+    Ok(query)
+}
+fn scoped_query(s: &Scope, suffix: &str) -> Result<String, Diagnostic> {
+    checked_query(format!("{} | {suffix}", scope(s)?))
+}
+fn facet_suffix(field: &str, limit: usize) -> String {
+    format!(
+        "groupBy([{}], function=count(as=events), limit=max) | sort(events, order=desc, limit={limit})",
+        quote(field)
+    )
+}
+/// The query an agent may run itself to see which types in a quiet source's repository have
+/// events: the repository selector alone, grouped by type. Discovery reserves nothing for it and
+/// never reads its answer. A source without both a repository and a type has none: the same
+/// repository alone would repeat the measured zero, and a type alone names no repository.
+pub fn quiet_census_query(s: &Scope) -> Result<Option<String>, Diagnostic> {
+    if s.repo.is_none() || s.type_.is_none() {
+        return Ok(None);
+    }
+    let repository = Scope {
+        repo: s.repo.clone(),
+        type_: None,
+        event: None,
+    };
+    scoped_query(&repository, &facet_suffix("#type", 25)).map(Some)
 }
 pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     validate_request(r)?;
@@ -569,9 +601,7 @@ fn record_kind_probes(
 ) -> Result<Vec<Probe>, Diagnostic> {
     record_kind_candidates(r)
         .into_iter()
-        .filter(|field| {
-            r.max_population_fields_per_source.is_none() || *field != "#event.dataset"
-        })
+        .filter(|field| r.max_population_fields_per_source.is_none() || *field != "#event.dataset")
         .filter(|field| {
             fields.iter().any(|name| name == field)
                 || field
@@ -584,10 +614,7 @@ fn record_kind_probes(
                 r,
                 s,
                 "record-kind-facet",
-                &format!(
-                    "groupBy([{}], function=count(as=events), limit=max) | sort(events, order=desc, limit=50)",
-                    quote(field)
-                ),
+                &facet_suffix(field, KIND_FACET_LIMIT),
                 false,
                 vec![],
                 Some(field.into()),
@@ -1074,6 +1101,30 @@ pub fn frontier(
     frontier_with_policy(r, answered, true)
 }
 
+/// Sources whose accepted volume answer is zero, in request order. Only the exact volume probe
+/// of each source, over the request window, counts.
+pub fn quiet_sources(
+    r: &DiscoverRequest,
+    answered: &BTreeMap<String, Vec<Value>>,
+) -> Result<Vec<Scope>, Diagnostic> {
+    let mut sources = r.sources.clone();
+    if r.census {
+        let Some(rows) = answered.get(&probe_id(&r.environment.view, &census_probe(r)?)) else {
+            return Ok(vec![]);
+        };
+        census_sources(rows, &mut sources)?;
+    }
+    let mut quiet = Vec::new();
+    for s in sources {
+        if let Some(rows) = answered.get(&probe_id(&r.environment.view, &volume_probe(r, &s)?))
+            && count_row(rows)? == 0
+        {
+            quiet.push(s);
+        }
+    }
+    Ok(quiet)
+}
+
 pub(crate) fn frontier_with_policy(
     r: &DiscoverRequest,
     answered: &BTreeMap<String, Vec<Value>>,
@@ -1094,29 +1145,30 @@ pub(crate) fn frontier_with_policy(
             "More than 100 sources require an explicitly narrowed discovery run.",
         ));
     }
-    // Every source's volume comes first, so a quiet source costs one search.
+    // Every source's volume comes first, so a quiet source costs one search and nothing more.
     let mut pending = Vec::new();
+    let mut live = Vec::new();
     for s in &sources {
         validate_scope(s)?;
         let p = volume_probe(r, s)?;
         match answered.get(&id(&p)) {
-            Some(rows) if count_row(rows)? == 0 => {
-                return Err(fail(if r.depth == DiscoveryDepth::SourcesOnly {
-                    "Quiet source measurements cannot establish observed presence."
-                } else {
-                    "Quiet or empty measurement windows cannot replace an existing schema."
-                }));
-            }
-            Some(_) => {}
+            Some(rows) if count_row(rows)? == 0 => {}
+            Some(_) => live.push(s.clone()),
             None => pending.push(p),
         }
     }
-    if !pending.is_empty() || r.depth == DiscoveryDepth::SourcesOnly {
+    if !pending.is_empty() {
         return Ok(pending);
     }
-    // Then every source's listings, so an empty one fails before dependent searches.
+    if live.is_empty() {
+        return Err(fail(ALL_QUIET_SOURCES));
+    }
+    if r.depth == DiscoveryDepth::SourcesOnly {
+        return Ok(pending);
+    }
+    // Then every live source's listings, so an empty one fails before dependent searches.
     let mut listed = Vec::new();
-    for s in &sources {
+    for s in &live {
         let base = base_probes(r, s)?;
         if let Some(rows) = answered.get(&id(&base[1])) {
             kind_facet(rows, "#event.dataset", None)?;
@@ -1140,9 +1192,7 @@ pub(crate) fn frontier_with_policy(
             full_window = true;
         }
         if fields.is_empty() {
-            return Err(fail(
-                "Quiet or empty measurement windows cannot replace an existing schema.",
-            ));
+            return Err(fail(EMPTY_FIELD_LISTING));
         }
         let mut known_observed: BTreeSet<String> = fields.iter().cloned().collect();
         if let Some(rows) = answered.get(&id(&base[1]))
@@ -1238,9 +1288,7 @@ fn sparse_fieldset_probe(r: &DiscoverRequest, s: &Scope) -> Result<Probe, Diagno
     if environment::parse_time(&r.end)? - environment::parse_time(&r.start)?
         <= time::Duration::minutes(15)
     {
-        return Err(fail(
-            "Quiet or empty measurement windows cannot replace an existing schema.",
-        ));
+        return Err(fail(EMPTY_FIELD_LISTING));
     }
     probe(r, s, "fieldset", "fieldset()", false, vec![], None)
 }
@@ -1404,18 +1452,21 @@ impl<B: SearchBackend> Run<'_, B> {
                 "More than 100 sources require an explicitly narrowed discovery run.",
             ));
         }
-        let mut volumes = Vec::new();
+        // A source whose volume is zero takes no further search and stays out of the pack.
+        let (mut live, mut volumes) = (Vec::new(), Vec::new());
         for s in &sources {
             validate_scope(s)?;
             let rows = self.execute(volume_probe(self.request, s)?)?;
-            if count_row(&rows)? == 0 {
-                return Err(fail(
-                    "Quiet or empty measurement windows cannot replace an existing schema.",
-                ));
+            if count_row(&rows)? > 0 {
+                live.push(s.clone());
+                volumes.push(rows);
             }
-            volumes.push(rows);
         }
-        // Every source is listed before any source's dependent measurements.
+        if live.is_empty() {
+            return Err(fail(ALL_QUIET_SOURCES));
+        }
+        let sources = live;
+        // Every live source is listed before any source's dependent measurements.
         let mut listings = Vec::new();
         for (s, volume) in sources.iter().zip(volumes) {
             let mut datasets = Vec::new();
@@ -1459,9 +1510,7 @@ impl<B: SearchBackend> Run<'_, B> {
                 full_window = true;
             }
             if fields.is_empty() && self.request.depth != DiscoveryDepth::SourcesOnly {
-                return Err(fail(
-                    "Quiet or empty measurement windows cannot replace an existing schema.",
-                ));
+                return Err(fail(EMPTY_FIELD_LISTING));
             }
             if self.request.depth != DiscoveryDepth::SourcesOnly {
                 let mut known_observed: BTreeSet<String> = fields.iter().cloned().collect();

@@ -342,10 +342,7 @@ fn an_empty_second_listing_fails_after_three_searches_per_source() {
             world.full.insert("two".into(), vec![]);
             let (relayed, failure) = relay(&r, &world);
             let failure = failure.expect("empty listing fails the run");
-            assert_eq!(
-                failure.message,
-                "Quiet or empty measurement windows cannot replace an existing schema."
-            );
+            assert_eq!(failure.message, discovery::EMPTY_FIELD_LISTING);
             assert_eq!(relayed.len(), searches, "{end} quick={quick}");
             assert!(
                 relayed
@@ -364,7 +361,7 @@ fn an_empty_second_listing_fails_after_three_searches_per_source() {
 }
 
 #[test]
-fn a_zero_first_source_fails_at_the_first_search_in_every_depth() {
+fn a_zero_first_source_costs_one_search_in_every_depth() {
     let _lock = SIGNAL.lock().unwrap();
     let sources = ["one", "two"];
     for r in [
@@ -375,11 +372,12 @@ fn a_zero_first_source_fails_at_the_first_search_in_every_depth() {
         let mut world = World::live(&sources);
         world.volume.insert("one".into(), 0);
         let (relayed, failure) = relay(&r, &world);
-        assert!(failure.is_some());
-        assert_eq!(kinds(&relayed), ["one:volume"]);
+        assert!(failure.is_none(), "{failure:?}");
+        assert_eq!(kinds(&relayed)[..2], ["one:volume", "two:volume"]);
+        assert!(relayed[1..].iter().all(|probe| source_of(probe) == "two"));
         let (executed, activated) = execute(&r, &world);
-        assert!(!activated);
-        assert_eq!(kinds(&executed), ["one:volume"]);
+        assert!(activated);
+        assert_eq!(ids(&r, &executed), ids(&r, &relayed));
     }
 }
 

@@ -564,7 +564,7 @@ fn old_session_policy_fails_an_empty_listing_without_a_fallback_search() {
         assert_eq!(output.status, "failed", "{:?}", output.diagnostics);
         assert_eq!(
             output.diagnostics[0].message,
-            "Quiet or empty measurement windows cannot replace an existing schema."
+            discovery::EMPTY_FIELD_LISTING
         );
         assert_eq!(mcp::resumable_info(&saved.state).unwrap()["attempts"], 2);
     }

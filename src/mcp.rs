@@ -984,6 +984,9 @@ pub struct StepOutput {
     pub completion: Option<VerifiedCompletion>,
     #[serde(skip)]
     pub terminal_failure: bool,
+    /// Sources whose accepted volume answer was zero; `None` for an earlier-plan checkpoint.
+    #[serde(skip)]
+    pub quiet_source_ids: Option<Vec<String>>,
 }
 impl StepOutput {
     pub fn exit_code(&self) -> i32 {
@@ -1649,7 +1652,22 @@ fn progress(
             }
         }),
         terminal_failure: status == "failed" && state.status == "failed",
+        quiet_source_ids: quiet_source_ids(state).ok().flatten(),
     }
+}
+
+/// Source IDs whose accepted volume answer is zero, in request order, from the checkpoint's
+/// verified answers. Only checkpoints of the current plan record them.
+pub fn quiet_source_ids(state: &State) -> Result<Option<Vec<String>>, Diagnostic> {
+    if state.discovery_algorithm != DISCOVERY_ALGORITHM {
+        return Ok(None);
+    }
+    Ok(Some(
+        discovery::quiet_sources(&state.request, &session::accepted_rows(state)?)?
+            .iter()
+            .map(discovery::source_id)
+            .collect(),
+    ))
 }
 fn elapsed(state: &State, now: &str) -> Result<Duration, Diagnostic> {
     if let Some(session) = &state.session {
@@ -2890,6 +2908,7 @@ mod recovery_tests {
             status: "cleanup-pending".into(),
             mode: DiscoveryMode::Full,
             quick_depth: QuickDepth::SourcesOnly,
+            quiet_source_ids: vec![],
         });
         let path = run.directory.join("inventory.json");
         let writer = storage::Writer::acquire(&path).unwrap();

@@ -339,6 +339,19 @@ fn observe(
         .iter()
         .any(|known| known.expected && known.selectors == source)
     {
+        // A repository-wide search over an expected typed source's repository, such as the
+        // optional type listing shown for a quiet source, is not a new source.
+        if source.type_.is_none()
+            && source.event.is_none()
+            && source.repo.is_some()
+            && state.sources.iter().any(|known| {
+                known.expected
+                    && known.selectors.type_.is_some()
+                    && known.selectors.repo == source.repo
+            })
+        {
+            return "not-creditable";
+        }
         let action = InventoryAction::RecordInventoryHints {
             environment: environment.clone(),
             hints,
