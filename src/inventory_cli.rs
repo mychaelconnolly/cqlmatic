@@ -2317,7 +2317,7 @@ fn action_brief(action: &Value) -> Value {
     if matches!(
         action["relay"]["status"].as_str(),
         Some("needs-probes" | "cleanup-pending" | "cancel-requested")
-    ) || action.get("relay").is_none()
+    ) || (action.get("relay").is_none() && action["run_index"].is_u64())
     {
         // Only project fixed instructions parameterized by the selected run's numeric index.
         if let Some(next) = action["next_action"].as_str()
@@ -5137,6 +5137,35 @@ mod tests {
             action_brief(&json!({"relay":{"status":"complete","probes":[]}}))
                 .get("next_action")
                 .is_none()
+        );
+        for non_discovery in [
+            json!({"mode":"agent-relayed-mcp","tool":"falcon_search_ngsiem","next_action":"Obtain caller authorization."}),
+            json!({"attempt_id":"refresh-1","phase":"prepared","next_action":"Confirm this exact target."}),
+            json!({"attempt_id":"refresh-1","phase":"dispatched","next_action":"The dispatch is durably reserved."}),
+            json!({"capability":{"run_id":"cap-1"},"next_action":"Review the selected fixed cases."}),
+            json!({"run_id":"cap-1","attempt_id":"attempt-1","phase":"dispatched","next_action":"This exact attempt is reserved."}),
+            json!({"credited_fields":0,"uncredited_fields":1,"next_action":"Inspect the full output."}),
+        ] {
+            assert!(
+                action_brief(&non_discovery).get("next_action").is_none(),
+                "{non_discovery}"
+            );
+        }
+        assert_eq!(
+            action_brief(&json!({
+                "run_index": 2,
+                "status": "incomplete",
+                "next_action": DiscoveryStepAdvice::Recover.message(2),
+            }))["next_action"],
+            DiscoveryStepAdvice::Recover.message(2)
+        );
+        assert_eq!(
+            action_brief(&json!({
+                "run_index": 2,
+                "status": "incomplete",
+                "next_action": raw,
+            }))["next_action"],
+            FULL_STEP
         );
         assert_eq!(
             value["action"]["cost"],
