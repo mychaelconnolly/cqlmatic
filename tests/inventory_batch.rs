@@ -166,7 +166,7 @@ fn parser_inputs(dir: &Path, count: usize) -> (Value, Vec<(String, String)>) {
 /// A confirmed Full inventory with `sources` selected sources and saved (not imported) parsers.
 fn fixture(sources: usize, parsers: usize) -> Fixture {
     let dir = Temp::new();
-    let state = dir.0.join("workflow/state.json");
+    let state = dir.0.join("workflow").join("state.json");
     call(
         &dir.0,
         &state,
@@ -195,7 +195,7 @@ fn fixture(sources: usize, parsers: usize) -> Fixture {
 /// that only source review and a parser decision can complete.
 fn measured_fixture() -> Fixture {
     let dir = Temp::new();
-    let state = dir.0.join("workflow/state.json");
+    let state = dir.0.join("workflow").join("state.json");
     let inventory = |action| call(&dir.0, &state, action);
     inventory(json!({"kind":"set-discovery-mode","mode":"full"}));
     let confirmed = inventory(
@@ -421,7 +421,10 @@ fn a_failed_item_rolls_back_the_whole_batch() {
     );
     assert_eq!(fs::read(&f.state).unwrap(), before);
     // The reply describes what is saved: nothing from the batch.
-    assert_eq!(reply["state"], json!(f.state));
+    assert_eq!(
+        reply["state"],
+        json!(std::path::absolute(&f.state).unwrap())
+    );
     for source in reply["status"]["sources"].as_array().unwrap() {
         assert!(source["review"].is_null(), "{source}");
         assert!(source["binding"].is_null(), "{source}");
@@ -558,7 +561,10 @@ fn a_successful_batch_commits_every_item_and_a_replay_changes_nothing() {
     assert_eq!(reply["action"]["kind"], "batch");
     assert_eq!(reply["action"]["commit"], "committed");
     assert_eq!(outcomes(&reply), ["applied"; 6]);
-    assert_eq!(reply["state"], json!(f.state));
+    assert_eq!(
+        reply["state"],
+        json!(std::path::absolute(&f.state).unwrap())
+    );
     let saved = read(&f.state);
     let source = |id: &String| {
         saved["sources"]
@@ -759,7 +765,7 @@ fn pending_work_is_judged_against_the_final_result_of_the_batch() {
 /// refresh, a recorded unfinished discovery run, an overdue refresh reminder and pending work.
 fn noticed_fixture() -> Fixture {
     let dir = Temp::new();
-    let state = dir.0.join("workflow/state.json");
+    let state = dir.0.join("workflow").join("state.json");
     let inventory = |action| call(&dir.0, &state, action);
     let file = |name: &str, value: Value| {
         let path = dir.0.join(name);
@@ -875,7 +881,13 @@ fn brief_batch_replies_fit_under_every_notice_for_every_outcome() {
         assert!(output.stdout.len() <= 4096, "{}", output.stdout.len());
         assert_eq!(output.stdout.last(), Some(&b'\n'));
         let text = String::from_utf8(output.stdout.clone()).unwrap();
-        for private in [marker, f.dir.0.to_str().unwrap(), "0000000000000000"] {
+        let dir_name = f.dir.0.file_name().unwrap().to_str().unwrap();
+        for private in [
+            marker,
+            f.dir.0.to_str().unwrap(),
+            dir_name,
+            "0000000000000000",
+        ] {
             assert!(!text.contains(private), "{private}: {text}");
         }
         for source in &f.sources {
@@ -956,7 +968,7 @@ fn malformed_batch_shapes_create_nothing_and_are_not_refused_as_busy() {
         let diagnostic: Value = serde_json::from_slice(&output.stderr).unwrap();
         assert_eq!(diagnostic["code"], "INVENTORY_INPUT", "{diagnostic}");
     };
-    let absent = f.dir.0.join("absent/state.json");
+    let absent = f.dir.0.join("absent").join("state.json");
     for action in &shapes {
         refused(&absent, action);
         assert!(!absent.parent().unwrap().exists(), "{action}");
@@ -1017,7 +1029,9 @@ fn missing_run_evidence_neither_hides_an_invalid_item_nor_drops_the_batch_reply(
         assert!(reply["action"]["diagnostic"]["code"].is_string(), "{reply}");
         if !flags.is_empty() {
             let text = String::from_utf8(output.stdout).unwrap();
+            let dir_name = f.dir.0.file_name().unwrap().to_str().unwrap();
             assert!(!text.contains(f.dir.0.to_str().unwrap()), "{text}");
+            assert!(!text.contains(dir_name), "{text}");
         }
         assert_eq!(fs::read(&f.state).unwrap(), before);
     }
