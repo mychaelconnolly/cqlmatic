@@ -218,6 +218,13 @@ fn isolated<'a>(command: &'a mut Command, home: &Path) -> &'a mut Command {
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_STATE_HOME", home.join("state"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("XDG_RUNTIME_DIR", home.join("runtime"))
+        .env("APPDATA", home.join("appdata"))
+        .env("ZDOTDIR", home)
+        .env("BASH_ENV", home.join("bash-env"))
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
         .env_remove("COPILOT_HOME")
@@ -414,7 +421,7 @@ fn with_lock(settings: &Path) -> Vec<String> {
 }
 
 #[test]
-fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks() {
+fn capture_install_preserves_existing_settings_and_custom_fields() {
     for (client, _, default, file) in WRITTEN_CLIENTS {
         let home = Temp::new();
         let file = home.0.join(default).join(file);
@@ -470,15 +477,13 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
         assert_eq!(repeat["hooks"]["capture"], "present", "{client}");
         assert_eq!(fs::read(&file).unwrap(), exact, "{client}");
 
-        // Only the whole entry is this installation's. One someone changed is reported, and
-        // nothing that would run the command a second time is added beside it.
+        // Changing fields outside the command leaves them in place.
         let hook = &mut expected["hooks"][event][1];
         hook["extra-setting"] = json!(true);
         let changed = serde_json::to_vec(&expected).unwrap();
         fs::write(&file, &changed).unwrap();
         let repeat = report(&mut command);
-        assert_manual(&repeat, "different hook entry");
-        assert_eq!(repeat["hooks"]["capture"], "manual", "{client}");
+        assert_eq!(repeat["hooks"]["capture"], "present", "{client}");
         assert_eq!(fs::read(&file).unwrap(), changed, "{client}");
 
         let hook = &expected["hooks"][event][1];
@@ -502,7 +507,11 @@ fn capture_install_preserves_existing_settings_and_recognizes_only_exact_hooks()
                     command.arg("--dry-run");
                 }
                 let repeat = report(&mut command);
-                assert_manual(&repeat, "different hook entry");
+                if copilot {
+                    assert_manual(&repeat, "different hook entry");
+                } else {
+                    assert_eq!(repeat["hooks"]["capture"], "present", "{client}");
+                }
                 assert_eq!(fs::read(&file).unwrap(), wanted, "{client}");
             }
         }
@@ -3028,7 +3037,7 @@ fn earlier_capture(client: &str, state: &Path) -> Value {
 }
 
 #[test]
-fn guard_install_replaces_the_earlier_capture_entry_and_reports_entries_it_did_not_write() {
+fn guard_install_upgrades_legacy_capture_and_preserves_other_handlers() {
     for client in ["claude-code", "codex"] {
         let home = Temp::new();
         let file = settings_file(&home.0, client);
@@ -3060,10 +3069,10 @@ fn guard_install_replaces_the_earlier_capture_entry_and_reports_entries_it_did_n
                 .contains("different hook entry")
         );
 
-        // An entry someone changed is reported with its command and left in place. One that an
-        // older copy elsewhere wrote is this tool's own and is removed.
+        // A user's command in the same matcher group survives removal of the owned handlers.
         let mut changed = upgraded["entry"]["hooks"]["PreToolUse"][0].clone();
         changed["note"] = json!("kept by its owner");
+        let user_hook = json!({"type": "command", "command": "echo check"});
         let older = upgraded["command"]
             .as_str()
             .unwrap()
@@ -3071,6 +3080,10 @@ fn guard_install_replaces_the_earlier_capture_entry_and_reports_entries_it_did_n
         let mut copy = changed.clone();
         copy.as_object_mut().unwrap().remove("note");
         copy["hooks"][0]["command"] = json!(older);
+        changed["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .push(user_hook.clone());
         let written = json!({"hooks": {
             "PostToolUse": upgraded["entry"]["hooks"]["PostToolUse"],
             "PreToolUse": [&changed, &copy],
@@ -3081,32 +3094,11 @@ fn guard_install_replaces_the_earlier_capture_entry_and_reports_entries_it_did_n
         let kept = report(command.args(["--hooks", "capture"]));
         assert_eq!(
             kept["hooks"],
-            json!({"capture": "present", "guard": "manual"})
+            json!({"capture": "present", "guard": "removed"})
         );
-        assert_eq!(kept["installed"], false);
+        assert_eq!(kept["installed"], true);
         assert_eq!(kept["changed"], true);
-        let actions = kept["next_actions"].to_string();
-        assert!(
-            actions.contains("hooks.PreToolUse holds a different hook entry"),
-            "{actions}"
-        );
-        assert!(!actions.contains("/older/copy/cqlmatic"), "{actions}");
-        // Each names the settings file as the report spells it on this platform.
-        let path = kept["path"].as_str().unwrap();
-        let different: Vec<_> = kept["next_actions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|action| action.contains("different hook entry"))
-            .collect();
-        assert_eq!(different.len(), 1, "{actions}");
-        assert!(
-            different
-                .iter()
-                .all(|action| action.ends_with(&format!(" ({path})."))),
-            "{actions}"
-        );
+        changed["hooks"] = json!([user_hook]);
         let settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
         assert_eq!(
             settings["hooks"]["PreToolUse"],
@@ -3541,4 +3533,122 @@ fn capture_counts_its_own_failures_and_stays_silent() {
         json!(body(json!([{"user": "ann"}]))),
     ));
     assert_eq!(dir.tally()["hook-not-saved"], 1);
+}
+
+#[test]
+fn capture_install_updates_customized_entries_in_place() {
+    for (client, _, default, file) in WRITTEN_CLIENTS {
+        let home = Temp::new();
+        let file = home.0.join(default).join(file);
+        let state = home.state();
+        let event = if client.starts_with("copilot-") {
+            "postToolUse"
+        } else {
+            "PostToolUse"
+        };
+        let first = report(&mut install_copy(
+            &home.0,
+            client,
+            SERVER,
+            "old-cqlmatic",
+            &state,
+        ));
+        let mut settings = first["entry"].clone();
+        let hooks = settings["hooks"][event].as_array_mut().unwrap();
+        let own = &mut hooks[0];
+        if client.starts_with("copilot-") {
+            own["timeoutSec"] = json!(17);
+        } else {
+            own["hooks"][0]["timeout"] = json!(17);
+            own["matcher"] = json!("custom|matcher");
+        }
+        hooks.insert(0, json!({"other": "keep first"}));
+        hooks.push(json!({"other": "keep last"}));
+        let original = serde_json::to_string_pretty(&settings).unwrap();
+        fs::write(&file, &original).unwrap();
+
+        let result = report(&mut install_copy(
+            &home.0,
+            client,
+            SERVER,
+            "new-cqlmatic",
+            &state,
+        ));
+        assert_eq!(result["hooks"]["capture"], "present", "{client}: {result}");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            original.replace("old-cqlmatic", "new-cqlmatic"),
+            "{client}"
+        );
+    }
+}
+
+#[test]
+fn capture_install_preserves_shell_pipelines_and_mixed_copilot_pairs() {
+    let home = Temp::new();
+    let state = home.state();
+    let file = home.0.join(".copilot/hooks/cqlmatic-capture.json");
+    let marker = home.0.join("workflow/state.json.captures/hooks.json");
+    let install = || install_copy(&home.0, "copilot-cli", SERVER, "new-cqlmatic", &state);
+    let first = report(&mut install_copy(
+        &home.0,
+        "copilot-app",
+        SERVER,
+        "old-cqlmatic",
+        &state,
+    ));
+    for bash in [
+        format!(
+            "tee -a audit.log | {}",
+            first["command"]["bash"].as_str().unwrap()
+        ),
+        first["command"]["bash"]
+            .as_str()
+            .unwrap()
+            .replace("old-cqlmatic", "other-launcher"),
+    ] {
+        let mut settings = first["entry"].clone();
+        settings["hooks"]["postToolUse"][0]["bash"] = json!(bash);
+        let original = serde_json::to_string_pretty(&settings).unwrap();
+        fs::write(&file, &original).unwrap();
+        for hooks in ["capture", "none"] {
+            let result = report(install().args(["--hooks", hooks]));
+            assert_eq!(result["hooks"]["capture"], "manual", "{result}");
+            assert_eq!(fs::read_to_string(&file).unwrap(), original);
+            assert!(!marker.exists(), "{result}");
+        }
+    }
+}
+
+#[test]
+fn capture_install_marker_tracks_shared_client_and_server() {
+    let home = Temp::new();
+    let state = home.state();
+    let marker = home.0.join("workflow/state.json.captures/hooks.json");
+    let install = |client, server| install_copy(&home.0, client, server, "cqlmatic", &state);
+    report(&mut install("copilot-app", SERVER));
+    report(install("copilot-cli", SERVER).args(["--hooks", "none"]));
+    assert!(!marker.exists());
+
+    report(&mut install("claude-code", "previous"));
+    report(&mut install("claude-code", SERVER));
+    let active = fs::read(&marker).unwrap();
+    report(install("claude-code", "previous").args(["--hooks", "none"]));
+    assert_eq!(fs::read(&marker).unwrap(), active);
+
+    let file = settings_file(&home.0, "claude-code");
+    let mut settings: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    settings["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(17);
+    fs::write(&file, settings.to_string()).unwrap();
+    fs::remove_file(&marker).unwrap();
+    report(&mut install("claude-code", SERVER));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&marker).unwrap()).unwrap()["hooks"],
+        json!(["capture", "guard"])
+    );
+    report(install("claude-code", SERVER).args(["--hooks", "capture"]));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&marker).unwrap()).unwrap()["hooks"],
+        json!(["capture"])
+    );
 }
