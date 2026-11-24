@@ -600,10 +600,12 @@ mod tests {
         let path = directory.join("snapshot");
         let writer = Writer::acquire(&path).unwrap();
         let lock = writer_lock_path(&path).unwrap();
-        assert_eq!(
-            fs::remove_file(&lock).unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
+        let error = fs::remove_file(&lock).unwrap_err();
+        assert!(
+            matches!(error.raw_os_error(), Some(5 | 32)),
+            "expected Windows sharing or access error, got {error:?}"
         );
+        assert!(lock.exists());
         assert_eq!(Writer::acquire(&path).err().unwrap().code, "PACK_BUSY");
         drop(writer);
         fs::remove_file(&lock).unwrap();
