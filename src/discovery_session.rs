@@ -1191,10 +1191,7 @@ pub fn step_resumable(
                         hosted_answer_identifies_call(&body)
                             && reused_evidence(&state, count - 1, &sha256_hex(&raw), Some(&body))
                     }) {
-                        return Err(error(
-                            "MCP_RESULT_REUSED",
-                            "This answer was already retained by an earlier attempt.",
-                        ));
+                        return Err(reused_measurement());
                     }
                     let session = state.session.as_mut().expect("session checked");
                     let a = session.attempts.last_mut().expect("attempt checked");
@@ -1251,6 +1248,22 @@ pub fn step_resumable(
                 return Ok(output);
             }
         };
+        if let Some(body) = identified_measurement(&raw, extended)
+            && (matches_accepted_measurement(&state, &result, &body)
+                || state
+                    .session
+                    .as_ref()
+                    .expect("session checked")
+                    .attempts
+                    .iter()
+                    .filter(|a| ended(&a.outcome))
+                    .filter_map(|a| a.terminal.as_ref())
+                    .any(|e| {
+                        matches_retained_measurement(&e.raw_hex, &e.raw_sha256, &result, &body)
+                    }))
+        {
+            return Err(reused_measurement());
+        }
         if let Err(d) = elapsed(&state, &now) {
             if d.code != "MCP_DEADLINE" {
                 return Err(d);

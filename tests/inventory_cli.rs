@@ -1027,15 +1027,19 @@ fn prepare_source_run(dir: &Path) -> Value {
 }
 
 fn prepare_two_source_run(dir: &Path) -> Value {
+    confirm_two_sources(dir, "sources-only");
+    prepare_source_run(dir)
+}
+
+fn confirm_two_sources(dir: &Path, depth: &str) {
     call(
         dir,
-        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":depth}),
     );
     call(
         dir,
         json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":"synthetic-a"},{"type":"synthetic-b"}]}),
     );
-    prepare_source_run(dir)
 }
 
 fn synthetic_inventory_pack(dir: &Path) -> PathBuf {
@@ -5957,4 +5961,184 @@ fn unknown_source_id_lists_a_bounded_selection_and_brief_only_counts_it() {
         }
         assert_eq!(fs::read(&state).unwrap(), before);
     }
+}
+
+#[test]
+fn identified_result_cannot_be_credited_to_another_probe() {
+    for (ended, route) in [
+        (true, "next-probe"),
+        (true, "capture"),
+        (false, "next-probe"),
+        (false, "discovery-step"),
+        (false, "capture"),
+    ] {
+        let dir = Temp::new();
+        confirm_two_sources(
+            &dir.0,
+            if ended {
+                "sources-and-fields"
+            } else {
+                "sources-only"
+            },
+        );
+        let prepared = call(&dir.0, source_run_request(100));
+        let checkpoint = prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap();
+        let next = || call(&dir.0, json!({"kind":"next-probe"}));
+        let mut reply = next();
+        let answer = |reply: &Value, file: &str| json!({"probe_id":reply["action"]["probe"]["probe_id"],"result_file":file});
+        let submit = |reply: &Value, file: &str| {
+            call(
+                &dir.0,
+                json!({"kind":"next-probe","answer":answer(reply,file)}),
+            )
+        };
+        let body = if route == "discovery-step" {
+            json!({"result":[{"events":771}],"metadata":{"job_id":"one-synthetic-call"}})
+        } else {
+            json!({"result":[{"events":771}],"trace_id":"one-synthetic-call"})
+        };
+        let original = fixture(&dir.0, "original.json", body.clone());
+        if ended {
+            let volume = fixture(&dir.0, "volume.json", json!({"result":[{"events":23}]}));
+            reply = submit(&reply, &volume);
+            assert!(
+                reply["action"]["probe"]["arguments"]["query_string"]
+                    .as_str()
+                    .unwrap()
+                    .contains("groupBy")
+            );
+            reply = submit(&reply, &original);
+            assert_eq!(reply["action"]["state"], "paused", "{reply}");
+            call(&dir.0, json!({"kind":"resume-discovery"}));
+            reply = next();
+            for _ in 0..80 {
+                let query = reply["action"]["probe"]["arguments"]["query_string"]
+                    .as_str()
+                    .unwrap();
+                if query.contains("synthetic-b")
+                    && query.ends_with("count(as=events)")
+                    && !query.contains("groupBy")
+                {
+                    break;
+                }
+                let rows = if query.contains("fieldset(") {
+                    json!([{"field":"aid"}])
+                } else if query.contains("groupBy") {
+                    json!([])
+                } else if query.contains("as=total") {
+                    let row = query.split("as=c").enumerate().fold(
+                        json!({"total":23}),
+                        |mut row, (i, _)| {
+                            if i > 0 {
+                                row[format!("c{}", i - 1)] = json!(3);
+                            }
+                            row
+                        },
+                    );
+                    json!([row])
+                } else {
+                    json!([{"events":0}])
+                };
+                let file = fixture(&dir.0, "fresh.json", json!({"result":rows}));
+                reply = submit(&reply, &file);
+            }
+        } else {
+            reply = submit(&reply, &original);
+        }
+        let probe = &reply["action"]["probe"];
+        let query = probe["arguments"]["query_string"].as_str().unwrap();
+        assert!(
+            query.contains("synthetic-b") && query.ends_with("count(as=events)"),
+            "{query}"
+        );
+        let id = probe["probe_id"].as_str().unwrap();
+        let before = fs::read(&checkpoint).unwrap();
+        let wrapper = json!({"jsonrpc":"2.0","id":42,"result":{"content":[{"type":"text","text":body.to_string()}]}});
+        let wrapped = fixture(&dir.0, "wrapped.json", wrapper.clone());
+        match route {
+            "next-probe" => {
+                for file in [&original, &wrapped] {
+                    let refused = submit(&reply, file);
+                    assert_eq!(refused["action"]["settled"], false, "{refused}");
+                    assert_eq!(refused["action"]["outstanding_probe_id"], id);
+                    assert_eq!(
+                        refused["action"]["diagnostics"][0]["code"],
+                        "MCP_RESULT_REUSED"
+                    );
+                }
+            }
+            "discovery-step" => {
+                let refused = call(
+                    &dir.0,
+                    json!({"kind":"discovery-step","answers":[answer(&reply,&wrapped)]}),
+                );
+                assert_eq!(
+                    refused["action"]["diagnostics"][0]["code"], "MCP_RESULT_REUSED",
+                    "{refused}"
+                );
+            }
+            "capture" => {
+                let hook = fixture(
+                    &dir.0,
+                    "hook.json",
+                    json!({
+                        "tool_name":"mcp__example__falcon_search_ngsiem","tool_input":probe["arguments"],"tool_response":wrapper
+                    }),
+                );
+                let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+                    .args([
+                        "env", "capture", "--client", "generic", "--server", "example", "--state",
+                    ])
+                    .arg(dir.0.join("workflow/state.json"))
+                    .stdin(fs::File::open(hook).unwrap())
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+                let tally: Value = serde_json::from_slice(
+                    &fs::read(dir.0.join("workflow/state.json.captures/tally.json")).unwrap(),
+                )
+                .unwrap();
+                assert!(tally.get("probe-answered").is_none(), "{tally}");
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(fs::read(&checkpoint).unwrap(), before);
+        let current = next();
+        assert_eq!(current["action"]["outstanding_probe_id"], id);
+        let inventory: Value =
+            serde_json::from_slice(&fs::read(dir.0.join("workflow/state.json")).unwrap()).unwrap();
+        assert!(inventory["active_pack"].is_null());
+    }
+}
+
+#[test]
+fn identifier_free_identical_counts_complete_two_distinct_probes() {
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let file = fixture(&dir.0, "count.json", json!({"result":[{"events":771}]}));
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let id = &first["action"]["probe"]["probe_id"];
+    let second = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":id,"result_file":file}}),
+    );
+    let second_id = &second["action"]["probe"]["probe_id"];
+    assert_ne!(id, second_id);
+    let final_reply = call(
+        &dir.0,
+        json!({"kind":"next-probe","answer":{"probe_id":second_id,"result_file":file}}),
+    );
+    assert_eq!(final_reply["action"]["state"], "complete", "{final_reply}");
+    let checkpoint = prepared["status"]["discovery_runs"][0]["state_path"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        cqlmatic::mcp::inspect_state(Path::new(checkpoint))
+            .unwrap()
+            .answers
+            .len(),
+        2
+    );
 }

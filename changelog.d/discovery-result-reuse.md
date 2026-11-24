@@ -1,0 +1,1 @@
+- Refuse a discovery result with a trace or job identifier if an earlier attempt in the run already retained the same result, including identical files and results returned in another wrapper.

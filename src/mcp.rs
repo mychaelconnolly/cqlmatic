@@ -327,6 +327,45 @@ pub(crate) fn hosted_answer_identifies_call(value: &Value) -> bool {
             .is_some_and(|body| hosted_body_ending(body) == Some("timed-out"))
 }
 
+fn identified_measurement(raw: &[u8], extended: bool) -> Option<Value> {
+    let body = hosted_answer_body(raw, extended)?;
+    let has_job_id = ["metadata", "metaData"]
+        .iter()
+        .filter_map(|key| body.get(key))
+        .any(|metadata| {
+            ["job_id", "jobId"]
+                .iter()
+                .filter_map(|key| metadata.get(key).and_then(Value::as_str))
+                .any(|id| !id.is_empty())
+        });
+    (hosted_answer_identifies_call(&body) || has_job_id).then_some(body)
+}
+
+fn matches_retained_measurement(
+    raw_hex: &str,
+    hash: &str,
+    result: &Normalized,
+    body: &Value,
+) -> bool {
+    hash == result.raw_sha256
+        || capture_bytes(raw_hex, hash)
+            .is_ok_and(|prior| hosted_answer_body(&prior, true).as_ref() == Some(body))
+}
+
+fn reused_measurement() -> Diagnostic {
+    Diagnostic::error(
+        "MCP_RESULT_REUSED",
+        "This answer was already retained by an earlier attempt.",
+    )
+}
+
+fn matches_accepted_measurement(state: &State, result: &Normalized, body: &Value) -> bool {
+    state.answers.values().any(|answer| {
+        answer.outcome == "complete"
+            && matches_retained_measurement(&answer.raw_hex, &answer.raw_sha256, result, body)
+    })
+}
+
 pub(crate) fn hosted_answer_body(raw: &[u8], extended: bool) -> Option<Value> {
     let (mut value, _) = decode_frame(raw, extended).ok()?;
     if value.as_object()?.contains_key("content") {
@@ -1854,6 +1893,7 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
         let raw = storage::read_bytes(path, MAX_CAPTURE_BYTES as u64)?;
         let ingested_at = discovery::timestamp();
         let remaining = elapsed(&state, &ingested_at);
+        let extended = uses_extended_framing(&raw);
         let normalized = remaining.and_then(|_| {
             normalize(&raw).and_then(|value| {
                 if value.rows.len() >= 10_000 {
@@ -1866,6 +1906,12 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
                 }
             })
         });
+        if let Ok(value) = &normalized
+            && let Some(body) = identified_measurement(&raw, extended)
+            && matches_accepted_measurement(&state, value, &body)
+        {
+            return Err(reused_measurement());
+        }
         let (outcome, trace_id, diagnostic) = match normalized {
             Ok(value) => ("complete".into(), value.trace_id, None),
             Err(d) => ("failed".into(), None, Some(d)),
@@ -1880,7 +1926,7 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
                 repository: state.request.environment.view.clone(),
                 outcome,
                 trace_id,
-                extended_result_framing: uses_extended_framing(&raw),
+                extended_result_framing: extended,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
                 ingested_at,
@@ -1978,7 +2024,9 @@ mod recovery_tests {
                 .enumerate()
                 .map(|(i, probe)| {
                     let path = run.directory.join(format!("answer-{i}.json"));
-                    fs::write(&path, fixture(probe)).unwrap();
+                    let mut response: Value = serde_json::from_str(fixture(probe)).unwrap();
+                    response.as_object_mut().unwrap().remove("trace_id");
+                    fs::write(&path, serde_json::to_vec(&response).unwrap()).unwrap();
                     (probe["probe_id"].as_str().unwrap().to_string(), path)
                 })
                 .collect::<Vec<_>>();
