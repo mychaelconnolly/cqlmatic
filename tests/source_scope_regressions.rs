@@ -446,3 +446,111 @@ fn mixed_record_kind_policy_still_applies_to_anchored_discriminator_filters() {
         &pack,
     ));
 }
+fn check_both(query: &str, pack: &Pack) -> [Analysis; 2] {
+    [
+        check(query, pack),
+        app::check_with_evidence(
+            CheckRequest {
+                schema_version: 1,
+                id: None,
+                query: query.into(),
+                context: context(),
+            },
+            Some(pack),
+            Some(app::GroundingEvidence {
+                environment: &pack.environment,
+                active_pack: Some(pack),
+                query_observations: &[],
+                captured_observations: &[],
+                capabilities: None,
+            }),
+        ),
+    ]
+}
+
+fn add_scoped_field(data: &mut PackData, kind: &str, field: &str) {
+    let id = format!("env:source:{kind}");
+    let mut source = data.sources[0].clone();
+    source["id"] = json!(id);
+    source["kind"] = json!("source");
+    source["selectors"] = json!({"repo":REPO,"type":kind,"sourcetype":kind});
+    data.sources.push(source);
+    data.fields.push(observation(&id, field));
+}
+
+#[test]
+fn exact_repo_and_type_observations_resolve_overlapping_dataset_records() {
+    let mut data = data();
+    data.fields.push(observation(SOURCE, "#event.dataset"));
+    add_scoped_field(&mut data, "logs", "#event.dataset");
+    data.fields.push(observation("env:source:logs", "user"));
+    let pack = pack(data);
+    for query in [
+        "#repo=scope_example user=* | count()",
+        "#repo=scope_example #event.dataset=example user=* | count()",
+        "#repo=scope_example #type=logs #event.dataset=example user=* | count()",
+    ] {
+        for result in check_both(query, &pack) {
+            assert_ready(&result);
+        }
+    }
+}
+
+#[test]
+fn ambiguity_names_the_competing_scopes() {
+    let mut data = data();
+    add_scoped_field(&mut data, "logs", "aid");
+    add_scoped_field(&mut data, "other", "aid");
+    data.fields
+        .retain(|f| f["path"] != "aid" || f["source_id"] != SOURCE);
+    let pack = pack(data);
+    for result in check_both("#repo=scope_example aid=* | count()", &pack) {
+        assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+        let basis = &result.grounding.basis["scope_example:*:aid"];
+        assert!(
+            basis.contains("#type=logs") && basis.contains("#type=other"),
+            "{basis}"
+        );
+        assert!(basis.contains("query's own scope"), "{basis}");
+    }
+}
+
+#[test]
+fn contradictory_event_family_does_not_supply_grounding() {
+    let mut data = data();
+    data.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let pack = pack(data);
+    for query in [
+        "#repo=scope_example #event_simpleName=FileEvent aid=* | count()",
+        r##"#repo=scope_example | in(field="#event_simpleName", values=["FileEvent","NetworkEvent"]) | aid=* | count()"##,
+    ] {
+        for result in check_both(query, &pack) {
+            assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+            assert!(
+                result
+                    .grounding
+                    .missing
+                    .contains(&"scope_example:*:aid".into())
+            );
+        }
+    }
+    for query in [
+        "#repo=scope_example #event_simpleName=ProcessEvent aid=* | count()",
+        "#repo=scope_example aid=* | count()",
+        r##"#repo=scope_example | in(field="#event_simpleName", values=["ProcessEvent","FileEvent"]) | aid=* | count()"##,
+        r##"#repo=scope_example | !in(field="#event_simpleName", values=["FileEvent"]) | aid=* | count()"##,
+        r##"#repo=scope_example | in(field="#event_simpleName", values=["processevent"], ignoreCase=true) | aid=* | count()"##,
+    ] {
+        for result in check_both(query, &pack) {
+            assert_ready(&result);
+        }
+    }
+    let result = generate(
+        "aid",
+        json!({"op":"eq","field":"#event_simpleName","value":"FileEvent"}),
+        "aid",
+        &pack,
+    );
+    assert_eq!(result.outcome, Outcome::NeedsContext, "{result:?}");
+    assert!(result.query.is_none());
+}

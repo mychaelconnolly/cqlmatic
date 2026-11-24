@@ -1,0 +1,1 @@
+- Resolve overlapping field namespaces when one matches the query's exact repository and type scope. Exclude pack field evidence for event families outside the query's exact event selection.

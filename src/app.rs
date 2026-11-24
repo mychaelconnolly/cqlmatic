@@ -5,7 +5,10 @@ use crate::{
     inventory::{FieldObservation, InventoryHint, QueryObservation, UnverifiedFieldLead},
     language::{self, ast::*},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 #[derive(Clone, Copy)]
 pub struct GroundingEvidence<'a> {
@@ -631,6 +634,7 @@ struct Requirement {
     uncertain_source: bool,
     relaxed_type: bool,
     relaxed_event: bool,
+    event_values: Option<Rc<BTreeSet<String>>>,
     unavailable: bool,
     removed: bool,
     unexported_by: Option<Exporter>,
@@ -680,6 +684,7 @@ struct Flow {
     uncertain_source: bool,
     relaxed_type: bool,
     relaxed_event: bool,
+    event_values: Option<Rc<BTreeSet<String>>>,
     tables: BTreeMap<String, Flow>,
     locals: BTreeMap<String, ElementBinding>,
     available: Option<BTreeSet<String>>,
@@ -1202,6 +1207,7 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
                 || state.unverified(&mapped),
             relaxed_type: state.relaxed_type,
             relaxed_event: state.relaxed_event,
+            event_values: state.event_values.clone(),
             unavailable,
             removed: false,
             unexported_by: unavailable.then(|| state.unexported_by(&mapped)).flatten(),
@@ -1225,6 +1231,7 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         uncertain_source: state.uncertain_source || state.unverified(field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
+        event_values: state.event_values.clone(),
         unavailable,
         unexported_by: unavailable.then(|| state.unexported_by(field)).flatten(),
         removed: state.removed_in(&state.removed, field)
@@ -1247,6 +1254,7 @@ fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
         uncertain_source: state.uncertain_source || state.unverified(&field),
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
+        event_values: state.event_values.clone(),
         unavailable,
         removed: false,
         unexported_by: unavailable.then(|| state.unexported_by(&field)).flatten(),
@@ -1266,6 +1274,7 @@ fn add_unknown(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         uncertain_source: true,
         relaxed_type: state.relaxed_type,
         relaxed_event: state.relaxed_event,
+        event_values: state.event_values.clone(),
         unavailable: false,
         removed: false,
         unexported_by: None,
@@ -1967,6 +1976,12 @@ fn merge_branches(incoming: &Flow, branches: Vec<Flow>) -> Flow {
                 .any(|b| b.scope != first.scope || b.field_target != first.field_target);
         merged.relaxed_type = branches.iter().any(|b| b.relaxed_type);
         merged.relaxed_event = branches.iter().any(|b| b.relaxed_event);
+        if branches
+            .iter()
+            .all(|b| b.event_values == first.event_values)
+        {
+            merged.event_values = first.event_values.clone();
+        }
         for branch in &branches {
             merged
                 .derived
@@ -2130,6 +2145,9 @@ fn constrain(state: &mut Flow, steps: &[Step]) {
             _ => break,
         }
     }
+    if found[2].len() == 1 && reads_event_name(state) {
+        constrain_events(state, found[2].clone());
+    }
     for (slot, mut values) in [
         &mut state.scope.repo,
         &mut state.scope.type_,
@@ -2165,6 +2183,61 @@ fn constrain(state: &mut Flow, steps: &[Step]) {
         state.uncertain_source |= unresolved;
     }
 }
+const EVENT_NAME: &str = "#event_simpleName";
+
+fn reads_event_name(state: &Flow) -> bool {
+    !state.produces(EVENT_NAME)
+        && !state.conditional(EVENT_NAME)
+        && !state.unverified(EVENT_NAME)
+        && !state.absent(EVENT_NAME)
+}
+
+fn constrain_events(state: &mut Flow, mut values: BTreeSet<String>) {
+    if let Some(previous) = &state.event_values {
+        values.retain(|value| previous.contains(value));
+    }
+    state.event_values = Some(Rc::new(values));
+}
+
+fn constrain_event_call(state: &mut Flow, call: &Call) {
+    if !call.name.eq_ignore_ascii_case("in") || !reads_event_name(state) {
+        return;
+    }
+    let Some(resolved) = crate::catalog::resolve(call) else {
+        return;
+    };
+    if resolved.diagnostics.is_empty()
+        && resolved
+            .arguments
+            .get("field")
+            .is_some_and(|v| fields_of(v) == [EVENT_NAME])
+        && resolved
+            .arguments
+            .get("ignoreCase")
+            .and_then(|v| v.boolean())
+            != Some(true)
+        && let Some(values) = resolved
+            .arguments
+            .get("values")
+            .and_then(|v| v.string_array())
+        && values.iter().all(|value| !value.contains(['*', '?']))
+    {
+        constrain_events(state, values.into_iter().collect());
+    }
+}
+
+fn constrain_event_filter(state: &mut Flow, filter: &Filter) {
+    match filter {
+        Filter::Call(call) => constrain_event_call(state, call),
+        Filter::And(filters) => {
+            for filter in filters {
+                constrain_event_filter(state, filter);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn check_record_kinds(p: &Pipeline, state: &Flow, out: &mut GroundingScan<'_>, nested: bool) {
     if state.scope == Scope::default()
         && state.origin == Origin::Deployment
@@ -2197,6 +2270,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
         let removed = state.removed.clone();
         match step {
             Step::Filter(f) => {
+                constrain_event_filter(&mut state, f);
                 scan_filter(f, &state, out, false);
                 for pattern in language::validate::positive_regexes(f) {
                     if let Ok(info) = language::validate::regex_analysis(pattern) {
@@ -2270,6 +2344,7 @@ fn scan_pipeline(p: &Pipeline, mut state: Flow, out: &mut GroundingScan<'_>) -> 
                 add(&linked, field, out);
             }
             Step::Call(c) => {
+                constrain_event_call(&mut state, c);
                 let exported = scan_call(c, &state, out, false);
                 if let Some(resolved) = crate::catalog::resolve(c) {
                     let spec = resolved.function;
@@ -3191,9 +3266,11 @@ fn ground(
         let sources = decoded_p
             .sources
             .iter()
-            .filter(|source| source_matches_requirement(source, &r))
+            .filter(|source| {
+                source_matches_requirement(source, &r) && !event_family_mismatch(source, &r)
+            })
             .collect::<Vec<_>>();
-        let matches = decoded_p
+        let mut matches = decoded_p
             .fields
             .iter()
             .filter(|f| {
@@ -3202,6 +3279,23 @@ fn ground(
                     && (!r.array || f.is_array == Some(true) || f.data_type == "array")
             })
             .collect::<Vec<_>>();
+        let namespace = |field: &environment::LegacyField| {
+            sources
+                .iter()
+                .find(|s| s.id == field.source_id)
+                .and_then(|source| source.selectors.as_ref())
+                .map(field_namespace)
+                .expect("matched field has a source namespace")
+        };
+        let mut ambiguity = None;
+        if matches.len() > 1 {
+            let namespaces: BTreeSet<_> = matches.iter().map(|field| namespace(field)).collect();
+            if has_unique_exact_namespace(&namespaces, &r.scope) {
+                matches.retain(|field| exact_namespace(namespace(field), &r.scope));
+            } else {
+                ambiguity = Some(ambiguous_field_basis(&namespaces));
+            }
+        }
         if matches.len() == 1 {
             let f = &matches[0];
             let source = sources
@@ -3309,16 +3403,16 @@ fn ground(
                 &mut g,
                 key.clone(),
                 if matches.len() > 1 {
-                    "multiple source-specific observations; not interchangeable"
+                    ambiguity.unwrap_or_else(|| AMBIGUOUS_FIELD.into())
                 } else {
-                    "query-supplied; not measured in selected pack"
-                }
-                .into(),
+                    "query-supplied; not measured in selected pack".into()
+                },
             );
             if context.require_observed {
                 g.missing.push(key);
             }
         }
+        selected.retain(|source| !event_family_mismatch(source, &r));
         if compare
             && !selected.is_empty()
             && !r.field.starts_with('@')
@@ -3592,6 +3686,75 @@ fn map_gap<'a>(
     }
 }
 
+const AMBIGUOUS_FIELD: &str = "multiple source-specific observations; not interchangeable";
+
+type FieldNamespace<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+
+fn field_namespace(selectors: &environment::Selectors) -> FieldNamespace<'_> {
+    (
+        selectors.repo.as_deref(),
+        selectors.type_.as_deref(),
+        selectors.event_family.as_deref(),
+        selectors.sourcetype.as_deref(),
+    )
+}
+
+fn exact_namespace((repo, kind, event, sourcetype): FieldNamespace<'_>, scope: &Scope) -> bool {
+    repo == scope.repo.as_deref()
+        && kind == scope.type_.as_deref()
+        && event.is_none()
+        && (sourcetype.is_none() || sourcetype == kind)
+}
+
+fn has_unique_exact_namespace(namespaces: &BTreeSet<FieldNamespace<'_>>, scope: &Scope) -> bool {
+    namespaces
+        .iter()
+        .filter(|&&namespace| exact_namespace(namespace, scope))
+        .count()
+        == 1
+}
+
+fn ambiguous_field_basis(namespaces: &BTreeSet<FieldNamespace<'_>>) -> String {
+    let labels = namespaces
+        .iter()
+        .map(|&(repo, kind, event, sourcetype)| {
+            let mut label = selector_text(repo, kind);
+            for (field, value) in [("#event_simpleName", event), ("@sourcetype", sourcetype)] {
+                if let Some(value) = value {
+                    if !label.is_empty() {
+                        label.push(' ');
+                    }
+                    label.push_str(&format!("{field}={value:?}"));
+                }
+            }
+            if label.is_empty() {
+                "unscoped".into()
+            } else {
+                label
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("{AMBIGUOUS_FIELD} ({labels}). Measure the field at the query's own scope.")
+}
+
+fn event_family_mismatch(source: &environment::LegacySource, r: &Requirement) -> bool {
+    source
+        .selectors
+        .as_ref()
+        .and_then(|selectors| selectors.event_family.as_ref())
+        .is_some_and(|stored| {
+            r.event_values
+                .as_ref()
+                .is_some_and(|values| !values.contains(stored))
+        })
+}
+
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {
     source.selectors.as_ref().is_some_and(|selectors| {
         r.scope
@@ -3691,14 +3854,10 @@ fn query_observation_basis(
                 .collect::<Vec<_>>();
             if !source_fields.is_empty()
                 && source_matches_requirement(source, r)
+                && !event_family_mismatch(source, r)
                 && let Some(selectors) = &source.selectors
             {
-                namespaces.insert((
-                    selectors.repo.clone(),
-                    selectors.type_.clone(),
-                    selectors.event_family.clone(),
-                    selectors.sourcetype.clone(),
-                ));
+                namespaces.insert(field_namespace(selectors));
             }
             let source_evidence = observation(pack, &source.provenance_ids);
             let source_negative = source.inventory_status == "stale"
@@ -3757,8 +3916,8 @@ fn query_observation_basis(
             contradictions.push((pack, provenance_ids, windows, snapshot_bound));
         }
     }
-    if namespaces.len() > 1 {
-        return Err("multiple source-specific observations; not interchangeable".into());
+    if namespaces.len() > 1 && !has_unique_exact_namespace(&namespaces, &r.scope) {
+        return Err(ambiguous_field_basis(&namespaces));
     }
     let source_id = crate::discovery::source_id(&r.scope);
     let mut matching = false;

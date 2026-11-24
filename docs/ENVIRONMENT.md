@@ -230,6 +230,8 @@ The provenance validator accepts these values:
 
 Strict grounding needs at least one qualifying type/status pair among the provenance references of **both** the selected source and the matched field. A qualifying record may coexist with retained stale or nonqualifying records. Source inventory must be `inventoried`, `observed-only`, or `reconciled`, with no explicit `evidence.observed: false`. The field must be observed, with no explicit `coverage.observed: false`. Historical `not-reobserved` fields and stale sources remain ineligible; source selectors, tag/data namespaces, array shape, and unambiguous field matching still apply.
 
+When several field namespaces match, a single namespace at the query's exact repository and type scope resolves the ambiguity. This requires a source without an event family and with no sourcetype or a sourcetype equal to its type. If ambiguity remains, the grounding report lists the competing selectors. Pack field evidence from a different event family cannot ground a query that selects an exact event name or an exact list of event names with `in()`.
+
 There is no age cutoff: retrieval dates are preserved and the operator judges recency. Import validates record structure and references, not whether an observation occurred. Changing labels cannot create evidence or turn a declaration into a deployment observation.
 
 ## Refresh and failure behavior
