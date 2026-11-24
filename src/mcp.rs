@@ -23,12 +23,20 @@ pub struct Normalized {
 }
 
 pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
-    normalize_classified(raw, true)
+    normalize_framed(raw, true)
+}
+
+pub(crate) fn normalize_framed(raw: &[u8], extended: bool) -> Result<Normalized, Diagnostic> {
+    normalize_classified(raw, true, extended)
 }
 
 // `hosted` classifies an error object inside `result`; without it such an answer is a shape error.
-fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
-    let value = result_frame(parse_saved_result(raw)?)?;
+fn normalize_classified(
+    raw: &[u8],
+    hosted: bool,
+    extended: bool,
+) -> Result<Normalized, Diagnostic> {
+    let (value, _) = decode_frame(raw, extended)?;
     let object = value
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
@@ -41,42 +49,13 @@ fn normalize_classified(raw: &[u8], hosted: bool) -> Result<Normalized, Diagnost
     parse_result(body, raw, hosted)
 }
 
-fn result_frame(mut value: Value) -> Result<Value, Diagnostic> {
-    if let Some(wrapper) = value
-        .as_object_mut()
-        .filter(|object| object.contains_key("jsonrpc"))
+fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
+    // structuredContent is optional; when present it must equal the parsed text payload.
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "content" | "isError" | "structuredContent"))
     {
-        if wrapper.len() != 3
-            || wrapper["jsonrpc"] != "2.0"
-            || !wrapper
-                .get("id")
-                .is_some_and(|id| id.is_number() || id.is_string() || id.is_null())
-            || !wrapper.get("result").is_some_and(Value::is_object)
-        {
-            return Err(shape("Expected one JSON-RPC result response"));
-        }
-        value = wrapper.remove("result").expect("Result object was checked");
-    }
-    if let Value::Array(items) = value {
-        return Ok(Value::Object(Map::from_iter([(
-            "content".into(),
-            Value::Array(items),
-        )])));
-    }
-    Ok(value)
-}
-
-fn envelope_text(object: &Map<String, Value>) -> Result<(bool, &str), Diagnostic> {
-    if object.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "content" | "isError" | "structuredContent" | "_meta"
-        )
-    }) || object.get("_meta").is_some_and(|meta| !meta.is_object())
-    {
-        return Err(shape(
-            "MCP text envelope has unexpected fields or invalid metadata",
-        ));
+        return Err(shape("MCP text envelope has unexpected fields"));
     }
     let is_error = match object.get("isError") {
         None => false,
@@ -90,23 +69,11 @@ fn envelope_text(object: &Map<String, Value>) -> Result<(bool, &str), Diagnostic
         .ok_or_else(|| shape("MCP text envelope must contain one text item"))?;
     let item = content[0]
         .as_object()
-        .filter(|item| {
-            item.get("type").and_then(Value::as_str) == Some("text")
-                && item
-                    .keys()
-                    .all(|key| matches!(key.as_str(), "type" | "text" | "annotations"))
-                && item.get("annotations").is_none_or(Value::is_object)
-        })
+        .filter(|item| item.len() == 2 && item.get("type").and_then(Value::as_str) == Some("text"))
         .ok_or_else(|| shape("MCP text envelope must contain a text item"))?;
-    let text = item
-        .get("text")
-        .and_then(Value::as_str)
+    let text = item["text"]
+        .as_str()
         .ok_or_else(|| shape("MCP text envelope text must be a string"))?;
-    Ok((is_error, text))
-}
-
-fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
-    let (is_error, text) = envelope_text(object)?;
 
     if is_error {
         if let Ok(Value::Object(inner)) = serde_json::from_str::<Value>(text) {
@@ -163,6 +130,62 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
         ));
     }
     Ok(body)
+}
+
+// Strip only framing metadata. The original bytes are still the evidence.
+fn decode_frame(raw: &[u8], extended: bool) -> Result<(Value, bool), Diagnostic> {
+    let mut value = parse_result_json(raw, extended)?;
+    let mut changed = extended && raw.starts_with(b"\xef\xbb\xbf");
+    if !extended {
+        return Ok((value, changed));
+    }
+    if let Some(wrapper) = value.as_object_mut()
+        && wrapper.len() == 3
+        && wrapper
+            .get("jsonrpc")
+            .is_some_and(|version| version == "2.0")
+        && wrapper
+            .get("id")
+            .is_some_and(|id| id.is_number() || id.is_string() || id.is_null())
+        && wrapper
+            .get("result")
+            .and_then(Value::as_object)
+            .is_some_and(|inner| inner.contains_key("content") || inner.contains_key("result"))
+    {
+        value = wrapper.remove("result").expect("Result object was checked");
+        changed = true;
+    }
+    if let Value::Array(items) = value {
+        value = json!({"content":items});
+        changed = true;
+    }
+    if let Some(object) = value.as_object_mut()
+        && object.contains_key("content")
+        && object
+            .get("_meta")
+            .is_none_or(|v| v.is_null() || v.is_object())
+    {
+        changed |= object.remove("_meta").is_some();
+        if object.get("structuredContent").is_some_and(Value::is_null) {
+            object.remove("structuredContent");
+            changed = true;
+        }
+        if let Some(items) = object.get_mut("content").and_then(Value::as_array_mut)
+            && let [item] = items.as_mut_slice()
+            && let Some(item) = item.as_object_mut()
+            && ["_meta", "annotations"]
+                .iter()
+                .all(|key| item.get(*key).is_none_or(|v| v.is_null() || v.is_object()))
+        {
+            changed |= item.remove("_meta").is_some();
+            changed |= item.remove("annotations").is_some();
+        }
+    }
+    Ok((value, changed))
+}
+
+pub(crate) fn uses_extended_framing(raw: &[u8]) -> bool {
+    decode_frame(raw, true).is_ok_and(|(_, changed)| changed)
 }
 
 fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
@@ -263,13 +286,14 @@ fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Di
 
 /// Recognize the hosted search tool's final error answer from its exact decoded shape.
 pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
-    hosted_body_ending(hosted_answer_body(raw)?.as_object()?)
+    hosted_attempt_ending_framed(raw, true)
 }
 
-pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
-    let Some(value) = hosted_answer_body(raw) else {
-        return false;
-    };
+pub(crate) fn hosted_attempt_ending_framed(raw: &[u8], extended: bool) -> Option<&'static str> {
+    hosted_body_ending(hosted_answer_body(raw, extended)?.as_object()?)
+}
+
+pub(crate) fn hosted_answer_identifies_call(value: &Value) -> bool {
     value
         .get("trace_id")
         .and_then(Value::as_str)
@@ -279,21 +303,36 @@ pub(crate) fn hosted_answer_identifies_call(raw: &[u8]) -> bool {
             .is_some_and(|body| hosted_body_ending(body) == Some("timed-out"))
 }
 
-fn hosted_answer_body(raw: &[u8]) -> Option<Value> {
-    let value = result_frame(parse_saved_result(raw).ok()?).ok()?;
-    let object = value.as_object()?;
-    if !object.contains_key("content") {
-        return Some(value);
+pub(crate) fn hosted_answer_body(raw: &[u8], extended: bool) -> Option<Value> {
+    let (mut value, _) = decode_frame(raw, extended).ok()?;
+    if value.as_object()?.contains_key("content") {
+        let object = value.as_object()?;
+        if object
+            .keys()
+            .any(|k| !matches!(k.as_str(), "content" | "isError" | "structuredContent"))
+            || object.get("isError").is_some_and(|v| !v.is_boolean())
+        {
+            return None;
+        }
+        let content = object.get("content")?.as_array()?;
+        if content.len() != 1 {
+            return None;
+        }
+        let item = content[0].as_object()?;
+        if item.len() != 2 || item.get("type")?.as_str()? != "text" {
+            return None;
+        }
+        let body = parse_repeated_json(
+            item.get("text")?.as_str()?.as_bytes(),
+            "Invalid hosted answer",
+        )
+        .ok()?;
+        if object.get("structuredContent").is_some_and(|v| *v != body) {
+            return None;
+        }
+        value = body;
     }
-    let (_, text) = envelope_text(object).ok()?;
-    let body = parse_repeated_json(text.as_bytes(), "Invalid hosted answer").ok()?;
-    if object
-        .get("structuredContent")
-        .is_some_and(|copy| *copy != body)
-    {
-        return None;
-    }
-    Some(body)
+    Some(value)
 }
 
 fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
@@ -384,6 +423,10 @@ fn shape(message: &str) -> Diagnostic {
 /// (see `parse_repeated_json`). Callers that keep the value (for example `assess`) must still pass it
 /// through [`normalize`] before trusting it.
 pub fn parse_saved_result(raw: &[u8]) -> Result<Value, Diagnostic> {
+    parse_result_json(raw, true)
+}
+
+fn parse_result_json(raw: &[u8], extended: bool) -> Result<Value, Diagnostic> {
     if raw.len() > MAX_RESULT_BYTES {
         return Err(Diagnostic::error(
             "MCP_TOO_LARGE",
@@ -391,7 +434,11 @@ pub fn parse_saved_result(raw: &[u8]) -> Result<Value, Diagnostic> {
         ));
     }
     parse_repeated_json(
-        raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw),
+        if extended {
+            raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw)
+        } else {
+            raw
+        },
         "MCP search result must be valid UTF-8 JSON",
     )
 }
@@ -540,6 +587,8 @@ pub struct Answer {
     pub outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
     pub raw_hex: String,
     pub raw_sha256: String,
     pub ingested_at: String,
@@ -713,7 +762,10 @@ fn raw_hex(raw: &[u8]) -> String {
     encoded
 }
 fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, Diagnostic> {
-    Ok(normalize(&answer_bytes(answer)?))
+    Ok(normalize_framed(
+        &answer_bytes(answer)?,
+        answer.extended_result_framing,
+    ))
 }
 fn answer_bytes(answer: &Answer) -> Result<Vec<u8>, Diagnostic> {
     capture_bytes(&answer.raw_hex, &answer.raw_sha256)
@@ -745,7 +797,8 @@ fn earlier_hosted_diagnostic(producer: &str, raw: &[u8], saved: &Diagnostic) -> 
         producer,
         "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
     ) && producer != env!("CARGO_PKG_VERSION")
-        && normalize_classified(raw, false).is_err_and(|earlier| same_diagnostic(saved, &earlier))
+        && normalize_classified(raw, false, false)
+            .is_err_and(|earlier| same_diagnostic(saved, &earlier))
 }
 fn same_diagnostic(a: &Diagnostic, b: &Diagnostic) -> bool {
     serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
@@ -1774,6 +1827,7 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
                 repository: state.request.environment.view.clone(),
                 outcome,
                 trace_id,
+                extended_result_framing: uses_extended_framing(&raw),
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
                 ingested_at,
@@ -1954,6 +2008,9 @@ mod recovery_tests {
                 json!([item]),
                 json!({"content":[{"type":"text","text":payload.to_string(),
                     "annotations":{"audience":["assistant"]}}]}),
+                json!({"content":[{"type":"text","text":payload.to_string(),"_meta":{}}]}),
+                json!({"content":[{"type":"text","text":payload.to_string(),
+                    "annotations":null,"_meta":null}],"_meta":null,"structuredContent":null}),
             ];
             let mut bom = b"\xef\xbb\xbf".to_vec();
             bom.extend(serde_json::to_vec(&payload).unwrap());
@@ -1962,6 +2019,8 @@ mod recovery_tests {
                 .map(|frame| frame.to_string().into_bytes())
                 .chain([bom])
             {
+                assert!(uses_extended_framing(&raw));
+                assert_eq!(normalize_framed(&raw, false).unwrap_err().code, "MCP_SHAPE");
                 match code {
                     Some(code) => assert_eq!(normalize(&raw).unwrap_err().code, code),
                     None => {
@@ -1971,6 +2030,24 @@ mod recovery_tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn json_rpc_errors_use_the_original_error_classification() {
+        for (message, code) in [
+            ("Server failure", "MCP_TOOL_ERROR"),
+            ("Request timed out", "MCP_DEADLINE"),
+        ] {
+            let raw = json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":message}})
+                .to_string();
+            let saved = normalize_framed(raw.as_bytes(), false).unwrap_err();
+            assert!(!uses_extended_framing(raw.as_bytes()));
+            assert_eq!(saved.code, code);
+            assert!(same_diagnostic(
+                &saved,
+                &normalize(raw.as_bytes()).unwrap_err()
+            ));
         }
     }
 

@@ -720,6 +720,8 @@ pub struct RawSnapshot {
     pub sha256: String,
     pub retrieved_at: String,
     pub raw_hex: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
 }
 
 impl RawSnapshot {
@@ -737,8 +739,19 @@ impl RawSnapshot {
             sha256: sha256_hex(raw),
             retrieved_at: retrieved_at.into(),
             raw_hex,
+            extended_result_framing: false,
         })
     }
+    pub(crate) fn new_search_result(raw: &[u8], retrieved_at: &str) -> Result<Self, Diagnostic> {
+        let mut snapshot = Self::new(raw, retrieved_at)?;
+        snapshot.extended_result_framing = mcp::uses_extended_framing(raw);
+        Ok(snapshot)
+    }
+
+    pub(crate) fn normalized_result(&self) -> Result<mcp::Normalized, Diagnostic> {
+        mcp::normalize_framed(&self.bytes()?, self.extended_result_framing)
+    }
+
     pub fn bytes(&self) -> Result<Vec<u8>, Diagnostic> {
         environment::parse_time(&self.retrieved_at)?;
         if self.raw_hex.len() > mcp::MAX_RESULT_BYTES * 2 || !self.raw_hex.len().is_multiple_of(2) {
@@ -2006,7 +2019,7 @@ impl InventoryState {
                         "Refresh result requires an exact completed settlement.",
                     ));
                 }
-                refresh_rows(&result.bytes()?)?;
+                refresh_rows(&result.bytes()?, result.extended_result_framing)?;
             } else if attempt.phase == RefreshPhase::Imported {
                 return Err(fail("Imported refresh is missing its original result."));
             }
@@ -2112,7 +2125,7 @@ impl InventoryState {
             if attempt.phase == RefreshPhase::Imported
                 && attempt.environment == target.environment
                 && let Some(result) = &attempt.result
-                && refresh_rows(&result.bytes()?).is_ok()
+                && refresh_rows(&result.bytes()?, result.extended_result_framing).is_ok()
             {
                 let end = environment::parse_time(&attempt.arguments.end)?;
                 last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
@@ -2121,7 +2134,11 @@ impl InventoryState {
         for scout in &self.scouting {
             if scout.plan.environment == target.environment
                 && scout.plan.arguments.repository == target.environment.view
-                && refresh_rows(&scout.snapshot.bytes()?).is_ok()
+                && refresh_rows(
+                    &scout.snapshot.bytes()?,
+                    scout.snapshot.extended_result_framing,
+                )
+                .is_ok()
             {
                 let end = environment::parse_time(&scout.plan.arguments.end)?;
                 last_successful = Some(last_successful.map_or(end, |previous| end.max(previous)));
@@ -2786,7 +2803,7 @@ impl InventoryState {
         raw: &[u8],
         retrieved_at: &str,
     ) -> Result<usize, Diagnostic> {
-        let rows = refresh_rows(raw)?;
+        let rows = refresh_rows(raw, true)?;
         let mut candidate = self.clone();
         let index = candidate
             .refresh_attempts
@@ -2863,7 +2880,7 @@ impl InventoryState {
                 usize::from(candidate.queue_inventory_work(source, vec![], novel, new_source)?);
         }
         let attempt = &mut candidate.refresh_attempts[index];
-        attempt.result = Some(RawSnapshot::new(raw, retrieved_at)?);
+        attempt.result = Some(RawSnapshot::new_search_result(raw, retrieved_at)?);
         attempt.phase = RefreshPhase::Imported;
         candidate.validate()?;
         *self = candidate;
@@ -3021,7 +3038,7 @@ impl InventoryState {
             {
                 return Err(fail("Scouting belongs to another environment."));
             }
-            if mcp::normalize(&scout.snapshot.bytes()?)?.rows.len() != scout.rows {
+            if scout.snapshot.normalized_result()?.rows.len() != scout.rows {
                 return Err(fail("Scouting row count differs from saved evidence."));
             }
         }
@@ -3185,7 +3202,7 @@ impl InventoryState {
         }
         let evidence = ScoutEvidence {
             plan: plan.clone(),
-            snapshot: RawSnapshot::new(raw, retrieved_at)?,
+            snapshot: RawSnapshot::new_search_result(raw, retrieved_at)?,
             rows: result.rows.len(),
         };
         if self.scouting.iter().any(|scout| {
@@ -3813,8 +3830,8 @@ pub(crate) fn validate_refresh_settlement(
 }
 
 type RefreshRows = Vec<(Scope, Vec<String>, u64)>;
-fn refresh_rows(raw: &[u8]) -> Result<RefreshRows, Diagnostic> {
-    let result = mcp::normalize(raw)?;
+fn refresh_rows(raw: &[u8], extended: bool) -> Result<RefreshRows, Diagnostic> {
+    let result = mcp::normalize_framed(raw, extended)?;
     if result.rows.len() >= 10_000 {
         return Err(fail(
             "Cap-sized refresh results cannot establish a complete metadata capture.",

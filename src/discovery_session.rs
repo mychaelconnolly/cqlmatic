@@ -45,6 +45,8 @@ struct TerminalEvidence {
     file: PathBuf,
     raw_hex: String,
     raw_sha256: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    extended_result_framing: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -223,13 +225,20 @@ fn ended(outcome: &str) -> bool {
     )
 }
 
-fn reused_evidence(state: &State, before: usize, hash: &str) -> bool {
+fn reused_evidence(state: &State, before: usize, hash: &str, body: Option<&Value>) -> bool {
+    let matches_capture = |raw_hex: &str, raw_sha256: &str| {
+        raw_sha256 == hash
+            || body.is_some_and(|body| {
+                capture_bytes(raw_hex, raw_sha256)
+                    .is_ok_and(|prior| hosted_answer_body(&prior, true).as_ref() == Some(body))
+            })
+    };
     state.session.as_ref().is_some_and(|s| {
         s.attempts[..before].iter().any(|a| {
             a.terminal
                 .iter()
                 .chain(a.rejected_results.iter().map(|r| &r.evidence))
-                .any(|e| e.raw_sha256 == hash)
+                .any(|e| matches_capture(&e.raw_hex, &e.raw_sha256))
                 || (a.outcome == "complete"
                     && state
                         .answers
@@ -237,7 +246,7 @@ fn reused_evidence(state: &State, before: usize, hash: &str) -> bool {
                             &state.request.environment.view,
                             &a.probe,
                         ))
-                        .is_some_and(|answer| answer.raw_sha256 == hash))
+                        .is_some_and(|answer| matches_capture(&answer.raw_hex, &answer.raw_sha256)))
         })
     })
 }
@@ -282,15 +291,17 @@ pub fn earlier_release_ended(state: &State, now: &str) -> bool {
         && rejected
             .iter()
             .all(|r| r.evidence.raw_sha256 == evidence.raw_sha256)
-        && !reused_evidence(state, earlier.len(), &evidence.raw_sha256)
+        && !reused_evidence(state, earlier.len(), &evidence.raw_sha256, None)
         && elapsed(state, now).is_err_and(|d| d.code == "MCP_DEADLINE")
-        && capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)
-            .is_ok_and(|raw| hosted_attempt_ending(&raw).is_some() || normalize(&raw).is_ok())
+        && capture_bytes(&evidence.raw_hex, &evidence.raw_sha256).is_ok_and(|raw| {
+            hosted_attempt_ending_framed(&raw, false).is_some()
+                || normalize_framed(&raw, false).is_ok()
+        })
 }
 
-fn attempt_ending(raw: &[u8], probe: &Probe) -> Option<&'static str> {
-    hosted_attempt_ending(raw).or_else(|| {
-        (normalize(raw).is_ok() && complete_result(raw, probe).is_err())
+fn attempt_ending(raw: &[u8], probe: &Probe, extended: bool) -> Option<&'static str> {
+    hosted_attempt_ending_framed(raw, extended).or_else(|| {
+        (normalize_framed(raw, extended).is_ok() && complete_result(raw, probe, extended).is_err())
             .then_some("completed-unusable")
     })
 }
@@ -543,23 +554,27 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
             )
         {
             let raw = capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)?;
+            let extended = evidence.extended_result_framing;
             if terminal && ended(&attempt.outcome) {
-                let valid_ending =
-                    if historical_ended_attempts && attempt.outcome == "completed-unusable" {
-                        // Historical list completion is independent of current measurement rules.
-                        normalize(&raw).is_ok()
-                    } else {
-                        attempt_ending(&raw, &attempt.probe) == Some(attempt.outcome.as_str())
-                    };
+                let valid_ending = if historical_ended_attempts
+                    && attempt.outcome == "completed-unusable"
+                {
+                    // Historical list completion is independent of current measurement rules.
+                    normalize_framed(&raw, extended).is_ok()
+                } else {
+                    attempt_ending(&raw, &attempt.probe, extended) == Some(attempt.outcome.as_str())
+                };
                 if !valid_ending
-                    || (crate::mcp::hosted_answer_identifies_call(&raw)
-                        && reused_evidence(state, index, &evidence.raw_sha256))
+                    || hosted_answer_body(&raw, extended).is_some_and(|body| {
+                        hosted_answer_identifies_call(&body)
+                            && reused_evidence(state, index, &evidence.raw_sha256, None)
+                    })
                 {
                     return Err(tampered());
                 }
             }
             if terminal && attempt.outcome == "completed" {
-                complete_result(&raw, &attempt.probe).map_err(|_| tampered())?;
+                complete_result(&raw, &attempt.probe, extended).map_err(|_| tampered())?;
             }
             if terminal && session.transport == Transport::Mcp && attempt.outcome == "cancelled" {
                 validate_cancellation(state, attempt, &id, &raw).map_err(|_| tampered())?;
@@ -1064,8 +1079,8 @@ fn resume_locked(writer: &storage::Writer, state: &mut State) -> Result<StepOutp
     }
 }
 
-fn complete_result(raw: &[u8], probe: &Probe) -> Result<Normalized, Diagnostic> {
-    let normalized = normalize(raw)?;
+fn complete_result(raw: &[u8], probe: &Probe, extended: bool) -> Result<Normalized, Diagnostic> {
+    let normalized = normalize_framed(raw, extended)?;
     if normalized.rows.len() >= 10000 {
         return Err(error(
             "SEARCH_ROW_LIMIT",
@@ -1141,20 +1156,22 @@ pub fn step_resumable(
         }
         let raw = storage::read_bytes(file, MAX_CAPTURE_BYTES as u64)?;
         let now = discovery::timestamp();
-        let normalized = complete_result(&raw, &attempt.probe);
+        let extended = uses_extended_framing(&raw);
+        let normalized = complete_result(&raw, &attempt.probe, extended);
         let result = match normalized {
             Ok(result) => result,
             Err(d) => {
-                if let Some(outcome) = attempt_ending(&raw, &attempt.probe) {
+                if let Some(outcome) = attempt_ending(&raw, &attempt.probe, extended) {
                     let count = state
                         .session
                         .as_ref()
                         .expect("session checked")
                         .attempts
                         .len();
-                    if crate::mcp::hosted_answer_identifies_call(&raw)
-                        && reused_evidence(&state, count - 1, &sha256_hex(&raw))
-                    {
+                    if hosted_answer_body(&raw, extended).is_some_and(|body| {
+                        hosted_answer_identifies_call(&body)
+                            && reused_evidence(&state, count - 1, &sha256_hex(&raw), Some(&body))
+                    }) {
                         return Err(error(
                             "MCP_RESULT_REUSED",
                             "This answer was already retained by an earlier attempt.",
@@ -1167,6 +1184,7 @@ pub fn step_resumable(
                         file: path_identity(file)?,
                         raw_hex: raw_hex(&raw),
                         raw_sha256: sha256_hex(&raw),
+                        extended_result_framing: extended,
                     });
                     session.pause_clock(&now)?;
                     let mut output = match elapsed(&state, &now) {
@@ -1203,6 +1221,7 @@ pub fn step_resumable(
                         file: path_identity(file)?,
                         raw_hex: raw_hex(&raw),
                         raw_sha256: sha256_hex(&raw),
+                        extended_result_framing: extended,
                     },
                     diagnostic: d.clone(),
                 });
@@ -1224,6 +1243,7 @@ pub fn step_resumable(
                 file: path_identity(file)?,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
+                extended_result_framing: extended,
             });
             session.pause_clock(&now)?;
             return fail_state(&writer, &mut state, d);
@@ -1248,6 +1268,7 @@ pub fn step_resumable(
                 trace_id: result.trace_id,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
+                extended_result_framing: extended,
                 ingested_at: now.clone(),
                 diagnostic: None,
             },
@@ -1390,6 +1411,7 @@ pub fn settle_cancelled(
         file: path_identity(evidence_file)?,
         raw_hex: raw_hex(&raw),
         raw_sha256: sha256_hex(&raw),
+        extended_result_framing: false,
     });
     session.pause_clock(&discovery::timestamp())?;
     state.status = "paused".into();
