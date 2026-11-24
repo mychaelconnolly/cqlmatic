@@ -2162,8 +2162,12 @@ mod tests {
         };
         let old = shell.fail_open(&command(&args, "codex", shell).unwrap());
         let settings = json!({"hooks": {POST_TOOL_USE: [matcher_hook(".*", &old, true)]}});
+        #[cfg(windows)]
+        let alias = directory.join("STATE.JSON");
+        #[cfg(not(windows))]
+        let alias = child.join("../state.json");
         let args = CaptureArgs {
-            state: Some(child.join("../state.json")),
+            state: Some(alias),
             ..args
         };
         let direct = command(&args, "codex", shell).unwrap();
