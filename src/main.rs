@@ -2069,15 +2069,12 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
             let credentials = network::Credentials::load(credentials_file.as_deref(), &e)?;
             let mut client = network::FalconClient::new(&e, credentials)?;
             let deadline = Instant::now() + Duration::from_secs(30);
-            let result = if let Some(id) = id {
-                client.parser(&id, template, deadline)?
-            } else {
-                if template {
-                    return Err(input_error("--template requires --id."));
-                }
-                client.list_parsers(offset, limit, deadline)?
-            };
-            output(&result, true)?;
+            match (id, template) {
+                (Some(id), false) => output(&client.raw_parser(&id, deadline)?, true)?,
+                (Some(id), true) => output(&client.parser(&id, true, deadline)?, true)?,
+                (None, false) => output(&client.list_parsers(offset, limit, deadline)?, true)?,
+                (None, true) => return Err(input_error("--template requires --id.")),
+            }
             Ok(0)
         }
     }

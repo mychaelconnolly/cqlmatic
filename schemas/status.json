@@ -75,6 +75,27 @@
         "cases"
       ]
     },
+    "CarriedParserReview": {
+      "description": "The latest capture saved a reviewed parser definition again as other bytes with the same\nparsed resource, so the review made against `reviewed_sha256` stands on `saved_sha256`.",
+      "type": "object",
+      "properties": {
+        "parser_id": {
+          "type": "string"
+        },
+        "reviewed_sha256": {
+          "type": "string"
+        },
+        "saved_sha256": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parser_id",
+        "reviewed_sha256",
+        "saved_sha256"
+      ]
+    },
     "CaseId": {
       "type": "string",
       "enum": [
@@ -444,6 +465,12 @@
             "$ref": "#/$defs/QueryObservation"
           }
         },
+        "carried_parser_reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CarriedParserReview"
+          }
+        },
         "context": {
           "type": [
             "string",
@@ -592,6 +619,20 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/SourceStatus"
+          }
+        },
+        "suspended_parser_exclusions": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "suspended_parser_reviews": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SuspendedParserReview"
           }
         },
         "target": {
@@ -807,6 +848,30 @@
             "evidence"
           ]
         }
+      ]
+    },
+    "ParserExclusion": {
+      "type": "object",
+      "properties": {
+        "parser_id": {
+          "type": "string"
+        },
+        "parser_sha256": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reviewed_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "parser_id",
+        "parser_sha256",
+        "reviewed_at",
+        "reason"
       ]
     },
     "ParserRun": {
@@ -1595,6 +1660,67 @@
       "additionalProperties": false,
       "required": [
         "schema_version"
+      ]
+    },
+    "SuspendedParserReview": {
+      "description": "A binding or exclusion whose reviewed parser definition is not in the latest saved capture.\nIt satisfies nothing until a capture saves that definition again, as the same bytes or as\nthe same parsed resource.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "binding": {
+              "$ref": "#/$defs/ParserBinding"
+            },
+            "kind": {
+              "type": "string",
+              "const": "binding"
+            },
+            "resource_sha256": {
+              "description": "SHA-256 of the reviewed parser resource after JSON parsing.",
+              "type": "string"
+            },
+            "source_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "source_id",
+            "resource_sha256",
+            "binding"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "exclusion": {
+              "$ref": "#/$defs/ParserExclusion"
+            },
+            "kind": {
+              "type": "string",
+              "const": "exclusion"
+            },
+            "position": {
+              "description": "Zero-based slot in the combined active and suspended exclusion order.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint",
+              "minimum": 0
+            },
+            "resource_sha256": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "resource_sha256",
+            "exclusion"
+          ]
+        }
       ]
     },
     "TargetScope": {
