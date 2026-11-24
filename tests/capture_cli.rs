@@ -178,7 +178,11 @@ fn probe_search(probe: &Value, response: Value) -> Value {
 }
 
 fn body(rows: Value) -> String {
-    json!({"result": rows, "trace_id": "00000000-0000-0000-0000-000000000000"}).to_string()
+    body_with_trace(rows, "00000000-0000-0000-0000-000000000000")
+}
+
+fn body_with_trace(rows: Value, trace_id: &str) -> String {
+    json!({"result": rows, "trace_id": trace_id}).to_string()
 }
 
 const WRITTEN_CLIENTS: [(&str, &str, &str, &str); 5] = [
@@ -2315,7 +2319,11 @@ fn capture_answers_the_outstanding_probe_of_a_run() {
     );
 
     // The hosted server's gateway carries the same arguments one level down.
-    let mut through_gateway = probe_search(&second["probe"], counted);
+    let second_counted = json!(body_with_trace(
+        json!([{"events": 10}]),
+        "00000000-0000-0000-0000-000000000002",
+    ));
+    let mut through_gateway = probe_search(&second["probe"], second_counted);
     through_gateway["tool_name"] = json!(format!("mcp__{SERVER}__execute_tool"));
     through_gateway["tool_input"] =
         json!({"name": second["probe"]["tool"], "arguments": second["probe"]["arguments"]});
@@ -2430,12 +2438,16 @@ fn capture_answers_a_probe_despite_a_leftover_copy() {
         let name = entry.unwrap().file_name().into_string().unwrap();
         assert!(!name.starts_with("probe-"), "{name}");
     }
+    let second_counted = body_with_trace(
+        json!([{"events": 10}]),
+        "00000000-0000-0000-0000-000000000002",
+    );
     let leftover = captures.join(format!(
         "probe-{}.json",
-        &cqlmatic::sha256_hex(counted.as_bytes())[..12]
+        &cqlmatic::sha256_hex(second_counted.as_bytes())[..12]
     ));
-    fs::write(&leftover, &counted).unwrap();
-    home.capture(probe_search(&second["probe"], json!(counted)));
+    fs::write(&leftover, &second_counted).unwrap();
+    home.capture(probe_search(&second["probe"], json!(second_counted)));
     assert_eq!(home.next_probe()["state"], "complete");
     assert_eq!(home.tally(), json!({"probe-answered": 2}));
 }
@@ -2480,7 +2492,11 @@ fn capture_answers_the_probe_of_a_resumed_earlier_run() {
     };
     let second = reserve(&[]);
     assert_eq!(second["state"], "probe", "{second}");
-    home.capture(probe_search(&second["probe"], json!(counted)));
+    let second_counted = body_with_trace(
+        json!([{"events": 10}]),
+        "00000000-0000-0000-0000-000000000002",
+    );
+    home.capture(probe_search(&second["probe"], json!(second_counted)));
     let after = reserve(&[]);
     assert_eq!(after["state"], "complete", "{after}");
     assert_eq!(home.tally()["probe-answered"], 1);
