@@ -7379,11 +7379,15 @@ mod tests {
         action(json!({"kind":"set-discovery-mode","mode":"full"}));
         action(
             json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
-            "context":"Synthetic notice fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
+            "context":"Synthetic notice fixture","expected_sources":[{"type":"first"}]}),
         );
         action(
             json!({"kind":"record-inventory-hints","environment":environment,"hints":[
-            {"source":{"type":"first"},"fields":["user"]},{"source":{"type":"second"},"fields":["user"]}]}),
+            {"source":{"type":"first"},"fields":["user"]},{"source":{"type":"second"},"fields":[]}]}),
+        );
+        action(
+            json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
+            "context":"Synthetic notice fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
         );
         // One query is not enough for a Full measurement, so this run is recorded as failed.
         let prepared = action(
