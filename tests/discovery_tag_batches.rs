@@ -1271,3 +1271,239 @@ fn as_earlier_plan(path: &Path) {
     write(path, &saved);
     mcp::inspect_state(path).unwrap();
 }
+
+#[test]
+fn intervening_recent_capture_does_not_hide_equal_time_contradiction() {
+    // Full discovery over W = 00:00..01:00 with an intervening positive A tag-batch between
+    // a positive W dataset-facet and a contradictory W measurement at the exact same retrieval time.
+    let explicit_zero = World {
+        datasets: vec![json!({"#event.dataset":"synthetic","events":50})],
+        ..World::new(&["user"])
+            .a(&[("#event.dataset", 1)])
+            .w(&[("user", 100), ("#event.dataset", 0)])
+    };
+    let r = request(json!({
+        "population_fields":[{"source":{"repo":"synthetic_repo"},"fields":["user","#event.dataset"]}]
+    }));
+    let (_, _, pack, report) = native(&r, &explicit_zero, |_| Some("2026-02-01T00:00:00Z"));
+    assert_eq!(report.status, "error", "{:?}", report.diagnostics);
+    assert!(pack.is_none());
+    assert!(
+        report.diagnostics[0]
+            .message
+            .contains("Tied field measurements"),
+        "{:?}",
+        report.diagnostics
+    );
+
+    // Same pattern when an empty W record-kind-facet contradicts the positive W dataset-facet.
+    let empty_kind = World {
+        datasets: vec![json!({"#event.dataset":"synthetic","events":50})],
+        ..World::new(&["user"])
+            .a(&[("#event.dataset", 1)])
+            .w(&[("user", 100)])
+    };
+    let r_kind = request(json!({"kind_fields":["#event.dataset"]}));
+    let (_, _, pack_kind, report_kind) =
+        native(&r_kind, &empty_kind, |_| Some("2026-02-01T00:00:00Z"));
+    assert_eq!(report_kind.status, "error", "{:?}", report_kind.diagnostics);
+    assert!(pack_kind.is_none());
+    assert!(
+        report_kind.diagnostics[0]
+            .message
+            .contains("Tied field measurements"),
+        "{:?}",
+        report_kind.diagnostics
+    );
+}
+
+#[test]
+fn two_runs_apply_within_run_precedence_separately() {
+    // Two v3 runs: Run 0 has positive W=00:00..01:00 dataset-facet + zero A tag-batch;
+    // Run 1 has empty W=00:45..01:00 dataset-facet + zero tag-batch + `later` field.
+    // The stored work proof for `#event.dataset` must cite Run 1's tag-batch (matching
+    // the active pack's observed=false), not Run 0's positive dataset-facet.
+    let dir = Temp::new();
+    let inventory = Inventory::new(&dir);
+    inventory.call(json!({
+        "kind":"record-inventory-hints",
+        "environment":{"cloud":"us1","tenant":"00000000000000000000000000000000","view":VIEW},
+        "hints":[{"source":{"type":"synthetic"},"fields":["#event.dataset","later"]}]
+    }));
+    let saved = read(&inventory.state());
+    let sid = saved["sources"][0]["id"].as_str().unwrap().to_string();
+    inventory.call(json!({
+        "kind":"review-source","source_id":sid,"purpose":"Synthetic",
+        "data_model":"Synthetic","reviewed_at":"2026-01-02T02:00:00Z","evidence":"Synthetic"
+    }));
+    inventory.call(json!({
+        "kind":"parser-not-applicable","source_id":sid,"reason":"falcon-sensor-native",
+        "reviewed_at":"2026-01-02T02:00:00Z","evidence":"Synthetic"
+    }));
+
+    let drive_run = |start: &str, end: &str, world: &World, run_index: usize| -> (Value, String) {
+        let mut step = inventory.call(json!({
+            "kind":"prepare-discovery","start":start,"end":end,"max_queries":40,"max_seconds":600
+        }));
+        let state = read(&inventory.state());
+        let checkpoint = read(Path::new(
+            state["discovery_runs"][run_index]["state_path"]
+                .as_str()
+                .unwrap(),
+        ));
+        let req: DiscoverRequest = serde_json::from_value(checkpoint["request"].clone()).unwrap();
+        let mut batch_id = String::new();
+        while step["action"]["relay"]["status"] == "needs-probes" {
+            let wire = step["action"]["relay"]["probes"][0].clone();
+            if wire["kind"] == "tag-batch" {
+                batch_id = wire["probe_id"].as_str().unwrap().to_string();
+            }
+            let rows = world.rows(&req, &wire_probe(&wire));
+            let id = wire["probe_id"].clone();
+            inventory
+                .call(json!({"kind":"dispatch-discovery","run_index":run_index,"probe_id":id}));
+            let file = dir.path(&format!("run{run_index}-{}.json", id.as_str().unwrap()));
+            write(&file, &json!({"result":rows}));
+            step = inventory.call(json!({
+                "kind":"discovery-step","run_index":run_index,
+                "answers":[{"probe_id":id,"result_file":file}]
+            }));
+        }
+        assert_eq!(step["action"]["relay"]["status"], "complete", "{step}");
+        (step, batch_id)
+    };
+
+    let run0_world = World {
+        total_a: 100,
+        total_w: 100,
+        datasets: vec![json!({"#event.dataset":"synthetic","events":50})],
+        ..World::new(&["user"]).a(&[("user", 20)]).w(&[("user", 20)])
+    };
+    drive_run(
+        "2026-01-02T00:00:00Z",
+        "2026-01-02T01:00:00Z",
+        &run0_world,
+        0,
+    );
+    assert!(read(&inventory.state())["pending_inventory"][0]["resolution"].is_null());
+
+    let run1_world = World {
+        total_a: 100,
+        total_w: 100,
+        ..World::new(&["later"])
+            .a(&[("later", 20)])
+            .w(&[("later", 20)])
+    };
+    let (done, run1_batch_id) = drive_run(
+        "2026-01-02T00:45:00Z",
+        "2026-01-02T01:00:00Z",
+        &run1_world,
+        1,
+    );
+    let active_pack = PathBuf::from(done["status"]["active_pack"]["path"].as_str().unwrap());
+    let pack: Pack = serde_json::from_slice(&fs::read(&active_pack).unwrap()).unwrap();
+    assert_eq!(
+        field(&pack, "#event.dataset")["coverage"]["observed"],
+        false
+    );
+    let check = strict_check(
+        &dir,
+        &active_pack,
+        r##"#type="synthetic" #event.dataset=* | head(1)"##,
+    );
+    assert_eq!(check.status.code(), Some(1));
+
+    let resolved = read(&inventory.state());
+    let evidence = resolved["pending_inventory"][0]["resolution"]["evidence"]
+        .as_array()
+        .unwrap();
+    let dataset_proof = evidence
+        .iter()
+        .find_map(|entry| {
+            entry["fields"]
+                .get("#event.dataset")
+                .and_then(Value::as_str)
+        })
+        .expect("resolved #event.dataset proof");
+    assert_eq!(dataset_proof, run1_batch_id);
+}
+
+#[test]
+fn post_batch_hint_keeps_population_proof_over_later_compatible_facet() {
+    // Full discovery on a 10-minute window with plain `event.kind` measured by population (20/100)
+    // and then a singleton record-kind-facet (`event.kind=e`). Queueing the hint right after the
+    // tag-batch (before population) must still apply current-plan precedence and keep population
+    // as the resolved field proof.
+    let dir = Temp::new();
+    let inventory = Inventory::new(&dir);
+    inventory.call(json!({"kind":"set-discovery-mode","mode":"full"}));
+    let saved = read(&inventory.state());
+    let sid = saved["sources"][0]["id"].as_str().unwrap().to_string();
+    inventory.call(json!({
+        "kind":"review-source","source_id":sid,"purpose":"Synthetic",
+        "data_model":"Synthetic","reviewed_at":"2026-01-02T02:00:00Z","evidence":"Synthetic"
+    }));
+    inventory.call(json!({
+        "kind":"parser-not-applicable","source_id":sid,"reason":"falcon-sensor-native",
+        "reviewed_at":"2026-01-02T02:00:00Z","evidence":"Synthetic"
+    }));
+
+    let mut step = inventory.call(json!({
+        "kind":"prepare-discovery",
+        "start":"2026-01-02T00:00:00Z",
+        "end":"2026-01-02T00:10:00Z",
+        "max_queries":40,
+        "max_seconds":600
+    }));
+    let req = inventory.request();
+    let world = World {
+        total_a: 100,
+        total_w: 100,
+        ..World::new(&["event.kind"])
+            .a(&[("event.kind", 20)])
+            .w(&[("event.kind", 20)])
+            .facet("event.kind", &[("e", 20)])
+    };
+    let mut population_id = String::new();
+    let mut hinted = false;
+    while step["action"]["relay"]["status"] == "needs-probes" {
+        let probes = step["action"]["relay"]["probes"]
+            .as_array()
+            .unwrap()
+            .clone();
+        // Answer one probe per step so population runs before record-kind-facet and the hint
+        // arrives strictly after tag-batch and before population.
+        let wire = probes
+            .iter()
+            .find(|p| p["kind"] == "population")
+            .or_else(|| probes.first())
+            .unwrap()
+            .clone();
+        let kind = wire["kind"].as_str().unwrap().to_string();
+        let probe_id = wire["probe_id"].as_str().unwrap().to_string();
+        if kind == "population" {
+            population_id = probe_id.clone();
+        }
+        let rows = world.rows(&req, &wire_probe(&wire));
+        step = inventory.answer(&wire, rows);
+        if kind == "tag-batch" && !hinted {
+            hinted = true;
+            inventory.call(json!({
+                "kind":"record-inventory-hints",
+                "environment":{"cloud":"us1","tenant":"00000000000000000000000000000000","view":VIEW},
+                "hints":[{"source":{"type":"synthetic"},"fields":["event.kind"]}]
+            }));
+        }
+    }
+    assert_eq!(step["action"]["relay"]["status"], "complete", "{step}");
+    assert!(!population_id.is_empty());
+
+    let resolved = read(&inventory.state());
+    let evidence = resolved["pending_inventory"][0]["resolution"]["evidence"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        evidence[0]["fields"]["event.kind"], population_id,
+        "post-batch hint should keep population proof: {evidence:?}"
+    );
+}

@@ -808,27 +808,52 @@ type FieldCaptures = BTreeMap<String, (usize, bool, Option<f64>)>;
 /// The capture that proves each field of `source`, its presence and, for a population count, its
 /// rate. Without a selection (inventory work proofs) a tag batch column carries no rate; the
 /// chosen captures do not depend on it.
+pub(crate) type CaptureOrderingKey = (
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+    time::OffsetDateTime,
+);
+
+pub(crate) fn source_uses_tag_batch_policy(captures: &[Capture], source: &Scope) -> bool {
+    captures
+        .iter()
+        .any(|capture| &capture.probe.source == source && capture.probe.kind == "tag-batch")
+}
+
+pub(crate) fn capture_ordering_key(capture: &Capture) -> Result<CaptureOrderingKey, Diagnostic> {
+    capture_key(capture)
+}
+
+#[cfg(test)]
 pub(crate) fn field_captures(
     captures: &[Capture],
     source: &Scope,
 ) -> Result<FieldCaptures, Diagnostic> {
-    field_captures_for(captures, source, None)
+    let current_plan = source_uses_tag_batch_policy(captures, source);
+    field_captures_for(captures, source, None, current_plan)
+}
+
+pub(crate) fn field_captures_with_policy(
+    captures: &[Capture],
+    source: &Scope,
+    current_plan: bool,
+) -> Result<FieldCaptures, Diagnostic> {
+    field_captures_for(captures, source, None, current_plan)
 }
 
 fn field_captures_for(
     captures: &[Capture],
     source: &Scope,
     selected: Option<&BTreeSet<String>>,
+    current_plan: bool,
 ) -> Result<FieldCaptures, Diagnostic> {
-    // Captures of the current plan carry a tag batch; earlier-plan receipts keep their ordering.
-    let current_plan = captures
-        .iter()
-        .any(|capture| &capture.probe.source == source && capture.probe.kind == "tag-batch");
     let counted: BTreeSet<&str> = captures
         .iter()
         .filter(|capture| &capture.probe.source == source && capture.probe.kind == "population")
         .flat_map(|capture| capture.probe.fields.iter().map(String::as_str))
         .collect();
+    let mut seen_by_key: BTreeMap<(String, CaptureOrderingKey), (bool, Option<f64>)> =
+        BTreeMap::new();
     let mut result = FieldCaptures::new();
     for (index, capture) in captures
         .iter()
@@ -886,16 +911,22 @@ fn field_captures_for(
         };
         let key = capture_key(capture)?;
         for (field, observed, rate) in values {
-            if let Some(&(previous, previous_observed, previous_rate)) = result.get(&field) {
-                let previous_key = capture_key(&captures[previous])?;
-                if key == previous_key
-                    && (observed != previous_observed
-                        || rate.zip(previous_rate).is_some_and(|(a, b)| a != b))
-                {
+            // Check equal-time contradictions per (field, concrete window, retrieval instant)
+            // before winner reduction so an intervening narrower capture cannot mask a tie.
+            if let Some((seen_observed, seen_rate)) = seen_by_key.get_mut(&(field.clone(), key)) {
+                if observed != *seen_observed || rate.zip(*seen_rate).is_some_and(|(a, b)| a != b) {
                     return Err(fail(
                         "Tied field measurements contain contradictory presence or population rates.",
                     ));
                 }
+                if seen_rate.is_none() {
+                    *seen_rate = rate;
+                }
+            } else {
+                seen_by_key.insert((field.clone(), key), (observed, rate));
+            }
+            if let Some(&(previous, previous_observed, previous_rate)) = result.get(&field) {
+                let previous_key = capture_key(&captures[previous])?;
                 let keep = if current_plan {
                     keeps_previous(
                         (&captures[previous], previous_key, previous_observed),
@@ -1704,7 +1735,9 @@ impl<B: SearchBackend> Run<'_, B> {
             let sid = source_id(&s);
             let source_window = format!("{}/{}", self.request.start, self.request.end);
             let selected = population.keys().cloned().collect();
-            let measurements = field_captures_for(&self.report.captures, &s, Some(&selected))?;
+            let current_plan = source_uses_tag_batch_policy(&self.report.captures, &s);
+            let measurements =
+                field_captures_for(&self.report.captures, &s, Some(&selected), current_plan)?;
             let volume = self
                 .report
                 .captures

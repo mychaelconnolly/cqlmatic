@@ -2581,38 +2581,39 @@ impl InventoryState {
             {
                 continue;
             }
-            let mut captures = Vec::new();
-            let mut capture_runs = Vec::new();
-            for (run_index, run) in self.discovery_runs.iter().enumerate() {
-                let Some(report) = reports.get(run.state_path.as_str()) else {
-                    continue;
-                };
-                if !inventory_work_run_eligible(run_index, run, work, Some(&report.request_sha256))
-                    || !work.fields.is_empty()
-                        && run.mode == DiscoveryMode::Quick
-                        && run.quick_depth == QuickDepth::SourcesOnly
-                {
-                    continue;
-                }
-                for capture in &report.captures {
-                    if capture.probe.source != work.source {
-                        continue;
-                    }
-                    let id = discovery::probe_id(&environment.view, &capture.probe);
-                    if run_index < work.after_run
-                        && work
-                            .capture_boundary
-                            .as_ref()
-                            .is_some_and(|boundary| boundary.accepted_probe_ids.contains(&id))
-                    {
-                        continue;
-                    }
-                    captures.push(capture.clone());
-                    capture_runs.push((run_index, id));
-                }
-            }
             let mut proofs = BTreeMap::new();
             if work.fields.is_empty() {
+                let mut captures = Vec::new();
+                let mut capture_runs = Vec::new();
+                for (run_index, run) in self.discovery_runs.iter().enumerate() {
+                    let Some(report) = reports.get(run.state_path.as_str()) else {
+                        continue;
+                    };
+                    if !inventory_work_run_eligible(
+                        run_index,
+                        run,
+                        work,
+                        Some(&report.request_sha256),
+                    ) {
+                        continue;
+                    }
+                    for capture in &report.captures {
+                        if capture.probe.source != work.source {
+                            continue;
+                        }
+                        let id = discovery::probe_id(&environment.view, &capture.probe);
+                        if run_index < work.after_run
+                            && work
+                                .capture_boundary
+                                .as_ref()
+                                .is_some_and(|boundary| boundary.accepted_probe_ids.contains(&id))
+                        {
+                            continue;
+                        }
+                        captures.push(capture);
+                        capture_runs.push((run_index, id));
+                    }
+                }
                 let Some(index) = captures.iter().rposition(|capture| {
                     capture.probe.kind == "volume"
                         && capture.receipt.events.first().is_some_and(|row| {
@@ -2638,13 +2639,88 @@ impl InventoryState {
                     },
                 );
             } else {
-                let measured = discovery::field_captures(&captures, &work.source)?;
-                if !work.fields.iter().all(|field| measured.contains_key(field)) {
+                // Evaluate within-run precedence per completed report using each run's intact
+                // policy before accepted-ID filtering, then compare per-run winners across runs
+                // using standard (end, start, retrieved_at) ordering.
+                let mut best: BTreeMap<
+                    String,
+                    (
+                        usize,
+                        String,
+                        discovery::CaptureOrderingKey,
+                        bool,
+                        Option<f64>,
+                    ),
+                > = BTreeMap::new();
+                for (run_index, run) in self.discovery_runs.iter().enumerate() {
+                    let Some(report) = reports.get(run.state_path.as_str()) else {
+                        continue;
+                    };
+                    if !inventory_work_run_eligible(
+                        run_index,
+                        run,
+                        work,
+                        Some(&report.request_sha256),
+                    ) || (run.mode == DiscoveryMode::Quick
+                        && run.quick_depth == QuickDepth::SourcesOnly)
+                    {
+                        continue;
+                    }
+                    let current_plan =
+                        discovery::source_uses_tag_batch_policy(&report.captures, &work.source);
+                    let mut run_captures = Vec::new();
+                    let mut run_ids = Vec::new();
+                    for capture in &report.captures {
+                        if capture.probe.source != work.source {
+                            continue;
+                        }
+                        let id = discovery::probe_id(&environment.view, &capture.probe);
+                        if run_index < work.after_run
+                            && work
+                                .capture_boundary
+                                .as_ref()
+                                .is_some_and(|boundary| boundary.accepted_probe_ids.contains(&id))
+                        {
+                            continue;
+                        }
+                        run_captures.push(capture.clone());
+                        run_ids.push(id);
+                    }
+                    if run_captures.is_empty() {
+                        continue;
+                    }
+                    let measured = discovery::field_captures_with_policy(
+                        &run_captures,
+                        &work.source,
+                        current_plan,
+                    )?;
+                    for (field, (capture_index, observed, rate)) in measured {
+                        let key = discovery::capture_ordering_key(&run_captures[capture_index])?;
+                        let id = run_ids[capture_index].clone();
+                        if let Some((_, _, prev_key, prev_observed, prev_rate)) = best.get(&field) {
+                            if key == *prev_key
+                                && (observed != *prev_observed
+                                    || rate.zip(*prev_rate).is_some_and(|(a, b)| a != b))
+                            {
+                                return Err(Diagnostic::error(
+                                    "DISCOVERY_EVIDENCE",
+                                    "Tied field measurements contain contradictory presence or population rates.",
+                                ));
+                            }
+                            if key < *prev_key
+                                || (key == *prev_key && (rate.is_none() || prev_rate.is_some()))
+                            {
+                                continue;
+                            }
+                        }
+                        best.insert(field, (run_index, id, key, observed, rate));
+                    }
+                }
+                if !work.fields.iter().all(|field| best.contains_key(field)) {
                     continue;
                 }
                 for field in &work.fields {
-                    let (capture_index, _, _) = measured[field];
-                    let (run_index, id) = &capture_runs[capture_index];
+                    let (run_index, id, _, _, _) = &best[field];
                     let run = &self.discovery_runs[*run_index];
                     proofs
                         .entry(*run_index)
