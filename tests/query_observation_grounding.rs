@@ -861,3 +861,26 @@ fn a_captured_search_grounds_a_field_under_its_own_basis_and_warning() {
     assert!(codes.contains(&"CQL_CAPTURED_OBSERVATION"), "{codes:?}");
     assert!(!codes.contains(&"CQL_QUERY_OBSERVATION"), "{codes:?}");
 }
+
+#[test]
+fn sourcetype_alias_does_not_create_a_second_namespace() {
+    let mut typed = data();
+    typed.sources[0]["selectors"]["type"] = json!("logs");
+    let plain = pack(typed.clone(), "2026-01-10T00:00:00Z");
+
+    typed.sources[0]["selectors"]["sourcetype"] = json!("logs");
+    let equivalent = pack(typed.clone(), "2026-01-10T00:00:00Z");
+    let query = "#repo=synthetic #type=logs user=* | count()";
+    assert_eq!(
+        checked(query, Some(&plain), Some(&equivalent), &[]).outcome,
+        Outcome::Ready
+    );
+
+    typed.sources[0]["selectors"]["sourcetype"] = json!("parser-alias");
+    typed.fields[0]["coverage"]["observed"] = json!(false);
+    let narrower_negative = pack(typed, "2026-01-10T00:00:00Z");
+    assert_eq!(
+        checked(query, Some(&plain), Some(&narrower_negative), &[]).outcome,
+        Outcome::NeedsContext
+    );
+}

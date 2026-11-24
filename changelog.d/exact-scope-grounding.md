@@ -1,0 +1,1 @@
+- Ground fields from qualifying exact-scope observations when scopes overlap, and exclude evidence for event families that contradict the query's exact event selector.

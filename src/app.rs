@@ -624,6 +624,7 @@ struct Requirement {
     target: Option<String>,
     array: bool,
     scope: Scope,
+    sourcetype: Option<String>,
     field: String,
     derived: bool,
     conditional: bool,
@@ -671,6 +672,7 @@ struct Flow {
     target: Option<String>,
     field_target: Option<String>,
     scope: Scope,
+    sourcetype: Option<String>,
     derived: BTreeSet<String>,
     definite: BTreeSet<String>,
     conditional: BTreeSet<String>,
@@ -1185,6 +1187,7 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
             target: state.field_target.clone(),
             array: suffix.is_empty(),
             scope: state.scope.clone(),
+            sourcetype: state.sourcetype.clone(),
             field: mapped.clone(),
             derived: if suffix.is_empty() {
                 state.array_produces(array)
@@ -1214,6 +1217,7 @@ fn add(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         target: state.field_target.clone(),
         array: false,
         scope: state.scope.clone(),
+        sourcetype: state.sourcetype.clone(),
         field: field.into(),
         derived: state.produces(field)
             || array && state.array_produces(field)
@@ -1241,6 +1245,7 @@ fn add_array(state: &Flow, array: &str, out: &mut GroundingScan<'_>) {
         target: state.field_target.clone(),
         array: true,
         scope: state.scope.clone(),
+        sourcetype: state.sourcetype.clone(),
         derived: state.array_produces(&field) || element_written(&state.derived, &field),
         conditional: state.array_conditional(&field) || element_written(&state.conditional, &field),
         origin: state.origin,
@@ -1259,6 +1264,7 @@ fn add_unknown(state: &Flow, field: &str, out: &mut GroundingScan<'_>) {
         target: state.field_target.clone(),
         array: false,
         scope: state.scope.clone(),
+        sourcetype: state.sourcetype.clone(),
         field: field.into(),
         derived: false,
         conditional: false,
@@ -1877,7 +1883,7 @@ fn scan_queries(value: &Value, state: &Flow, out: &mut GroundingScan<'_>) {
         _ => {}
     }
 }
-fn selectors(filter: &Filter, found: &mut [BTreeSet<String>; 3]) {
+fn selectors(filter: &Filter, found: &mut [BTreeSet<String>; 4]) {
     match filter {
         Filter::Compare {
             field,
@@ -1888,6 +1894,7 @@ fn selectors(filter: &Filter, found: &mut [BTreeSet<String>; 3]) {
                 "#repo" => 0,
                 "#type" => 1,
                 "#event_simpleName" => 2,
+                "@sourcetype" => 3,
                 _ => return,
             };
             found[index].insert(text.clone());
@@ -1960,6 +1967,11 @@ fn merge_branches(incoming: &Flow, branches: Vec<Flow>) -> Flow {
             first.scope.clone()
         } else {
             Scope::default()
+        };
+        merged.sourcetype = if branches.iter().all(|b| b.sourcetype == first.sourcetype) {
+            first.sourcetype.clone()
+        } else {
+            None
         };
         merged.uncertain_source = branches.iter().any(|b| b.uncertain_source)
             || branches
@@ -2114,7 +2126,7 @@ fn unresolved_selector(filter: &Filter, anchor: SourceAnchor) -> bool {
     }
 }
 fn constrain(state: &mut Flow, steps: &[Step]) {
-    let mut found: [BTreeSet<String>; 3] = Default::default();
+    let mut found: [BTreeSet<String>; 4] = Default::default();
     let mut filters = Vec::new();
     let semantic_steps: Vec<_> = steps.iter().map(Step::semantic).collect();
     for (index, step) in semantic_steps.iter().enumerate() {
@@ -2130,10 +2142,17 @@ fn constrain(state: &mut Flow, steps: &[Step]) {
             _ => break,
         }
     }
+    if state.produces("@sourcetype")
+        || state.conditional("@sourcetype")
+        || state.unverified("@sourcetype")
+    {
+        found[3].clear();
+    }
     for (slot, mut values) in [
         &mut state.scope.repo,
         &mut state.scope.type_,
         &mut state.scope.event,
+        &mut state.sourcetype,
     ]
     .into_iter()
     .zip(found)
@@ -2991,21 +3010,13 @@ fn ground(
         .map(|e| e.view.clone());
     let mut decoded = Vec::<DecodedPack>::new();
     for p in pack.into_iter().chain(evidence.and_then(|e| e.active_pack)) {
-        if !decoded.iter().any(|d| std::ptr::eq(d.pack, p)) {
+        if !decoded
+            .iter()
+            .any(|d| d.pack.content_digest == p.content_digest)
+        {
             decoded.push(DecodedPack::new(p));
         }
     }
-    let decoded_of = |p: &Pack| {
-        decoded
-            .iter()
-            .find(|d| std::ptr::eq(d.pack, p))
-            .expect("every pack is decoded")
-    };
-    let evidence_packs: Vec<_> = pack
-        .into_iter()
-        .chain(evidence.and_then(|e| e.active_pack))
-        .map(decoded_of)
-        .collect();
     let mut query_observed = false;
     let (reads, in_selector) = requirements(
         pipeline,
@@ -3155,8 +3166,19 @@ fn ground(
             record_basis(&mut g, key, "language-built-in".into());
             continue;
         }
+        let field_observation =
+            match select_pack_field(&r, &decoded, pack, context.accept_partial_coverage) {
+                Ok(observation) => observation,
+                Err(basis) => {
+                    record_basis(&mut g, key.clone(), basis);
+                    if context.require_observed {
+                        g.missing.push(key);
+                    }
+                    continue;
+                }
+            };
         if let Some(evidence) = evidence {
-            match query_observation_basis(&r, &evidence_packs, evidence) {
+            match query_observation_basis(&r, &decoded, evidence) {
                 Ok(Some(basis)) => {
                     query_observed = true;
                     record_basis(&mut g, key, basis);
@@ -3172,7 +3194,16 @@ fn ground(
                 Ok(None) => {}
             }
         }
-        let Some(p) = pack else {
+        if let Some((basis, observed, stale)) = field_observation {
+            record_basis(&mut g, key.clone(), basis);
+            if context.require_observed {
+                if stale {
+                    g.stale.push(key);
+                } else if !observed {
+                    g.missing.push(key);
+                }
+            }
+        } else if pack.is_none() {
             record_basis(
                 &mut g,
                 key.clone(),
@@ -3186,135 +3217,11 @@ fn ground(
             if context.require_observed && evidence.is_some() {
                 g.missing.push(key);
             }
-            continue;
-        };
-        let decoded_p = decoded_of(p);
-        let sources = decoded_p
-            .sources
-            .iter()
-            .filter(|source| source_matches_requirement(source, &r))
-            .collect::<Vec<_>>();
-        let matches = decoded_p
-            .fields
-            .iter()
-            .filter(|f| {
-                field_matches_requirement(f, &r)
-                    && sources.iter().any(|s| s.id == f.source_id)
-                    && (!r.array || f.is_array == Some(true) || f.data_type == "array")
-            })
-            .collect::<Vec<_>>();
-        if matches.len() == 1 {
-            let f = &matches[0];
-            let source = sources
-                .iter()
-                .find(|s| s.id == f.source_id)
-                .expect("matched field belongs to a selected source");
-            let historical = f.refresh_status.as_deref() == Some("not-reobserved");
-            let field_observed = f
-                .coverage
-                .as_ref()
-                .and_then(|c| c.observed)
-                .unwrap_or(f.evidence_kind == "observed");
-            let source_observed = matches!(
-                source.inventory_status.as_str(),
-                "inventoried" | "observed-only" | "reconciled"
-            ) && source.evidence.as_ref().and_then(|e| e.observed)
-                != Some(false);
-            let field_evidence = observation(p, &f.provenance_ids);
-            let source_evidence = observation(p, &source.provenance_ids);
-            let stale = historical
-                || source.inventory_status == "stale"
-                || field_evidence == Observation::Stale
-                || source_evidence == Observation::Stale;
-            let partial_applicable =
-                context.accept_partial_coverage && !stale && field_observed && source_observed;
-            let field_partial = if partial_applicable && field_evidence == Observation::Missing {
-                partial_observation(p, &f.provenance_ids)
-            } else {
-                None
-            };
-            let source_partial = if partial_applicable && source_evidence == Observation::Missing {
-                partial_observation(p, &source.provenance_ids)
-            } else {
-                None
-            };
-            let accepted_partial = partial_applicable
-                && (field_evidence == Observation::Qualified || field_partial.is_some())
-                && (source_evidence == Observation::Qualified
-                    || (source.evidence.as_ref().and_then(|e| e.observed) == Some(true)
-                        && source_partial.is_some()))
-                && (field_evidence != Observation::Qualified
-                    || source_evidence != Observation::Qualified);
-            let observed = field_observed
-                && source_observed
-                && ((field_evidence == Observation::Qualified
-                    && source_evidence == Observation::Qualified)
-                    || accepted_partial);
-            let evidence = if historical {
-                "historical; not re-observed".into()
-            } else if source.inventory_status == "stale" {
-                "source marked stale".into()
-            } else if stale {
-                "observation evidence marked stale".into()
-            } else if accepted_partial {
-                let mut details = Vec::new();
-                if field_evidence != Observation::Qualified {
-                    details.push(format!(
-                        "field {}",
-                        field_partial.expect("accepted field coverage")
-                    ));
-                }
-                if source_evidence != Observation::Qualified {
-                    details.push(format!(
-                        "source {}",
-                        source_partial.expect("accepted source coverage")
-                    ));
-                }
-                format!(
-                    "observed with accepted partial coverage; {}",
-                    details.join("; ")
-                )
-            } else if observed {
-                "observed in a bounded sample".into()
-            } else if !source_observed {
-                "source has no current observed evidence".into()
-            } else if f.evidence_kind == "documented"
-                && f.coverage.as_ref().is_none_or(|c| c.observed.is_none())
-            {
-                "listed field namespace; population not measured".into()
-            } else if !field_observed {
-                "not observed in the selected sample".into()
-            } else {
-                let missing = match (
-                    field_evidence == Observation::Qualified,
-                    source_evidence == Observation::Qualified,
-                ) {
-                    (false, true) => "field",
-                    (true, false) => "source",
-                    _ => "field and source",
-                };
-                format!(
-                    "no qualifying deployment observation provenance for {missing}; requires source_type ngsiem-api, mcp-observation, or console-export and coverage_status complete, observed-only, or reconciled"
-                )
-            };
-            record_basis(&mut g, key.clone(), evidence);
-            if context.require_observed {
-                if stale {
-                    g.stale.push(key);
-                } else if !observed {
-                    g.missing.push(key);
-                }
-            }
         } else {
             record_basis(
                 &mut g,
                 key.clone(),
-                if matches.len() > 1 {
-                    "multiple source-specific observations; not interchangeable"
-                } else {
-                    "query-supplied; not measured in selected pack"
-                }
-                .into(),
+                "query-supplied; not measured in selected pack".into(),
             );
             if context.require_observed {
                 g.missing.push(key);
@@ -3593,6 +3500,22 @@ fn map_gap<'a>(
     }
 }
 
+fn distinct_sourcetype(selectors: &environment::Selectors) -> Option<&str> {
+    selectors
+        .sourcetype
+        .as_deref()
+        .filter(|value| Some(*value) != selectors.type_.as_deref())
+}
+
+fn event_family_mismatch(source: &environment::LegacySource, r: &Requirement) -> bool {
+    source
+        .selectors
+        .as_ref()
+        .and_then(|selectors| selectors.event_family.as_ref())
+        .zip(r.scope.event.as_ref())
+        .is_some_and(|(stored, event)| stored != event)
+}
+
 fn source_matches_requirement(source: &environment::LegacySource, r: &Requirement) -> bool {
     source.selectors.as_ref().is_some_and(|selectors| {
         r.scope
@@ -3606,8 +3529,9 @@ fn source_matches_requirement(source: &environment::LegacySource, r: &Requiremen
             && (!r.relaxed_type
                 || ((r.scope.type_.is_some() || selectors.type_.is_none())
                     && selectors.event_family.is_none()
-                    && selectors.sourcetype.is_none()))
+                    && distinct_sourcetype(selectors).is_none()))
             && (!r.relaxed_event || selectors.event_family.is_none())
+            && !event_family_mismatch(source, r)
     })
 }
 
@@ -3656,14 +3580,309 @@ impl<'a> DecodedPack<'a> {
                 .collect(),
         }
     }
+
+    fn fields_for(&self, r: &Requirement) -> BTreeMap<&str, Vec<&environment::LegacyField>> {
+        let mut by_source = BTreeMap::<_, Vec<_>>::new();
+        for field in self
+            .fields
+            .iter()
+            .filter(|field| field_matches_requirement(field, r))
+        {
+            by_source
+                .entry(field.source_id.as_str())
+                .or_default()
+                .push(field);
+        }
+        by_source
+    }
+}
+
+struct PackField<'a> {
+    pack: &'a Pack,
+    source: &'a environment::LegacySource,
+    field: &'a environment::LegacyField,
+}
+
+impl PackField<'_> {
+    fn is_array(&self) -> bool {
+        self.field.is_array == Some(true) || self.field.data_type == "array"
+    }
+
+    fn observation(&self, accept_partial: bool) -> (String, bool, bool) {
+        let Self {
+            pack: p,
+            source,
+            field: f,
+        } = *self;
+        let historical = f.refresh_status.as_deref() == Some("not-reobserved");
+        let field_observed = f
+            .coverage
+            .as_ref()
+            .and_then(|c| c.observed)
+            .unwrap_or(f.evidence_kind == "observed");
+        let source_observed = matches!(
+            source.inventory_status.as_str(),
+            "inventoried" | "observed-only" | "reconciled"
+        ) && source.evidence.as_ref().and_then(|e| e.observed) != Some(false);
+        let field_evidence = observation(p, &f.provenance_ids);
+        let source_evidence = observation(p, &source.provenance_ids);
+        let stale = historical
+            || source.inventory_status == "stale"
+            || field_evidence == Observation::Stale
+            || source_evidence == Observation::Stale;
+        let partial_applicable = accept_partial && !stale && field_observed && source_observed;
+        let field_partial = if partial_applicable && field_evidence == Observation::Missing {
+            partial_observation(p, &f.provenance_ids)
+        } else {
+            None
+        };
+        let source_partial = if partial_applicable && source_evidence == Observation::Missing {
+            partial_observation(p, &source.provenance_ids)
+        } else {
+            None
+        };
+        let accepted_partial = partial_applicable
+            && (field_evidence == Observation::Qualified || field_partial.is_some())
+            && (source_evidence == Observation::Qualified
+                || (source.evidence.as_ref().and_then(|e| e.observed) == Some(true)
+                    && source_partial.is_some()))
+            && (field_evidence != Observation::Qualified
+                || source_evidence != Observation::Qualified);
+        let observed = field_observed
+            && source_observed
+            && ((field_evidence == Observation::Qualified
+                && source_evidence == Observation::Qualified)
+                || accepted_partial);
+        let evidence = if historical {
+            "historical; not re-observed".into()
+        } else if source.inventory_status == "stale" {
+            "source marked stale".into()
+        } else if stale {
+            "observation evidence marked stale".into()
+        } else if accepted_partial {
+            let mut details = Vec::new();
+            if field_evidence != Observation::Qualified {
+                details.push(format!(
+                    "field {}",
+                    field_partial.expect("accepted field coverage")
+                ));
+            }
+            if source_evidence != Observation::Qualified {
+                details.push(format!(
+                    "source {}",
+                    source_partial.expect("accepted source coverage")
+                ));
+            }
+            format!(
+                "observed with accepted partial coverage; {}",
+                details.join("; ")
+            )
+        } else if observed {
+            "observed in a bounded sample".into()
+        } else if !source_observed {
+            "source has no current observed evidence".into()
+        } else if f.evidence_kind == "documented"
+            && f.coverage.as_ref().is_none_or(|c| c.observed.is_none())
+        {
+            "listed field namespace; population not measured".into()
+        } else if !field_observed {
+            "not observed in the selected sample".into()
+        } else {
+            let missing = match (
+                field_evidence == Observation::Qualified,
+                source_evidence == Observation::Qualified,
+            ) {
+                (false, true) => "field",
+                (true, false) => "source",
+                _ => "field and source",
+            };
+            format!(
+                "no qualifying deployment observation provenance for {missing}; requires source_type ngsiem-api, mcp-observation, or console-export and coverage_status complete, observed-only, or reconciled"
+            )
+        };
+        (evidence, observed, stale)
+    }
+}
+
+fn select_pack_field(
+    r: &Requirement,
+    packs: &[DecodedPack<'_>],
+    primary: Option<&Pack>,
+    accept_partial: bool,
+) -> Result<Option<(String, bool, bool)>, String> {
+    let mut related = Vec::new();
+    let mut mismatched_families = BTreeSet::new();
+    for decoded in packs {
+        let fields_by_source = decoded.fields_for(r);
+        for source in decoded
+            .sources
+            .iter()
+            .filter(|s| source_overlaps_scope(s, &r.scope))
+        {
+            let selectors = source
+                .selectors
+                .as_ref()
+                .expect("overlap requires selectors");
+            let fields = fields_by_source
+                .get(source.id.as_str())
+                .into_iter()
+                .flatten()
+                .copied();
+            if event_family_mismatch(source, r) {
+                if fields.count() > 0 {
+                    mismatched_families.extend(selectors.event_family.as_deref());
+                }
+                continue;
+            }
+            let scope = (
+                selectors.repo.as_deref(),
+                selectors.type_.as_deref(),
+                selectors.event_family.as_deref(),
+                distinct_sourcetype(selectors),
+            );
+            for field in fields {
+                let record = PackField {
+                    pack: decoded.pack,
+                    source,
+                    field,
+                };
+                related.push((scope, record));
+            }
+        }
+    }
+    let candidates = || {
+        related
+            .iter()
+            .filter(|(_, record)| source_matches_requirement(record.source, r))
+    };
+    let namespaces: BTreeSet<_> = candidates().map(|(scope, _)| *scope).collect();
+    let mut primary_fields = candidates().filter(|(_, record)| {
+        primary.is_some_and(|p| p.content_digest == record.pack.content_digest)
+            && (!r.array || record.is_array())
+    });
+    let single = primary_fields.next();
+    let multiple_primary = primary_fields.next().is_some();
+    let exact = candidates().filter(|((repo, kind, event, sourcetype), record)| {
+        *repo == r.scope.repo.as_deref()
+            && *kind == r.scope.type_.as_deref()
+            && event.is_none_or(|event| Some(event) == r.scope.event.as_deref())
+            && sourcetype.is_none_or(|value| Some(value) == r.sourcetype.as_deref())
+            && (!r.array || record.is_array())
+    });
+    let specificity = |(_, _, event, sourcetype): &(_, _, Option<&str>, Option<&str>)| {
+        usize::from(event.is_some()) + usize::from(sourcetype.is_some())
+    };
+    let best = exact.clone().map(|(scope, _)| specificity(scope)).max();
+    let mut exact = exact.filter(|(scope, _)| Some(specificity(scope)) == best);
+    // The selected pack is first. Matching snapshots at the same scope are
+    // guards on that record and do not contribute additional observations.
+    let preferred = exact.next();
+    let overlapping_exact =
+        preferred.is_some_and(|(scope, _)| related.iter().any(|(other, _)| other != scope));
+    if namespaces.len() > 1 || multiple_primary || overlapping_exact {
+        if let Some((scope, record)) = preferred
+            && primary.is_some()
+            && exact.all(|(other, duplicate)| {
+                other == scope && duplicate.pack.content_digest != record.pack.content_digest
+            })
+            && related.iter().all(|(_, other)| {
+                other.is_array() == record.is_array() && !field_negative(other.pack, other.field)
+            })
+            && !packs.iter().any(|decoded| {
+                decoded.sources.iter().any(|source| {
+                    source_overlaps_scope(source, &r.scope)
+                        && !event_family_mismatch(source, r)
+                        && (source_negative(decoded.pack, source)
+                            || source_measured_field(source, &r.field)
+                                && !related.iter().any(|(_, record)| {
+                                    record.pack.content_digest == decoded.pack.content_digest
+                                        && record.source.id == source.id
+                                }))
+                })
+            })
+        {
+            let observation = record.observation(false);
+            if observation.1 {
+                return Ok(Some(observation));
+            }
+        }
+        let scopes: BTreeSet<_> = related
+            .iter()
+            .map(|((repo, kind, event, sourcetype), _)| {
+                let mut label = selector_text(*repo, *kind);
+                for (field, value) in [("#event_simpleName", event), ("@sourcetype", sourcetype)] {
+                    if let Some(value) = value {
+                        if !label.is_empty() {
+                            label.push(' ');
+                        }
+                        label.push_str(&format!("{field}={value:?}"));
+                    }
+                }
+                if label.is_empty() {
+                    label.push_str("unscoped");
+                }
+                label
+            })
+            .collect();
+        let next = if r.scope.type_.is_none() {
+            "Add the applicable #type restriction or measure the intended scope."
+        } else {
+            "Measure the intended scope."
+        };
+        return Err(format!(
+            "multiple source-specific observations; not interchangeable ({}). {next}",
+            scopes.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if let Some((_, record)) = single {
+        return Ok(Some(record.observation(accept_partial)));
+    }
+    if !mismatched_families.is_empty() {
+        let event = r
+            .scope
+            .event
+            .as_deref()
+            .expect("mismatch requires a query event");
+        return Ok(Some((
+            format!(
+                "recorded event family ({}) differs from #event_simpleName={event:?}. Measure the field for the selected event family.",
+                mismatched_families
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            false,
+            false,
+        )));
+    }
+    Ok(None)
+}
+
+fn source_negative(pack: &Pack, source: &environment::LegacySource) -> bool {
+    source.inventory_status == "stale"
+        || source.evidence.as_ref().and_then(|e| e.observed) == Some(false)
+        || observation(pack, &source.provenance_ids) == Observation::Stale
+}
+
+fn field_negative(pack: &Pack, field: &environment::LegacyField) -> bool {
+    field.refresh_status.as_deref() == Some("not-reobserved")
+        || field.coverage.as_ref().and_then(|c| c.observed) == Some(false)
+        || observation(pack, &field.provenance_ids) == Observation::Stale
+}
+
+fn source_measured_field(source: &environment::LegacySource, field: &str) -> bool {
+    source.evidence.as_ref().is_some_and(|e| {
+        e.measured_fields
+            .as_ref()
+            .is_some_and(|fields| fields.iter().any(|name| name == field))
+    })
 }
 
 fn query_observation_basis(
     r: &Requirement,
-    packs: &[&DecodedPack<'_>],
+    packs: &[DecodedPack<'_>],
     evidence: GroundingEvidence<'_>,
 ) -> Result<Option<String>, String> {
-    let mut namespaces = BTreeSet::new();
     let mut contradictions = Vec::new();
     let mut active_contradiction = false;
     for decoded in packs {
@@ -3671,7 +3890,9 @@ fn query_observation_basis(
         let sources = decoded
             .sources
             .iter()
-            .filter(|source| source_overlaps_scope(source, &r.scope))
+            .filter(|source| {
+                source_overlaps_scope(source, &r.scope) && !event_family_mismatch(source, r)
+            })
             .collect::<Vec<_>>();
         let fields = decoded
             .fields
@@ -3690,44 +3911,13 @@ fn query_observation_basis(
                 .iter()
                 .filter(|field| field.source_id == source.id)
                 .collect::<Vec<_>>();
-            if !source_fields.is_empty()
-                && source_matches_requirement(source, r)
-                && let Some(selectors) = &source.selectors
-            {
-                namespaces.insert((
-                    selectors.repo.clone(),
-                    selectors.type_.clone(),
-                    selectors.event_family.clone(),
-                    selectors.sourcetype.clone(),
-                ));
-            }
-            let source_evidence = observation(pack, &source.provenance_ids);
-            let source_negative = source.inventory_status == "stale"
-                || source
-                    .evidence
-                    .as_ref()
-                    .and_then(|evidence| evidence.observed)
-                    == Some(false)
-                || source_evidence == Observation::Stale;
+            let source_negative = source_negative(pack, source);
             let negative_fields = source_fields
                 .into_iter()
-                .filter(|field| {
-                    field.refresh_status.as_deref() == Some("not-reobserved")
-                        || field
-                            .coverage
-                            .as_ref()
-                            .and_then(|coverage| coverage.observed)
-                            == Some(false)
-                        || observation(pack, &field.provenance_ids) == Observation::Stale
-                })
+                .filter(|field| field_negative(pack, field))
                 .collect::<Vec<_>>();
             let measured_absent = !fields.iter().any(|field| field.source_id == source.id)
-                && source.evidence.as_ref().is_some_and(|evidence| {
-                    evidence
-                        .measured_fields
-                        .as_ref()
-                        .is_some_and(|fields| fields.iter().any(|field| field == &r.field))
-                });
+                && source_measured_field(source, &r.field);
             if source_negative || !negative_fields.is_empty() || measured_absent {
                 contradicted = true;
                 if source_negative || measured_absent {
@@ -3757,9 +3947,6 @@ fn query_observation_basis(
                 .is_some_and(|active| active.content_digest == pack.content_digest);
             contradictions.push((pack, provenance_ids, windows, snapshot_bound));
         }
-    }
-    if namespaces.len() > 1 {
-        return Err("multiple source-specific observations; not interchangeable".into());
     }
     let source_id = crate::discovery::source_id(&r.scope);
     let mut matching = false;
