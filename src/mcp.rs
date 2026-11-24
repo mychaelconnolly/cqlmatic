@@ -3,7 +3,7 @@
 use std::{collections::HashSet, fmt};
 
 use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, value::RawValue};
 
 use crate::{
     contracts::Diagnostic,
@@ -36,7 +36,7 @@ fn normalize_classified(
     hosted: bool,
     extended: bool,
 ) -> Result<Normalized, Diagnostic> {
-    let (value, _) = decode_frame(raw, extended)?;
+    let DecodedFrame { value, .. } = decode_frame(raw, extended)?;
     let object = value
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
@@ -148,13 +148,24 @@ fn is_single_text_block(value: &Value) -> bool {
     })
 }
 
+struct DecodedFrame {
+    value: Value,
+    changed: bool,
+    rpc: bool,
+}
+
 // Strip only framing metadata. The original bytes are still the evidence.
-fn decode_frame(raw: &[u8], extended: bool) -> Result<(Value, bool), Diagnostic> {
+fn decode_frame(raw: &[u8], extended: bool) -> Result<DecodedFrame, Diagnostic> {
     let mut value = parse_result_json(raw, extended)?;
     let mut changed = extended && raw.starts_with(b"\xef\xbb\xbf");
     if !extended {
-        return Ok((value, changed));
+        return Ok(DecodedFrame {
+            value,
+            changed,
+            rpc: false,
+        });
     }
+    let mut rpc = false;
     if let Some(wrapper) = value.as_object_mut()
         && wrapper.len() == 3
         && wrapper
@@ -173,6 +184,7 @@ fn decode_frame(raw: &[u8], extended: bool) -> Result<(Value, bool), Diagnostic>
     {
         value = wrapper.remove("result").expect("Result object was checked");
         changed = true;
+        rpc = true;
     }
     if value.is_array() && is_single_text_block(&value) {
         value = Value::Object(Map::from_iter([("content".into(), value)]));
@@ -205,11 +217,15 @@ fn decode_frame(raw: &[u8], extended: bool) -> Result<(Value, bool), Diagnostic>
         changed |= item.remove("_meta").is_some();
         changed |= item.remove("annotations").is_some();
     }
-    Ok((value, changed))
+    Ok(DecodedFrame {
+        value,
+        changed,
+        rpc,
+    })
 }
 
 pub(crate) fn uses_extended_framing(raw: &[u8]) -> bool {
-    decode_frame(raw, true).is_ok_and(|(_, changed)| changed)
+    decode_frame(raw, true).is_ok_and(|frame| frame.changed)
 }
 
 fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
@@ -327,8 +343,7 @@ pub(crate) fn hosted_answer_identifies_call(value: &Value) -> bool {
             .is_some_and(|body| hosted_body_ending(body) == Some("timed-out"))
 }
 
-fn identified_measurement(raw: &[u8], extended: bool) -> Option<Value> {
-    let body = hosted_answer_body(raw, extended)?;
+fn identifies_measurement(body: &Value) -> bool {
     let has_job_id = ["metadata", "metaData"]
         .iter()
         .filter_map(|key| body.get(key))
@@ -338,36 +353,79 @@ fn identified_measurement(raw: &[u8], extended: bool) -> Option<Value> {
                 .filter_map(|key| metadata.get(key).and_then(Value::as_str))
                 .any(|id| !id.is_empty())
         });
-    (hosted_answer_identifies_call(&body) || has_job_id).then_some(body)
+    hosted_answer_identifies_call(body) || has_job_id
+}
+
+/// Compare a fresh identified result against retained captures without changing replay.
+fn verify_fresh_result(
+    raw: &[u8],
+    extended: bool,
+    is_reused: impl FnOnce(&str, Option<&RawValue>) -> bool,
+) -> Result<(), Diagnostic> {
+    if let Some((body, source)) = decode_hosted_answer(raw, extended)
+        && identifies_measurement(&body)
+        && is_reused(&sha256_hex(raw), source.exact_value(raw))
+    {
+        return Err(Diagnostic::error(
+            "MCP_RESULT_REUSED",
+            "This answer was already retained by an earlier attempt.",
+        ));
+    }
+    Ok(())
 }
 
 fn matches_retained_measurement(
     raw_hex: &str,
     hash: &str,
-    result: &Normalized,
-    body: &Value,
+    fresh_hash: &str,
+    fresh: Option<&RawValue>,
 ) -> bool {
-    hash == result.raw_sha256
-        || capture_bytes(raw_hex, hash)
-            .is_ok_and(|prior| hosted_answer_body(&prior, true).as_ref() == Some(body))
+    hash == fresh_hash
+        || fresh.is_some_and(|fresh| {
+            capture_bytes(raw_hex, hash).is_ok_and(|raw| {
+                decode_hosted_answer(&raw, true).is_some_and(|(_, source)| {
+                    source
+                        .exact_value(&raw)
+                        .is_some_and(|prior| exact_json_equal(prior, fresh))
+                })
+            })
+        })
 }
 
-fn reused_measurement() -> Diagnostic {
-    Diagnostic::error(
-        "MCP_RESULT_REUSED",
-        "This answer was already retained by an earlier attempt.",
-    )
+enum BodySource {
+    Bare,
+    Rpc,
+    Text(String),
 }
 
-fn matches_accepted_measurement(state: &State, result: &Normalized, body: &Value) -> bool {
-    state.answers.values().any(|answer| {
-        answer.outcome == "complete"
-            && matches_retained_measurement(&answer.raw_hex, &answer.raw_sha256, result, body)
-    })
+impl BodySource {
+    fn exact_value<'a>(&'a self, raw: &'a [u8]) -> Option<&'a RawValue> {
+        let bare = || first_raw_value(raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw));
+        match self {
+            Self::Bare => bare(),
+            Self::Rpc => {
+                let fields: BTreeMap<String, &RawValue> =
+                    serde_json::from_str(bare()?.get()).ok()?;
+                fields.get("result").copied()
+            }
+            Self::Text(text) => first_raw_value(text.as_bytes()),
+        }
+    }
+}
+
+fn first_raw_value(raw: &[u8]) -> Option<&RawValue> {
+    serde_json::Deserializer::from_slice(raw)
+        .into_iter::<&RawValue>()
+        .next()?
+        .ok()
 }
 
 pub(crate) fn hosted_answer_body(raw: &[u8], extended: bool) -> Option<Value> {
-    let (mut value, _) = decode_frame(raw, extended).ok()?;
+    decode_hosted_answer(raw, extended).map(|(body, _)| body)
+}
+
+fn decode_hosted_answer(raw: &[u8], extended: bool) -> Option<(Value, BodySource)> {
+    let DecodedFrame { mut value, rpc, .. } = decode_frame(raw, extended).ok()?;
     if value.as_object()?.contains_key("content") {
         let object = value.as_object()?;
         if object
@@ -393,9 +451,114 @@ pub(crate) fn hosted_answer_body(raw: &[u8], extended: bool) -> Option<Value> {
         if object.get("structuredContent").is_some_and(|v| *v != body) {
             return None;
         }
-        value = body;
+        let Value::String(text) = value["content"][0]["text"].take() else {
+            unreachable!("the text block was checked");
+        };
+        return Some((body, BodySource::Text(text)));
     }
-    Some(value)
+    Some((
+        value,
+        if rpc {
+            BodySource::Rpc
+        } else {
+            BodySource::Bare
+        },
+    ))
+}
+
+// The captures have already passed JSON and framing validation. Read number tokens from
+// that same body so comparison never rounds a decimal or converts a large integer to f64.
+fn exact_json_equal(left: &RawValue, right: &RawValue) -> bool {
+    let (left, right) = (left.get(), right.get());
+    if left == right {
+        return true;
+    }
+    match (left.as_bytes()[0], right.as_bytes()[0]) {
+        (b'{', b'{') => {
+            let Ok(left) = serde_json::from_str::<BTreeMap<String, &RawValue>>(left) else {
+                return false;
+            };
+            let Ok(right) = serde_json::from_str::<BTreeMap<String, &RawValue>>(right) else {
+                return false;
+            };
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|((lk, lv), (rk, rv))| lk == rk && exact_json_equal(lv, rv))
+        }
+        (b'[', b'[') => {
+            let Ok(left) = serde_json::from_str::<Vec<&RawValue>>(left) else {
+                return false;
+            };
+            let Ok(right) = serde_json::from_str::<Vec<&RawValue>>(right) else {
+                return false;
+            };
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(l, r)| exact_json_equal(l, r))
+        }
+        (b'"', b'"') => {
+            serde_json::from_str::<String>(left).ok() == serde_json::from_str::<String>(right).ok()
+        }
+        (b'-' | b'0'..=b'9', b'-' | b'0'..=b'9') => decimal_parts(left) == decimal_parts(right),
+        _ => false,
+    }
+}
+
+fn decimal_parts(token: &str) -> (bool, String, String) {
+    let unsigned = token.strip_prefix('-').unwrap_or(token);
+    let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
+    let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{integer}{fraction}");
+    let significant = digits.trim_matches('0');
+    if significant.is_empty() {
+        return (false, String::new(), String::new());
+    }
+    let trailing = digits.len() - digits.trim_end_matches('0').len();
+    let shift = trailing as i64 - fraction.len() as i64;
+    (
+        unsigned != token,
+        significant.into(),
+        shift_exponent(exponent, shift),
+    )
+}
+
+fn shift_exponent(exponent: &str, shift: i64) -> String {
+    let unsigned = exponent
+        .trim_start_matches(['+', '-'])
+        .trim_start_matches('0');
+    let negative = exponent.starts_with('-');
+    let magnitude = if unsigned.is_empty() { "0" } else { unsigned };
+    let signed_shift = if negative { -shift } else { shift };
+    if let Ok(value) = magnitude.parse::<i128>()
+        && let Some(value) = value.checked_add(i128::from(signed_shift))
+    {
+        return (if negative { -value } else { value }).to_string();
+    }
+
+    // A very large exponent can still parse as an underflowing JSON number.
+    // Its sign cannot change because the adjustment is bounded by the capture length.
+    let mut carry = signed_shift;
+    let mut digits = Vec::with_capacity(magnitude.len() + 1);
+    for digit in magnitude.bytes().rev() {
+        let sum = i64::from(digit - b'0') + carry;
+        digits.push(b'0' + sum.rem_euclid(10) as u8);
+        carry = sum.div_euclid(10);
+    }
+    if carry > 0 {
+        digits.push(b'1');
+    }
+    while digits.last() == Some(&b'0') {
+        digits.pop();
+    }
+    if negative {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    String::from_utf8(digits).expect("exponent contains only ASCII digits and sign")
 }
 
 fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
@@ -1894,6 +2057,12 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
         let ingested_at = discovery::timestamp();
         let remaining = elapsed(&state, &ingested_at);
         let extended = uses_extended_framing(&raw);
+        verify_fresh_result(&raw, extended, |hash, body| {
+            state.answers.values().any(|answer| {
+                answer.outcome == "complete"
+                    && matches_retained_measurement(&answer.raw_hex, &answer.raw_sha256, hash, body)
+            })
+        })?;
         let normalized = remaining.and_then(|_| {
             normalize(&raw).and_then(|value| {
                 if value.rows.len() >= 10_000 {
@@ -1906,12 +2075,6 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
                 }
             })
         });
-        if let Ok(value) = &normalized
-            && let Some(body) = identified_measurement(&raw, extended)
-            && matches_accepted_measurement(&state, value, &body)
-        {
-            return Err(reused_measurement());
-        }
         let (outcome, trace_id, diagnostic) = match normalized {
             Ok(value) => ("complete".into(), value.trace_id, None),
             Err(d) => ("failed".into(), None, Some(d)),

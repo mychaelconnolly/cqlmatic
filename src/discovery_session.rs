@@ -225,13 +225,9 @@ fn ended(outcome: &str) -> bool {
     )
 }
 
-fn reused_evidence(state: &State, before: usize, hash: &str, body: Option<&Value>) -> bool {
+fn reused_evidence(state: &State, before: usize, hash: &str, body: Option<&RawValue>) -> bool {
     let matches_capture = |raw_hex: &str, raw_sha256: &str| {
-        raw_sha256 == hash
-            || body.is_some_and(|body| {
-                capture_bytes(raw_hex, raw_sha256)
-                    .is_ok_and(|prior| hosted_answer_body(&prior, true).as_ref() == Some(body))
-            })
+        matches_retained_measurement(raw_hex, raw_sha256, hash, body)
     };
     state.session.as_ref().is_some_and(|s| {
         s.attempts[..before].iter().any(|a| {
@@ -1182,23 +1178,21 @@ pub fn step_resumable(
         let raw = storage::read_bytes(file, MAX_CAPTURE_BYTES as u64)?;
         let now = discovery::timestamp();
         let extended = uses_extended_framing(&raw);
+        let earlier = state
+            .session
+            .as_ref()
+            .expect("session checked")
+            .attempts
+            .len()
+            - 1;
+        verify_fresh_result(&raw, extended, |hash, body| {
+            reused_evidence(&state, earlier, hash, body)
+        })?;
         let normalized = complete_result(&raw, &attempt.probe, extended);
         let result = match normalized {
             Ok(result) => result,
             Err(d) => {
                 if let Some(outcome) = attempt_ending(&raw, &attempt.probe, extended) {
-                    let count = state
-                        .session
-                        .as_ref()
-                        .expect("session checked")
-                        .attempts
-                        .len();
-                    if hosted_answer_body(&raw, extended).is_some_and(|body| {
-                        hosted_answer_identifies_call(&body)
-                            && reused_evidence(&state, count - 1, &sha256_hex(&raw), Some(&body))
-                    }) {
-                        return Err(reused_measurement());
-                    }
                     let session = state.session.as_mut().expect("session checked");
                     let a = session.attempts.last_mut().expect("attempt checked");
                     a.outcome = outcome.into();
@@ -1254,22 +1248,6 @@ pub fn step_resumable(
                 return Ok(output);
             }
         };
-        if let Some(body) = identified_measurement(&raw, extended)
-            && (matches_accepted_measurement(&state, &result, &body)
-                || state
-                    .session
-                    .as_ref()
-                    .expect("session checked")
-                    .attempts
-                    .iter()
-                    .filter(|a| ended(&a.outcome))
-                    .filter_map(|a| a.terminal.as_ref())
-                    .any(|e| {
-                        matches_retained_measurement(&e.raw_hex, &e.raw_sha256, &result, &body)
-                    }))
-        {
-            return Err(reused_measurement());
-        }
         if let Err(d) = elapsed(&state, &now) {
             if d.code != "MCP_DEADLINE" {
                 return Err(d);

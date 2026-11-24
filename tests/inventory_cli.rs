@@ -6564,3 +6564,217 @@ fn answer_before_reservation_can_recover_by_requesting_the_next_probe() {
     assert_eq!(next["action"]["probe"]["probe_id"], *probe_id);
     assert_eq!(next["action"]["dispatched"], true);
 }
+
+fn submit_next_answer(dir: &Path, probe: &Value, result_file: &Path) -> Value {
+    call(
+        dir,
+        json!({"kind":"next-probe","answer":{"probe_id":probe["action"]["probe"]["probe_id"],"result_file":result_file}}),
+    )
+}
+
+fn assert_reused_on_next(dir: &Path, checkpoint: &Path, probe: &Value, file: &Path) {
+    let before = fs::read(checkpoint).unwrap();
+    let refused = submit_next_answer(dir, probe, file);
+    assert_eq!(
+        refused["action"]["diagnostics"][0]["code"], "MCP_RESULT_REUSED",
+        "{refused}"
+    );
+    assert_eq!(
+        refused["action"]["outstanding_probe_id"],
+        probe["action"]["probe"]["probe_id"]
+    );
+    assert_eq!(
+        refused["action"]["cost"]["searches"]["used"],
+        probe["action"]["cost"]["searches"]["used"]
+    );
+    assert_eq!(fs::read(checkpoint).unwrap(), before);
+}
+
+#[test]
+fn reuse_checks_prior_refusals_and_excludes_the_outstanding_attempt() {
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let checkpoint = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let unusable = fixture(&dir.0, "old-shape.json", json!({"unsupported":true}));
+    let refused = submit_next_answer(&dir.0, &first, Path::new(&unusable));
+    assert_eq!(refused["action"]["state"], "cleanup-pending");
+
+    // Model a result rejected under the older framing rule.
+    let body = json!({"result":[{"events":771}],"trace_id":"prior-call"});
+    let wrapped = fixture(
+        &dir.0,
+        "wrapped-count.json",
+        json!({
+            "jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":body.to_string()}]}
+        }),
+    );
+    let raw = fs::read(&wrapped).unwrap();
+    let mut saved: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+    let evidence = &mut saved["session"]["attempts"][0]["rejected_results"][0]["evidence"];
+    evidence["raw_hex"] = json!(
+        raw.iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    evidence["raw_sha256"] = json!(cqlmatic::sha256_hex(&raw));
+    let evidence = evidence.clone();
+    fs::write(checkpoint, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+    let corrected = submit_next_answer(&dir.0, &first, Path::new(&wrapped));
+    assert_eq!(corrected["action"]["settled"], true, "{corrected}");
+    assert_eq!(corrected["action"]["state"], "paused");
+    call(&dir.0, json!({"kind":"resume-discovery"}));
+    let second = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_ne!(
+        first["action"]["probe"]["probe_id"],
+        second["action"]["probe"]["probe_id"]
+    );
+    let unwrapped = fixture(&dir.0, "count.json", body);
+    assert_reused_on_next(&dir.0, checkpoint, &second, Path::new(&unwrapped));
+
+    // Change the accepted result while retaining the first attempt's original refusal.
+    // An old rejected result can also precede a different valid result on the same probe.
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let checkpoint = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let unusable = fixture(&dir.0, "old-shape.json", json!({"unsupported":true}));
+    submit_next_answer(&dir.0, &first, Path::new(&unusable));
+    let mut saved: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+    saved["session"]["attempts"][0]["rejected_results"][0]["evidence"] = evidence.clone();
+    fs::write(checkpoint, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let fresh = fixture(
+        &dir.0,
+        "fresh-count.json",
+        json!({"result":[{"events":23}]}),
+    );
+    let corrected = submit_next_answer(&dir.0, &first, Path::new(&fresh));
+    assert_eq!(corrected["action"]["settled"], true);
+    call(&dir.0, json!({"kind":"resume-discovery"}));
+    let second = call(&dir.0, json!({"kind":"next-probe"}));
+    for file in [&wrapped, &unwrapped] {
+        assert_reused_on_next(&dir.0, checkpoint, &second, Path::new(file));
+    }
+}
+
+#[test]
+fn identified_round_trips_compare_numbers_exactly() {
+    for (identity, metadata) in [
+        (r#""trace_id":"call","#, r#""metadata":{"#),
+        ("", r#""metaData":{"jobId":"job","#),
+    ] {
+        let dir = Temp::new();
+        let prepared = prepare_two_source_run(&dir.0);
+        let checkpoint = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let file = dir.0.join("result.json");
+        let result = |time, size| {
+            format!(
+                r#"{{"result":[{{"events":771}}],{identity}{metadata}"time":{time},"size":{size}}}}}"#
+            )
+        };
+        fs::write(&file, result("1.0", "9007199254740993")).unwrap();
+        let first = call(&dir.0, json!({"kind":"next-probe"}));
+        let second = submit_next_answer(&dir.0, &first, &file);
+        for body in [
+            result("1", "9007199254740993"),
+            result("1e0", "9007199254740993.0"),
+        ] {
+            fs::write(&file, body).unwrap();
+            assert_reused_on_next(&dir.0, checkpoint, &second, &file);
+        }
+        fs::write(&file, result("1", "9007199254740992")).unwrap();
+        let complete = submit_next_answer(&dir.0, &second, &file);
+        assert_eq!(complete["action"]["state"], "complete", "{complete}");
+    }
+}
+
+#[test]
+fn identified_reuse_cannot_end_an_incompatible_or_capped_attempt() {
+    for capped in [false, true] {
+        for (metadata, job) in [("metadata", "job_id"), ("metaData", "jobId")] {
+            let dir = Temp::new();
+            confirm_two_sources(&dir.0, "sources-and-fields");
+            let prepared = call(&dir.0, source_run_request(100));
+            let checkpoint = Path::new(
+                prepared["status"]["discovery_runs"][0]["state_path"]
+                    .as_str()
+                    .unwrap(),
+            );
+            let first = call(&dir.0, json!({"kind":"next-probe"}));
+            let file = dir.0.join("original.json");
+            let body = json!({"result":vec![json!({"events":23});if capped {10_000} else {1}],metadata:{job:"original-job"}});
+            fs::write(&file, body.to_string()).unwrap();
+            let mut second = submit_next_answer(&dir.0, &first, &file);
+            if capped {
+                assert_eq!(second["action"]["state"], "paused");
+                call(&dir.0, json!({"kind":"resume-discovery"}));
+                second = call(&dir.0, json!({"kind":"next-probe"}));
+            } else {
+                assert!(
+                    second["action"]["probe"]["arguments"]["query_string"]
+                        .as_str()
+                        .unwrap()
+                        .contains("groupBy")
+                );
+            }
+            let wrapped = fixture(
+                &dir.0,
+                "wrapped.json",
+                json!({
+                    "jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":body.to_string()}]}
+                }),
+            );
+            assert_reused_on_next(&dir.0, checkpoint, &second, Path::new(&wrapped));
+        }
+    }
+}
+
+#[test]
+fn format_two_identified_duplicate_returns_reuse_code() {
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let checkpoint = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    use_format_two(checkpoint);
+    let relay = call(&dir.0, json!({"kind":"discovery-step","answers":[]}));
+    let probes = relay["action"]["relay"]["probes"].as_array().unwrap();
+    assert_eq!(probes.len(), 2);
+    let file = fixture(
+        &dir.0,
+        "count.json",
+        json!({"result":[{"events":771}],"metaData":{"jobId":"prior-job"}}),
+    );
+    let answer = |index: usize| json!({"kind":"discovery-step","answers":[{"probe_id":probes[index]["probe_id"],"result_file":file}]});
+    let first = call(&dir.0, answer(0));
+    assert_eq!(first["action"]["relay"]["status"], "needs-probes");
+    let before = fs::read(checkpoint).unwrap();
+    let duplicate = call(&dir.0, answer(1));
+    assert_eq!(
+        duplicate["action"]["diagnostics"][0]["code"], "MCP_RESULT_REUSED",
+        "{duplicate}"
+    );
+    assert_eq!(fs::read(checkpoint).unwrap(), before);
+}
+
+fn use_format_two(checkpoint: &Path) {
+    let mut legacy: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+    legacy["schema_version"] = json!(2);
+    legacy.as_object_mut().unwrap().remove("session");
+    fs::write(checkpoint, serde_json::to_vec(&legacy).unwrap()).unwrap();
+}
