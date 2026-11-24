@@ -46,6 +46,19 @@ impl Drop for Temp {
     }
 }
 
+fn cli(dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cqlmatic"));
+    for variable in [
+        "HOME",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    ] {
+        command.env(variable, dir);
+    }
+    command
+}
 fn run(dir: &Path, action: Value, flags: &[&str]) -> Output {
     let request = dir.join("request.json");
     fs::write(
@@ -53,7 +66,7 @@ fn run(dir: &Path, action: Value, flags: &[&str]) -> Output {
         serde_json::to_vec(&json!({"schema_version":1,"action":action})).unwrap(),
     )
     .unwrap();
-    Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+    cli(dir)
         .args(["env", "inventory", "--json", "--state"])
         .arg(dir.join("workflow/state.json"))
         .args(flags)
@@ -80,18 +93,21 @@ fn environment() -> Value {
 }
 /// Confirms one selected source and returns its inventory source ID.
 fn confirm_source(dir: &Path) -> String {
+    confirm_sources(dir, json!([{"repo":"synthetic-repo"}]))[0]["source_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+fn confirm_sources(dir: &Path, expected_sources: Value) -> Value {
     call(
         dir,
         json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
     );
-    let confirmed = call(
+    call(
         dir,
-        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic parser review","expected_sources":[{"repo":"synthetic-repo"}]}),
-    );
-    confirmed["status"]["sources"][0]["source_id"]
-        .as_str()
-        .unwrap()
-        .to_owned()
+        json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic parser review","expected_sources":expected_sources}),
+    )["status"]["sources"]
+        .clone()
 }
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> String {
     let path = dir.join(name);
@@ -572,6 +588,170 @@ fn exclude(dir: &Path, parser: &str, sha256: &str) -> Value {
         dir,
         json!({"kind":"exclude-parser","parser_id":parser,"parser_sha256":sha256,"reviewed_at":RETRIEVED,"reason":"Synthetic exclusion"}),
     )
+}
+
+fn reconcile(dir: &Temp) -> (Value, InventoryState) {
+    let reply = call(&dir.0, json!({"kind":"reconcile","reviewed_at":RETRIEVED}));
+    assert_eq!(reply["status"]["reconciliation"], "done");
+    (
+        reply,
+        serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap(),
+    )
+}
+
+fn assert_same_reconciliation(dir: &Temp, reply: &Value, reconciled: &InventoryState) {
+    assert_eq!(reply["status"]["reconciliation"], "done");
+    let saved: InventoryState = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    assert_eq!(
+        saved.reconciled_evidence_sha256,
+        reconciled.reconciled_evidence_sha256
+    );
+    assert_eq!(
+        saved.evidence_digest().unwrap(),
+        reconciled.evidence_digest().unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(saved.parser_exclusions).unwrap(),
+        serde_json::to_value(&reconciled.parser_exclusions).unwrap()
+    );
+}
+
+fn assert_carried_review_round_trip(bindings: bool) {
+    let dir = Temp::new();
+    let repos = if bindings {
+        json!([{"repo":"synthetic-repo"},{"repo":"other-synthetic-repo"}])
+    } else {
+        json!([{"repo":"synthetic-repo"}])
+    };
+    let sources = confirm_sources(&dir.0, repos);
+    let (first, second) = ("p1", "p2");
+    let ids = [first, second];
+    let a = detail(&dir.0, "a.json", resource(first, SCRIPT));
+    let b = detail(&dir.0, "b.json", resource(second, SCRIPT));
+    let original = import(&dir.0, &ids, &[(first, &a), (second, &b)]);
+    for (index, id) in ids.into_iter().enumerate() {
+        let hash = sha(&original, id);
+        if bindings {
+            bind(
+                &dir.0,
+                sources[index]["source_id"].as_str().unwrap(),
+                id,
+                &hash,
+            );
+        } else {
+            exclude(&dir.0, id, &hash);
+        }
+    }
+    let a = re_encoded(&dir.0, "re-encoded-a.json", first, SCRIPT);
+    let b = re_encoded(&dir.0, "re-encoded-b.json", second, SCRIPT);
+    let full = [(first, a.as_str()), (second, b.as_str())];
+    assert_eq!(
+        import(&dir.0, &ids, &full)["action"]["parser_reviews"],
+        counts(0, 2, 0, 0)
+    );
+    let (before, reconciled) = reconcile(&dir);
+
+    let partial = import(&dir.0, &ids, &full[1..]);
+    assert_eq!(partial["action"]["parser_reviews"], counts(0, 1, 1, 0));
+    assert_eq!(partial["status"]["reconciliation"], "pending");
+    for _ in 0..2 {
+        let restored = import(&dir.0, &ids, &full);
+        assert_eq!(restored["action"]["parser_reviews"], counts(0, 2, 0, 0));
+        assert_eq!(
+            restored["status"]["carried_parser_reviews"],
+            before["status"]["carried_parser_reviews"],
+            "the same capture must preserve carried review order"
+        );
+        assert_same_reconciliation(&dir, &restored, &reconciled);
+    }
+}
+
+#[test]
+fn carried_exclusions_preserve_reconciliation_when_the_same_capture_returns() {
+    assert_carried_review_round_trip(false);
+}
+
+#[test]
+fn carried_bindings_preserve_reconciliation_when_the_same_capture_returns() {
+    assert_carried_review_round_trip(true);
+}
+
+#[test]
+fn suspended_reviews_preserve_reconciliation_when_the_same_partial_capture_returns() {
+    let dir = Temp::new();
+    confirm_source(&dir.0);
+    let ids = ["p1", "p2"];
+    let a = detail(&dir.0, "a.json", resource("p1", SCRIPT));
+    let b = detail(&dir.0, "b.json", resource("p2", SCRIPT));
+    let first = import(&dir.0, &ids, &[("p1", &a), ("p2", &b)]);
+    exclude(&dir.0, "p1", &sha(&first, "p1"));
+    exclude(&dir.0, "p2", &sha(&first, "p2"));
+    let partial = import(&dir.0, &ids, &[]);
+    assert_eq!(partial["action"]["parser_reviews"], counts(0, 0, 2, 0));
+    let (before, reconciled) = reconcile(&dir);
+
+    let mixed = import(&dir.0, &ids, &[("p2", &b)]);
+    assert_eq!(mixed["action"]["parser_reviews"], counts(0, 0, 1, 1));
+    assert_eq!(mixed["status"]["reconciliation"], "pending");
+    let restored = import(&dir.0, &ids, &[]);
+    assert_eq!(
+        restored["status"]["suspended_parser_reviews"],
+        before["status"]["suspended_parser_reviews"],
+        "the same partial capture must preserve suspended review order"
+    );
+    assert_same_reconciliation(&dir, &restored, &reconciled);
+}
+
+#[test]
+fn status_rejects_contradictory_held_digests_for_the_same_reviewed_bytes() {
+    let dir = Temp::new();
+    let sources = confirm_sources(
+        &dir.0,
+        json!([{"repo":"synthetic-repo"},{"repo":"other-synthetic-repo"}]),
+    );
+    let parser = detail(&dir.0, "parser.json", resource("p1", SCRIPT));
+    let first = import(&dir.0, &["p1"], &[("p1", &parser)]);
+    for source in sources.as_array().unwrap() {
+        bind(
+            &dir.0,
+            source["source_id"].as_str().unwrap(),
+            "p1",
+            &sha(&first, "p1"),
+        );
+    }
+    let held = import(&dir.0, &["p1"], &[]);
+    assert_eq!(held["action"]["parser_reviews"], counts(0, 0, 2, 0));
+    let status = || {
+        cli(&dir.0)
+            .args(["status", "--json", "--state"])
+            .arg(dir.state())
+            .output()
+            .unwrap()
+    };
+    assert!(
+        status().status.success(),
+        "matching held digests must be accepted"
+    );
+    let mut state: Value = serde_json::from_slice(&fs::read(dir.state()).unwrap()).unwrap();
+    let other_digest = "a".repeat(64);
+    assert_ne!(
+        state["suspended_parser_reviews"][0]["resource_sha256"],
+        other_digest
+    );
+    state["suspended_parser_reviews"][1]["resource_sha256"] = json!(other_digest);
+    let bytes = serde_json::to_vec(&state).unwrap();
+    fs::write(dir.state(), &bytes).unwrap();
+    let output = status();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "status accepted contradictory held digests"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("INVENTORY_EVIDENCE"),
+        "{output:?}"
+    );
+    assert_eq!(fs::read(dir.state()).unwrap(), bytes);
 }
 
 fn not_applicable(dir: &Path, source: &str) -> Value {

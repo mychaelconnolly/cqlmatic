@@ -3193,6 +3193,7 @@ impl InventoryState {
                 .count();
         let mut held_bindings = BTreeSet::new();
         let mut held_exclusions = BTreeSet::new();
+        let mut held_resources = BTreeMap::new();
         let mut saved_resources = BTreeMap::new();
         let mut held_sources = BTreeSet::new();
         for held in &self.suspended_parser_reviews {
@@ -3282,6 +3283,14 @@ impl InventoryState {
             {
                 return Err(fail(
                     "A suspended parser review must name a definition absent from the saved capture.",
+                ));
+            }
+            if held_resources
+                .insert((parser_id, parser_sha256), resource_sha256)
+                .is_some_and(|digest| digest != resource_sha256)
+            {
+                return Err(fail(
+                    "Suspended parser reviews disagree on the definition for the same reviewed bytes. Restore an intact inventory state from backup.",
                 ));
             }
         }
@@ -3816,6 +3825,16 @@ impl InventoryState {
             Carried(String),
             Suspended(String),
         }
+        fn suspended_key(review: &SuspendedParserReview) -> (u8, Option<usize>, &str) {
+            match review {
+                SuspendedParserReview::Binding { source_id, .. } => (0, None, source_id),
+                SuspendedParserReview::Exclusion {
+                    exclusion,
+                    position,
+                    ..
+                } => (1, *position, &exclusion.parser_id),
+            }
+        }
         let mut candidate = self.clone();
         candidate.parser_pages = pages;
         candidate.parsers = parsers;
@@ -3948,6 +3967,13 @@ impl InventoryState {
             .map(|(_, exclusion)| exclusion)
             .collect();
         candidate.prune_unused_carried_parser_reviews();
+        // Reconciliation binds to the serialized reviews, regardless of which were suspended.
+        candidate.carried_parser_reviews.sort_unstable_by(|a, b| {
+            (&a.parser_id, &a.reviewed_sha256).cmp(&(&b.parser_id, &b.reviewed_sha256))
+        });
+        candidate
+            .suspended_parser_reviews
+            .sort_unstable_by(|a, b| suspended_key(a).cmp(&suspended_key(b)));
         candidate.validate()?;
         *self = candidate;
         Ok(counts)
