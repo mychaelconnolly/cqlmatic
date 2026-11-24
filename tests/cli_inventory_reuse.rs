@@ -1127,6 +1127,27 @@ fn default_unconfirmed_scout_leaves_offline_query_commands_unchanged() {
 }
 
 #[test]
+fn ordinary_family_mismatch_keeps_missing_field_warning_exit() {
+    let temp = Temp::new();
+    let mut data = pack(true, "2026-01-02T00:00:00Z").data;
+    data.sources[0]["selectors"]["event_family"] = json!("ProcessEvent");
+    let pack = Pack::new(environment(), "2026-01-02T00:00:00Z".into(), data).unwrap();
+    let path = temp.0.join("pack.json");
+    save_pack(&path, &pack);
+    let (exit, result) = temp.one(&[
+        "check",
+        "--json",
+        "--pack",
+        path.to_str().unwrap(),
+        "--fail-on-warning",
+        "#repo=sample #event_simpleName=FileEvent | never_seen=* | count()",
+    ]);
+    assert_eq!(exit, 1, "{result}");
+    assert_eq!(result["outcome"], "ready");
+    assert!(diagnostic(&result, "CQL_UNMAPPED_FIELD", "warning"));
+}
+
+#[test]
 fn inspect_bridges_exact_inventory_source_ids() {
     let temp = Temp::new();
     let mut data = pack(true, "2026-01-02T00:00:00Z").data;
