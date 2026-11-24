@@ -3028,7 +3028,6 @@ fn ground(
     let lenient = !context.require_observed;
     let compare = lenient && !in_selector;
     let pack_sources: Vec<_> = pack
-        .filter(|_| lenient)
         .iter()
         .flat_map(|p| &p.data.sources)
         .filter_map(|v| environment::source(v).ok())
@@ -3121,7 +3120,7 @@ fn ground(
             continue;
         }
         let mut selected = Vec::new();
-        if lenient && pack.is_some() && r.origin == Origin::Deployment {
+        if pack.is_some() && r.origin == Origin::Deployment {
             selected = pack_sources
                 .iter()
                 .filter(|source| {
