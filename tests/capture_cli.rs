@@ -65,6 +65,7 @@ impl Temp {
         )
         .unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &self.0)
             .args(["env", "inventory", "--json", "--state"])
             .arg(state)
             .arg("--request")
@@ -80,6 +81,7 @@ impl Temp {
     /// Asks for the run's probe without supplying an answer.
     fn next_probe(&self) -> Value {
         let output = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &self.0)
             .args(["env", "inventory", "--json", "--next-probe", "--state"])
             .arg(self.state())
             .output()
@@ -112,7 +114,11 @@ impl Temp {
         self.capture_into(&self.state(), client, server, payload);
     }
     fn capture_into(&self, state: &Path, client: &str, server: &str, payload: Value) {
+        self.capture_bytes(state, client, server, &payload.to_string());
+    }
+    fn capture_bytes(&self, state: &Path, client: &str, server: &str, payload: &str) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &self.0)
             .args(["env", "capture", "--client", client, "--server"])
             .arg(server)
             .arg("--state")
@@ -126,7 +132,7 @@ impl Temp {
             .stdin
             .take()
             .unwrap()
-            .write_all(payload.to_string().as_bytes())
+            .write_all(payload.as_bytes())
             .unwrap();
         let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{payload}");
@@ -135,6 +141,112 @@ impl Temp {
             "{output:?}"
         );
     }
+}
+
+fn check_numeric_capture_reuse(deliver: impl Fn(&Temp, &Value, &str)) {
+    for number in ["0.123456789012345678", "9007199254740993.0"] {
+        for identity in [r#""trace_id":"call","#, ""] {
+            for capture_first in [false, true] {
+                let home = Temp::new();
+                let first = home.probing();
+                let job = if identity.is_empty() {
+                    r#""job_id":"job","#
+                } else {
+                    ""
+                };
+                let body = format!(
+                    r#"{{{identity}"metadata":{{{job}"timing":{number}}},"result":[{{"events":23}}]}}"#
+                );
+                let file = home.0.join("answer.json");
+                fs::write(&file, &body).unwrap();
+                let submit = |probe: &Value| {
+                    home.act_on(
+                        &home.state(),
+                        json!({"kind":"discovery-step","answers":[
+                            {"probe_id":probe["probe_id"],"result_file":file}
+                        ]}),
+                    );
+                };
+                if capture_first {
+                    deliver(&home, &first["probe"], &body);
+                } else {
+                    submit(&first["probe"]);
+                }
+                let second = home.next_probe();
+                assert_ne!(second["probe"]["probe_id"], first["probe"]["probe_id"]);
+                let checkpoint = home.saved()["discovery_runs"][0]["state_path"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                let before = fs::read(&checkpoint).unwrap();
+                if capture_first {
+                    submit(&second["probe"]);
+                } else {
+                    deliver(&home, &second["probe"], &body);
+                }
+                let after = home.next_probe();
+                assert_eq!(
+                    after["diagnostics"][0]["code"], "MCP_RESULT_REUSED",
+                    "{number}, {identity}, capture_first={capture_first}: {after}"
+                );
+                assert_eq!(fs::read(&checkpoint).unwrap(), before);
+
+                let other = if number.starts_with("0.") {
+                    "0.123456789012345679"
+                } else {
+                    "9007199254740992.0"
+                };
+                fs::write(&file, body.replace(number, other)).unwrap();
+                submit(&second["probe"]);
+                assert_eq!(home.next_probe()["state"], "complete");
+            }
+        }
+    }
+}
+
+#[test]
+fn capture_keeps_exact_numbers_for_reuse_in_both_delivery_orders() {
+    check_numeric_capture_reuse(|home, probe, body| {
+        let hook = probe_search(probe, json!("synthetic-placeholder")).to_string();
+        home.capture_bytes(
+            &home.state(),
+            "generic",
+            SERVER,
+            &hook.replace(r#""synthetic-placeholder""#, body),
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn pass_through_keeps_exact_numbers_for_reuse_in_both_delivery_orders() {
+    check_numeric_capture_reuse(|home, probe, body| {
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":probe["tool"],"arguments":probe["arguments"]
+        }});
+        let body = body.strip_suffix('}').unwrap();
+        let response = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{body},"_meta":{{}}}}}}"#);
+        let input = format!("{request}\n{response}\n");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_cqlmatic"))
+            .env("HOME", &home.0)
+            .args(["env", "pass-through", "--state"])
+            .arg(home.state())
+            .args(["--", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, input.as_bytes());
+    });
 }
 impl Drop for Temp {
     fn drop(&mut self) {

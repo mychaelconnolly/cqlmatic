@@ -1,2 +1,3 @@
 - Explain expired runs and activation conflicts, preserve discovery answer codes, and omit brief failure notices once discovery succeeds for the same sources.
+- On failed runs, report the answer refusal alongside the saved failure and recovery guidance. For a refused incomplete response, direct the caller to recover the final response for the same search.
 - Show actionable brief input errors and name unknown status request fields. Read errors distinguish an output failure from a saved change.

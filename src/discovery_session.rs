@@ -47,6 +47,14 @@ struct TerminalEvidence {
     raw_sha256: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     extended_result_framing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact_result_framing: bool,
+}
+
+impl TerminalEvidence {
+    fn framing(&self) -> ResultFraming {
+        ResultFraming::saved(self.extended_result_framing, self.exact_result_framing)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -295,10 +303,11 @@ pub fn earlier_release_ended(state: &State, now: &str) -> bool {
         })
 }
 
-fn attempt_ending(raw: &[u8], probe: &Probe, extended: bool) -> Option<&'static str> {
-    hosted_attempt_ending_framed(raw, extended).or_else(|| {
-        (normalize_framed(raw, extended).is_ok() && complete_result(raw, probe, extended).is_err())
-            .then_some("completed-unusable")
+fn attempt_ending(raw: &[u8], probe: &Probe, framing: ResultFraming) -> Option<&'static str> {
+    hosted_attempt_ending_with_framing(raw, framing).or_else(|| {
+        (normalize_classified(raw, true, framing).is_ok()
+            && complete_result(raw, probe, framing).is_err())
+        .then_some("completed-unusable")
     })
 }
 
@@ -550,18 +559,18 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
             )
         {
             let raw = capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)?;
-            let extended = evidence.extended_result_framing;
+            let framing = evidence.framing();
             if terminal && ended(&attempt.outcome) {
                 let valid_ending = if historical_ended_attempts
                     && attempt.outcome == "completed-unusable"
                 {
                     // Historical list completion is independent of current measurement rules.
-                    normalize_framed(&raw, extended).is_ok()
+                    normalize_classified(&raw, true, framing).is_ok()
                 } else {
-                    attempt_ending(&raw, &attempt.probe, extended) == Some(attempt.outcome.as_str())
+                    attempt_ending(&raw, &attempt.probe, framing) == Some(attempt.outcome.as_str())
                 };
                 if !valid_ending
-                    || hosted_answer_body(&raw, extended).is_some_and(|body| {
+                    || hosted_answer_body(&raw, framing).is_some_and(|body| {
                         hosted_answer_identifies_call(&body)
                             && reused_evidence(state, index, &evidence.raw_sha256, None)
                     })
@@ -570,7 +579,7 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
                 }
             }
             if terminal && attempt.outcome == "completed" {
-                complete_result(&raw, &attempt.probe, extended).map_err(|_| tampered())?;
+                complete_result(&raw, &attempt.probe, framing).map_err(|_| tampered())?;
             }
             if terminal && session.transport == Transport::Mcp && attempt.outcome == "cancelled" {
                 validate_cancellation(state, attempt, &id, &raw).map_err(|_| tampered())?;
@@ -1095,13 +1104,17 @@ pub fn ended_at_row_limit(state: &State) -> bool {
         .and_then(|evidence| {
             capture_bytes(&evidence.raw_hex, &evidence.raw_sha256)
                 .ok()
-                .and_then(|raw| normalize_framed(&raw, evidence.extended_result_framing).ok())
+                .and_then(|raw| normalize_classified(&raw, true, evidence.framing()).ok())
         })
         .is_some_and(|result| result.rows.len() >= 10_000)
 }
 
-fn complete_result(raw: &[u8], probe: &Probe, extended: bool) -> Result<Normalized, Diagnostic> {
-    let normalized = normalize_framed(raw, extended)?;
+fn complete_result(
+    raw: &[u8],
+    probe: &Probe,
+    framing: ResultFraming,
+) -> Result<Normalized, Diagnostic> {
+    let normalized = normalize_classified(raw, true, framing)?;
     if normalized.rows.len() >= 10000 {
         return Err(error(
             "SEARCH_ROW_LIMIT",
@@ -1185,14 +1198,14 @@ pub fn step_resumable(
             .attempts
             .len()
             - 1;
-        verify_fresh_result(&raw, extended, |hash, body| {
+        verify_fresh_result(&raw, |hash, body| {
             reused_evidence(&state, earlier, hash, body)
         })?;
-        let normalized = complete_result(&raw, &attempt.probe, extended);
+        let normalized = complete_result(&raw, &attempt.probe, ResultFraming::Exact);
         let result = match normalized {
             Ok(result) => result,
             Err(d) => {
-                if let Some(outcome) = attempt_ending(&raw, &attempt.probe, extended) {
+                if let Some(outcome) = attempt_ending(&raw, &attempt.probe, ResultFraming::Exact) {
                     let session = state.session.as_mut().expect("session checked");
                     let a = session.attempts.last_mut().expect("attempt checked");
                     a.outcome = outcome.into();
@@ -1201,6 +1214,7 @@ pub fn step_resumable(
                         raw_hex: raw_hex(&raw),
                         raw_sha256: sha256_hex(&raw),
                         extended_result_framing: extended,
+                        exact_result_framing: true,
                     });
                     session.pause_clock(&now)?;
                     let mut output = match elapsed(&state, &now) {
@@ -1238,6 +1252,7 @@ pub fn step_resumable(
                         raw_hex: raw_hex(&raw),
                         raw_sha256: sha256_hex(&raw),
                         extended_result_framing: extended,
+                        exact_result_framing: true,
                     },
                     diagnostic: d.clone(),
                 });
@@ -1260,6 +1275,7 @@ pub fn step_resumable(
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
                 extended_result_framing: extended,
+                exact_result_framing: true,
             });
             session.pause_clock(&now)?;
             return fail_state(&writer, &mut state, d);
@@ -1285,6 +1301,7 @@ pub fn step_resumable(
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
                 extended_result_framing: extended,
+                exact_result_framing: true,
                 ingested_at: now.clone(),
                 diagnostic: None,
             },
@@ -1428,6 +1445,7 @@ pub fn settle_cancelled(
         raw_hex: raw_hex(&raw),
         raw_sha256: sha256_hex(&raw),
         extended_result_framing: false,
+        exact_result_framing: false,
     });
     session.pause_clock(&discovery::timestamp())?;
     state.status = "paused".into();

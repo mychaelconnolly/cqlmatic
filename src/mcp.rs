@@ -27,21 +27,55 @@ pub fn normalize(raw: &[u8]) -> Result<Normalized, Diagnostic> {
 }
 
 pub(crate) fn normalize_framed(raw: &[u8], extended: bool) -> Result<Normalized, Diagnostic> {
-    normalize_classified(raw, true, extended)
+    normalize_classified(raw, true, ResultFraming::saved(extended, false))
+}
+
+/// Normalize a newly delivered discovery response, comparing framing copies exactly.
+pub fn normalize_fresh(raw: &[u8]) -> Result<Normalized, Diagnostic> {
+    normalize_classified(raw, true, ResultFraming::Exact)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResultFraming {
+    Original,
+    Extended,
+    Exact,
+}
+
+impl ResultFraming {
+    fn saved(extended: bool, exact: bool) -> Self {
+        match (extended, exact) {
+            (_, true) => Self::Exact,
+            (true, false) => Self::Extended,
+            (false, false) => Self::Original,
+        }
+    }
 }
 
 // `hosted` classifies an error object inside `result`; without it such an answer is a shape error.
 fn normalize_classified(
     raw: &[u8],
     hosted: bool,
-    extended: bool,
+    framing: ResultFraming,
 ) -> Result<Normalized, Diagnostic> {
-    let DecodedFrame { value, .. } = decode_frame(raw, extended)?;
+    let frame = decode_frame(raw, framing)?;
+    let value = frame.value;
     let object = value
         .as_object()
         .ok_or_else(|| shape("MCP search result must be an object"))?;
     let body = if object.contains_key("content") {
-        parse_envelope(object, hosted)?
+        let source = BodySource::outer(frame.rpc);
+        let envelope =
+            if framing == ResultFraming::Exact && object.contains_key("structuredContent") {
+                Some(
+                    source
+                        .exact_value(raw)
+                        .ok_or_else(|| shape("Invalid MCP text envelope"))?,
+                )
+            } else {
+                None
+            };
+        parse_envelope(object, hosted, envelope)?
     } else {
         value
     };
@@ -49,7 +83,11 @@ fn normalize_classified(
     parse_result(body, raw, hosted)
 }
 
-fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Diagnostic> {
+fn parse_envelope(
+    object: &Map<String, Value>,
+    hosted: bool,
+    envelope: Option<&RawValue>,
+) -> Result<Value, Diagnostic> {
     // structuredContent is optional; when present it must equal the parsed text payload.
     if object
         .keys()
@@ -85,16 +123,16 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
                 return Err(shape("Nested MCP text envelopes are not supported"));
             }
             if hosted && inner.get("result").is_some_and(Value::is_object) {
-                if object
-                    .get("structuredContent")
-                    .is_some_and(|value| value != &Value::Object(inner.clone()))
-                {
+                let body = Value::Object(inner);
+                if !matching_structured_content(object, &body, text, envelope) {
                     return Err(shape(
                         "MCP structuredContent does not match the text content",
                     ));
                 }
-                return Err(hosted_result_error(&inner)
-                    .unwrap_or_else(|| shape("MCP search result must have a result array")));
+                return Err(
+                    hosted_result_error(body.as_object().expect("inner is an object"))
+                        .unwrap_or_else(|| shape("MCP search result must have a result array")),
+                );
             }
         }
         if has_deadline(text) {
@@ -122,14 +160,29 @@ fn parse_envelope(object: &Map<String, Value>, hosted: bool) -> Result<Value, Di
     if inner.contains_key("content") || inner.contains_key("isError") {
         return Err(shape("Nested MCP text envelopes are not supported"));
     }
-    if let Some(structured) = object.get("structuredContent")
-        && *structured != body
-    {
+    if !matching_structured_content(object, &body, text, envelope) {
         return Err(shape(
             "MCP structuredContent does not match the text content",
         ));
     }
     Ok(body)
+}
+
+fn matching_structured_content(
+    object: &Map<String, Value>,
+    body: &Value,
+    text: &str,
+    envelope: Option<&RawValue>,
+) -> bool {
+    object.get("structuredContent").is_none_or(|structured| {
+        if let Some(envelope) = envelope {
+            raw_field(envelope, "structuredContent")
+                .zip(first_raw_value(text.as_bytes()))
+                .is_some_and(|(left, right)| exact_json_equal(left, right))
+        } else {
+            structured == body
+        }
+    })
 }
 
 fn is_single_text_block(value: &Value) -> bool {
@@ -155,8 +208,9 @@ struct DecodedFrame {
 }
 
 // Strip only framing metadata. The original bytes are still the evidence.
-fn decode_frame(raw: &[u8], extended: bool) -> Result<DecodedFrame, Diagnostic> {
-    let mut value = parse_result_json(raw, extended)?;
+fn decode_frame(raw: &[u8], framing: ResultFraming) -> Result<DecodedFrame, Diagnostic> {
+    let extended = framing != ResultFraming::Original;
+    let mut value = parse_result_json(raw, framing)?;
     let mut changed = extended && raw.starts_with(b"\xef\xbb\xbf");
     if !extended {
         return Ok(DecodedFrame {
@@ -225,7 +279,7 @@ fn decode_frame(raw: &[u8], extended: bool) -> Result<DecodedFrame, Diagnostic> 
 }
 
 pub(crate) fn uses_extended_framing(raw: &[u8]) -> bool {
-    decode_frame(raw, true).is_ok_and(|frame| frame.changed)
+    decode_frame(raw, ResultFraming::Extended).is_ok_and(|frame| frame.changed)
 }
 
 fn parse_result(value: Value, raw: &[u8], hosted: bool) -> Result<Normalized, Diagnostic> {
@@ -330,7 +384,11 @@ pub fn hosted_attempt_ending(raw: &[u8]) -> Option<&'static str> {
 }
 
 pub(crate) fn hosted_attempt_ending_framed(raw: &[u8], extended: bool) -> Option<&'static str> {
-    hosted_body_ending(hosted_answer_body(raw, extended)?.as_object()?)
+    hosted_attempt_ending_with_framing(raw, ResultFraming::saved(extended, false))
+}
+
+fn hosted_attempt_ending_with_framing(raw: &[u8], framing: ResultFraming) -> Option<&'static str> {
+    hosted_body_ending(hosted_answer_body(raw, framing)?.as_object()?)
 }
 
 pub(crate) fn hosted_answer_identifies_call(value: &Value) -> bool {
@@ -354,15 +412,17 @@ fn identifies_measurement(body: &Value) -> bool {
                 .any(|id| !id.is_empty())
         });
     hosted_answer_identifies_call(body) || has_job_id
+        // A different numeric spelling can match a retained cutoff. Only the strict
+        // hosted outcome decoder may settle an attempt.
+        || body.as_object().and_then(hosted_error_result).and_then(hosted_timeout_seconds).is_some_and(Value::is_number)
 }
 
 /// Compare a fresh identified result against retained captures without changing replay.
 fn verify_fresh_result(
     raw: &[u8],
-    extended: bool,
     is_reused: impl FnOnce(&str, Option<&RawValue>) -> bool,
 ) -> Result<(), Diagnostic> {
-    if let Some((body, source)) = decode_hosted_answer(raw, extended)
+    if let Some((body, source)) = decode_hosted_answer(raw, ResultFraming::Exact)
         && identifies_measurement(&body)
         && is_reused(&sha256_hex(raw), source.exact_value(raw))
     {
@@ -383,7 +443,7 @@ fn matches_retained_measurement(
     hash == fresh_hash
         || fresh.is_some_and(|fresh| {
             capture_bytes(raw_hex, hash).is_ok_and(|raw| {
-                decode_hosted_answer(&raw, true).is_some_and(|(_, source)| {
+                decode_hosted_answer(&raw, ResultFraming::Exact).is_some_and(|(_, source)| {
                     source
                         .exact_value(&raw)
                         .is_some_and(|prior| exact_json_equal(prior, fresh))
@@ -399,18 +459,25 @@ enum BodySource {
 }
 
 impl BodySource {
+    fn outer(rpc: bool) -> Self {
+        if rpc { Self::Rpc } else { Self::Bare }
+    }
+
     fn exact_value<'a>(&'a self, raw: &'a [u8]) -> Option<&'a RawValue> {
         let bare = || first_raw_value(raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw));
         match self {
             Self::Bare => bare(),
-            Self::Rpc => {
-                let fields: BTreeMap<String, &RawValue> =
-                    serde_json::from_str(bare()?.get()).ok()?;
-                fields.get("result").copied()
-            }
+            Self::Rpc => raw_field(bare()?, "result"),
             Self::Text(text) => first_raw_value(text.as_bytes()),
         }
     }
+}
+
+fn raw_field<'a>(object: &'a RawValue, key: &str) -> Option<&'a RawValue> {
+    serde_json::from_str::<BTreeMap<String, &RawValue>>(object.get())
+        .ok()?
+        .get(key)
+        .copied()
 }
 
 fn first_raw_value(raw: &[u8]) -> Option<&RawValue> {
@@ -420,12 +487,13 @@ fn first_raw_value(raw: &[u8]) -> Option<&RawValue> {
         .ok()
 }
 
-pub(crate) fn hosted_answer_body(raw: &[u8], extended: bool) -> Option<Value> {
-    decode_hosted_answer(raw, extended).map(|(body, _)| body)
+fn hosted_answer_body(raw: &[u8], framing: ResultFraming) -> Option<Value> {
+    decode_hosted_answer(raw, framing).map(|(body, _)| body)
 }
 
-fn decode_hosted_answer(raw: &[u8], extended: bool) -> Option<(Value, BodySource)> {
-    let DecodedFrame { mut value, rpc, .. } = decode_frame(raw, extended).ok()?;
+fn decode_hosted_answer(raw: &[u8], framing: ResultFraming) -> Option<(Value, BodySource)> {
+    let DecodedFrame { mut value, rpc, .. } = decode_frame(raw, framing).ok()?;
+    let source = BodySource::outer(rpc);
     if value.as_object()?.contains_key("content") {
         let object = value.as_object()?;
         if object
@@ -443,12 +511,15 @@ fn decode_hosted_answer(raw: &[u8], extended: bool) -> Option<(Value, BodySource
         if item.len() != 2 || item.get("type")?.as_str()? != "text" {
             return None;
         }
-        let body = parse_repeated_json(
-            item.get("text")?.as_str()?.as_bytes(),
-            "Invalid hosted answer",
-        )
-        .ok()?;
-        if object.get("structuredContent").is_some_and(|v| *v != body) {
+        let text = item.get("text")?.as_str()?;
+        let exact = framing == ResultFraming::Exact;
+        let body = parse_repeated_json(text.as_bytes(), "Invalid hosted answer", exact).ok()?;
+        let envelope = if exact && object.contains_key("structuredContent") {
+            Some(source.exact_value(raw)?)
+        } else {
+            None
+        };
+        if !matching_structured_content(object, &body, text, envelope) {
             return None;
         }
         let Value::String(text) = value["content"][0]["text"].take() else {
@@ -456,14 +527,7 @@ fn decode_hosted_answer(raw: &[u8], extended: bool) -> Option<(Value, BodySource
         };
         return Some((body, BodySource::Text(text)));
     }
-    Some((
-        value,
-        if rpc {
-            BodySource::Rpc
-        } else {
-            BodySource::Bare
-        },
-    ))
+    Some((value, source))
 }
 
 // The captures have already passed JSON and framing validation. Read number tokens from
@@ -561,7 +625,7 @@ fn shift_exponent(exponent: &str, shift: i64) -> String {
     String::from_utf8(digits).expect("exponent contains only ASCII digits and sign")
 }
 
-fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
+fn hosted_error_result(object: &Map<String, Value>) -> Option<&Map<String, Value>> {
     if object
         .keys()
         .any(|k| !matches!(k.as_str(), "result" | "trace_id"))
@@ -569,7 +633,10 @@ fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
     {
         return None;
     }
-    let result = object.get("result")?.as_object()?;
+    object.get("result")?.as_object()
+}
+
+fn hosted_timeout_seconds(result: &Map<String, Value>) -> Option<&Value> {
     let text = result.get("error")?.as_str()?;
     let details = result.get("details")?.as_object()?;
     if result.len() == 3
@@ -578,14 +645,23 @@ fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
         && details.len() == 2
     {
         let id = details.get("job_id")?.as_str()?;
-        if !id.is_empty()
-            && id.chars().count() <= 256
-            && !id.chars().any(char::is_control)
-            && details.get("timeout_seconds")?.as_u64()? >= 1
-        {
-            return Some("timed-out");
+        if !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control) {
+            return details.get("timeout_seconds");
         }
     }
+    None
+}
+
+fn hosted_body_ending(object: &Map<String, Value>) -> Option<&'static str> {
+    let result = hosted_error_result(object)?;
+    if hosted_timeout_seconds(result)
+        .and_then(Value::as_u64)
+        .is_some_and(|seconds| seconds >= 1)
+    {
+        return Some("timed-out");
+    }
+    let text = result.get("error")?.as_str()?;
+    let details = result.get("details")?.as_object()?;
     if result.len() != 2 || details.len() != 2 || !details.get("body")?.is_object() {
         return None;
     }
@@ -649,10 +725,10 @@ fn shape(message: &str) -> Diagnostic {
 /// (see `parse_repeated_json`). Callers that keep the value (for example `assess`) must still pass it
 /// through [`normalize`] before trusting it.
 pub fn parse_saved_result(raw: &[u8]) -> Result<Value, Diagnostic> {
-    parse_result_json(raw, true)
+    parse_result_json(raw, ResultFraming::Extended)
 }
 
-fn parse_result_json(raw: &[u8], extended: bool) -> Result<Value, Diagnostic> {
+fn parse_result_json(raw: &[u8], framing: ResultFraming) -> Result<Value, Diagnostic> {
     if raw.len() > MAX_RESULT_BYTES {
         return Err(Diagnostic::error(
             "MCP_TOO_LARGE",
@@ -660,19 +736,20 @@ fn parse_result_json(raw: &[u8], extended: bool) -> Result<Value, Diagnostic> {
         ));
     }
     parse_repeated_json(
-        if extended {
+        if framing != ResultFraming::Original {
             raw.strip_prefix(b"\xef\xbb\xbf").unwrap_or(raw)
         } else {
             raw
         },
         "MCP search result must be valid UTF-8 JSON",
+        framing == ResultFraming::Exact,
     )
 }
 
 /// Agent hosts can render one MCP result more than once (GitHub Copilot CLI shows the text content
 /// followed by the identical structuredContent). Accept whitespace-separated repeats only when every
 /// copy is identical; any difference, or any copy failing the duplicate-key check, fails closed.
-fn parse_repeated_json(raw: &[u8], message: &str) -> Result<Value, Diagnostic> {
+fn parse_repeated_json(raw: &[u8], message: &str, exact: bool) -> Result<Value, Diagnostic> {
     let mut stream = serde_json::Deserializer::from_slice(raw).into_iter::<serde::de::IgnoredAny>();
     let mut spans = Vec::new();
     let mut start = 0;
@@ -682,12 +759,19 @@ fn parse_repeated_json(raw: &[u8], message: &str) -> Result<Value, Diagnostic> {
         spans.push((start, end));
         start = end;
     }
-    let mut copies = spans
-        .into_iter()
-        .map(|(from, to)| parse_unique_json(&raw[from..to], message));
-    let first = copies.next().ok_or_else(|| shape(message))??;
-    for copy in copies {
-        if copy? != first {
+    let mut copies = spans.into_iter().map(|(from, to)| &raw[from..to]);
+    let first_raw = copies.next().ok_or_else(|| shape(message))?;
+    let first = parse_unique_json(first_raw, message)?;
+    for raw in copies {
+        let copy = parse_unique_json(raw, message)?;
+        let matches = if exact {
+            first_raw_value(first_raw)
+                .zip(first_raw_value(raw))
+                .is_some_and(|(left, right)| exact_json_equal(left, right))
+        } else {
+            copy == first
+        };
+        if !matches {
             return Err(shape("MCP search result repeats with different content"));
         }
     }
@@ -815,6 +899,8 @@ pub struct Answer {
     pub trace_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     extended_result_framing: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exact_result_framing: bool,
     pub raw_hex: String,
     pub raw_sha256: String,
     pub ingested_at: String,
@@ -988,9 +1074,10 @@ fn raw_hex(raw: &[u8]) -> String {
     encoded
 }
 fn normalized_answer(answer: &Answer) -> Result<Result<Normalized, Diagnostic>, Diagnostic> {
-    Ok(normalize_framed(
+    Ok(normalize_classified(
         &answer_bytes(answer)?,
-        answer.extended_result_framing,
+        true,
+        ResultFraming::saved(answer.extended_result_framing, answer.exact_result_framing),
     ))
 }
 /// Report the ceiling independently of the recorded failure verdict.
@@ -1040,7 +1127,7 @@ fn earlier_hosted_diagnostic(producer: &str, raw: &[u8], saved: &Diagnostic) -> 
         producer,
         "0.1.0" | "0.1.1" | "0.1.2" | "0.1.3" | "0.1.4" | "0.1.5" | "0.1.6" | "0.1.7"
     ) && producer != env!("CARGO_PKG_VERSION")
-        && normalize_classified(raw, false, false)
+        && normalize_classified(raw, false, ResultFraming::Original)
             .is_err_and(|earlier| same_diagnostic(saved, &earlier))
 }
 fn same_diagnostic(a: &Diagnostic, b: &Diagnostic) -> bool {
@@ -2089,14 +2176,14 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
         let ingested_at = discovery::timestamp();
         let remaining = elapsed(&state, &ingested_at);
         let extended = uses_extended_framing(&raw);
-        verify_fresh_result(&raw, extended, |hash, body| {
+        verify_fresh_result(&raw, |hash, body| {
             state.answers.values().any(|answer| {
                 answer.outcome == "complete"
                     && matches_retained_measurement(&answer.raw_hex, &answer.raw_sha256, hash, body)
             })
         })?;
         let normalized = remaining.and_then(|_| {
-            normalize(&raw).and_then(|value| {
+            normalize_fresh(&raw).and_then(|value| {
                 if value.rows.len() >= 10_000 {
                     Err(Diagnostic::error(
                         "SEARCH_ROW_LIMIT",
@@ -2122,6 +2209,7 @@ pub fn step(state_path: &Path, answers: &[(String, PathBuf)]) -> Result<StepOutp
                 outcome,
                 trace_id,
                 extended_result_framing: extended,
+                exact_result_framing: true,
                 raw_hex: raw_hex(&raw),
                 raw_sha256: sha256_hex(&raw),
                 ingested_at,

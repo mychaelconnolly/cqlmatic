@@ -40,7 +40,7 @@ fn inventory_command_at(dir: &Path, state: &Path, action: Value) -> Command {
     )
     .unwrap();
     let mut command = inventory_json_command(state);
-    command.arg("--request").arg(request);
+    command.env("HOME", dir).arg("--request").arg(request);
     command
 }
 fn inventory_json_command(state: &Path) -> Command {
@@ -1527,8 +1527,16 @@ fn next_probe_explains_a_run_that_ran_out_of_searches() {
             assert!(output.status.success(), "{output:?}");
             let polled: Value = serde_json::from_slice(&output.stdout).unwrap();
             let polled = &polled["action"];
-            for key in ["state", "diagnostics", "next_action", "cost"] {
+            for key in ["state", "next_action", "cost"] {
                 assert_eq!(polled[key], action[key]);
+            }
+            let diagnostics = polled["diagnostics"].as_array().unwrap();
+            if request.get("answer").is_some() {
+                assert_eq!(diagnostics.len(), 2);
+                assert_eq!(diagnostics[0], action["diagnostics"][0]);
+                assert_eq!(diagnostics[1]["code"], "MCP_ALREADY_ANSWERED");
+            } else {
+                assert_eq!(polled["diagnostics"], action["diagnostics"]);
             }
             assert_eq!(polled["settled"], false);
             assert_eq!(polled["dispatched"], false);
@@ -4549,6 +4557,10 @@ fn another_completion_supersedes_an_already_reserved_run() {
     assert_closed_run_answer(&dir.0, 1, "DISCOVERY_PHASE", "superseded", checkpoint);
     let brief = brief_call(&dir.0, json!({"kind":"discovery-step","run_index":1}));
     assert_eq!(brief["action"]["outcome"], "incomplete");
+    assert_eq!(
+        brief["action"]["diagnostics"][0]["code"],
+        "DISCOVERY_SUPERSEDED"
+    );
     assert_eq!(brief["status"]["counts"]["discovery_unfinished"], 0);
 }
 
@@ -7139,4 +7151,433 @@ fn brief_step_preserves_the_reuse_refusal() {
         );
     }
     assert_eq!(fs::read(checkpoint).unwrap(), before);
+}
+
+#[test]
+fn exact_framing_rejects_copies_that_round_to_the_same_float() {
+    let left = r#"{"result":[{"events":23}],"metadata":{"timing":0.123456789012345678}}"#;
+    let right = left.replace("0.123456789012345678", "0.12345678901234568");
+    let text = json!(left);
+    for framed in [
+        format!(r#"{{"content":[{{"type":"text","text":{text}}}],"structuredContent":{right}}}"#),
+        format!("{left}\n{right}"),
+    ] {
+        for legacy in [false, true] {
+            let dir = Temp::new();
+            let prepared = prepare_two_source_run(&dir.0);
+            // Check the live intake and its next readback on both checkpoint formats.
+            let checkpoint = Path::new(
+                prepared["status"]["discovery_runs"][0]["state_path"]
+                    .as_str()
+                    .unwrap(),
+            );
+            let id = if legacy {
+                use_format_two(checkpoint);
+                prepared["action"]["relay"]["probes"][0]["probe_id"].clone()
+            } else {
+                call(&dir.0, json!({"kind":"next-probe"}))["action"]["probe"]["probe_id"].clone()
+            };
+            let path = dir.0.join("disagreeing.json");
+            fs::write(&path, &framed).unwrap();
+            let result = call(
+                &dir.0,
+                json!({"kind":"discovery-step","answers":[{"probe_id":id,"result_file":path}]}),
+            );
+            assert_eq!(
+                result["action"]["relay"]["diagnostics"][0]["code"], "MCP_SHAPE",
+                "{result}"
+            );
+            cqlmatic::mcp::inspect_state(checkpoint).unwrap();
+        }
+    }
+}
+
+#[test]
+fn reuse_checks_equivalent_numeric_copies_in_rejected_history() {
+    for repeated in [false, true] {
+        let dir = Temp::new();
+        let prepared = prepare_two_source_run(&dir.0);
+        let checkpoint = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let prior =
+            r#"{"result":[{"events":771}],"trace_id":"prior-call","metadata":{"timing":1.0}}"#;
+        let equivalent = prior.replace("1.0", "1");
+        let framed = if repeated {
+            format!("{prior}\n{equivalent}")
+        } else {
+            format!(
+                r#"{{"content":[{{"type":"text","text":{}}}],"structuredContent":{equivalent}}}"#,
+                json!(prior)
+            )
+        };
+        let first = call(&dir.0, json!({"kind":"next-probe"}));
+        let path = dir.0.join("rejected.json");
+        // Seed a refusal of the two copies under the prior comparison rule.
+        fs::write(&path, r#"{"unsupported":true}"#).unwrap();
+        let rejected = submit_next_answer(&dir.0, &first, &path);
+        assert_eq!(rejected["action"]["state"], "cleanup-pending");
+        let mut saved: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+        let evidence = &mut saved["session"]["attempts"][0]["rejected_results"][0]["evidence"];
+        evidence["raw_hex"] = json!(
+            framed
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        evidence["raw_sha256"] = json!(cqlmatic::sha256_hex(framed.as_bytes()));
+        evidence
+            .as_object_mut()
+            .unwrap()
+            .remove("exact_result_framing");
+        fs::write(checkpoint, serde_json::to_vec(&saved).unwrap()).unwrap();
+
+        fs::write(
+            &path,
+            r#"{"result":[{"events":12}],"trace_id":"corrected"}"#,
+        )
+        .unwrap();
+        let settled = submit_next_answer(&dir.0, &first, &path);
+        assert_eq!(settled["action"]["settled"], true);
+        call(&dir.0, json!({"kind":"resume-discovery"}));
+        let second = call(&dir.0, json!({"kind":"next-probe"}));
+        fs::write(&path, prior).unwrap();
+        assert_reused_on_next(&dir.0, checkpoint, &second, &path);
+    }
+}
+
+#[test]
+fn discovery_replays_numeric_copies_under_the_saved_framing_rule() {
+    for historical in [false, true] {
+        let dir = Temp::new();
+        let prepared = prepare_two_source_run(&dir.0);
+        let checkpoint = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let first = call(&dir.0, json!({"kind":"next-probe"}));
+        let left = r#"{"result":[{"events":23}],"metadata":{"timing":0.123456789012345678}}"#;
+        let right = left.replace("0.123456789012345678", "0.12345678901234568");
+        let accepted = if historical {
+            left.to_owned()
+        } else {
+            format!(
+                "{}\n{}",
+                left.replace("0.123456789012345678", "1.0"),
+                left.replace("0.123456789012345678", "1")
+            )
+        };
+        let path = dir.0.join("first.json");
+        fs::write(&path, &accepted).unwrap();
+        let second = submit_next_answer(&dir.0, &first, &path);
+        assert_eq!(second["action"]["settled"], true, "{second}");
+        if historical {
+            // The earlier framing rule accepted two copies that rounded to the same float.
+            let older_bytes = format!("{left}\n{right}");
+            let mut state: Value = serde_json::from_slice(&fs::read(checkpoint).unwrap()).unwrap();
+            let id = first["action"]["probe"]["probe_id"].as_str().unwrap();
+            let answer = state["answers"][id].as_object_mut().unwrap();
+            answer.remove("exact_result_framing");
+            answer.insert(
+                "raw_hex".into(),
+                json!(
+                    older_bytes
+                        .bytes()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                ),
+            );
+            answer.insert(
+                "raw_sha256".into(),
+                json!(cqlmatic::sha256_hex(older_bytes.as_bytes())),
+            );
+            fs::write(checkpoint, serde_json::to_vec(&state).unwrap()).unwrap();
+        }
+        let before = fs::read(checkpoint).unwrap();
+        let poll = call(&dir.0, json!({"kind":"next-probe"}));
+        assert_eq!(
+            poll["action"]["probe"]["probe_id"],
+            second["action"]["probe"]["probe_id"]
+        );
+        assert_eq!(fs::read(checkpoint).unwrap(), before);
+        let final_file = fixture(&dir.0, "second.json", json!({"result":[{"events":17}]}));
+        let done = submit_next_answer(&dir.0, &second, Path::new(&final_file));
+        assert_eq!(done["action"]["state"], "complete");
+    }
+}
+
+#[test]
+fn job_only_cutoff_reuse_keeps_the_reservation_unchanged() {
+    let dir = Temp::new();
+    let prepared = prepare_two_source_run(&dir.0);
+    let checkpoint = Path::new(
+        prepared["status"]["discovery_runs"][0]["state_path"]
+            .as_str()
+            .unwrap(),
+    );
+    let file = dir.0.join("cutoff.json");
+    let cutoff = r#"{"result":{"error":"NGSIEM search timed out after 20 seconds","operation":"GetSearchStatusV1","details":{"job_id":"job","timeout_seconds":20}}}"#;
+    fs::write(&file, cutoff).unwrap();
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let paused = submit_next_answer(&dir.0, &first, &file);
+    assert_eq!(paused["action"]["state"], "paused", "{paused}");
+    call(&dir.0, json!({"kind":"resume-discovery"}));
+    let second = call(&dir.0, json!({"kind":"next-probe"}));
+    fs::write(&file, cutoff.replace(":20}", ":20.0}")).unwrap();
+    assert_reused_on_next(&dir.0, checkpoint, &second, &file);
+
+    fs::write(
+        &file,
+        cutoff
+            .replace(r#""job""#, r#""different-job""#)
+            .replace(":20}", ":20.0}"),
+    )
+    .unwrap();
+    let refused = submit_next_answer(&dir.0, &second, &file);
+    assert_eq!(refused["action"]["state"], "cleanup-pending", "{refused}");
+    assert_eq!(refused["action"]["settled"], false);
+}
+
+#[test]
+fn cleanup_advice_recovers_the_complete_result_from_the_same_call() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    let probe = call(&dir.0, json!({"kind":"next-probe"}));
+    let file = fixture(
+        &dir.0,
+        "partial.json",
+        json!({"partial":true,"result":[{"events":1}]}),
+    );
+    let partial = submit_next_answer(&dir.0, &probe, Path::new(&file));
+    assert_eq!(partial["action"]["state"], "cleanup-pending");
+    let poll = json!({"kind":"discovery-step","answers":[]});
+    for flag in ["", "--summary", "--brief"] {
+        let action = projected_action(&dir.0, &poll, flag);
+        let advice = action["next_action"].as_str().unwrap();
+        assert!(
+            advice.contains("complete or final response") && advice.contains("same search call"),
+            "{action}"
+        );
+    }
+    let final_file = fixture(&dir.0, "complete.json", json!({"result":[{"events":17}]}));
+    let recovered = submit_next_answer(&dir.0, &probe, Path::new(&final_file));
+    assert_eq!(recovered["action"]["settled"], true);
+    let done = call(&dir.0, json!({"kind":"resume-discovery"}));
+    assert_eq!(done["action"]["relay"]["status"], "complete");
+}
+
+#[test]
+fn capped_run_waits_for_a_retained_sibling_search() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    prepare_source_run(&dir.0);
+    let probe = call(&dir.0, json!({"kind":"next-probe"}));
+    let file = fixture(
+        &dir.0,
+        "cap.json",
+        json!({"result":vec![json!({"events":1});10_000]}),
+    );
+    let paused = submit_next_answer(&dir.0, &probe, Path::new(&file));
+    assert_eq!(paused["action"]["state"], "paused");
+    call(&dir.0, source_run_request(9));
+    let sibling = call(&dir.0, json!({"kind":"next-probe","run_index":1}));
+    for kind in ["next-probe", "discovery-step"] {
+        for flag in ["", "--summary", "--brief"] {
+            let reply = projected_action(&dir.0, &json!({"kind":kind,"run_index":0}), flag);
+            assert!(
+                reply["next_action"]
+                    .as_str()
+                    .unwrap()
+                    .contains("run_index=1"),
+                "{reply}"
+            );
+            assert!(reply.to_string().contains("SEARCH_ROW_LIMIT"), "{reply}");
+        }
+    }
+    let cutoff = fixture(
+        &dir.0,
+        "cutoff.json",
+        serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-timeout.json")).unwrap(),
+    );
+    let settled = call(
+        &dir.0,
+        json!({"kind":"next-probe","run_index":1,"answer":{
+            "probe_id":sibling["action"]["probe"]["probe_id"],"result_file":cutoff
+        }}),
+    );
+    assert_eq!(settled["action"]["state"], "paused");
+    let mut narrower = source_run_request(4);
+    narrower["end"] = json!("2026-01-01T02:00:00Z");
+    let prepared = call(&dir.0, narrower);
+    assert_eq!(prepared["action"]["run_index"], 2);
+}
+
+#[test]
+fn identical_preparation_does_not_resume_a_spent_query_allowance() {
+    let dir = Temp::new();
+    confirm_quick_source(&dir.0, "synthetic");
+    let request = source_run_request(1);
+    call(&dir.0, request.clone());
+    let probe = call(&dir.0, json!({"kind":"next-probe"}));
+    let file = fixture(
+        &dir.0,
+        "unusable.json",
+        json!({"result":[{"field":"name"}]}),
+    );
+    let paused = submit_next_answer(&dir.0, &probe, Path::new(&file));
+    assert_eq!(paused["action"]["state"], "paused");
+    let repeated = call(&dir.0, request);
+    assert_eq!(repeated["action"]["run_index"], 1);
+    assert_eq!(
+        relay(&dir.0, repeated, &[], &[], None)["action"]["relay"]["status"],
+        "complete"
+    );
+}
+
+#[test]
+fn failed_run_submissions_keep_classification_and_failure() {
+    for legacy in [false, true] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        let prepared = prepare_source_run(&dir.0);
+        let checkpoint = Path::new(
+            prepared["status"]["discovery_runs"][0]["state_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let (probe_id, failure, body) = if legacy {
+            use_format_two(checkpoint);
+            (
+                prepared["action"]["relay"]["probes"][0]["probe_id"].clone(),
+                "SEARCH_ROW_LIMIT",
+                json!({"result":vec![json!({"events":1});10_000]}),
+            )
+        } else {
+            let probe = call(&dir.0, json!({"kind":"next-probe"}));
+            (
+                probe["action"]["probe"]["probe_id"].clone(),
+                "DISCOVERY_EVIDENCE",
+                json!({"result":[{"events":0}]}),
+            )
+        };
+        let file = fixture(&dir.0, "failure.json", body);
+        let initial = call(
+            &dir.0,
+            json!({"kind":"discovery-step","answers":[{"probe_id":probe_id,"result_file":file}]}),
+        );
+        assert_eq!(initial["action"]["relay"]["status"], "failed", "{initial}");
+        let inventory = dir.0.join("workflow/state.json");
+        let before = [fs::read(&inventory).unwrap(), fs::read(checkpoint).unwrap()];
+        let unknown = json!("unknown-synthetic-probe");
+        for id in [&unknown, &probe_id] {
+            if !legacy && id == &probe_id {
+                continue;
+            }
+            // The answer is classified without opening its input file.
+            let answer = json!({"probe_id":id,"result_file":"unreadable-synthetic-file"});
+            for request in [
+                json!({"kind":"discovery-step","answers":[answer]}),
+                json!({"kind":"next-probe","answer":answer}),
+            ] {
+                for flag in ["", "--summary", "--brief"] {
+                    let action = projected_action(&dir.0, &request, flag);
+                    let codes = action["diagnostics"].as_array().unwrap();
+                    let refusal = if legacy {
+                        "MCP_UNKNOWN_PROBE"
+                    } else {
+                        "DISCOVERY_PHASE"
+                    };
+                    assert!(codes.iter().any(|d| d["code"] == refusal), "{action}");
+                    assert!(codes.iter().any(|d| d["code"] == failure), "{action}");
+                    assert!(action["next_action"].is_string(), "{action}");
+                    assert_eq!(
+                        [fs::read(&inventory).unwrap(), fs::read(checkpoint).unwrap()],
+                        before
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn brief_step_projects_relay_diagnostics_with_safe_text() {
+    for (body, expected) in [
+        (
+            json!({"partial":true,"result":[{"events":1}],"trace_id":"synthetic-private-marker"}),
+            ["MCP_INCOMPLETE", "DISCOVERY_CLEANUP_PENDING"],
+        ),
+        (
+            json!({"result":[{"field":"synthetic-private-marker"}]}),
+            ["DISCOVERY_EVIDENCE", "DISCOVERY_ATTEMPT_ENDED"],
+        ),
+        (
+            serde_json::from_slice(include_bytes!("fixtures/mcp/hosted-timeout.json")).unwrap(),
+            ["MCP_DEADLINE", "DISCOVERY_ATTEMPT_ENDED"],
+        ),
+    ] {
+        let dir = Temp::new();
+        confirm_quick_source(&dir.0, "synthetic");
+        prepare_source_run(&dir.0);
+        let probe = call(&dir.0, json!({"kind":"next-probe"}));
+        let path = fixture(&dir.0, "synthetic-private-marker.json", body);
+        let id = probe["action"]["probe"]["probe_id"].as_str().unwrap();
+        let brief = brief_call(
+            &dir.0,
+            json!({"kind":"discovery-step","answers":[{"probe_id":id,"result_file":path}]}),
+        );
+        let diagnostic_codes: Vec<_> = brief["action"]["diagnostics"]
+            .as_array()
+            .expect("brief step diagnostics")
+            .iter()
+            .map(|d| d["code"].as_str().unwrap())
+            .collect();
+        assert_eq!(diagnostic_codes, expected);
+        let output = brief.to_string();
+        assert!(!output.contains(id) && !output.contains("synthetic-private-marker"));
+    }
+}
+
+#[test]
+fn cleanup_readback_keeps_the_latest_refusal_for_that_attempt() {
+    let dir = Temp::new();
+    prepare_two_source_run(&dir.0);
+    let count = fixture(
+        &dir.0,
+        "count.json",
+        json!({"result":[{"events":23}],"trace_id":"prior"}),
+    );
+    let first = call(&dir.0, json!({"kind":"next-probe"}));
+    let second = submit_next_answer(&dir.0, &first, Path::new(&count));
+    let partial = fixture(
+        &dir.0,
+        "partial.json",
+        json!({"result":[{"events":1}],"partial":true}),
+    );
+    let cleanup = submit_next_answer(&dir.0, &second, Path::new(&partial));
+    assert_eq!(cleanup["action"]["state"], "cleanup-pending");
+    let refused = submit_next_answer(&dir.0, &second, Path::new(&count));
+    assert_eq!(
+        refused["action"]["diagnostics"][0]["code"],
+        "MCP_RESULT_REUSED"
+    );
+    for kind in ["next-probe", "discovery-step"] {
+        for flag in ["", "--summary", "--brief"] {
+            let action = projected_action(&dir.0, &json!({"kind":kind}), flag);
+            let serial = action.to_string();
+            assert!(
+                serial.contains("MCP_RESULT_REUSED") && !serial.contains("MCP_INCOMPLETE"),
+                "{action}"
+            );
+        }
+    }
+    let unusable = fixture(&dir.0, "unusable.json", json!({"unsupported":true}));
+    let latest = submit_next_answer(&dir.0, &second, Path::new(&unusable));
+    assert_eq!(latest["action"]["diagnostics"][0]["code"], "MCP_SHAPE");
+    let poll = call(&dir.0, json!({"kind":"next-probe"}));
+    assert_eq!(poll["action"]["diagnostics"][0]["code"], "MCP_SHAPE");
 }
