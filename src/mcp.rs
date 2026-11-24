@@ -1784,7 +1784,7 @@ fn activate(
     }
     let merged = match old {
         Some(old) => environment::merge_with_notices(&old, &candidate),
-        None => Ok((candidate, Vec::new())),
+        None => environment::validate_incoming_fields(&candidate).map(|()| (candidate, Vec::new())),
     };
     let (merged, notices) = match merged {
         Ok(merged) => merged,
@@ -1848,11 +1848,7 @@ fn activate(
         return Ok(activation_blocked(state, d));
     }
     activation_checkpoint("after-intent")?;
-    let mut output = finish_activation(writer, &pack_writer, &receipt_writer, state)?;
-    if output.status == "complete" {
-        output.diagnostics.extend(notices);
-    }
-    Ok(output)
+    finish_activation(writer, &pack_writer, &receipt_writer, state)
 }
 fn frozen_json(value: &impl Serialize) -> Result<String, Diagnostic> {
     let mut bytes = serde_json::to_string_pretty(value).map_err(|_| {
@@ -1974,6 +1970,23 @@ pub fn pending_activation_conflict(state: &State) -> Option<Diagnostic> {
         .filter(|error| error.code == "MCP_ACTIVATION_CONFLICT")
 }
 
+fn receipt_notices(state: &State) -> Vec<Diagnostic> {
+    let Some(intent) = state.activation.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(receipt) = serde_json::from_str::<Value>(&intent.receipt_bytes) else {
+        return Vec::new();
+    };
+    receipt
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| serde_json::from_value::<Diagnostic>(item.clone()).ok())
+        .filter(|diagnostic| diagnostic.code == "FIELD_MEASUREMENT_NOT_APPLIED")
+        .collect()
+}
+
 fn finish_activation(
     writer: &storage::Writer,
     pack_writer: &storage::Writer,
@@ -2016,7 +2029,13 @@ fn finish_activation(
         return Ok(activation_blocked(state, d));
     }
     activation_checkpoint("after-activated")?;
-    Ok(progress(state, "complete", vec![], true, vec![]))
+    Ok(progress(
+        state,
+        "complete",
+        vec![],
+        true,
+        receipt_notices(state),
+    ))
 }
 
 #[cfg(test)]
@@ -2070,7 +2089,13 @@ fn advance(writer: &storage::Writer, state: &mut State) -> Result<StepOutput, Di
         if let Err(d) = writer.confirm_durable() {
             return Ok(activation_blocked(state, d));
         }
-        return Ok(progress(state, "complete", vec![], true, vec![]));
+        return Ok(progress(
+            state,
+            "complete",
+            vec![],
+            true,
+            receipt_notices(state),
+        ));
     }
     if state.status == "activating" {
         return recover_activation(writer, state);

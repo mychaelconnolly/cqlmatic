@@ -1008,11 +1008,8 @@ fn field_update(
         if incoming_observed == Some(false) && compatible_rate {
             return Ok(FieldUpdate::Keep);
         }
-        // Preserve legacy tag evidence when the new window cannot clear its boundary.
-        if field_merge == FieldMerge::Canonical
-            && fresh.is_tag == Some(true)
-            && incoming_measurement.is_some()
-        {
+        // Preserve undated negative evidence when the new window cannot clear its boundary.
+        if field_merge == FieldMerge::Canonical && incoming_measurement.is_some() {
             return Ok(FieldUpdate::Unapplied);
         }
         return Err(conflict(
@@ -1113,6 +1110,23 @@ fn retain_field_metadata(fresh: &mut Value, matches: &[&Value], provenance: &[Va
 }
 
 /// Replace only fully measured selected sources. Quiet fields retain their original evidence.
+pub fn validate_incoming_fields(candidate: &Pack) -> Result<(), Diagnostic> {
+    let mut incoming_fields = BTreeSet::new();
+    for record in &candidate.data.fields {
+        let _ = field(record)?;
+        let (source_id, path, is_tag) = record_field_parts(record);
+        let identity = FieldMerge::Canonical.identity(source_id, path, is_tag);
+        if !incoming_fields.insert(identity) {
+            let prefix = if is_tag { "#" } else { "" };
+            return Err(invalid(&format!(
+                "Duplicate incoming field for source {source_id} field {prefix}{}.",
+                identity.1
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn merge(old: &Pack, candidate: &Pack) -> Result<Pack, Diagnostic> {
     merge_with_notices(old, candidate).map(|(pack, _)| pack)
 }

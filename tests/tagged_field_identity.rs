@@ -1,7 +1,7 @@
 use cqlmatic::{
     contracts::{Cloud, EnvironmentId},
     environment::{self, Pack, PackData},
-    sha256_hex, storage,
+    mcp, sha256_hex, storage,
 };
 use serde_json::{Value, json};
 use std::{
@@ -641,4 +641,200 @@ fn existing_tag_spellings_still_validate_with_their_original_digests() {
             .validate()
             .unwrap_or_else(|error| panic!("{error:?}: {}", fixture.digest().unwrap()));
     }
+}
+
+#[test]
+fn first_activation_refuses_duplicate_canonical_tag_spellings() {
+    let duplicate = pack(
+        4,
+        4,
+        vec![
+            tag(LEGACY, "#event.dataset", 4),
+            tag(SECOND, "event.dataset", 4),
+        ],
+        vec![],
+    );
+    let error = environment::validate_incoming_fields(&duplicate).unwrap_err();
+    assert_eq!(error.code, "PACK_INTEGRITY");
+    assert!(
+        error.message.contains(SOURCE) && error.message.contains("#event.dataset"),
+        "{error:?}"
+    );
+
+    // Fresh inventory with no predecessor refuses a first activation producing both spellings.
+    let workflow = Workflow::new();
+    workflow.confirm();
+    let prepared = workflow.prepare(3, 5);
+    let index = &prepared["action"]["run_index"];
+    let mut result = prepared.clone();
+    for _ in 0..40 {
+        let relay = &result["action"]["relay"];
+        if relay["status"] == "failed" {
+            assert_eq!(relay["active_pack_updated"], false);
+            let diagnostics = relay["diagnostics"].as_array().unwrap();
+            assert_eq!(diagnostics[0]["code"], "PACK_INTEGRITY", "{diagnostics:?}");
+            assert!(
+                diagnostics[0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("#event.dataset"),
+                "{diagnostics:?}"
+            );
+            return;
+        }
+        assert_eq!(relay["status"], "needs-probes", "{result}");
+        let probe = &relay["probes"][0];
+        let rows = match probe["kind"].as_str().unwrap() {
+            "volume" => json!([{"events":10}]),
+            "fieldset" => json!([{"field":"user"},{"field":"##event.dataset"}]),
+            "dataset-facet" => json!([{"#event.dataset":"synthetic","events":10}]),
+            "tag-detect" => {
+                let query = probe["mcp"]["arguments"]["query_string"].as_str().unwrap();
+                json!([{"events":u32::from(query.contains("#event.dataset")) * 10}])
+            }
+            "population" => {
+                let mut row = json!({"total":10});
+                for i in 0..probe["fields"].as_array().unwrap().len() {
+                    row[format!("c{i}")] = json!(10);
+                }
+                json!([row])
+            }
+            "value-facet" => json!([{"user":"synthetic","events":10}]),
+            kind => panic!("Unexpected probe {kind}"),
+        };
+        let path = workflow.0.join("answer.json");
+        write_json(&path, &json!({"result":rows}));
+        workflow.call(
+            json!({"kind":"dispatch-discovery","run_index":index,"probe_id":probe["probe_id"]}),
+        );
+        result = workflow.call(json!({"kind":"discovery-step","run_index":index,
+            "answers":[{"probe_id":probe["probe_id"],"result_file":path}]}));
+    }
+    panic!("Discovery did not fail on duplicate canonical incoming tag");
+}
+
+#[test]
+fn an_undated_negative_data_field_completes_activation_with_a_warning() {
+    let workflow = Workflow::new();
+    workflow.confirm();
+    let mut negative = tag("env:field:user", "user", 2);
+    negative["is_tag"] = json!(false);
+    negative["evidence_kind"] = json!("declared");
+    negative["coverage"]["observed"] = json!(false);
+    negative["observation_window"] = Value::Null;
+    let retained = pack(5, 2, vec![negative.clone()], vec![]);
+    workflow.import("legacy.json", &retained);
+    let (reply, refreshed, _) = workflow.finish(workflow.prepare(3, 5));
+    let user_fields: Vec<_> = refreshed
+        .data
+        .fields
+        .iter()
+        .filter(|field| field["path"] == "user" && field["is_tag"] == false)
+        .collect();
+    assert_eq!(user_fields, [&negative]);
+    let warnings: Vec<_> = reply["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|warning| warning["code"] == "FIELD_MEASUREMENT_NOT_APPLIED")
+        .collect();
+    assert_eq!(warnings.len(), 1, "{reply}");
+    assert_eq!(warnings[0]["severity"], "warning");
+    let message = warnings[0]["message"].as_str().unwrap();
+    for text in [SOURCE, "user", day(5).as_str()] {
+        assert!(message.contains(text), "{message}");
+    }
+}
+
+#[test]
+fn completed_poll_recovery_and_next_probe_preserve_field_measurement_warning() {
+    let workflow = Workflow::new();
+    workflow.confirm();
+    let mut negative = tag(LEGACY, "#event.dataset", 2);
+    negative["evidence_kind"] = json!("declared");
+    negative["coverage"]["observed"] = json!(false);
+    negative["observation_window"] = Value::Null;
+    let retained = pack(5, 2, vec![negative], vec![]);
+    workflow.import("legacy.json", &retained);
+    let prepared = workflow.prepare(3, 5);
+    let index = prepared["action"]["run_index"].as_u64().unwrap();
+
+    // Drive every probe through next-probe so the final completion reply goes through compact projection.
+    let mut next = workflow.call(json!({"kind":"next-probe","run_index":index}));
+    let final_next = loop {
+        if next["action"]["state"] == "complete" {
+            break next;
+        }
+        assert_eq!(next["action"]["state"], "probe", "{next}");
+        let probe = &next["action"]["probe"];
+        let query = probe["arguments"]["query_string"].as_str().unwrap();
+        let rows = if query.contains("fieldset()") {
+            json!([{"field":"user"}])
+        } else if query.contains("groupBy([#event.dataset]") {
+            json!([{"#event.dataset":"synthetic","events":10}])
+        } else if query.contains("stats([count(as=total)") {
+            let mut row = json!({"total":10});
+            for i in 0..query.matches(", as=c").count() {
+                row[format!("c{i}")] = json!(10);
+            }
+            json!([row])
+        } else if query.contains("groupBy([user]") {
+            json!([{"user":"synthetic","events":10}])
+        } else if query.contains("=* | count(as=events)") {
+            json!([{"events":u32::from(query.contains("#event.dataset")) * 10}])
+        } else {
+            json!([{"events":10}])
+        };
+        let path = workflow.0.join("next-answer.json");
+        write_json(&path, &json!({"result":rows}));
+        next = workflow.call(json!({
+            "kind":"next-probe",
+            "run_index":index,
+            "answer":{"probe_id":probe["probe_id"],"result_file":path}
+        }));
+    };
+    assert_eq!(final_next["action"]["settled"], true, "{final_next}");
+    let next_diags = final_next["action"]["diagnostics"].as_array().unwrap();
+    let next_warning = next_diags
+        .iter()
+        .find(|d| d["code"] == "FIELD_MEASUREMENT_NOT_APPLIED")
+        .expect("next-probe completion carries FIELD_MEASUREMENT_NOT_APPLIED");
+    assert_eq!(next_warning["severity"], "warning");
+    let next_msg = next_warning["message"].as_str().unwrap();
+    assert!(
+        next_msg.contains("Discovery completed")
+            && !next_msg.contains("The answer could not be applied"),
+        "{next_warning}"
+    );
+
+    // Polling the completed run with discovery-step preserves FIELD_MEASUREMENT_NOT_APPLIED.
+    let poll = workflow.call(json!({"kind":"discovery-step","run_index":index,"answers":[]}));
+    let poll_diags = poll["action"]["relay"]["diagnostics"].as_array().unwrap();
+    assert!(
+        poll_diags
+            .iter()
+            .any(|d| d["code"] == "FIELD_MEASUREMENT_NOT_APPLIED" && d["severity"] == "warning"),
+        "{poll}"
+    );
+
+    // Recovering from an interrupted activation (status == "activating" with frozen intent) also returns it.
+    let state = read_json(&workflow.state());
+    let run = &state["discovery_runs"][0];
+    let checkpoint = PathBuf::from(run["state_path"].as_str().unwrap());
+    let receipt_path = PathBuf::from(run["receipt_path"].as_str().unwrap());
+    let mut interrupted = read_json(&checkpoint);
+    interrupted["status"] = json!("activating");
+    interrupted["pack_sha256"] = Value::Null;
+    write_json(&checkpoint, &interrupted);
+    let _ = fs::remove_file(&receipt_path);
+    let recovered = mcp::step_resumable(&checkpoint, &[]).unwrap();
+    assert_eq!(recovered.status, "complete", "{recovered:?}");
+    assert!(
+        recovered
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "FIELD_MEASUREMENT_NOT_APPLIED"),
+        "{:?}",
+        recovered.diagnostics
+    );
 }

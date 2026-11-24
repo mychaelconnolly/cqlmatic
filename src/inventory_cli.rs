@@ -1733,6 +1733,9 @@ fn answer_reason(code: &str) -> Option<&'static str> {
         "MCP_INCOMPLETE" => "The search response reports incomplete results.",
         "MCP_DEADLINE" => "The search response reports a timeout.",
         "DISCOVERY_EVIDENCE" => "The result did not provide the evidence required by this probe.",
+        "FIELD_MEASUREMENT_NOT_APPLIED" => {
+            "Discovery completed. A field kept its earlier evidence. Read the full step output or receipt for the field and its time boundary."
+        }
         "SEARCH_ROW_LIMIT" => ROW_LIMIT_REASON,
         "MCP_TOO_LARGE" => "The search response exceeds the size limit.",
         "DISCOVERY_CANCEL_REQUESTED" => "Cancellation was requested for the outstanding search.",
