@@ -112,6 +112,19 @@ impl Session {
         Ok(self.predecessor_sha256.as_deref())
     }
 
+    /// Check a surviving predecessor after a marked run's cleanup has begun.
+    pub fn verify_prune_predecessor(&self, pack: &Path) -> Result<(), Diagnostic> {
+        if optional_bytes(pack)?.is_some_and(|bytes| {
+            self.predecessor_sha256.as_deref() != Some(sha256_hex(&bytes).as_str())
+        }) {
+            return Err(error(
+                "MCP_ACTIVATION_CONFLICT",
+                "The retained starting pack changed.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn attempts_len(&self) -> usize {
         self.attempts.len()
     }
@@ -936,6 +949,29 @@ pub fn inspect_inventory_owner(state: &State, owner: &storage::Writer) -> Result
         return Ok(false);
     }
     require_inventory(state, owner)?;
+    Ok(true)
+}
+
+/// Check an owner without acquiring a writer or binding an unowned session.
+pub fn inspect_inventory_owner_path(state: &State, owner: &Path) -> Result<bool, Diagnostic> {
+    let Some(session) = &state.session else {
+        return Ok(false);
+    };
+    if session.transport != Transport::Mcp {
+        return Err(error(
+            "DISCOVERY_TRANSPORT",
+            "Inventory discovery requires the MCP transport.",
+        ));
+    }
+    let Some(recorded) = &session.inventory_owner else {
+        return Ok(false);
+    };
+    if recorded != owner {
+        return Err(error(
+            "DISCOVERY_INVENTORY_OWNER",
+            "Discovery checkpoint belongs to another inventory.",
+        ));
+    }
     Ok(true)
 }
 

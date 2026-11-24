@@ -33,6 +33,18 @@ const MAX_PENDING_WORK: usize = 1000;
 // shortcut: retain 200 refresh attempts per state, add protected archival for longer histories.
 const MAX_REFRESH_ATTEMPTS: usize = 200;
 
+fn deserialize_keep_last<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    let value = usize::deserialize(deserializer)?;
+    if value > 1000 {
+        return Err(serde::de::Error::custom(
+            "keep_last must be between 0 and 1000",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -46,6 +58,14 @@ pub struct InventoryRequest {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum InventoryAction {
     Init {},
+    Prune {
+        dry_run: bool,
+        #[serde(default, deserialize_with = "deserialize_keep_last")]
+        #[cfg_attr(test, schemars(range(min = 0, max = 1000)))]
+        keep_last: usize,
+        #[serde(default)]
+        include_failed: bool,
+    },
     SetDiscoveryMode {
         mode: DiscoveryMode,
         #[serde(default)]
@@ -913,6 +933,10 @@ pub struct PackReference {
     pub input_content_digest: Option<String>,
     pub imported_at: String,
     pub discovery_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -935,6 +959,10 @@ pub struct DiscoveryRun {
     pub mode: DiscoveryMode,
     #[serde(default)]
     pub quick_depth: QuickDepth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1552,7 +1580,10 @@ pub fn brief(status: &InventoryStatus, session_id: Option<&str>) -> Value {
     let mut discovery_work: Vec<_> = status
         .discovery_runs
         .iter()
-        .filter(|run| !matches!(run.status.as_str(), "complete" | "superseded" | "paused"))
+        .filter(|run| {
+            run.pruned_at.is_none()
+                && !matches!(run.status.as_str(), "complete" | "superseded" | "paused")
+        })
         .collect();
     discovery_work.sort_by_key(|run| {
         (
@@ -1762,20 +1793,35 @@ fn inventory_work_run(
     })
 }
 
+pub fn inventory_work_run_candidate(
+    index: usize,
+    run: &DiscoveryRun,
+    work: &PendingInventoryWork,
+) -> bool {
+    run.status == "complete"
+        && run.source_ids.contains(&work.id)
+        && (work.fields.is_empty()
+            || run.mode != DiscoveryMode::Quick
+            || run.quick_depth != QuickDepth::SourcesOnly)
+        && (index >= work.after_run
+            || work
+                .capture_boundary
+                .as_ref()
+                .is_some_and(|boundary| boundary.run == run.state_path))
+}
+
 fn inventory_work_run_eligible(
     index: usize,
     run: &DiscoveryRun,
     work: &PendingInventoryWork,
     request_sha256: Option<&str>,
 ) -> bool {
-    run.status == "complete"
-        && run.source_ids.contains(&work.id)
+    inventory_work_run_candidate(index, run, work)
         && (index >= work.after_run
-            || index + 1 == work.after_run
-                && work.capture_boundary.as_ref().is_some_and(|boundary| {
-                    boundary.run == run.state_path
-                        && request_sha256 == Some(boundary.request_sha256.as_str())
-                }))
+            || work
+                .capture_boundary
+                .as_ref()
+                .is_some_and(|boundary| request_sha256 == Some(boundary.request_sha256.as_str())))
 }
 
 fn validate_inventory_work_proof(
@@ -2312,7 +2358,8 @@ impl InventoryState {
                 .discovery_runs
                 .last()
                 .filter(|run| {
-                    run.state_path == boundary.run
+                    run.pruned_at.is_none()
+                        && run.state_path == boundary.run
                         && !matches!(run.status.as_str(), "complete" | "superseded")
                 })
                 .ok_or_else(|| {
@@ -2558,9 +2605,6 @@ impl InventoryState {
                     continue;
                 };
                 if !inventory_work_run_eligible(run_index, run, work, Some(&report.request_sha256))
-                    || !work.fields.is_empty()
-                        && run.mode == DiscoveryMode::Quick
-                        && run.quick_depth == QuickDepth::SourcesOnly
                 {
                     continue;
                 }
@@ -2988,6 +3032,12 @@ impl InventoryState {
         copy.refresh_reminder = None;
         for reference in copy.packs.iter_mut().chain(copy.active_pack.iter_mut()) {
             reference.input_content_digest = None;
+            reference.pruned_at = None;
+            reference.cleanup_pending = false;
+        }
+        for run in &mut copy.discovery_runs {
+            run.pruned_at = None;
+            run.cleanup_pending = false;
         }
         for work in &mut copy.pending_inventory {
             work.notified_revision = 0;
@@ -2997,6 +3047,99 @@ impl InventoryState {
             .map(|b| sha256_hex(&b))
             .map_err(|_| fail("Cannot serialize inventory evidence."))
     }
+    pub fn run_pack_claimants(
+        &self,
+        index: usize,
+    ) -> impl Iterator<Item = (usize, &PackReference)> {
+        let run = &self.discovery_runs[index];
+        self.packs.iter().enumerate().filter(|(_, reference)| {
+            reference.path == run.pack_path
+                || reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+        })
+    }
+
+    fn validate_prune_markers(&self) -> Result<(), Diagnostic> {
+        let check = |at: &Option<String>, pending: bool| {
+            if let Some(at) = at {
+                if self.schema_version != STATE_VERSION {
+                    return Err(fail("Pruned inventory history requires schema version 4."));
+                }
+                environment::parse_time(at)?;
+            } else if pending {
+                return Err(fail("Pending cleanup requires a pruning timestamp."));
+            }
+            Ok(())
+        };
+        let mut paths = BTreeMap::new();
+        let mut track = |path, marked| {
+            if paths
+                .insert(path, marked)
+                .is_some_and(|previous| previous != marked)
+            {
+                return Err(fail("Pruned and retained inventory paths overlap."));
+            }
+            Ok(())
+        };
+        let active = self.active_pack.as_ref();
+        if let Some(active) = active
+            && (active.pruned_at.is_some() || active.cleanup_pending)
+        {
+            return Err(fail("The active inventory snapshot cannot be pruned."));
+        }
+        let mut matched = BTreeSet::new();
+        for (index, run) in self.discovery_runs.iter().enumerate() {
+            check(&run.pruned_at, run.cleanup_pending)?;
+            let marked = run.pruned_at.is_some();
+            for path in [&run.state_path, &run.pack_path, &run.receipt_path] {
+                track(path, marked)?;
+            }
+            if !marked {
+                continue;
+            }
+            if active.is_some_and(|reference| {
+                reference.path == run.pack_path
+                    || reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+            }) || self.pending_inventory.iter().any(|work| {
+                work.resolution.is_none() && inventory_work_run_candidate(index, run, work)
+            }) {
+                return Err(fail(
+                    "Pruned discovery history is required by active inventory or pending work.",
+                ));
+            }
+            let mut claimants = self.run_pack_claimants(index);
+            match (run.status.as_str(), claimants.next()) {
+                ("complete", Some((pack_index, reference)))
+                    if claimants.next().is_none()
+                        && reference.path == run.pack_path
+                        && reference.discovery_run.as_deref() == Some(run.state_path.as_str())
+                        && reference.pruned_at == run.pruned_at
+                        && reference.cleanup_pending == run.cleanup_pending
+                        && matched.insert(pack_index) => {}
+                ("superseded" | "failed", None) => {}
+                _ => {
+                    return Err(fail(
+                        "Pruned discovery history has inconsistent promotion references.",
+                    ));
+                }
+            }
+        }
+        for (index, reference) in self.packs.iter().enumerate() {
+            check(&reference.pruned_at, reference.cleanup_pending)?;
+            let marked = reference.pruned_at.is_some();
+            track(&reference.path, marked)?;
+            if marked
+                && (active.is_none_or(|active| {
+                    active.path == reference.path
+                        && active.content_digest == reference.content_digest
+                }) || !sha256_valid(&reference.content_digest)
+                    || (reference.discovery_run.is_some() && !matched.contains(&index)))
+            {
+                return Err(fail("Invalid pruned inventory snapshot reference."));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), Diagnostic> {
         if self.format != "cqlmatic-inventory-state"
             || !matches!(self.schema_version, 1..=STATE_VERSION)
@@ -3012,6 +3155,7 @@ impl InventoryState {
             return Err(fail("Invalid retained field-evidence schema version."));
         }
         self.validate_refresh()?;
+        self.validate_prune_markers()?;
         if self.schema_version < 4 && !self.capability_runs.is_empty() {
             return Err(fail(
                 "Legacy inventory states cannot attest capability checks.",
@@ -4214,7 +4358,7 @@ pub fn assess(state: &InventoryState, packs: &[Pack]) -> Result<InventoryStatus,
     if state
         .packs
         .iter()
-        .any(|r| !verified_packs.contains_key(&r.content_digest))
+        .any(|r| r.pruned_at.is_none() && !verified_packs.contains_key(&r.content_digest))
     {
         return Err(fail(
             "A referenced pack is missing or its digest changed; import the new snapshot explicitly.",

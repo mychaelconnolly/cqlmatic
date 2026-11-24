@@ -278,6 +278,9 @@
           "format": "uint",
           "minimum": 0
         },
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "elapsed_seconds": {
           "type": "number",
           "format": "double"
@@ -301,6 +304,12 @@
         },
         "pack_path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "quick_depth": {
           "$ref": "#/$defs/QuickDepth",
@@ -424,6 +433,34 @@
           "additionalProperties": false,
           "required": [
             "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "dry_run": {
+              "type": "boolean"
+            },
+            "include_failed": {
+              "type": "boolean",
+              "default": false
+            },
+            "keep_last": {
+              "type": "integer",
+              "format": "uint",
+              "default": 0,
+              "maximum": 1000,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "prune"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "dry_run"
           ]
         },
         {
@@ -1803,6 +1840,9 @@
     "PackReference": {
       "type": "object",
       "properties": {
+        "cleanup_pending": {
+          "type": "boolean"
+        },
         "content_digest": {
           "type": "string"
         },
@@ -1823,6 +1863,12 @@
         },
         "path": {
           "type": "string"
+        },
+        "pruned_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false,

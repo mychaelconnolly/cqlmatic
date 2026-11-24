@@ -312,6 +312,8 @@ fn strict_grounding_fails_closed_when_selected_active_pack_disappears() {
     let mut inventory: InventoryState =
         serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
     let active = PackReference {
+        pruned_at: None,
+        cleanup_pending: false,
         path: dir
             .path()
             .join("missing-new-pack.json")
