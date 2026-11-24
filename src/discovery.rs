@@ -93,6 +93,14 @@ pub struct DiscoverRequest {
     #[serde(default = "time_budget")]
     pub max_seconds: u64,
 }
+impl DiscoverRequest {
+    pub fn normalize_inputs(mut self) -> Result<Self, Diagnostic> {
+        self.environment = environment::normalize_identity(self.environment)?;
+        self.start = environment::normalize_request_time(&self.start)?;
+        self.end = environment::normalize_request_time(&self.end)?;
+        Ok(self)
+    }
+}
 fn query_budget() -> u32 {
     200
 }
@@ -193,11 +201,7 @@ pub fn validate_request(r: &DiscoverRequest) -> Result<(), Diagnostic> {
     environment::validate_identity(&r.environment)?;
     let start = environment::parse_time(&r.start)?;
     let end = environment::parse_time(&r.end)?;
-    if !r.start.ends_with('Z')
-        || !r.end.ends_with('Z')
-        || start >= end
-        || end - start > time::Duration::days(7)
-    {
+    if start >= end || end - start > time::Duration::days(7) {
         return Err(fail(
             "Use increasing absolute UTC windows of at most seven days.",
         ));
@@ -315,8 +319,9 @@ fn probe(
     fields: Vec<String>,
     field: Option<String>,
 ) -> Result<Probe, Diagnostic> {
-    let start = environment::parse_time(&r.start)?;
-    let end = environment::parse_time(&r.end)?;
+    let start = environment::parse_time(&environment::normalize_request_time(&r.start)?)?;
+    let end_text = environment::normalize_request_time(&r.end)?;
+    let end = environment::parse_time(&end_text)?;
     let query = if kind == "census" {
         suffix.to_string()
     } else {
@@ -338,7 +343,7 @@ fn probe(
         } else {
             start
         }),
-        end: r.end.clone(),
+        end: end_text,
         fields,
         field,
     })
@@ -352,7 +357,8 @@ pub fn initial_plan(r: &DiscoverRequest) -> Result<Value, Diagnostic> {
     for s in &r.sources {
         probes.extend(base_probes(r, s)?);
     }
-    let mut result = json!({"schema_version":1,"environment":r.environment,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census","population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
+    let identity = environment::normalize_identity(r.environment.clone())?;
+    let mut result = json!({"schema_version":1,"environment":identity,"initial_probes":probes,"deferred_stages":["base measurements for sources found by explicit census","population chunks of at most 20 fields from fieldset","tag namespace checks","record-kind facets over the full request window","bounded value samples requested by value_fields"],"max_queries":r.max_queries,"max_seconds":r.max_seconds,"is_live":false,"executes_searches":false});
     if r.depth == DiscoveryDepth::SourcesOnly {
         result["depth"] = json!(r.depth);
         result["deferred_stages"] =

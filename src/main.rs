@@ -1609,7 +1609,11 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 environment.as_deref().map(json_file).transpose()?;
             let p = if from.is_dir() {
                 let e=explicit.clone().ok_or_else(||input_error("Legacy import requires --environment FILE with explicit cloud/account/view."))?;
-                Pack::new(e, discovery::timestamp(), storage::legacy_data(&from)?)?
+                Pack::new(
+                    environment::normalize_identity(e)?,
+                    discovery::timestamp(),
+                    storage::legacy_data(&from)?,
+                )?
             } else {
                 let p = storage::read_pack(&from)?;
                 if explicit.as_ref().is_some_and(|e| e != &p.environment) {
@@ -1804,6 +1808,7 @@ fn env(command: EnvCommand) -> Result<i32, Diagnostic> {
                 request.ok_or_else(|| input_error("Discovery requires --request FILE."))?;
             let r: discovery::DiscoverRequest = json_file(&request)?;
             discovery::validate_request(&r)?;
+            let r = r.normalize_inputs()?;
             if !execute {
                 output(&discovery::initial_plan(&r)?, true)?;
                 return Ok(0);

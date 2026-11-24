@@ -1,7 +1,7 @@
 //! The only network-capable boundary. No generic authenticated endpoint is public.
 use crate::{
-    contracts::{Cloud, Diagnostic, EnvironmentId},
-    environment::{parse_time, validate_identity},
+    contracts::{Cloud, Diagnostic, EnvironmentId, falcon_cid, same_account},
+    environment::{normalize_request_time, parse_time, validate_identity},
     sha256_hex, storage,
 };
 use reqwest::{
@@ -98,7 +98,7 @@ impl Credentials {
         } else if self
             .member_cid
             .as_ref()
-            .is_some_and(|cid| cid != &identity.tenant)
+            .is_some_and(|cid| !same_account(cid, &identity.tenant))
         {
             return Err(Diagnostic::error(
                 "AUTH_TENANT",
@@ -341,8 +341,13 @@ fn response_body(
 }
 
 impl FalconClient {
-    pub fn new(identity: &EnvironmentId, credentials: Credentials) -> Result<Self, Diagnostic> {
+    pub fn new(identity: &EnvironmentId, mut credentials: Credentials) -> Result<Self, Diagnostic> {
         credentials.validate_for(identity)?;
+        if falcon_cid(&identity.tenant).is_some()
+            && let Some(member) = credentials.member_cid.as_deref().and_then(falcon_cid)
+        {
+            credentials.member_cid = Some(member.to_ascii_lowercase());
+        }
         let base = match identity.cloud {
             Cloud::Us1 => "https://api.crowdstrike.com/",
             Cloud::Us2 => "https://api.us-2.crowdstrike.com/",
@@ -726,12 +731,14 @@ pub fn run_job(
         diagnostic: None,
     };
     let action = (|| {
+        receipt.start = normalize_request_time(start)?;
+        receipt.end = normalize_request_time(end)?;
         let from = parse_time(start)?;
         let to = parse_time(end)?;
-        if !start.ends_with('Z') || !end.ends_with('Z') || from >= to {
+        if from >= to {
             return Err(Diagnostic::error(
                 "SEARCH_WINDOW",
-                "Use increasing absolute UTC timestamps ending in Z.",
+                "Use increasing absolute RFC 3339 timestamps with explicit offsets.",
             ));
         }
         if policy.timeout.is_zero()
@@ -751,7 +758,7 @@ pub fn run_job(
             ));
         }
         let deadline = Instant::now() + policy.timeout;
-        let job = backend.start(view, query, start, end, deadline)?;
+        let job = backend.start(view, query, &receipt.start, &receipt.end, deadline)?;
         receipt.job_id = Some(job.clone());
         receipt.cleanup = "pending".into();
         for _ in 0..policy.max_polls {

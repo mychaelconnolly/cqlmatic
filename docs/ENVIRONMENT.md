@@ -32,7 +32,7 @@ Packs remain scoped, sampled evidence. Parser declarations, documented standard 
 
 ## Bind an account
 
-Environment identity consists of `cloud`, `tenant`, and `view`. Supported clouds are `us1`, `us2`, and `eu1`. `view` is the explicit searchable API target. Supply a confirmed 32-hex CID, or derive an API-client fingerprint locally:
+Environment identity consists of `cloud`, `tenant`, and `view`. Supported clouds are `us1`, `us2`, and `eu1`. `view` is the explicit searchable API target. Supply a confirmed 32-digit hexadecimal CID in either case, with or without its two-digit hexadecimal checksum suffix (`-XX`). CQLmatic matches CIDs in lowercase and discards the suffix without verifying the checksum. You can also derive an API-client fingerprint locally:
 
 ```sh
 ./target/release/cqlmatic env identity --cloud us2 --view CONFIRMED_VIEW --credentials-file PATH_TO_PROTECTED_CREDENTIALS
@@ -69,7 +69,7 @@ The strict version-1 request rejects unknown properties. Inspect `cqlmatic --sch
 | --- | --- |
 | `schema_version` | Required; `1`. |
 | `environment` | Required `cloud`, `tenant`, `view` binding; must match an existing destination pack. |
-| `start`, `end` | Required increasing absolute UTC timestamps ending in `Z`; at most seven days. |
+| `start`, `end` | Required increasing RFC 3339 timestamps with explicit offsets and a window of at most seven days. Discovery emits the window in UTC with `Z`. |
 | `census` | `false`; adds repositories/types observed in the full window to explicit sources. |
 | `depth` | Omitted or `full`: the normal field measurement graph. `sources-only`: volume checks only; field/value/contract options must be empty. |
 | `sources` | `[]`; select at least one source unless `census: true`. Each scope requires nonempty `repo` or `type` (or both), and forbids `event`. Duplicate selectors fail. At most 100 sources after census. |

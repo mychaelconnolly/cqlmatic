@@ -251,7 +251,7 @@ New MCP initialization uses durable format 3. Dispatch exactly one emitted probe
 cqlmatic env discover --request examples/discover.request.json
 ```
 
-The example above is a safe offline plan. Live searches require the operator's own explicit target, UTC bounds, authorization, permissions, and budgets. A pack's searchable `view` differs from a `#repo` selector.
+The example above is a safe offline plan. Live searches require the operator's own explicit target, authorization, permissions, budgets, and RFC 3339 window bounds with explicit offsets. Discovery emits the search window in UTC with `Z`. A pack's searchable `view` differs from a `#repo` selector.
 
 ### Parsers
 

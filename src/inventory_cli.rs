@@ -1534,21 +1534,26 @@ fn import_query_observations(
     retrieved_at: String,
     caller_assertion: QueryResultAssertion,
 ) -> Result<Value, Diagnostic> {
+    use cqlmatic::environment::normalize_request_time;
+    let start = normalize_request_time(&start)?;
+    let end = normalize_request_time(&end)?;
     let query_file = Path::new(query_file);
     let result_file = Path::new(result_file);
     distinct_from_state(path, query_file)?;
     distinct_from_state(path, result_file)?;
     let query = observation_input(query_file, OBSERVATION_FILE_BYTES)?;
     let result = observation_input(result_file, OBSERVATION_FILE_BYTES)?;
-    if state
+    let Some(target) = state
         .target
         .as_ref()
-        .is_none_or(|t| t.environment != environment)
-    {
+        .filter(|target| target.environment == environment)
+    else {
         return Err(fail(
             "Confirm the exact query target environment before importing observations.",
         ));
-    }
+    };
+    // The bound spelling is part of retained observation audit paths.
+    let environment = target.environment.clone();
     let source_id = discovery::source_id(&source);
     if !state
         .sources
@@ -1918,7 +1923,7 @@ fn preflight_foreign_run(
         let fingerprint = serde_json::to_vec(&request)
             .map(|bytes| cqlmatic::sha256_hex(&bytes))
             .map_err(|_| fail("Cannot fingerprint discovery request."))?;
-        if relay.request_sha256 == fingerprint
+        if matches_discovery_request(relay, &fingerprint)?
             && relay
                 .session
                 .as_ref()
@@ -1936,6 +1941,17 @@ fn preflight_foreign_run(
         }
     }
     Ok(earlier_ended)
+}
+
+fn matches_discovery_request(relay: &mcp::State, fingerprint: &str) -> Result<bool, Diagnostic> {
+    if relay.request_sha256 == fingerprint {
+        return Ok(true);
+    }
+    // Comparison may normalize a retained CID. The verified checkpoint digest stays exact.
+    let request = relay.request.clone().normalize_inputs()?;
+    let bytes =
+        serde_json::to_vec(&request).map_err(|_| fail("Cannot fingerprint discovery request."))?;
+    Ok(cqlmatic::sha256_hex(&bytes) == fingerprint)
 }
 
 fn check_retained_searches(
@@ -1984,7 +2000,9 @@ fn check_retained_searches(
             && mcp::is_resumable(&relay)
             && !mcp::time_limit_passed(&relay, now)
             && selected_run.is_none()
-            && fingerprint.as_ref() == Some(&relay.request_sha256)
+            && let Some(fingerprint) = &fingerprint
+            && matches_discovery_request(&relay, fingerprint)
+                .map_err(|diagnostic| discovery_run_diagnostic(index, diagnostic))?
         {
             let predecessor = relay
                 .session

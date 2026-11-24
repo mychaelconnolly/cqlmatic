@@ -664,6 +664,7 @@ fn init_resumable_with_owner(
 ) -> Result<StepOutput, Diagnostic> {
     // Hold the state lock throughout initialization; a partially initialized run is never exposed.
     discovery::validate_request(&request)?;
+    let request = request.normalize_inputs()?;
     distinct_paths(&[state_path, pack_path, receipt_path])?;
     let state_path = path_identity(state_path)?;
     let pack = path_identity(pack_path)?;

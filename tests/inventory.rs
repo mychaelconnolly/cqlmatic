@@ -1016,7 +1016,7 @@ fn quick_scout_requires_explicit_target_and_finite_host_budget_without_breaking_
         state
             .prepare_scout_with_budget(
                 environment(),
-                "2026-01-01T00:00:00-05:00".into(),
+                "2026-01-01T00:00:00".into(),
                 NOW.into(),
                 Some(120)
             )
