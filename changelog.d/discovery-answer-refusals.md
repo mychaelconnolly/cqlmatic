@@ -1,1 +1,0 @@
-- Keep answer refusals attached to the outstanding search and preserve finished discovery runs when an extra answer arrives.

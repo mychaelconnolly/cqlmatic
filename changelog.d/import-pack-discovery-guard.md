@@ -1,1 +1,0 @@
-- Pack imports that would displace an unfinished discovery run now report how to finish or recover it and require explicit acknowledgement to proceed. Replays and unchanged updates keep the existing run available.

@@ -1,1 +1,0 @@
-- In strict grounding, use the single field namespace at the query's exact repository and type scope when multiple namespaces match. Exclude positive pack evidence from event families that differ from the query's exact event-name literal.

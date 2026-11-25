@@ -1,2 +1,0 @@
-- Refuse a discovery result with a trace or job identifier if an earlier attempt in the run already retained the same result, including identical files and results returned in another wrapper.
-- Preserve exact numbers when recording discovery answers through a capture hook or stdio pass-through, and reject discovery result copies that disagree.

@@ -1,1 +1,0 @@
-- Preview and prune historical inventory snapshots while retaining active evidence, run indices and saved proofs.

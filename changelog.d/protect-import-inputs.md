@@ -1,1 +1,0 @@
-- Refuse pack import destinations that resolve to an input snapshot, environment descriptor, or legacy component path, including optional components that do not yet exist.

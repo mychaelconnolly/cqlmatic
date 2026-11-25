@@ -486,7 +486,7 @@ pub(crate) fn validate(state: &State, producer: &str) -> Result<(), Diagnostic> 
     let mut last_dispatch = environment::parse_time(&state.created_at)?;
     let historical_ended_attempts = matches!(
         state.producer_version.as_str(),
-        "0.1.8" | "0.1.9" | "0.1.10" | "0.1.11" | "0.1.12"
+        "0.1.8" | "0.1.9" | "0.1.10" | "0.1.11" | "0.1.12" | "0.1.13"
     ) && state.producer_version != producer;
     for (index, attempt) in session.attempts.iter().enumerate() {
         let id = discovery::probe_id(&state.request.environment.view, &attempt.probe);

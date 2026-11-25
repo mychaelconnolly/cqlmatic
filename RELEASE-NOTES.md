@@ -1,20 +1,60 @@
-# CQLmatic v0.1.13
+# CQLmatic v0.1.14
 
-Setup, inventory and capture now work on managed workstations, in sandboxes and in folders you made yourself. Earlier versions refused a state location when another account had rights on it or when its path passed through a link. This version uses the location as it is and relies on your user profile's access rules.
+Mapping an environment takes fewer searches, and a source with no events in the window no longer stops the sources that have them. Setup can use an MCP server that is already configured in your client. Inventory status says what is still open, several inventory actions fit in one command, and parser reviews survive a new parser capture. Many refusals now say what stopped the action and what to do next.
 
-## Storage locations
+## Discovery
 
-- **Existing directories are used as they are.** 0.1.12 stopped with `SETUP_PROTECTION` when the state directory, or any directory above it, gave rights to another account, and with `SETUP_LINK` when the path passed through a symbolic link, junction or other reparse point, as `/tmp` does on macOS. On Windows that refused a directory made in Explorer, any directory under `C:\`, and a profile on which a support or backup group has rights.
-- **New directories:** still owner-only (`0700`, files `0600`) on macOS and Linux. On Windows a new directory now takes the access rules of the directory it is created in, where 0.1.12 limited it to the user and SYSTEM, and PowerShell is no longer started to create it.
-- **Pack and input files:** `LOCAL_DIRECTORY_PERMISSIONS` is removed, so a pack or state directory writable by its group is accepted. The saved query and result files given to `import-query-observations` no longer need owner-only modes.
-- **Unchanged:** state, pack and input files must be regular files, not links, and the credential file keeps its `0600` rule on macOS and Linux.
-- **Clearer errors:** when a storage location cannot be created, read or locked for writing, the error names it. Where access was denied, it says to allow the location in the sandbox or device policy that blocks it, or to choose another.
+- **Fewer searches for fields.** Field discovery counts tag candidates in batches of at most 20 columns per source, replacing one search per tag. With the standard candidates and the default 20-field population cap, a Quick sources + fields source needs at least 4 searches and at most 21; it took at least 13 and up to 30. A window of 15 minutes or less takes one population search where it took two.
+- **Quiet sources.** A selected source with zero events in the discovery window costs only its volume search. The run measures and activates the sources that have events, leaves the quiet source's earlier records unchanged, and fails without activation only when every source is quiet. Status shows the zero and its window, and the source stays pending.
+- **Volume first.** Discovery measures every selected source's volume before any other search, then lists every source with events before any source's tag, kind, population or value searches.
+- **Refusals before anything is written.** `prepare-discovery` refuses a `max_queries` below the searches needed when every selected source has events and names that minimum. It also refuses a window that ends after the current time and a request with more than 100 sources. Search figures add `minimum_all_live` and `below_expected_high`, and Full discovery now has an upper figure.
+- **Saved results.** Saved search responses with MCP metadata or text annotations, JSON-RPC response wrappers, bare text blocks and a UTF-8 byte order mark are accepted, and the original bytes are kept as evidence. A result with a trace or job identifier is refused when an earlier attempt in the run already retained the same result.
+- **Failures explained.** The answer reply and later polls say why discovery failed and how to recover. Replies, polls and status report the search row ceiling.
 
-The default locations rely on your user profile's access rules. Choose a `--state` location that only accounts you trust can read. See [setup](docs/SETUP.md), [the security policy](SECURITY.md) and [troubleshooting](docs/TROUBLESHOOTING.md).
+## Setup
+
+- **Use the server you already have.** `setup` accepts `registration: {"mode":"host-managed"}` for Codex, VS Code Local, Claude Code and the Copilot clients, not only for `external`. Setup then uses the MCP server already configured in that client, runs no client command and changes nothing in its configuration. 0.1.13 refused this with `SETUP_REGISTRATION_MODE`.
+- **Client files with comments.** Setup reads client MCP files that contain comments or trailing commas, so VS Code Local no longer stops with `SETUP_NATIVE_CONFIG` when its server is already configured.
+- **Clearer mismatches.** `SETUP_DISCOVERY_BINDING` names the report field that does not match the selection, or the tool count, without repeating the supplied value.
+- **Capture hook offered.** A verified `setup` for Claude Code, Codex or a Copilot client names the command that installs the capture hook.
+- **Equivalent inputs.** Uppercase Falcon CIDs and console checksum suffixes are accepted, and explicit RFC 3339 search-window offsets are converted to UTC.
+
+## Inventory
+
+- **Status says what is open.** Full and summary status add `completion_detail` with the counts of expected sources whose reviews or measurements are not done and a `next_action`, the first listed step. Status and `reconcile` advise next steps in one shared order. Text status shows `census saved`, `captured`, `evidence review current` and `run complete, pack activated` where it showed `DONE` or `complete`; JSON values are unchanged.
+- **`reconcile` returns what it recorded:** `recorded` for a new evidence fingerprint and `already-current` when the saved one already matched.
+- **Full map completion.** `full_map_complete` also requires a search-all census below the 10,000-row ceiling. A Full inventory whose search-all censuses all reached the ceiling is no longer reported complete, and status says why.
+- **Several actions at once.** `env inventory` accepts a `batch` request of 1 to 32 `review-source`, `bind-parser`, `exclude-parser`, `parser-not-applicable`, `import-parsers` and `reconcile` actions under one writer lock. Either every item is saved or none is.
+- **Parser reviews are kept.** `import-parsers` and `fetch-parsers` no longer delete parser bindings, their line reviews or parser exclusions. 0.1.13 deleted each one whose exact reviewed bytes were missing from the new capture. A review now stays active, carries over to the same parser saved as other bytes, or is suspended until the same definition is saved again.
+- **Pack imports.** Imports can update matched records while preserving discovery scope, observation ordering and earlier snapshots. An import that would displace an unfinished discovery run reports how to finish or recover it and requires explicit acknowledgement. Destinations that resolve to an input snapshot, environment descriptor or legacy component path are refused.
+- **Pruning.** Historical inventory snapshots can be previewed and pruned while active evidence, run indices and saved proofs are retained.
+- **Clearer request errors.** Unknown action kinds and unexpected request fields are named, and a failed source selection lists the valid source IDs with their selectors.
+
+## Capability checks
+
+- `prepare-capabilities` refuses a `max_seconds` that does not exceed the host evidence's `max_search_seconds` and names the smallest value that can dispatch. 0.1.13 accepted such a run, and no later dispatch from it could pass.
+- `dispatch-capability` says which condition stopped it and what to do next, where 0.1.13 gave one message for all of them.
+- `submit-capability` records an attempt's terminal settlement after 21 unresolved reports. 0.1.13 refused that settlement, so the attempt stayed unresolved and blocked later inventory searches.
+
+## Capture hook
+
+- `env capture --install` updates recognized commands for the same client, server and state in place, keeps distinct custom matchers, removes repeated entries for the same matcher, and removes recognized commands with `--hooks none`.
+- The hook still prints nothing and exits 0. It counts its own failures in `tally.json` when the state file exists.
+- The hook no longer queues a new source for a search that names only the repository of a confirmed typed source.
+
+## Checking and grounding
+
+- Strict grounding uses the single field namespace at the query's exact repository and type scope when multiple namespaces match, and excludes positive pack evidence from event families that differ from the query's exact event-name literal.
+- Unmapped literal source warnings are kept when checking or generating with strict grounding.
+- A recent zero no longer hides presence that a whole-window count or a dataset or kind facet saw in the same run, so strict `check --require-observed` grounds those fields.
+- Offline checking, generation and assessment stay available while the default inventory is scouting before target confirmation.
+- Catalog knowledge and function contract lookups rank exact function names first.
 
 ## Upgrading
 
-- State written by 0.1.12 and earlier is used where it is.
-- A state directory that 0.1.13 creates on Windows is refused by 0.1.12 and earlier. To go back to an earlier release after 0.1.13 has created its state, give that release a new `--state` location.
-- If your capture hooks name a version-specific executable path, re-run `cqlmatic env capture --client CLIENT --server SERVER --install` after moving to the new executable.
-- CQLmatic 0.1.13 can inspect 0.1.12 (and earlier 0.1.0–0.1.11) discovery checkpoints in formats 2 and 3. Keep the 0.1.12 executable to resume or settle its unfinished runs. See [installation](docs/SETUP.md) for the package for your platform.
+- Finish, pause or settle an unfinished discovery run with the 0.1.13 executable before you upgrade. Discovery checkpoints prepared by 0.1.13 and earlier stay readable for status and completed evidence, but 0.1.14 cannot continue or pause them, and it refuses `prepare-discovery` while such a run is unfinished and not paused. Once the run is paused, 0.1.14 prepares a run for a different request, such as a new window; an identical request is refused so the paused run keeps its allowance. CQLmatic 0.1.14 can inspect discovery checkpoints in format 2 from 0.1.0–0.1.13 and in format 3 from 0.1.6–0.1.13.
+- Going back to 0.1.13 is not guaranteed. 0.1.13 and earlier cannot read a setup state that holds a `host-managed` selection for a named client, an inventory state that holds a suspended or carried parser review, an inventory state in which a discovery run recorded a source with no events, or an inventory state while a prepared scout plan is awaiting its reply. They may also refuse an inventory after a pack was imported onto an existing pack, after an update import or after snapshots were pruned. Keep a copy of your state before upgrading if you may need to go back.
+- 0.1.13 refuses a `batch` request with exit 2 and changes nothing. Before sending a batch to an executable you have not checked, confirm that `cqlmatic --schema inventory` offers the `batch` kind.
+- If your capture hooks name a version-specific executable path, re-run `cqlmatic env capture --client CLIENT --server SERVER --install` after moving to the new executable, with the same `--state` and `--program` you installed with.
+
+See [installation](docs/SETUP.md) for the package for your platform and the [changelog](CHANGELOG.md) for every change.

@@ -1,1 +1,0 @@
-- `submit-capability` now records an attempt's terminal settlement after 21 unresolved reports, keeping the 20 most recent unresolved reports; 0.1.13 refused that settlement, so the attempt stayed unresolved and blocked later inventory searches. A further unresolved report at that point is refused and names the terminal settlement as the next step.

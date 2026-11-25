@@ -19,7 +19,7 @@ from pathlib import Path
 REPOSITORY = "mychaelconnolly/cqlmatic"
 HOSTS = {"landing": "https://cqlmatic.dev", "docs": "https://docs.cqlmatic.dev"}
 # Retained approved artifacts with this contract must remain usable for rollback.
-SITE_VERSIONS = ("0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9", "0.1.10", "0.1.11", "0.1.12", "0.1.13")
+SITE_VERSIONS = ("0.1.4", "0.1.5", "0.1.6", "0.1.7", "0.1.8", "0.1.9", "0.1.10", "0.1.11", "0.1.12", "0.1.13", "0.1.14")
 MAX_ARCHIVE = 100 * 1024 * 1024
 MAX_EXPANDED = 200 * 1024 * 1024
 MAX_FILE = 25 * 1024 * 1024
