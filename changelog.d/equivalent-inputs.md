@@ -1,2 +1,0 @@
-- Accept uppercase Falcon CIDs and console checksum suffixes, and convert explicit RFC 3339 search-window offsets to UTC.
-- Recognize equivalent timestamps when matching paused discovery requests and replaying saved capability results.

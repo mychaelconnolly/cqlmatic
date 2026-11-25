@@ -1,2 +1,0 @@
-- Discovery measures every selected source's volume before any other search, then lists every source with events before any source's tag, kind, population or value searches, so a quiet source or an empty listing ends the run before other sources spend their searches. A requested census runs first and alone.
-- Discovery checkpoints prepared under the earlier discovery plan stay readable for status and completed evidence but cannot be continued; prepare a new run.

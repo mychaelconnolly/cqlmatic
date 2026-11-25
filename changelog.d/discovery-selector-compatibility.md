@@ -1,2 +1,0 @@
-- Check retained source restrictions and evidence dates before preparing inventory discovery. Status shows which retained selector labels are compatible with repository/type discovery.
-- Preserve legacy source labels, parent relationships and record identities when merging discovery measurements.

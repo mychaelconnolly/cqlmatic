@@ -1,1 +1,0 @@
-- Accept saved search responses with MCP metadata or text annotations, JSON-RPC response wrappers, bare text blocks, and a UTF-8 byte order mark. Preserve the original bytes as discovery evidence.
