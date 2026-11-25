@@ -952,10 +952,10 @@ fn tied_native_capture_presence_conflicts_prevent_pack_construction() {
     let mut r = request(&["#Vendor"]);
     r.contracts.clear();
     r.start = "2026-01-01T00:45:00Z".into();
-    // The tag batch counts #type while its kind facet over the same window, retrieved at the
-    // same instant, lists no value.
+    // The tag batch counts #event.module while its kind facet over the same window, retrieved
+    // at the same instant, lists no value. (The literal type selector answers #type itself.)
     let scenario = Scenario {
-        counts: BTreeMap::from([("tag:#type".into(), 1)]),
+        counts: BTreeMap::from([("tag:#event.module".into(), 1)]),
         ..Scenario::default()
     };
     let (_, answers) = scenario.graph(&r);

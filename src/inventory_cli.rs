@@ -194,16 +194,12 @@ pub fn brief_failure_for(diagnostic: &Diagnostic) -> Diagnostic {
 
 const INCOMPATIBLE_SELECTOR_PREFIX: &str =
     "Retained selectors are incompatible with repo/type discovery.";
-const FUTURE_PREDECESSOR_PREFIX: &str = "The retained pack is dated in the future.";
 const STALE_SOURCE_PREFIX: &str = "Selected sources require a window after the retained pack date.";
 
 fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
     Some(match (code, message) {
         ("INVENTORY_INPUT", msg) if msg.starts_with(INCOMPATIBLE_SELECTOR_PREFIX) => {
             INCOMPATIBLE_SELECTOR_PREFIX
-        }
-        ("INVENTORY_INPUT", msg) if msg.starts_with(FUTURE_PREDECESSOR_PREFIX) => {
-            FUTURE_PREDECESSOR_PREFIX
         }
         ("INVENTORY_INPUT", msg) if msg.starts_with(STALE_SOURCE_PREFIX) => STALE_SOURCE_PREFIX,
         ("INVENTORY_INPUT", message)
@@ -367,6 +363,29 @@ fn brief_reason(code: &str, message: &str) -> Option<&'static str> {
         ("INVENTORY_REFRESH_REMINDER_STALE", _) => "The refresh reminder changed or is not due.",
         ("DISCOVERY_EVIDENCE", "Use increasing absolute UTC windows of at most seven days.") => {
             "The discovery window is invalid."
+        }
+        (
+            "DISCOVERY_EVIDENCE",
+            "More than 100 sources require an explicitly narrowed discovery run.",
+        ) => "More than 100 sources are selected.",
+        ("DISCOVERY_EVIDENCE", msg) if msg.starts_with("The discovery window ends at ") => {
+            "The discovery window ends after the current time."
+        }
+        ("DISCOVERY_EVIDENCE", msg) if msg.starts_with("The active pack was created at ") => {
+            "The active pack was created after the current time."
+        }
+        ("DISCOVERY_EVIDENCE", msg)
+            if msg.contains(
+                " searches needed when every selected source has events exceed the 1000-query ceiling.",
+            ) =>
+        {
+            "The searches needed when every selected source has events exceed the query ceiling."
+        }
+        ("DISCOVERY_EVIDENCE", msg)
+            if msg.starts_with("The query limit ")
+                && msg.contains(" searches needed when every selected source has events.") =>
+        {
+            "The query limit is below the searches needed when every selected source has events."
         }
         ("PACK_TIME", _) => "A timestamp is invalid.",
         ("PACK_BUSY", _) => "Another writer holds the selected file.",
@@ -4248,10 +4267,20 @@ fn action_brief(action: &Value) -> Value {
     // The cost figures are counts, so they fit the brief budget whatever else the action holds.
     let cost = &action["relay"]["cost"];
     let mut searches = serde_json::Map::new();
-    for key in ["used", "ready", "expected_low", "expected_high", "limit"] {
+    for key in [
+        "used",
+        "ready",
+        "expected_low",
+        "minimum_all_live",
+        "expected_high",
+        "limit",
+    ] {
         if let Some(count) = cost["searches"][key].as_u64() {
             searches.insert(key.into(), json!(count));
         }
+    }
+    if let Some(below) = cost["searches"]["below_expected_high"].as_bool() {
+        searches.insert("below_expected_high".into(), json!(below));
     }
     if !searches.is_empty() {
         compact["cost"] = json!({"searches":searches});
@@ -5046,6 +5075,8 @@ struct PreparedDiscovery {
     prior: Option<Pack>,
 }
 
+/// Refuse a new discovery run before anything is written: no checkpoint owner binding, run
+/// folder, staged pack or inventory change.
 fn preflight_prepare_discovery(
     state: &InventoryState,
     action: &InventoryAction,
@@ -5079,8 +5110,14 @@ fn preflight_prepare_discovery(
         *max_queries,
         *max_seconds,
     )?;
-    let prior = cumulative_pack(state)?;
+    discovery::check_source_count(&request)?;
     check_retained_searches(state, Some(&request), None, now)?;
+    let prior = cumulative_pack(state)?;
+    discovery::admit(
+        &request,
+        prior.as_ref().map(|pack| pack.created_at.as_str()),
+        now,
+    )?;
     let Some(prior) = prior else {
         return Ok(Some(PreparedDiscovery {
             request,
@@ -5088,12 +5125,6 @@ fn preflight_prepare_discovery(
         }));
     };
     let created = environment::parse_time(&prior.created_at)?;
-    if created > environment::parse_time(now)? {
-        return Err(fail(&format!(
-            "{FUTURE_PREDECESSOR_PREFIX} Discovery can activate after {}.",
-            prior.created_at
-        )));
-    }
 
     let mut retained = BTreeMap::new();
     for record in &prior.data.sources {
@@ -7891,16 +7922,35 @@ mod tests {
             json!({"kind":"confirm-target","environment":environment,"scope":"selected-sources",
             "context":"Synthetic notice fixture","expected_sources":[{"type":"first"},{"type":"second"}]}),
         );
-        // One query is not enough for a Full measurement, so this run is recorded as failed.
-        let prepared = action(
+        // Four queries pass admission for one Full source but cannot also count an observed field.
+        let mut step = action(
             json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":at,
-            "source_ids":[source("first")],"max_queries":1,"max_seconds":3600}),
+            "source_ids":[source("first")],"max_queries":4,"max_seconds":3600}),
         );
-        let probe = prepared["relay"]["probes"][0]["probe_id"].clone();
-        action(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe}));
-        let answer = file("volume.json", json!({"result":[{"events":10}]}));
-        action(json!({"kind":"discovery-step","run_index":0,
-            "answers":[{"probe_id":probe,"result_file":answer}]}));
+        let mut answers = 0;
+        while step["relay"]["status"] == "needs-probes" {
+            let probe = step["relay"]["probes"][0].clone();
+            let rows = match probe["kind"].as_str().unwrap() {
+                "volume" => json!([{"events":10}]),
+                "dataset-facet" => json!([]),
+                "fieldset" => json!([{"field":"user"}]),
+                "tag-batch" => {
+                    let mut row = json!({"total":10});
+                    for i in 0..probe["fields"].as_array().unwrap().len() {
+                        row[format!("c{i}")] = json!(0);
+                    }
+                    json!([row])
+                }
+                kind => panic!("unexpected probe {kind}"),
+            };
+            answers += 1;
+            assert!(answers <= 4);
+            let answer = file(&format!("answer-{answers}.json"), json!({"result":rows}));
+            action(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe["probe_id"]}));
+            step = action(json!({"kind":"discovery-step","run_index":0,
+                "answers":[{"probe_id":probe["probe_id"],"result_file":answer}]}));
+        }
+        assert_eq!(step["relay"]["status"], "failed");
         // A completed run whose pending work no evidence allowance has reached.
         action(json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}));
         source_work_run(&path, "second", 0, 0);

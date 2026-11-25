@@ -1159,7 +1159,15 @@ fn rate_and_work_boundary() {
             as_earlier_plan(&checkpoint);
             let checkpoint_bytes = fs::read(&checkpoint).unwrap();
             let earlier = mcp::cost(&mcp::inspect_state(&checkpoint).unwrap(), 0).searches;
-            assert_eq!((v3.expected_low, v3.expected_high), (Some(5), Some(22)));
+            // The literal type selector's volume answers its #type facet.
+            assert_eq!(
+                (v3.expected_low, v3.minimum_all_live, v3.expected_high),
+                (Some(4), Some(4), Some(20))
+            );
+            assert_eq!(
+                (earlier.minimum_all_live, earlier.below_expected_high),
+                (None, None)
+            );
             assert_eq!(
                 (earlier.expected_low, earlier.expected_high),
                 (Some(13), Some(30))
@@ -1296,9 +1304,12 @@ fn intervening_recent_capture_does_not_hide_equal_time_contradiction() {
         report.diagnostics
     );
 
-    // Same pattern when an empty W record-kind-facet contradicts the positive W dataset-facet.
+    // Same pattern when an empty W record-kind-facet contradicts the positive W dataset-facet. A
+    // dataset listing of 50 rows takes its own facet search.
     let empty_kind = World {
-        datasets: vec![json!({"#event.dataset":"synthetic","events":50})],
+        datasets: (0..50)
+            .map(|index| json!({"#event.dataset":format!("synthetic-{index:02}"),"events":50}))
+            .collect(),
         ..World::new(&["user"])
             .a(&[("#event.dataset", 1)])
             .w(&[("user", 100)])

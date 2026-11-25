@@ -970,13 +970,20 @@ pub struct Searches {
     pub used: usize,
     /// Searches this response asks for.
     pub ready: usize,
-    /// Expected total for sources that hold events, within `limit`; absent when it cannot be
-    /// stated before the first answers.
+    /// The range of a completed run's searches, from one live source on its cheapest path with
+    /// every other source quiet to the most any run can take; absent when it cannot be stated
+    /// before the first answers. An earlier-plan checkpoint keeps its own figures within `limit`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_low: Option<u32>,
+    /// The fewest searches with which every selected source completes live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum_all_live: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_high: Option<u32>,
     pub limit: u32,
+    /// Whether `limit` is below `expected_high`, so a run can exhaust it before completing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub below_expected_high: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1613,11 +1620,17 @@ fn wire_probe(state: &State, p: &Probe) -> Value {
 }
 pub fn cost(state: &State, ready: usize) -> Cost {
     let limit = state.request.max_queries;
-    // An earlier-plan checkpoint counted each tag candidate in its own search.
-    let expected = discovery::expected_searches_for_plan(
-        &state.request,
-        state.discovery_algorithm != DISCOVERY_ALGORITHM,
-    );
+    let (expected_low, minimum_all_live, expected_high) =
+        if state.discovery_algorithm == DISCOVERY_ALGORITHM {
+            discovery::expected_searches(&state.request).map_or((None, None, None), |e| {
+                (Some(e.low), Some(e.minimum_all_live), Some(e.high))
+            })
+        } else {
+            // An earlier-plan checkpoint keeps the figures of its own plan.
+            discovery::earlier_plan_searches(&state.request).map_or((None, None, None), |e| {
+                (Some(e.0.min(limit)), None, e.1.map(|high| high.min(limit)))
+            })
+        };
     Cost {
         searches: Searches {
             used: state
@@ -1625,11 +1638,11 @@ pub fn cost(state: &State, ready: usize) -> Cost {
                 .as_ref()
                 .map_or(state.answers.len(), |session| session.attempts_len()),
             ready,
-            expected_low: expected.map(|(low, _)| low.min(limit)),
-            expected_high: expected
-                .and_then(|(_, high)| high)
-                .map(|high| high.min(limit)),
+            expected_low,
+            minimum_all_live,
+            expected_high,
             limit,
+            below_expected_high: minimum_all_live.and(expected_high).map(|high| limit < high),
         },
         answer_bytes: state
             .session

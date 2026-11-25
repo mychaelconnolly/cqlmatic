@@ -1499,18 +1499,46 @@ fn next_probe_explains_a_run_that_ran_out_of_searches() {
     let dir = Temp::new();
     call(
         &dir.0,
-        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-and-fields"}),
     );
     call(
         &dir.0,
         json!({"kind":"confirm-target","environment":environment(),"scope":"selected-sources","context":"Synthetic discovery target","expected_sources":[{"type":"synthetic-a"},{"type":"synthetic-b"}]}),
     );
-    call(&dir.0, source_run_request(1));
+    // Eight searches complete both sources when each lists only a counted tag; an ordinary
+    // field needs one more search per source than the limit leaves.
+    call(&dir.0, source_run_request(8));
     let first = call(&dir.0, json!({"kind":"next-probe"}));
-    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
-    let answer = json!({"kind":"next-probe","answer":{
-        "probe_id":first["action"]["probe"]["probe_id"],"result_file":result}});
-    let ended = call(&dir.0, answer.clone());
+    let mut next = first.clone();
+    let mut answer = Value::Null;
+    for step in 0..8 {
+        let query = next["action"]["probe"]["arguments"]["query_string"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let rows = if query.ends_with("count(as=events)") {
+            json!([{"events":10}])
+        } else if query.ends_with("fieldset()") {
+            json!([{"field":"user"}])
+        } else if query.contains("stats([count(as=total)") {
+            let mut row = json!({"total":10});
+            for index in 0..query.matches(", as=c").count() {
+                row[format!("c{index}")] = json!(0);
+            }
+            json!([row])
+        } else {
+            json!([])
+        };
+        let result = fixture(
+            &dir.0,
+            &format!("answer-{step}.json"),
+            json!({"result":rows}),
+        );
+        answer = json!({"kind":"next-probe","answer":{
+            "probe_id":next["action"]["probe"]["probe_id"],"result_file":result}});
+        next = call(&dir.0, answer.clone());
+    }
+    let ended = next;
     let action = &ended["action"];
     assert_eq!(action["state"], "failed", "{ended}");
     assert_eq!(action["settled"], true);
@@ -1571,6 +1599,11 @@ fn next_probe_explains_a_run_that_ran_out_of_searches() {
     assert_eq!(status["failed_discovery"]["run_index"], 0);
     assert_eq!(status["failed_discovery"]["code"], "DISCOVERY_EVIDENCE");
 
+    call(
+        &dir.0,
+        json!({"kind":"set-discovery-mode","mode":"quick","quick_depth":"sources-only"}),
+    );
+    let result = fixture(&dir.0, "volume.json", json!({"result":[{"events":10}]}));
     let fresh = call(&dir.0, source_run_request(4));
     let index = fresh["action"]["run_index"].as_u64().unwrap();
     let mut next = call(&dir.0, json!({"kind":"next-probe","run_index":index}));

@@ -793,16 +793,34 @@ fn noticed_fixture() -> Fixture {
         .map(|source| json!({"source":source,"fields":["user"]}))
         .collect();
     inventory(json!({"kind":"record-inventory-hints","environment":environment(),"hints":hints}));
-    // One query is not enough for a Full measurement, so the run is recorded as failed.
-    let prepared = inventory(
+    // Four queries pass admission for one Full source but cannot also count an observed field.
+    let mut step = inventory(
         json!({"kind":"prepare-discovery","start":"2026-01-01T00:00:00Z","end":AT,
-            "source_ids":[sources[0]],"max_queries":1,"max_seconds":3600}),
+            "source_ids":[sources[0]],"max_queries":4,"max_seconds":3600}),
     );
-    let probe = prepared["action"]["relay"]["probes"][0]["probe_id"].clone();
-    inventory(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe}));
-    let answer = file("volume.json", json!({"result":[{"events":10}]}));
-    let step = inventory(json!({"kind":"discovery-step","run_index":0,
-        "answers":[{"probe_id":probe,"result_file":answer}]}));
+    let mut answers = 0;
+    while step["action"]["relay"]["status"] == "needs-probes" {
+        let probe = step["action"]["relay"]["probes"][0].clone();
+        let rows = match probe["kind"].as_str().unwrap() {
+            "volume" => json!([{"events":10}]),
+            "dataset-facet" => json!([]),
+            "fieldset" => json!([{"field":"user"}]),
+            "tag-batch" => {
+                let mut row = json!({"total":10});
+                for i in 0..probe["fields"].as_array().unwrap().len() {
+                    row[format!("c{i}")] = json!(0);
+                }
+                json!([row])
+            }
+            kind => panic!("unexpected probe {kind}"),
+        };
+        answers += 1;
+        assert!(answers <= 4);
+        let answer = file(&format!("answer-{answers}.json"), json!({"result":rows}));
+        inventory(json!({"kind":"dispatch-discovery","run_index":0,"probe_id":probe["probe_id"]}));
+        step = inventory(json!({"kind":"discovery-step","run_index":0,
+            "answers":[{"probe_id":probe["probe_id"],"result_file":answer}]}));
+    }
     assert_eq!(step["status"]["discovery_runs"][0]["status"], "failed");
     let host = file(
         "host.json",
