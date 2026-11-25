@@ -1276,20 +1276,25 @@ fn powershell() -> Command {
     shell
 }
 
+/// Copies the built executable to `executable` and returns once it can be run.
+fn copy_runner(executable: &Path) {
+    fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), executable).unwrap();
+    // Another test's child process, started during the copy, can hold the new file open
+    // for writing for a moment, and Linux will not run a file in that state.
+    #[cfg(not(target_os = "macos"))]
+    while let Err(error) = Command::new(executable).arg("--version").output() {
+        assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// The built executable under a name and folder that need quoting.
 fn runner_in(directory: &Path) -> PathBuf {
     let source = env!("CARGO_BIN_EXE_cqlmatic");
     let executable = directory.join(format!("capture's $runner{}", std::env::consts::EXE_SUFFIX));
     // Changing the link count on macOS can kill concurrent launches of the Cargo executable.
     if cfg!(target_os = "macos") || fs::hard_link(source, &executable).is_err() {
-        fs::copy(source, &executable).unwrap();
-        // Another test's child process, started during the copy, can hold the new file open
-        // for writing for a moment, and Linux will not run a file in that state.
-        #[cfg(not(target_os = "macos"))]
-        while let Err(error) = Command::new(&executable).arg("--version").output() {
-            assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        copy_runner(&executable);
     }
     executable
 }
@@ -4126,7 +4131,7 @@ fn hook_ownership_matches_copilot_command_with_smart_apostrophe() {
     } else {
         "cqlmatic"
     });
-    fs::copy(env!("CARGO_BIN_EXE_cqlmatic"), &executable).unwrap();
+    copy_runner(&executable);
     let install = || {
         let mut command = Command::new(&executable);
         isolated(&mut command, &home.0).args([
