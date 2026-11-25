@@ -80,8 +80,8 @@ git rev-parse 'refs/tags/v0.1.14^{commit}'
 git status --porcelain
 git remote -v
 git ls-remote origin
-git push --dry-run origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.14"
-git push --atomic origin "$release_commit:refs/heads/main" "$release_tag:refs/tags/v0.1.14"
+git push --dry-run origin "${release_commit}:refs/heads/main" "${release_tag}:refs/tags/v0.1.14"
+git push --atomic origin "${release_commit}:refs/heads/main" "${release_tag}:refs/tags/v0.1.14"
 ```
 
 The peeled tag must equal the reviewed commit; the worktree must be clean and remote refs must match the inspected state. Never wildcard-push, force-push or move an existing release tag. Create the release with `--verify-tag`, reviewed notes through `--notes-file`, and explicitly selected assets/checksums. Verify public downloads, refs, registry integrity and CI. Correct a public executable with a new patch release rather than replacing immutable v0.1.3 assets.
