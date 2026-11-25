@@ -3750,7 +3750,7 @@ fn source_matches_requirement(source: &environment::LegacySource, r: &Requiremen
             && (!r.relaxed_type
                 || ((r.scope.type_.is_some() || selectors.type_.is_none())
                     && selectors.event_family.is_none()
-                    && selectors.sourcetype.is_none()))
+                    && environment::distinct_sourcetype(selectors).is_none()))
             && (!r.relaxed_event || selectors.event_family.is_none())
     })
 }
