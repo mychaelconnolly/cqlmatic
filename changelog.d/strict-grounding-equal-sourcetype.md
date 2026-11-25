@@ -1,0 +1,1 @@
+- For a relaxed type filter, `check --require-observed` treats a mapped source whose `sourcetype` repeats its `type` the same as a source with no `sourcetype`.
